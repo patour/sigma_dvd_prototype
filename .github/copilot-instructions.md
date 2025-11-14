@@ -1,96 +1,62 @@
-# IR-Drop Analysis Prototype - AI Coding Guide
+# AI Coding Guide – Power Grid Analysis Prototype
 
-## Architecture Overview
+Concise reference for agents working on static IR-drop, effective resistance, and spatial partitioning over artificial multi-layer power grids.
 
-This is a **static IR-drop analysis toolkit** for multi-layer power grids. The workflow is:
-1. **Generate** artificial power grid → 2. **Build** conductance model → 3. **Stimulate** with current loads → 4. **Solve** for voltages → 5. **Visualize** results
+## 1. Big Picture Workflow
+Generate grid (`generate_power_grid.py`) → Build reduced conductance model (`PowerGridModel`) → Create stimuli (`StimulusGenerator`) → Solve voltages (`IRDropSolver`) or resistances (`EffectiveResistanceCalculator`) → (Optionally) partition grid (`GridPartitioner`) → Visualize (`plot.py`). Reuse LU factorization for batch speed.
 
-**Core modules** (`irdrop/`):
-- `power_grid_model.py`: Constructs sparse conductance matrix (G) from resistor network; reduces system by treating pads as fixed Dirichlet boundary conditions (Vdd=1.0V). Pre-factorizes G_uu via LU for fast repeated solves.
-- `stimulus.py`: Generates current sink patterns (Dict[node, current]) from total power budget; supports uniform/gaussian distribution, spatial filtering by rectangular area.
-- `solver.py`: Orchestrates solve workflow; returns `IRDropResult` with voltages and ir_drop dicts.
-- `plot.py`: Matplotlib scatter heatmaps filtered by layer; uses node `xy` attribute from graph.
+## 2. Core Modules & Roles
+`generate_power_grid.py`: Constructs layered resistor mesh; NodeID(layer, idx) keys; loads inserted mid‑segment only on layer 0; pads placed on top layer endpoints (ordered, possible truncation if requested count exceeds). Resistances halve per higher layer.
+`power_grid_model.py`: Builds sparse G; Schur reduction removing pad (Dirichlet) nodes; caches (G_uu, G_up, lu). Sign flip: input sink current +I becomes −I in RHS.
+`solver.py`: Single/batch voltage solves returning `IRDropResult` (voltages, ir_drop, metadata); summary helpers.
+`stimulus.py`: Uniform or Gaussian allocation of total_power → currents; `area` rectangle filters candidates before sampling if graph provided.
+`effective_resistance.py`: Batch R_eff: to ground uses diagonal of G_uu^{-1}; pairwise uses solved columns of inverse (no direct dense inversion). Rejects pad nodes for pairwise queries.
+`grid_partitioner.py`: Structured slab partitioning (deterministic, connectivity enforced) with axis selection and optimized separator placement. Boundaries snap to via rows/columns; endpoint nodes (degree≤1) excluded as separators. X-axis uses layer-0 via nodes; Y-axis preferentially uses layer-1+ via nodes for fewer separators (can have zero layer-0 separators). Axis parameter: 'x' (vertical slabs), 'y' (horizontal slabs), 'auto' (choose better balance). Via-column constraints can cause load imbalance (ratio up to 3.5 for single axis; auto typically achieves <2.0). Pads never partitioned; separators carry no loads.
+`plot.py`: Voltage / IR-drop / current maps; headless default (`Agg`). Current map derives I=(V_u−V_v)/R per edge; optional via filtering.
 
-**Grid generator** (`generate_power_grid.py`):
-- Creates K-layer mesh with alternating orientation (H/V/H/V...); stripe count halves per layer (N₀, N₀/2, N₀/4...).
-- Layer 0 = horizontal load-bearing stripes; loads uniformly distributed (never at via intersections).
-- Returns `(nx.Graph, loads_dict, pads_list)` with edge attribute `resistance` and node attributes `layer`, `xy`, `node_type`.
+## 3. Critical Conventions
+Currents: positive = sink draw; solver internally negates for G·V=I. IR-drop = Vdd − V_node. Loads exist only on layer 0 and never at via (intersection) nodes. Via & stripe resistances halve per ascending layer. Do not pass pad list where a scalar `vdd` is required (common plotting mistake). Batch solves reuse LU and constant term (−G_up·V_p).
 
-## Critical Conventions
-
-### Sign Convention for Currents
-**Stimuli currents are POSITIVE for sinks** (nodes drawing current). Internally, `PowerGridModel.solve_voltages()` converts to negative injections (`I_node = -I_load`) to match nodal equation `G*V = I` where sources inject positive current.
-
-### Node Identification
-Nodes are `NodeID(layer, idx)` frozen dataclasses. Grid structure:
-- **Layer 0**: horizontal stripes, contains all load nodes
-- **Top layer (K-1)**: vertical stripes, contains all pad (Vdd) nodes
-- **Vias**: connect adjacent layer intersections; via resistance halves per layer
-
-### Matrix Reduction Pattern
-Pads are eliminated via Schur complement: `G_uu * V_u = I_u - G_up * V_p`. The factorized `G_uu` is cached in `ReducedSystem` and reused across stimuli. For batch solves, use `solve_batch()` which shares the factorization and constant term `(-G_up * V_p)`.
-
-## Development Workflows
-
-### Running Examples
-```csh
-python example_ir_drop.py                           # Single run demo
-python -m unittest discover -s tests -p 'test_*.py' # Full test suite
-```
-
-### Interactive Exploration
-Use `proto.ipynb` for experimentation. Typical workflow:
-1. Generate grid with `generate_power_grid(K, N0, I_N, N_vsrc, ...)`
-2. Build model: `model = PowerGridModel(G, pad_nodes=pads, vdd=1.0)`
-3. Create stimulus: `stim_gen.generate(total_power, percent=0.3, distribution="gaussian", area=(x1,y1,x2,y2))`
-4. Solve: `result = solver.solve(meta.currents, meta)`
-5. Plot: `plot_voltage_map(G, result.voltages, layer=0, show=False)` (use `show=False` in notebooks/headless)
-
-### Testing Patterns
-Tests use `build_small()` fixture (K=3, N0=8). Key assertions:
-- Zero load → all nodes at pad voltage (test_no_load_currents_all_pad_voltage)
-- Current conservation: `sum(currents) ≈ total_power / vdd` (test_uniform_power_distribution_current_sum)
-- Monotonicity: higher power → lower min voltage (test_batch_min_voltage_monotonic)
-
-## API Usage Patterns
-
-### Stimulus Generation with Spatial Filtering
+## 4. Typical Usage Snippets
+Build + solve one stimulus:
 ```python
-# Filter loads to rectangular area before sampling
-meta = stim_gen.generate(
-    total_power=1.5, 
-    count=10,                          # Exact node count (overrides percent)
-    distribution="gaussian",           # or "uniform"
-    gaussian_loc=1.0, gaussian_scale=0.2,  # Normal(loc, scale) weights
-    area=(0.4, 0.4, 0.6, 0.6)         # (x_min, y_min, x_max, y_max)
-)
+G, loads, pads = generate_power_grid(K=3, N0=12, I_N=150, N_vsrc=4, max_stripe_res=1.0, max_via_res=0.1, load_current=1.0, seed=7, plot=False)
+model = PowerGridModel(G, pad_nodes=pads, vdd=1.0)
+stim_gen = StimulusGenerator(load_nodes=list(loads.keys()), vdd=1.0, seed=42, graph=G)
+meta = stim_gen.generate(total_power=1.2, percent=0.30, distribution="gaussian", area=(0.2,0.2,0.8,0.8))
+solver = IRDropSolver(model)
+result = solver.solve(meta.currents)
 ```
-**Note**: `area` filters candidates BEFORE sampling; requires `graph=G` in StimulusGenerator constructor.
-
-### Batch Solves for Parameter Sweeps
+Batch sweep:
 ```python
-powers = [0.5, 1.0, 2.0]
-metas = stim_gen.generate_batch(powers, percent=0.3, distribution="gaussian")
+metas = stim_gen.generate_batch([0.5, 1.0, 2.0], percent=0.25)
 results = solver.solve_batch([m.currents for m in metas], metas)
-# Results preserve order; access via: results[i].voltages, results[i].ir_drop
 ```
-
-### Plotting Headless (CI/Notebooks)
-Always pass `show=False` and `matplotlib.use("Agg")` is set by default in `plot.py`:
+Effective resistance mix:
 ```python
-fig, ax = plot_voltage_map(G, voltages, layer=0, show=False)
-fig.savefig("output.png")  # Manual save
+calc = EffectiveResistanceCalculator(model)
+pairs = [(list(loads.keys())[0], None), (list(loads.keys())[1], list(loads.keys())[2])]
+reff = calc.compute_batch(pairs)
+```
+Partition (structured slabs, 4 regions):
+```python
+from irdrop.grid_partitioner import GridPartitioner
+part = GridPartitioner(G, loads, pads).partition(P=4, axis='auto')  # auto selects best X or Y
 ```
 
-## Common Gotchas
+## 5. Testing & Validation
+Run all tests: `python -m unittest discover -s tests -p 'test_*.py'`. Key invariants: zero-load → all pad voltage; monotonic min voltage with increasing power; R_eff symmetry & positivity; partition load balance ratio ≤3.5 (via-column boundary constraint trades balance for separation guarantee); pads excluded from partitions; graph topology unchanged by partitioning; cross-partition paths require separator traversal.
 
-- **Type error in plot_ir_drop_map**: Must pass `vdd` as numeric float, not `pads` list. Signature is `plot_ir_drop_map(G, voltages, vdd, layer=None)`.
-- **Load nodes only on layer 0**: Attempting to place loads on upper layers breaks assumptions; `generate_power_grid` enforces this.
-- **Via nodes excluded from loads**: `I_N` parameter controls tap insertion attempts; algorithm never places loads at via intersections.
+## 6. Common Gotchas / Edge Cases
+Passing pad list instead of float `vdd` to `plot_ir_drop_map`; selecting area without providing `graph` to `StimulusGenerator`; requesting more partitions than load nodes; including pad nodes in effective resistance pairwise queries (raises ValueError); extremely small node subsets leading to empty plots (raise early); Gaussian weights can degenerate → fallback uniform.
 
-## Key Files to Reference
+## 7. Extension Hooks
+Add stimulus distribution: implement new branch in `StimulusGenerator.generate` (ensure normalization of total current). New metrics: derive from voltages or R_eff post-solve (keep batch usage to avoid refactor). New partition strategy: follow structured pattern returning `PartitionResult` preserving graph (no edge removals).
 
-- `example_ir_drop.py`: Canonical usage workflow (generate → model → stimulate → solve → summarize)
-- `tests/test_irdrop.py`: Validation patterns and edge cases
-- `irdrop/__init__.py`: Public API exports
-- `README.md`: Installation, equation background (G*V=I), distribution modes
+## 8. Performance Notes
+Avoid rebuilding `PowerGridModel` for each stimulus; reuse `model.reduced.lu`. Batch effective resistance solves iterate LU with unit RHS columns—prefer grouping queries. Partitioning (structured) is O(N log N) over load-node x sorting; kmeans path heavier and less reliable.
+
+## 9. File Landmarks
+Examples: `example_ir_drop.py`, `example_partitioning.py`, `example_effective_resistance.py`; Tests: `tests/test_irdrop.py`, `tests/test_partitioner.py`; Core API exports in `irdrop/__init__.py`.
+
+Questions or missing clarity? Ask for: more on separator promotion, adding multi-domain Vdd, or current visualization scaling.

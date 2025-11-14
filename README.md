@@ -7,7 +7,10 @@ This prototype adds modular utilities for performing static IR-drop analysis on 
 - `irdrop/power_grid_model.py` – Builds sparse conductance matrix (Laplacian) and reduced system with pad (voltage source) nodes treated as Dirichlet boundary conditions.
 - `irdrop/stimulus.py` – Generates current sink stimuli (node -> current) from total power with uniform or Gaussian distribution over selected load nodes.
 - `irdrop/solver.py` – High-level orchestration for single and batch solves; returns voltages and IR-drop values.
-- `example_ir_drop.py` – Demonstration script.
+- `irdrop/grid_partitioner.py` – Structured vertical slab partitioning (deterministic); k-means legacy path removed.
+- `irdrop/effective_resistance.py` – Compute effective resistance between node pairs or from nodes to ground.
+- `example_ir_drop.py` – IR-drop analysis demonstration script.
+- `example_partitioning.py` – Grid partitioning demonstration script.
 
 ## Installation
 
