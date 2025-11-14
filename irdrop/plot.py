@@ -95,3 +95,96 @@ def plot_ir_drop_map(G: nx.Graph, voltages: Dict, vdd: float, layer: int | None 
     return fig, ax
 
 __all__ = ["plot_voltage_map", "plot_ir_drop_map"]
+
+from matplotlib.collections import LineCollection
+
+
+def plot_current_map(
+    G: nx.Graph,
+    voltages: Dict,
+    layer: int | None = None,
+    cmap: str = "plasma",
+    show: bool = True,
+    abs_current: bool = True,
+    linewidth_scale: float = 3.0,
+    include_vias: bool = True,
+    min_current: float | None = None,
+):
+    """Visualize currents through resistive edges.
+
+    Current on edge (u,v): I = (V_u - V_v) / R. Direction implied from higher V to lower V.
+
+    Parameters
+    ----------
+    G : nx.Graph
+        Grid graph with edge attribute 'resistance' and node attribute 'xy'.
+    voltages : Dict
+        Mapping node -> voltage.
+    layer : int | None
+        If provided, restrict to stripe edges where both nodes have this layer. Via edges are included only if include_vias=True.
+    cmap : str
+        Colormap for magnitudes.
+    show : bool
+        Whether to immediately display.
+    abs_current : bool
+        Plot absolute value if True; else signed values (positive/negative colors).
+    linewidth_scale : float
+        Multiplier controlling line width scaling vs max current.
+    include_vias : bool
+        Whether to include via edges (nodes on different layers).
+    min_current : float | None
+        If provided, only edges with (|I| if abs_current else I) >= min_current are plotted.
+    """
+    segs = []
+    vals = []
+    for u, v, d in G.edges(data=True):
+        R = float(d.get("resistance", 0.0))
+        if R <= 0.0:
+            continue
+        Vu = voltages.get(u); Vv = voltages.get(v)
+        if Vu is None or Vv is None:
+            continue
+        lu = G.nodes[u].get("layer")
+        lv = G.nodes[v].get("layer")
+        is_via = lu != lv
+        if layer is not None:
+            if is_via and not include_vias:
+                continue
+            if not is_via and (lu != layer or lv != layer):
+                continue
+        if is_via and not include_vias:
+            continue
+        I = (Vu - Vv) / R
+        val = abs(I) if abs_current else I
+        if min_current is not None:
+            # Compare against magnitude already reflected in val (abs if requested)
+            if val < min_current:
+                continue
+        x1, y1 = G.nodes[u]["xy"]
+        x2, y2 = G.nodes[v]["xy"]
+        segs.append([(x1, y1), (x2, y2)])
+        vals.append(val)
+    if not segs:
+        raise ValueError("No edges selected for current plotting (check layer/filter).")
+    vals_arr = np.array(vals, dtype=float)
+    vmax = vals_arr.max() if vals_arr.size else 1.0
+    # Line widths proportional to magnitude (avoid zero width)
+    lw = 0.4 + linewidth_scale * (vals_arr / vmax if vmax > 0 else vals_arr)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    lc = LineCollection(segs, array=vals_arr, cmap=cmap, linewidths=lw)
+    ax.add_collection(lc)
+    ax.set_aspect("equal", adjustable="box")
+    ax.autoscale()
+    title = "Current Map"
+    if layer is not None:
+        title += f" (Layer {layer})"
+    ax.set_title(title)
+    cbar = fig.colorbar(lc, ax=ax, label=("|I| (A)" if abs_current else "I (A)"))
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig, ax
+
+__all__.append("plot_current_map")

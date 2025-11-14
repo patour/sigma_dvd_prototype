@@ -19,6 +19,7 @@ Requirements satisfied:
 from __future__ import annotations
 import math
 import random
+import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -188,31 +189,56 @@ def generate_power_grid(
                     if not G.has_edge(n1, n2):
                         G.add_edge(n1, n2, resistance=seg_R, kind="stripe")
 
-    # 4) Place voltage sources (pads) on the top-most layer, evenly distributed
+    # 4) Place voltage sources (pads) on the top-most layer.
+    #      * Pads can occupy both endpoints of each stripe.
+    #      * Added in a clockwise ordering convention.
+    #        - For horizontal top layer: left boundary first (y ascending), then right boundary (y descending).
+    #        - For vertical top layer: top boundary first (x ascending), then bottom boundary (x descending).
+    #      * No duplicate pad nodes; if N_vsrc exceeds available endpoints, issue a warning.
     top = layers[-1]
     ℓT, oriT, coordsT = top["layer"], top["orientation"], top["coords"]
 
     pad_nodes: List[NodeID] = []
-    # We'll place pads at boundary endpoints of stripes, round-robin across stripes.
-    endpoints: List[NodeID] = []
-    if oriT == "H":
-        for y in coordsT:
-            # choose right boundary endpoint (x=Lx) for distinct positions
-            nd = node_lookup[(ℓT, round(Lx, 12), round(y, 12))]
-            endpoints.append(nd)
-    else:
-        for x in coordsT:
-            # choose top boundary endpoint (y=Ly)
-            nd = node_lookup[(ℓT, round(x, 12), round(Ly, 12))]
-            endpoints.append(nd)
-    # Even distribution
-    if len(endpoints) == 0:
-        # Edge case: only one stripe on top, ensure endpoints list
-        # (happens if N0=1 and K small)
-        endpoints = [nd for nd in G.nodes if node_attrs[nd]["layer"] == ℓT]
+    endpoints_ordered: List[NodeID] = []
 
-    for i in range(N_vsrc):
-        nd = endpoints[i % len(endpoints)]
+    if oriT == "H":
+        # Horizontal stripes: endpoints at x=0 (left) and x=Lx (right)
+        left = []
+        right = []
+        for y in sorted(coordsT):  # y ascending
+            left.append(node_lookup[(ℓT, round(0.0, 12), round(y, 12))])
+        for y in sorted(coordsT, reverse=True):  # y descending
+            right.append(node_lookup[(ℓT, round(Lx, 12), round(y, 12))])
+        endpoints_ordered = left + right
+    else:
+        # Vertical stripes: endpoints at y=Ly (top) and y=0 (bottom)
+        top_list = []
+        bottom_list = []
+        for x in sorted(coordsT):  # x ascending
+            top_list.append(node_lookup[(ℓT, round(x, 12), round(Ly, 12))])
+        for x in sorted(coordsT, reverse=True):  # x descending
+            bottom_list.append(node_lookup[(ℓT, round(x, 12), round(0.0, 12))])
+        endpoints_ordered = top_list + bottom_list
+
+    # Deduplicate while preserving order (in case coordinates overlap strangely)
+    seen = set()
+    unique_endpoints: List[NodeID] = []
+    for nd in endpoints_ordered:
+        if nd not in seen:
+            seen.add(nd)
+            unique_endpoints.append(nd)
+
+    available = len(unique_endpoints)
+    if N_vsrc > available:
+        warnings.warn(
+            f"Requested N_vsrc={N_vsrc} exceeds available unique endpoints={available} on top layer; only placing {available} pads.",
+            RuntimeWarning,
+        )
+        N_actual = available
+    else:
+        N_actual = N_vsrc
+
+    for nd in unique_endpoints[:N_actual]:
         node_attrs[nd]["kind"].add("pad")
         pad_nodes.append(nd)
 

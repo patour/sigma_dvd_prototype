@@ -27,27 +27,68 @@ class StimulusMeta:
 
 
 class StimulusGenerator:
-    def __init__(self, load_nodes: Sequence, vdd: float = 1.0, seed: int | None = None):
+    def __init__(self, load_nodes: Sequence, vdd: float = 1.0, seed: int | None = None, graph=None):
+        """Stimulus generator.
+
+        Parameters
+        ----------
+        load_nodes : Sequence
+            Iterable of candidate load (tap) nodes.
+        vdd : float
+            Supply voltage used to convert power -> current.
+        seed : int | None
+            RNG seed for reproducible node sampling.
+        graph : networkx.Graph | None
+            Optional reference graph to enable geometric filtering by area.
+            If provided, nodes must have 'xy' attribute.
+        """
         self.load_nodes = list(load_nodes)
         self.vdd = float(vdd)
         self.rng = random.Random(seed)
+        self.graph = graph
 
-    def _select_nodes(self, percent: float | None, count: int | None) -> List:
+    def _filter_area(self, nodes: Sequence, area: tuple | None) -> List:
+        """Filter nodes by rectangular area (x_min, y_min, x_max, y_max).
+
+        Returns nodes whose xy lies strictly inside the box (inclusive on edges).
+        If graph or area is None, returns nodes unchanged.
+        """
+        if area is None or self.graph is None:
+            return list(nodes)
+        x_min, y_min, x_max, y_max = area
+        selected = []
+        for n in nodes:
+            data = self.graph.nodes.get(n)
+            if not data:
+                continue
+            xy = data.get("xy")
+            if not xy:
+                continue
+            x, y = xy
+            if x_min <= x <= x_max and y_min <= y <= y_max:
+                selected.append(n)
+        return selected
+
+    def _select_nodes(self, percent: float | None, count: int | None, area: tuple | None) -> List:
         if not self.load_nodes:
             return []
+        # If area specified, restrict candidate pool before sampling
+        candidates = self._filter_area(self.load_nodes, area) if area else list(self.load_nodes)
+        if not candidates:
+            return []
         if count is None and percent is None:
-            # default: use all
-            return list(self.load_nodes)
-        if count is not None:
-            count = max(0, min(count, len(self.load_nodes)))
-            return self.rng.sample(self.load_nodes, count) if count > 0 else []
-        # percent path
-        p = max(0.0, min(float(percent), 1.0))
-        c = int(round(p * len(self.load_nodes)))
-        c = max(0, min(c, len(self.load_nodes)))
-        if c == 0 and p > 0:
-            c = 1  # ensure at least one if p>0
-        return self.rng.sample(self.load_nodes, c) if c > 0 else []
+            base = candidates
+        elif count is not None:
+            count = max(0, min(count, len(candidates)))
+            base = self.rng.sample(candidates, count) if count > 0 else []
+        else:
+            p = max(0.0, min(float(percent), 1.0))
+            c = int(round(p * len(candidates)))
+            c = max(0, min(c, len(candidates)))
+            if c == 0 and p > 0:
+                c = 1
+            base = self.rng.sample(candidates, c) if c > 0 else []
+        return base
 
     def generate(
         self,
@@ -57,6 +98,7 @@ class StimulusGenerator:
         distribution: str = "uniform",
         gaussian_loc: float = 1.0,
         gaussian_scale: float = 1.0,
+        area: tuple | None = None,
     ) -> StimulusMeta:
         """Generate one stimulus mapping node->current (Amps).
 
@@ -64,9 +106,10 @@ class StimulusGenerator:
         percent / count: choose nodes (exclusive; count takes precedence if provided).
         distribution: 'uniform' or 'gaussian'.
         gaussian_loc/scale: parameters for Normal(loc, scale) used when gaussian.
+        area: optional (x_min, y_min, x_max, y_max) rectangle; only nodes inside are used.
         """
         assert total_power >= 0.0, "Power must be non-negative"
-        nodes = self._select_nodes(percent if count is None else None, count)
+        nodes = self._select_nodes(percent if count is None else None, count, area)
         if not nodes:
             return StimulusMeta(total_power, 0.0, self.vdd, [], distribution, {})
         total_current = total_power / self.vdd if self.vdd > 0 else 0.0
@@ -99,6 +142,7 @@ class StimulusGenerator:
         distribution: str = "uniform",
         gaussian_loc: float = 1.0,
         gaussian_scale: float = 1.0,
+        area: tuple | None = None,
     ) -> List[StimulusMeta]:
         metas: List[StimulusMeta] = []
         for P in powers:
@@ -110,6 +154,7 @@ class StimulusGenerator:
                     distribution=distribution,
                     gaussian_loc=gaussian_loc,
                     gaussian_scale=gaussian_scale,
+                    area=area,
                 )
             )
         return metas
