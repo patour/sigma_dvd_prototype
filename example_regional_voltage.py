@@ -78,20 +78,21 @@ def main():
     # Define boundary A (separator nodes for this partition)
     A = partition.separator_nodes
     
-    # Define currents for near loads (in S)
-    I_S = {node: loads[node] for node in S if node in loads}
+    # Define currents for near loads (all loads in region R)
+    I_R = {node: loads[node] for node in partition.load_nodes if node in loads}
     
-    # Define currents for far loads (all other loads not in S)
-    all_other_loads = set(loads.keys()) - S
-    I_F = {node: loads[node] for node in all_other_loads}
+    # Define currents for far loads (all loads NOT in region R)
+    loads_in_R = set(partition.load_nodes)
+    all_far_loads = set(loads.keys()) - loads_in_R
+    I_F = {node: loads[node] for node in all_far_loads}
     
-    print(f"\n   Near loads (S): {len(I_S)} nodes")
-    print(f"   Far loads (F): {len(I_F)} nodes")
+    print(f"\n   Near loads (in R): {len(I_R)} nodes")
+    print(f"   Far loads (outside R): {len(I_F)} nodes")
     print(f"   Boundary nodes (A): {len(A)} nodes")
     
     # Compute IR-drops using regional solver
     print("\n7. Computing IR-drops using regional solver...")
-    ir_drops_regional = regional_solver.compute_ir_drops(S, R, A, I_S, I_F)
+    ir_drops_regional = regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
     
     print(f"\n   IR-drops computed for {len(ir_drops_regional)} nodes")
     print("\n   Sample IR-drops (first 5 nodes):")

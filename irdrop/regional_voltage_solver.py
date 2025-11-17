@@ -4,14 +4,15 @@ Computes IR-drop at a subset of load nodes S within a partition/region R
 using effective resistance matrices and boundary/separator nodes A.
 
 The solver uses the following algorithm:
-1. Build resistance matrices K_A, K_SA, K_FA, K_S from effective resistances
-2. Compute boundary IR-drops b_A due to far loads F
+1. Build resistance matrices K_A, K_SA, K_FA, K_SR from effective resistances
+2. Compute boundary IR-drops b_A due to far loads F (loads outside region R)
 3. Solve for boundary currents j_A 
 4. Compute IR-drop at S from far loads (drop_far) and near loads (drop_near)
 5. Return total IR-drop = drop_near + drop_far
 
-This approach allows efficient IR-drop computation within a region by treating
-loads outside the region as equivalent boundary currents.
+Near loads (I_R) are all loads within region R, while far loads (I_F) are
+loads outside region R. This allows efficient IR-drop computation by treating
+external loads as equivalent boundary currents.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ class RegionalIRDropSolver:
         S: Set,
         R: Set,
         A: Set,
-        I_S: Dict,
+        I_R: Dict,
         I_F: Dict
     ) -> Dict[any, float]:
         """Compute IR-drop at nodes in subset S.
@@ -56,8 +57,8 @@ class RegionalIRDropSolver:
             S: Set of target load nodes (subset of region R)
             R: Set of all nodes in the region containing S
             A: Set of boundary/separator nodes (ports) for region R
-            I_S: Dict mapping nodes in S to their current values (near loads)
-            I_F: Dict mapping nodes NOT in S to their current values (far loads)
+            I_R: Dict mapping load nodes IN region R to their current values (near loads)
+            I_F: Dict mapping load nodes NOT in region R to their current values (far loads)
             
         Returns:
             Dictionary mapping each node in S to its computed IR-drop
@@ -73,16 +74,22 @@ class RegionalIRDropSolver:
         if not S.issubset(R):
             raise ValueError("Subset S must be contained in region R")
         
+        # Extract load nodes in region R (near loads)
+        R_loads = set(I_R.keys())
+        if not R_loads.issubset(R):
+            raise ValueError("All near load nodes in I_R must be within region R")
+        
         # Convert sets to sorted lists for consistent indexing
         A_list = sorted(list(A), key=lambda n: (n.layer, n.idx))
         S_list = sorted(list(S), key=lambda n: (n.layer, n.idx))
+        R_list = sorted(list(R_loads), key=lambda n: (n.layer, n.idx))
         F_list = sorted(list(I_F.keys()), key=lambda n: (n.layer, n.idx))
         
         # Step 1: Build resistance matrices
         K_A = self._build_K_A(A_list)
         K_SA = self._build_K_SA(S_list, A_list)
         K_FA = self._build_K_FA(F_list, A_list)
-        K_S = self._build_K_S(S_list)
+        K_SR = self._build_K_SR(S_list, R_list)
         
         # Step 2: Compute b_A - IR-drop at boundary due to far loads
         I_F_vec = np.array([I_F[node] for node in F_list])
@@ -102,11 +109,11 @@ class RegionalIRDropSolver:
         for u in S_list:
             drop_far[u] = np.dot(K_SA[u], j_A)
         
-        # Step 5: Compute IR-drop at S due to near loads  
-        I_S_vec = np.array([I_S.get(node, 0.0) for node in S_list])
+        # Step 5: Compute IR-drop at S due to near loads (all loads in R)
+        I_R_vec = np.array([I_R.get(node, 0.0) for node in R_list])
         drop_near = {}
         for i, u in enumerate(S_list):
-            drop_near[u] = np.dot(K_S[i], I_S_vec)
+            drop_near[u] = np.dot(K_SR[u], I_R_vec)
         
         # Step 6: Compute final IR-drop
         # The K matrices compute IR drops (R*I)
@@ -210,33 +217,37 @@ class RegionalIRDropSolver:
         
         return K_FA
     
-    def _build_K_S(self, S_list: List) -> np.ndarray:
-        """Build the K_S resistance matrix for nodes in S.
+    def _build_K_SR(self, S_list: List, R_list: List) -> Dict[any, np.ndarray]:
+        """Build the K_SR resistance matrix mapping S to all load nodes in R.
         
-        K_S[p,q] = 0.5 * (R_eff(p,0) + R_eff(q,0) - R_eff(p,q))
+        K_SR[u,v] = 0.5 * (R_eff(u,0) + R_eff(v,0) - R_eff(u,v))
         
         Args:
-            S_list: Sorted list of nodes in S
+            S_list: Sorted list of nodes in S (targets)
+            R_list: Sorted list of load nodes in region R (near loads)
             
         Returns:
-            |S| x |S| numpy array
+            Dictionary mapping each node u in S to a |R|-length array
         """
-        n = len(S_list)
-        K_S = np.zeros((n, n))
+        K_SR = {}
         
-        # Compute R_eff to ground for all nodes in S
-        ground_pairs = [(node, None) for node in S_list]
-        R_ground = self.calc.compute_batch(ground_pairs)
+        # Compute R_eff to ground for all nodes in S and R
+        S_ground_pairs = [(node, None) for node in S_list]
+        R_ground_pairs = [(node, None) for node in R_list]
         
-        # Compute R_eff between all pairs in S
-        for i, p in enumerate(S_list):
-            for j, q in enumerate(S_list):
-                if i == j:
-                    # Diagonal: R_eff(p,p) = 0
-                    K_S[i, j] = R_ground[i]
+        R_S_ground = self.calc.compute_batch(S_ground_pairs)
+        R_R_ground = self.calc.compute_batch(R_ground_pairs)
+        
+        # For each node u in S, compute resistance vector to all load nodes in R
+        for i, u in enumerate(S_list):
+            K_SR[u] = np.zeros(len(R_list))
+            for j, v in enumerate(R_list):
+                if u == v:
+                    # Diagonal: R_eff(u,u) = 0, so K_SR[u,u] = R_eff(u,0)
+                    K_SR[u][j] = R_S_ground[i]
                 else:
-                    # Off-diagonal: compute R_eff(p,q)
-                    R_pq = self.calc.compute_batch([(p, q)])[0]
-                    K_S[i, j] = 0.5 * (R_ground[i] + R_ground[j] - R_pq)
+                    # Off-diagonal: compute R_eff(u,v)
+                    R_uv = self.calc.compute_batch([(u, v)])[0]
+                    K_SR[u][j] = 0.5 * (R_S_ground[i] + R_R_ground[j] - R_uv)
         
-        return K_S
+        return K_SR
