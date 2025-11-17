@@ -1,16 +1,16 @@
-"""Regional voltage solver for partitioned power grids.
+"""Regional IR-drop solver for partitioned power grids.
 
-Computes DC voltage at a subset of load nodes S within a partition/region R
+Computes IR-drop at a subset of load nodes S within a partition/region R
 using effective resistance matrices and boundary/separator nodes A.
 
 The solver uses the following algorithm:
 1. Build resistance matrices K_A, K_SA, K_FA, K_S from effective resistances
-2. Compute boundary voltages b_A due to far loads F
+2. Compute boundary IR-drops b_A due to far loads F
 3. Solve for boundary currents j_A 
-4. Compute voltage at S from far loads (v_far) and near loads (v_near)
-5. Return total voltage v = v_near + v_far
+4. Compute IR-drop at S from far loads (drop_far) and near loads (drop_near)
+5. Return total IR-drop = drop_near + drop_far
 
-This approach allows efficient voltage computation within a region by treating
+This approach allows efficient IR-drop computation within a region by treating
 loads outside the region as equivalent boundary currents.
 """
 
@@ -24,28 +24,25 @@ from .effective_resistance import EffectiveResistanceCalculator
 from .power_grid_model import PowerGridModel
 
 
-class RegionalVoltageSolver:
-    """Solves for DC voltage at nodes within a partitioned region.
+class RegionalIRDropSolver:
+    """Solves for IR-drop at nodes within a partitioned region.
     
     Uses effective resistance matrices and boundary conditions to compute
-    voltages efficiently for a subset of load nodes.
+    IR-drops efficiently for a subset of load nodes.
     """
     
     def __init__(
         self, 
-        calc: EffectiveResistanceCalculator,
-        model: PowerGridModel
+        calc: EffectiveResistanceCalculator
     ):
-        """Initialize the regional voltage solver.
+        """Initialize the regional IR-drop solver.
         
         Args:
             calc: EffectiveResistanceCalculator for computing R_eff
-            model: PowerGridModel containing the grid structure
         """
         self.calc = calc
-        self.model = model
         
-    def compute_voltages(
+    def compute_ir_drops(
         self,
         S: Set,
         R: Set,
@@ -53,7 +50,7 @@ class RegionalVoltageSolver:
         I_S: Dict,
         I_F: Dict
     ) -> Dict[any, float]:
-        """Compute DC voltage at nodes in subset S.
+        """Compute IR-drop at nodes in subset S.
         
         Args:
             S: Set of target load nodes (subset of region R)
@@ -63,7 +60,7 @@ class RegionalVoltageSolver:
             I_F: Dict mapping nodes NOT in S to their current values (far loads)
             
         Returns:
-            Dictionary mapping each node in S to its computed voltage
+            Dictionary mapping each node in S to its computed IR-drop
             
         Raises:
             ValueError: If sets are inconsistent or empty
@@ -87,7 +84,7 @@ class RegionalVoltageSolver:
         K_FA = self._build_K_FA(F_list, A_list)
         K_S = self._build_K_S(S_list)
         
-        # Step 2: Compute b_A - voltage at boundary due to far loads
+        # Step 2: Compute b_A - IR-drop at boundary due to far loads
         I_F_vec = np.array([I_F[node] for node in F_list])
         b_A = K_FA @ I_F_vec
         
@@ -100,26 +97,24 @@ class RegionalVoltageSolver:
             # Fallback to LU if Cholesky fails (shouldn't happen for valid grids)
             j_A = la.solve(K_A, b_A)
         
-        # Step 4: Compute voltage DROP at S due to far loads
-        v_far_drop = {}
+        # Step 4: Compute IR-drop at S due to far loads
+        drop_far = {}
         for u in S_list:
-            v_far_drop[u] = np.dot(K_SA[u], j_A)
+            drop_far[u] = np.dot(K_SA[u], j_A)
         
-        # Step 5: Compute voltage DROP at S due to near loads  
+        # Step 5: Compute IR-drop at S due to near loads  
         I_S_vec = np.array([I_S.get(node, 0.0) for node in S_list])
-        v_near_drop = {}
+        drop_near = {}
         for i, u in enumerate(S_list):
-            v_near_drop[u] = np.dot(K_S[i], I_S_vec)
+            drop_near[u] = np.dot(K_S[i], I_S_vec)
         
-        # Step 6: Compute final voltage
-        # The K matrices compute IR drops (R*I), so voltage = Vdd - IR_drop
-        vdd = self.model.vdd
-        v_total = {}
+        # Step 6: Compute final IR-drop
+        # The K matrices compute IR drops (R*I)
+        ir_drops = {}
         for u in S_list:
-            total_drop = v_near_drop[u] + v_far_drop[u]
-            v_total[u] = vdd - total_drop
+            ir_drops[u] = drop_near[u] + drop_far[u]
         
-        return v_total
+        return ir_drops
     
     def _build_K_A(self, A_list: List) -> np.ndarray:
         """Build the K_A resistance matrix for boundary nodes.

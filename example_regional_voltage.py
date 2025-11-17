@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Example: Regional Voltage Solver with Partitioned Power Grids
+Example: Regional IR-Drop Solver with Partitioned Power Grids
 
-Demonstrates the RegionalVoltageSolver for computing DC voltages at load nodes
+Demonstrates the RegionalIRDropSolver for computing IR-drops at load nodes
 within a partitioned region using effective resistance and boundary conditions.
 """
 
@@ -12,14 +12,14 @@ from irdrop import (
     PowerGridModel, 
     EffectiveResistanceCalculator,
     GridPartitioner,
-    RegionalVoltageSolver,
+    RegionalIRDropSolver,
     IRDropSolver
 )
 
 
 def main():
     print("=" * 70)
-    print("Regional Voltage Solver Example")
+    print("Regional IR-Drop Solver Example")
     print("=" * 70)
     
     # Generate a power grid
@@ -56,9 +56,9 @@ def main():
     print(f"   Load balance ratio: {partition_result.load_balance_ratio:.2f}")
     print(f"   Total separator nodes: {len(partition_result.separator_nodes)}")
     
-    # Create regional voltage solver
-    print("\n5. Creating regional voltage solver...")
-    regional_solver = RegionalVoltageSolver(calc, model)
+    # Create regional IR-drop solver
+    print("\n5. Creating regional IR-drop solver...")
+    regional_solver = RegionalIRDropSolver(calc)
     
     # Select a partition to analyze
     partition = partition_result.partitions[0]
@@ -89,16 +89,16 @@ def main():
     print(f"   Far loads (F): {len(I_F)} nodes")
     print(f"   Boundary nodes (A): {len(A)} nodes")
     
-    # Compute voltages using regional solver
-    print("\n7. Computing voltages using regional solver...")
-    voltages_regional = regional_solver.compute_voltages(S, R, A, I_S, I_F)
+    # Compute IR-drops using regional solver
+    print("\n7. Computing IR-drops using regional solver...")
+    ir_drops_regional = regional_solver.compute_ir_drops(S, R, A, I_S, I_F)
     
-    print(f"\n   Voltages computed for {len(voltages_regional)} nodes")
-    print("\n   Sample voltages (first 5 nodes):")
+    print(f"\n   IR-drops computed for {len(ir_drops_regional)} nodes")
+    print("\n   Sample IR-drops (first 5 nodes):")
     for i, node in enumerate(partition_loads[:5]):
-        v = voltages_regional[node]
-        ir_drop = 1.0 - v  # Assuming Vdd = 1.0V
-        print(f"      Node {node}: V = {v:.6f} V, IR-drop = {ir_drop:.6f} V")
+        drop = ir_drops_regional[node]
+        voltage = 1.0 - drop  # Assuming Vdd = 1.0V
+        print(f"      Node {node}: IR-drop = {drop:.6f} V, V = {voltage:.6f} V")
     
     # Compare with full IR-drop solver
     print("\n" + "=" * 70)
@@ -119,11 +119,11 @@ def main():
     for node in sample_nodes:
         print(f"      {node}: voltage={result_full.voltages.get(node, 'N/A')}, ir_drop={result_full.ir_drop.get(node, 'N/A')}")
     
-    # Extract voltages for nodes in S from full solution
-    voltages_full = {}
+    # Extract IR-drops for nodes in S from full solution
+    ir_drops_full = {}
     for node in S:
-        if node in result_full.voltages:
-            voltages_full[node] = result_full.voltages[node]
+        if node in result_full.ir_drop:
+            ir_drops_full[node] = result_full.ir_drop[node]
     
     print("\n9. Comparing results...")
     print("\n   Node-by-node comparison:")
@@ -134,11 +134,11 @@ def main():
     for node in partition_loads[:min(10, len(partition_loads))]:  # Show first 10
         if node not in S:
             continue
-        v_regional = voltages_regional.get(node, 0.0)
-        v_full = voltages_full.get(node, 0.0)
-        diff = abs(v_regional - v_full)
+        drop_regional = ir_drops_regional.get(node, 0.0)
+        drop_full = ir_drops_full.get(node, 0.0)
+        diff = abs(drop_regional - drop_full)
         errors.append(diff)
-        print(f"   {str(node):<15} {v_regional:<12.6f} {v_full:<12.6f} {diff:<12.6e}")
+        print(f"   {str(node):<15} {drop_regional:<12.6f} {drop_full:<12.6f} {diff:<12.6e}")
     
     if errors:
         print(f"\n   Error statistics:")
@@ -151,23 +151,23 @@ def main():
     print("Statistics")
     print("=" * 70)
     
-    v_regional_vals = list(voltages_regional.values())
-    v_full_vals = [voltages_full[n] for n in voltages_regional.keys()]
+    drop_regional_vals = list(ir_drops_regional.values())
+    drop_full_vals = [ir_drops_full[n] for n in ir_drops_regional.keys()]
     
     print(f"\nRegional Solver:")
-    print(f"   Min voltage: {np.min(v_regional_vals):.6f} V")
-    print(f"   Max voltage: {np.max(v_regional_vals):.6f} V")
-    print(f"   Mean voltage: {np.mean(v_regional_vals):.6f} V")
-    print(f"   Max IR-drop: {1.0 - np.min(v_regional_vals):.6f} V")
+    print(f"   Min IR-drop: {np.min(drop_regional_vals):.6f} V")
+    print(f"   Max IR-drop: {np.max(drop_regional_vals):.6f} V")
+    print(f"   Mean IR-drop: {np.mean(drop_regional_vals):.6f} V")
+    print(f"   Min voltage: {1.0 - np.max(drop_regional_vals):.6f} V")
     
     print(f"\nFull Solver (for same nodes):")
-    print(f"   Min voltage: {np.min(v_full_vals):.6f} V")
-    print(f"   Max voltage: {np.max(v_full_vals):.6f} V")
-    print(f"   Mean voltage: {np.mean(v_full_vals):.6f} V")
-    print(f"   Max IR-drop: {1.0 - np.min(v_full_vals):.6f} V")
+    print(f"   Min IR-drop: {np.min(drop_full_vals):.6f} V")
+    print(f"   Max IR-drop: {np.max(drop_full_vals):.6f} V")
+    print(f"   Mean IR-drop: {np.mean(drop_full_vals):.6f} V")
+    print(f"   Min voltage: {1.0 - np.max(drop_full_vals):.6f} V")
     
     print("\n" + "=" * 70)
-    print("✓ Regional voltage solver demonstration complete!")
+    print("✓ Regional IR-drop solver demonstration complete!")
     print("=" * 70)
 
 
