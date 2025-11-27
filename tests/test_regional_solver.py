@@ -67,7 +67,7 @@ class TestRegionalIRDropSolver(unittest.TestCase):
         I_F = {node: self.loads[node] for node in all_far_loads}
         
         # Compute IR-drops with regional solver
-        ir_drops_regional = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
+        ir_drops_regional, drop_near, drop_far = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
         
         # Compute IR-drops with full solver
         result_full = self.full_solver.solve(self.loads)
@@ -104,7 +104,7 @@ class TestRegionalIRDropSolver(unittest.TestCase):
         I_F = {node: self.loads[node] for node in all_far_loads}
         
         # Should not raise any errors
-        ir_drops_regional = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
+        ir_drops_regional, drop_near, drop_far = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
         
         self.assertEqual(len(ir_drops_regional), 1)
         self.assertIn(load_nodes[0], ir_drops_regional)
@@ -188,7 +188,7 @@ class TestRegionalIRDropSolver(unittest.TestCase):
         all_far_loads = set(self.loads.keys()) - loads_in_R
         I_F = {node: self.loads[node] for node in all_far_loads}
         
-        ir_drops_regional = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
+        ir_drops_regional, drop_near, drop_far = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
         
         for node, drop in ir_drops_regional.items():
             self.assertGreaterEqual(drop, 0.0, msg=f"IR-drop at {node} is negative: {drop}")
@@ -214,7 +214,7 @@ class TestRegionalIRDropSolver(unittest.TestCase):
         I_F = {node: 0.0 for node in all_far_loads}  # Zero far loads
         
         # Should compute successfully with only near load contribution
-        ir_drops_regional = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
+        ir_drops_regional, drop_near, drop_far = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
         
         self.assertEqual(len(ir_drops_regional), len(S))
         for node in S:
@@ -241,7 +241,7 @@ class TestRegionalIRDropSolver(unittest.TestCase):
         I_F = {node: self.loads[node] for node in all_far_loads}
         
         # Should compute successfully with only far load contribution
-        ir_drops_regional = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
+        ir_drops_regional, drop_near, drop_far = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
         
         self.assertEqual(len(ir_drops_regional), len(S))
         # IR-drops should still be positive due to far loads
@@ -270,7 +270,7 @@ class TestRegionalIRDropSolver(unittest.TestCase):
         all_far_loads = set(self.loads.keys()) - loads_in_R
         I_F = {node: self.loads[node] for node in all_far_loads}
         
-        ir_drops_regional = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
+        ir_drops_regional, drop_near, drop_far = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
         result_full = self.full_solver.solve(self.loads)
         
         # Verify partition matches full solver
@@ -308,7 +308,7 @@ class TestRegionalIRDropSolver(unittest.TestCase):
             all_far_loads = set(scaled_loads.keys()) - loads_in_R
             I_F = {node: scaled_loads[node] for node in all_far_loads}
             
-            ir_drops_regional = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
+            ir_drops_regional, drop_near, drop_far = self.regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
             result_full = self.full_solver.solve(scaled_loads)
             
             for node in S:

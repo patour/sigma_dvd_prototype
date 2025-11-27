@@ -50,7 +50,7 @@ class RegionalIRDropSolver:
         A: Set,
         I_R: Dict,
         I_F: Dict
-    ) -> Dict[any, float]:
+    ) -> tuple[Dict[any, float], Dict[any, float], Dict[any, float]]:
         """Compute IR-drop at nodes in subset S.
         
         Args:
@@ -61,7 +61,10 @@ class RegionalIRDropSolver:
             I_F: Dict mapping load nodes NOT in region R to their current values (far loads)
             
         Returns:
-            Dictionary mapping each node in S to its computed IR-drop
+            Tuple of three dictionaries (ir_drops, drop_near, drop_far):
+                - ir_drops: Total IR-drop at each node in S
+                - drop_near: IR-drop component from near loads (in R)
+                - drop_far: IR-drop component from far loads (outside R)
             
         Raises:
             ValueError: If sets are inconsistent or empty
@@ -121,7 +124,7 @@ class RegionalIRDropSolver:
         for u in S_list:
             ir_drops[u] = drop_near[u] + drop_far[u]
         
-        return ir_drops
+        return ir_drops, drop_near, drop_far
     
     def _build_K_A(self, A_list: List) -> np.ndarray:
         """Build the K_A resistance matrix for boundary nodes.

@@ -109,6 +109,7 @@ def plot_current_map(
     linewidth_scale: float = 3.0,
     include_vias: bool = True,
     min_current: float | None = None,
+    loads_current: Dict | None = None,
 ):
     """Visualize currents through resistive edges.
 
@@ -134,6 +135,9 @@ def plot_current_map(
         Whether to include via edges (nodes on different layers).
     min_current : float | None
         If provided, only edges with (|I| if abs_current else I) >= min_current are plotted.
+    loads_current : Dict | None
+        Optional dictionary mapping nodes to load current values. If provided, load nodes
+        are marked with colored dots whose intensity varies with current magnitude.
     """
     segs = []
     vals = []
@@ -175,6 +179,41 @@ def plot_current_map(
     ax.add_collection(lc)
     ax.set_aspect("equal", adjustable="box")
     ax.autoscale()
+    
+    # Overlay load currents if provided
+    if loads_current is not None:
+        load_xs = []
+        load_ys = []
+        load_currents = []
+        for node, current in loads_current.items():
+            node_data = G.nodes.get(node)
+            if node_data is None or "xy" not in node_data:
+                continue
+            node_layer = node_data.get("layer")
+            if layer is not None and node_layer != layer:
+                continue
+            x, y = node_data["xy"]
+            load_xs.append(x)
+            load_ys.append(y)
+            load_currents.append(abs(current) if abs_current else current)
+        
+        if load_xs:
+            load_currents_arr = np.array(load_currents)
+            sc = ax.scatter(
+                load_xs, load_ys, 
+                c=load_currents_arr, 
+                cmap="Reds", 
+                s=80, 
+                edgecolors="black", 
+                linewidths=1.5,
+                alpha=0.8,
+                zorder=10,
+                label="Load currents"
+            )
+            # Add separate colorbar for load currents
+            cbar_loads = fig.colorbar(sc, ax=ax, label="Load " + ("|I| (A)" if abs_current else "I (A)"), 
+                                     pad=0.02, aspect=30, shrink=0.8)
+    
     title = "Current Map"
     if layer is not None:
         title += f" (Layer {layer})"

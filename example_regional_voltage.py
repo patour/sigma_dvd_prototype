@@ -92,14 +92,16 @@ def main():
     
     # Compute IR-drops using regional solver
     print("\n7. Computing IR-drops using regional solver...")
-    ir_drops_regional = regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
+    ir_drops_regional, drop_near, drop_far = regional_solver.compute_ir_drops(S, R, A, I_R, I_F)
     
     print(f"\n   IR-drops computed for {len(ir_drops_regional)} nodes")
     print("\n   Sample IR-drops (first 5 nodes):")
     for i, node in enumerate(partition_loads[:5]):
         drop = ir_drops_regional[node]
+        drop_n = drop_near[node]
+        drop_f = drop_far[node]
         voltage = 1.0 - drop  # Assuming Vdd = 1.0V
-        print(f"      Node {node}: IR-drop = {drop:.6f} V, V = {voltage:.6f} V")
+        print(f"      Node {node}: IR-drop = {drop:.6f} V (near={drop_n:.6f} V, far={drop_f:.6f} V), V = {voltage:.6f} V")
     
     # Compare with full IR-drop solver
     print("\n" + "=" * 70)
