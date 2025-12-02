@@ -648,10 +648,36 @@ class GridPartitioner:
         
         # Handle orphan separators (not adjacent to any interior nodes)
         # These can occur when separators are only adjacent to other separators or pads
-        # Assign them to the first partition by default
         orphan_separators = separator_nodes - assigned_separators
         if orphan_separators and partitions:
-            partitions[0].separator_nodes.update(orphan_separators)
+            # Try to assign each orphan to the partition of its non-orphan separator neighbors
+            for orphan in list(orphan_separators):
+                # Check if connected to pads (voltage sources)
+                connected_to_pad = any(neighbor in self.pad_nodes for neighbor in self.G.neighbors(orphan))
+                if connected_to_pad:
+                    # Assign pad-connected orphans to partition 0
+                    partitions[0].separator_nodes.add(orphan)
+                    orphan_separators.remove(orphan)
+                    continue
+                
+                # Find non-orphan separator neighbors and their partitions
+                neighbor_partitions = set()
+                for neighbor in self.G.neighbors(orphan):
+                    if neighbor in assigned_separators:
+                        # Find which partition(s) this non-orphan separator belongs to
+                        for p in partitions:
+                            if neighbor in p.separator_nodes:
+                                neighbor_partitions.add(p.partition_id)
+                
+                # Assign to the lowest-numbered partition of non-orphan neighbors
+                if neighbor_partitions:
+                    target_partition_id = min(neighbor_partitions)
+                    partitions[target_partition_id].separator_nodes.add(orphan)
+                    orphan_separators.remove(orphan)
+            
+            # Any remaining orphans (shouldn't happen, but fallback to partition 0)
+            if orphan_separators:
+                partitions[0].separator_nodes.update(orphan_separators)
         
         return partitions
     
