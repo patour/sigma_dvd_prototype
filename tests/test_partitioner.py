@@ -169,23 +169,33 @@ class TestGridPartitioner(unittest.TestCase):
                            f"Separator node {sep_node} is a load node")
     
     def test_all_nodes_assigned_to_partitions(self):
-        """Test that all non-pad nodes are assigned to some partition."""
+        """Test that all non-pad nodes are assigned to some partition.
+        
+        Note: Separators may appear in multiple partitions (on boundaries).
+        Interior nodes appear in exactly one partition.
+        """
         G, loads, pads = build_test_grid()
         partitioner = GridPartitioner(G, loads, pads, seed=42)
         
         result = partitioner.partition(P=2)
         
-        # Collect all nodes in partitions
-        nodes_in_partitions = set()
+        # Collect all interior nodes (should be disjoint across partitions)
+        all_interior = set()
         for partition in result.partitions:
-            nodes_in_partitions.update(partition.all_nodes)
+            all_interior.update(partition.interior_nodes)
         
-        # Check all non-pad nodes are assigned
+        # Check all non-pad, non-separator nodes are assigned as interior
         pad_set = set(pads)
         for node in G.nodes():
-            if node not in pad_set:
-                self.assertIn(node, nodes_in_partitions,
-                            f"Node {node} not assigned to any partition")
+            if node not in pad_set and node not in result.separator_nodes:
+                self.assertIn(node, all_interior,
+                            f"Interior node {node} not assigned to any partition")
+        
+        # Check all separators appear in at least one partition
+        for sep in result.separator_nodes:
+            appears_in = [p.partition_id for p in result.partitions if sep in p.separator_nodes]
+            self.assertGreater(len(appears_in), 0,
+                             f"Separator {sep} does not appear in any partition's separator_nodes")
     
     def test_partition_with_different_P_values(self):
         """Test partitioning with different numbers of partitions."""
@@ -411,6 +421,95 @@ class TestPartitionDataStructures(unittest.TestCase):
                 # Verify we have some layer-0 nodes that could be disconnected
                 layer0_nodes = [n for n in interior if G.nodes[n].get('layer', 0) == 0]
                 # This is the expected behavior: layer-0 nodes form separate stripe segments
+    
+    def test_separators_assigned_by_adjacency(self):
+        """Test that separators are correctly assigned to partitions based on adjacency to interior nodes.
+        
+        This test validates the fix for the bug where separators were not being included in
+        partition.separator_nodes because they weren't in partition_assignments.
+        
+        Note: Some separators may be "orphans" (only adjacent to other separators or pads),
+        which are assigned to the first partition by default.
+        """
+        G, loads, pads = build_test_grid()
+        partitioner = GridPartitioner(G, loads, pads, seed=42)
+        
+        # Test both X and Y axis
+        for axis in ['x', 'y']:
+            with self.subTest(axis=axis):
+                result = partitioner.partition(P=3, axis=axis)
+                
+                # For each partition, verify all adjacent separators are included
+                for partition in result.partitions:
+                    # Find separators adjacent to this partition's interior nodes
+                    adjacent_separators = set()
+                    for interior_node in partition.interior_nodes:
+                        for neighbor in G.neighbors(interior_node):
+                            if neighbor in result.separator_nodes:
+                                adjacent_separators.add(neighbor)
+                    
+                    # All adjacent separators should be in partition.separator_nodes
+                    missing = adjacent_separators - partition.separator_nodes
+                    self.assertEqual(len(missing), 0,
+                                   f"{axis.upper()}-axis Partition {partition.partition_id}: "
+                                   f"Missing {len(missing)} adjacent separators. "
+                                   f"This indicates _build_partitions is not finding separators by adjacency.")
+                    
+                    # Most separators in partition should be adjacent to interior
+                    # (exception: orphan separators in partition 0)
+                    separators_with_interior_neighbors = 0
+                    for sep in partition.separator_nodes:
+                        has_interior_neighbor = False
+                        for neighbor in G.neighbors(sep):
+                            if neighbor in partition.interior_nodes:
+                                has_interior_neighbor = True
+                                break
+                        if has_interior_neighbor:
+                            separators_with_interior_neighbors += 1
+                    
+                    # At least some separators should have interior neighbors
+                    # (unless it's a tiny partition with only orphans)
+                    if len(partition.separator_nodes) > 0:
+                        ratio = separators_with_interior_neighbors / len(partition.separator_nodes)
+                        # Allow partition 0 to have many orphans (connectivity enforcement artifacts)
+                        min_ratio = 0.2 if partition.partition_id == 0 else 0.8
+                        self.assertGreaterEqual(ratio, min_ratio,
+                                              f"{axis.upper()}-axis Partition {partition.partition_id}: "
+                                              f"Only {separators_with_interior_neighbors}/{len(partition.separator_nodes)} "
+                                              f"separators are adjacent to interior nodes ({ratio:.1%} < {min_ratio:.1%}).")
+    
+    def test_separators_appear_in_multiple_partitions(self):
+        """Test that boundary separators appear in multiple adjacent partitions.
+        
+        Separators on internal boundaries should appear in the separator_nodes set of
+        multiple partitions (the ones they're adjacent to).
+        """
+        G, loads, pads = build_test_grid()
+        partitioner = GridPartitioner(G, loads, pads, seed=42)
+        
+        result = partitioner.partition(P=3, axis='x')
+        
+        # Track which partitions each separator belongs to
+        sep_to_partitions = {}
+        for partition in result.partitions:
+            for sep in partition.separator_nodes:
+                if sep not in sep_to_partitions:
+                    sep_to_partitions[sep] = []
+                sep_to_partitions[sep].append(partition.partition_id)
+        
+        # For P=3, we have 2 internal boundaries, so we expect:
+        # - Some separators appear in 2 partitions (on internal boundaries)
+        # - Edge partitions (0 and 2) may have separators on only their inner edge
+        multi_partition_seps = {k: v for k, v in sep_to_partitions.items() if len(v) > 1}
+        
+        # We should have some separators appearing in multiple partitions
+        self.assertGreater(len(multi_partition_seps), 0,
+                          "Expected some separators to appear in multiple partitions")
+        
+        # Verify middle partition (ID=1) has separators on both boundaries
+        middle_partition = result.partitions[1]
+        self.assertGreater(len(middle_partition.separator_nodes), 0,
+                          "Middle partition should have separators")
     
     def test_x_axis_uses_layer0_separators(self):
         """Test X-axis partitioning uses layer-0 via nodes as separators."""

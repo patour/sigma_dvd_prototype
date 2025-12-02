@@ -621,13 +621,20 @@ class GridPartitioner:
         """Build Partition objects from assignments and separators."""
         partitions = []
         
+        # Track which separators have been assigned
+        assigned_separators = set()
+        
         for p in range(P):
-            # Collect all nodes in this partition
-            partition_nodes = {n for n, pid in partition_assignments.items() if pid == p}
+            # Collect interior nodes assigned to this partition
+            interior = {n for n, pid in partition_assignments.items() if pid == p and n not in separator_nodes}
             
-            # Separate into interior and separator nodes
-            sep_in_partition = partition_nodes & separator_nodes
-            interior = partition_nodes - separator_nodes
+            # Find separators adjacent to this partition's interior nodes
+            sep_in_partition = set()
+            for interior_node in interior:
+                for neighbor in self.G.neighbors(interior_node):
+                    if neighbor in separator_nodes:
+                        sep_in_partition.add(neighbor)
+                        assigned_separators.add(neighbor)
             
             # Find load nodes in this partition
             loads_in_partition = interior & self.load_nodes
@@ -638,6 +645,13 @@ class GridPartitioner:
                 separator_nodes=sep_in_partition,
                 load_nodes=loads_in_partition
             ))
+        
+        # Handle orphan separators (not adjacent to any interior nodes)
+        # These can occur when separators are only adjacent to other separators or pads
+        # Assign them to the first partition by default
+        orphan_separators = separator_nodes - assigned_separators
+        if orphan_separators and partitions:
+            partitions[0].separator_nodes.update(orphan_separators)
         
         return partitions
     
