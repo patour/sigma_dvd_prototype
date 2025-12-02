@@ -99,6 +99,7 @@ class StimulusGenerator:
         gaussian_loc: float = 1.0,
         gaussian_scale: float = 1.0,
         area: tuple | None = None,
+        seed: int | None = None,
     ) -> StimulusMeta:
         """Generate one stimulus mapping node->current (Amps).
 
@@ -107,32 +108,55 @@ class StimulusGenerator:
         distribution: 'uniform' or 'gaussian'.
         gaussian_loc/scale: parameters for Normal(loc, scale) used when gaussian.
         area: optional (x_min, y_min, x_max, y_max) rectangle; only nodes inside are used.
+        seed: optional RNG seed for this specific generation call. If provided, 
+              overrides the generator's state to ensure reproducible node selection
+              and current distribution.
         """
         assert total_power >= 0.0, "Power must be non-negative"
-        nodes = self._select_nodes(percent if count is None else None, count, area)
-        if not nodes:
-            return StimulusMeta(total_power, 0.0, self.vdd, [], distribution, {})
-        total_current = total_power / self.vdd if self.vdd > 0 else 0.0
-        currents: Dict = {}
-        if distribution == "uniform":
-            each = total_current / len(nodes)
-            for n in nodes:
-                currents[n] = each
-        elif distribution == "gaussian":
-            raw = np.abs(np.random.normal(loc=gaussian_loc, scale=gaussian_scale, size=len(nodes)))
-            s = raw.sum()
-            if s <= 0:
-                # fallback uniform
+        
+        # Save current RNG state if seed is provided
+        saved_state = None
+        if seed is not None:
+            saved_state = self.rng.getstate()
+            self.rng.seed(seed)
+        
+        # Save numpy RNG state if using gaussian distribution
+        saved_np_state = None
+        if distribution == "gaussian" and seed is not None:
+            saved_np_state = np.random.get_state()
+            np.random.seed(seed)
+        
+        try:
+            nodes = self._select_nodes(percent if count is None else None, count, area)
+            if not nodes:
+                return StimulusMeta(total_power, 0.0, self.vdd, [], distribution, {})
+            total_current = total_power / self.vdd if self.vdd > 0 else 0.0
+            currents: Dict = {}
+            if distribution == "uniform":
                 each = total_current / len(nodes)
                 for n in nodes:
                     currents[n] = each
+            elif distribution == "gaussian":
+                raw = np.abs(np.random.normal(loc=gaussian_loc, scale=gaussian_scale, size=len(nodes)))
+                s = raw.sum()
+                if s <= 0:
+                    # fallback uniform
+                    each = total_current / len(nodes)
+                    for n in nodes:
+                        currents[n] = each
+                else:
+                    weights = raw / s
+                    for n, w in zip(nodes, weights):
+                        currents[n] = w * total_current
             else:
-                weights = raw / s
-                for n, w in zip(nodes, weights):
-                    currents[n] = w * total_current
-        else:
-            raise ValueError(f"Unknown distribution: {distribution}")
-        return StimulusMeta(total_power, total_current, self.vdd, nodes, distribution, currents)
+                raise ValueError(f"Unknown distribution: {distribution}")
+            return StimulusMeta(total_power, total_current, self.vdd, nodes, distribution, currents)
+        finally:
+            # Restore RNG states if they were saved
+            if saved_state is not None:
+                self.rng.setstate(saved_state)
+            if saved_np_state is not None:
+                np.random.set_state(saved_np_state)
 
     def generate_batch(
         self,
@@ -143,6 +167,7 @@ class StimulusGenerator:
         gaussian_loc: float = 1.0,
         gaussian_scale: float = 1.0,
         area: tuple | None = None,
+        seed: int | None = None,
     ) -> List[StimulusMeta]:
         metas: List[StimulusMeta] = []
         for P in powers:
@@ -155,6 +180,7 @@ class StimulusGenerator:
                     gaussian_loc=gaussian_loc,
                     gaussian_scale=gaussian_scale,
                     area=area,
+                    seed=seed,
                 )
             )
         return metas
