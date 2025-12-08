@@ -65,6 +65,7 @@ def main():
     parser.add_argument("--vdd", type=float, default=1.0, help="Supply voltage (V)")
     parser.add_argument("--plot_grid", action="store_true", help="Plot grid during generation")
     parser.add_argument("--plot_partition", action="store_true", help="Plot partition visualization")
+    parser.add_argument("--plot_victim_aggressors", action="store_true", help="Plot S (red), I_R (blue), I_F (yellow) nodes")
     parser.add_argument("--plot_irdrop", action="store_true", help="Plot IR-drop map")
     parser.add_argument("--plot_current", action="store_true", help="Plot current map")
     parser.add_argument("--min_current", type=float, default=5e-3, help="Minimum current for current map (A)")
@@ -174,7 +175,8 @@ def main():
             if min_distance <= args.near_max_distance:
                 I_R[node] = active_loads[node]
     
-    all_far_loads = set(active_loads.keys()) - set(I_R.keys())
+    # Far loads are active loads outside partition R
+    all_far_loads = set(active_loads.keys()) - loads_in_R
     I_F = {node: active_loads[node] for node in all_far_loads}
     
     print(f"Region R: {len(R)} nodes")
@@ -227,6 +229,68 @@ def main():
     print(f"  Max relative error:   {np.max(rel_errors):.2f}%")
     
     # Step 9: Visualizations
+    if args.plot_victim_aggressors:
+        print("\n[9] Plotting load distribution (S, I_R, I_F)...")
+        import matplotlib.pyplot as plt
+        
+        fig, ax = plt.subplots(figsize=(14, 12))
+        
+        # Draw grid edges at layer 0
+        layer_0_nodes = [n for n in G.nodes() if n.layer == 0]
+        for u, v in G.edges():
+            if u.layer == 0 and v.layer == 0:
+                x1, y1 = G.nodes[u]['xy']
+                x2, y2 = G.nodes[v]['xy']
+                ax.plot([x1, x2], [y1, y2], 'k-', alpha=0.2, linewidth=0.5)
+        
+        # Plot all layer 0 nodes as background
+        for node in layer_0_nodes:
+            x, y = G.nodes[node]['xy']
+            ax.scatter([x], [y], c='lightgray', s=20, marker='o', alpha=0.5, zorder=1)
+        
+        # Plot inactive loads (active but not in I_R nor I_F) as white circles
+        inactive_loads = set(active_loads.keys()) - set(I_R.keys()) - set(I_F.keys())
+        inactive_layer0 = [n for n in inactive_loads if n.layer == 0]
+        if inactive_layer0:
+            xy_inactive = np.array([G.nodes[n]['xy'] for n in inactive_layer0])
+            ax.scatter(xy_inactive[:, 0], xy_inactive[:, 1], c='white', s=60, marker='o', 
+                      edgecolors='black', linewidths=1, alpha=0.9, zorder=2, label=f'Other Active ({len(inactive_layer0)})')
+        
+        # Plot I_F nodes (yellow)
+        I_F_layer0 = [n for n in I_F.keys() if n.layer == 0]
+        if I_F_layer0:
+            xy_IF = np.array([G.nodes[n]['xy'] for n in I_F_layer0])
+            ax.scatter(xy_IF[:, 0], xy_IF[:, 1], c='gold', s=80, marker='s', 
+                      edgecolors='black', linewidths=1, alpha=0.8, zorder=3, label=f'I_F (Far, {len(I_F_layer0)})')
+        
+        # Plot I_R nodes (blue)
+        I_R_layer0 = [n for n in I_R.keys() if n.layer == 0]
+        if I_R_layer0:
+            xy_IR = np.array([G.nodes[n]['xy'] for n in I_R_layer0])
+            ax.scatter(xy_IR[:, 0], xy_IR[:, 1], c='blue', s=100, marker='o', 
+                      edgecolors='black', linewidths=1.5, alpha=0.8, zorder=4, label=f'I_R (Near, {len(I_R_layer0)})')
+        
+        # Plot S nodes (red)
+        S_layer0 = [n for n in S if n.layer == 0]
+        if S_layer0:
+            xy_S = np.array([G.nodes[n]['xy'] for n in S_layer0])
+            ax.scatter(xy_S[:, 0], xy_S[:, 1], c='red', s=150, marker='*', 
+                      edgecolors='black', linewidths=2, alpha=1.0, zorder=5, label=f'S (Subset, {len(S_layer0)})')
+        
+        ax.set_xlabel('X Position', fontsize=12)
+        ax.set_ylabel('Y Position', fontsize=12)
+        ax.set_title(f'Load Distribution: S (red), I_R (blue), I_F (yellow)\nNear distance: {args.near_max_distance}', fontsize=14)
+        ax.legend(loc='best', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.set_aspect('equal')
+        
+        if args.show_plots:
+            plt.show()
+        else:
+            fig.savefig("victim_aggressors.png", dpi=150, bbox_inches="tight")
+            print("  Saved: victim_aggressors.png")
+            plt.close(fig)
+    
     if args.plot_irdrop:
         print("\n[9] Plotting IR-drop map...")
         import matplotlib.pyplot as plt
