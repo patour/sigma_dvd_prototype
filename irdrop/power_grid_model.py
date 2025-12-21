@@ -371,6 +371,34 @@ class PowerGridModel:
         x_source = lu(e_source)  # G_uu^(-1) * e_source
 
         results = {}
+        
+        # For Dirichlet nodes, we need to compute effective resistance to each one separately.
+        # The key insight: R_eff(source, dirichlet_d) is the voltage at source when we
+        # inject 1A at source and set dirichlet_d to 0V, with all other Dirichlet nodes
+        # also at 0V (they're all boundary conditions).
+        #
+        # However, to get different resistances to different Dirichlet nodes, we need to
+        # account for the coupling. The correct approach is to solve:
+        #   G_uu * V_u = I_u - G_ud * V_d
+        # where V_d = 0 for all Dirichlet nodes, and I_u has 1A at source.
+        # This gives us the voltage at source, which is R_eff to the Dirichlet boundary.
+        #
+        # But this would give the same resistance to all Dirichlet nodes. To get different
+        # resistances, we need to consider the current flow through each specific Dirichlet node.
+        # 
+        # Better approach: For each Dirichlet target, compute the voltage at source when
+        # that specific Dirichlet node is at 0V and we inject 1A at source. The coupling
+        # matrix G_ud tells us how current flows to each Dirichlet node.
+        
+        # Extract coupling matrix from unknowns to Dirichlet nodes
+        # Create ordered list to match G_ud column ordering
+        dirichlet_list = sorted(dirichlet_in_subgrid, key=lambda n: (getattr(n, 'layer', 0), getattr(n, 'idx', 0)))
+        d_idx = [index[d] for d in dirichlet_list]
+        if d_idx:
+            G_ud = G_mat[np.ix_(u_idx, d_idx)].tocsr()
+        else:
+            G_ud = sp.csr_matrix((len(u_idx), 0))
+        
         for target in target_nodes:
             if target not in dirichlet_in_subgrid:
                 # Target is also unknown - use standard R_eff formula
@@ -387,9 +415,41 @@ class PowerGridModel:
                     results[target] = float('inf')
             else:
                 # Target is a Dirichlet node (port)
-                # R_eff to a Dirichlet node = G_uu^(-1)[source, source] for the reduced system
-                # where the Dirichlet node acts as ground
-                results[target] = max(0.0, x_source[source_idx])
+                # To get different resistances to different Dirichlet nodes, we compute
+                # the current flow to each specific Dirichlet node when injecting 1A at source.
+                # R_eff(source, d) = V_source / I_d, where I_d is the current into d.
+                #
+                # When we inject 1A at source and set all Dirichlet nodes to 0V:
+                #   V_u = G_uu^(-1) * I_u (where I_u has 1A at source)
+                #   I_d = G_ud^T * V_u (current into Dirichlet nodes)
+                #   R_eff(source, d) = V_source / I_d
+                
+                if G_ud.shape[1] > 0:
+                    # Find the column index in G_ud corresponding to this target Dirichlet node
+                    target_d_idx = None
+                    for i, d in enumerate(dirichlet_list):
+                        if d == target:
+                            target_d_idx = i
+                            break
+                    
+                    if target_d_idx is not None:
+                        # Current into this Dirichlet node: I_d = sum over u of G_ud[u, target_d_idx] * V_u[u]
+                        # Use matrix-vector multiplication for efficiency
+                        target_col = G_ud[:, target_d_idx].toarray().flatten()
+                        current_to_target = np.dot(target_col, x_source)
+                        
+                        if abs(current_to_target) > 1e-10:
+                            # R_eff = V_source / I_d
+                            r_eff = x_source[source_idx] / abs(current_to_target)
+                            results[target] = max(0.0, r_eff)
+                        else:
+                            # No current flow to this Dirichlet node, infinite resistance
+                            results[target] = float('inf')
+                    else:
+                        results[target] = float('inf')
+                else:
+                    # No coupling matrix, fallback
+                    results[target] = max(0.0, x_source[source_idx])
 
         return results
 
