@@ -629,7 +629,7 @@ class PDNSolver:
                     M_op = None
                 
                 # Solve with CG
-                V, info = spla.cg(G, I, tol=self.tolerance, maxiter=self.max_iterations, M=M_op)
+                V, info = spla.cg(G, I, rtol=self.tolerance, maxiter=self.max_iterations, M=M_op)
                 
                 if info > 0:
                     self.logger.warning(f"CG did not converge after {info} iterations")
@@ -653,7 +653,7 @@ class PDNSolver:
                     M_op = None
                 
                 # Solve with BiCGSTAB
-                V, info = spla.bicgstab(G, I, tol=self.tolerance, maxiter=self.max_iterations, M=M_op)
+                V, info = spla.bicgstab(G, I, rtol=self.tolerance, maxiter=self.max_iterations, M=M_op)
                 
                 if info > 0:
                     self.logger.warning(f"BiCGSTAB did not converge after {info} iterations")
