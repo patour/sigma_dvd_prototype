@@ -1,0 +1,56 @@
+* Package Model - VRM connections and bump interfaces
+* Includes voltage source probe network and zero-resistance bump connections
+
+* ============================================================================
+* VDD Package Network
+* ============================================================================
+
+* Voltage source with probe resistor network
+* VDD_vsrc is the ideal voltage source node at VDD (0.75V)
+* VDD is the package rail node that connects to die bumps
+v_VDD VDD_vsrc 0 VDD
+
+* Probe resistor network (creates measurement point)
+r VDD VDD_probe 0
+r_VDD_probe VDD_probe VDD_int 0.001
+r VDD_int VDD_vsrc 0
+
+* Package distribution resistance (models resistance in package traces)
+* Connect package rail to internal distribution nodes
+r_pkg_dist1 VDD VDD_dist1 0.002
+r_pkg_dist2 VDD VDD_dist2 0.002
+r_pkg_dist3 VDD VDD_dist3 0.002
+r_pkg_dist4 VDD VDD_dist4 0.002
+
+* ============================================================================
+* Bump connections (die to package) - Zero resistance for ideal connection
+* ============================================================================
+
+* Corner bumps (4 corners for good distribution)
+rs 1000_1000_M2 VDD_dist1 0
+rs 5000_1000_M2 VDD_dist2 0
+rs 1000_5000_M2 VDD_dist3 0
+rs 5000_5000_M2 VDD_dist4 0
+
+* Edge bumps (center of each edge)
+rs 3000_1000_M2 VDD 0
+rs 3000_5000_M2 VDD 0
+rs 1000_3000_M2 VDD 0
+rs 5000_3000_M2 VDD 0
+
+* Center bump
+rs 3000_3000_M2 VDD 0
+
+* ============================================================================
+* VSS Package Network (Ground)
+* ============================================================================
+
+* Voltage source with probe resistor network
+v_VSS VSS_vsrc 0 VSS
+
+* Probe resistor network
+r VSS VSS_probe 0
+r_VSS_probe VSS_probe VSS_int 0.001
+r VSS_int VSS_vsrc 0
+
+* Note: Ground (node 0) is implicitly connected via decoupling capacitors in tile

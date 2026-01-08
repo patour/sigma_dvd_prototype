@@ -1,0 +1,4 @@
+* Power net voltage specifications
+* Format: <net_name> <nominal_voltage>
+VDD 0.75
+VSS 0.0

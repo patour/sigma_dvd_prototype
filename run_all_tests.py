@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Run all PDN tests with summary"""
+import unittest
+import sys
+
+# Configure matplotlib before importing test modules
+import matplotlib
+matplotlib.use('Agg')
+
+loader = unittest.TestLoader()
+
+print("Discovering all test modules in ./tests directory...")
+suite = loader.discover('tests', pattern='test_*.py', top_level_dir='.')
+
+print(f"\nRunning {suite.countTestCases()} tests...")
+print("="*70)
+
+runner = unittest.TextTestRunner(verbosity=1)
+result = runner.run(suite)
+
+print("\n" + "="*70)
+print("TEST SUMMARY")
+print("="*70)
+print(f"Tests run: {result.testsRun}")
+print(f"Successes: {result.testsRun - len(result.failures) - len(result.errors)}")
+print(f"Failures: {len(result.failures)}")
+print(f"Errors: {len(result.errors)}")
+
+if result.failures:
+    print("\nFAILED TESTS:")
+    for test, _ in result.failures:
+        print(f"  ❌ {test}")
+
+if result.errors:
+    print("\nERRORS:")
+    for test, _ in result.errors:
+        print(f"  ❌ {test}")
+
+print("="*70)
+sys.exit(0 if result.wasSuccessful() else 1)
