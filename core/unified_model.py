@@ -1,0 +1,592 @@
+"""Unified power grid model supporting both synthetic and PDN sources.
+
+This module provides a unified interface for power grid analysis that works
+with both synthetic grids (from generate_power_grid.py) and PDN netlists
+(from pdn/pdn_parser.py).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+
+import networkx as nx
+import numpy as np
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+
+from .node_adapter import NodeInfoExtractor, UnifiedNodeInfo, LayerID
+from .edge_adapter import EdgeInfoExtractor, ElementType
+
+
+class GridSource(Enum):
+    """Source type for power grid data."""
+    SYNTHETIC = 'synthetic'
+    PDN_NETLIST = 'pdn'
+
+
+@dataclass
+class UnifiedReducedSystem:
+    """Reduced system for solving nodal voltages.
+
+    Holds the Schur-reduced conductance matrix and LU factorization
+    for efficient solving of the nodal equation G*V = I.
+
+    Attributes:
+        node_order: List of all nodes in matrix order
+        unknown_nodes: List of nodes to solve for (non-pad)
+        pad_nodes: List of Dirichlet boundary nodes (voltage sources)
+        G_uu: Sparse conductance submatrix for unknowns
+        G_up: Sparse coupling between unknowns and pads
+        lu: LU factorization callable for fast solves
+        pad_voltage: Voltage applied at pad nodes
+        index_of: Dict mapping node -> index in full ordering
+        index_unknown: Dict mapping node -> index in unknown ordering
+        net_name: Optional net name for multi-net support
+    """
+    node_order: List[Any]
+    unknown_nodes: List[Any]
+    pad_nodes: List[Any]
+    G_uu: sp.csr_matrix
+    G_up: sp.csr_matrix
+    lu: callable
+    pad_voltage: float
+    index_of: Dict[Any, int]
+    index_unknown: Dict[Any, int]
+    net_name: Optional[str] = None
+
+
+class UnifiedPowerGridModel:
+    """Unified power grid model supporting both synthetic and PDN sources.
+
+    Key features:
+    - Adapts to both NodeID-based and string-based node representations
+    - Supports R-only (synthetic) and RLC (PDN) edge types
+    - Multi-net support via net_name parameter
+    - Layer-based decomposition for hierarchical solving
+    - Preserves original graph structure (no modification)
+
+    Example usage:
+        # From synthetic grid
+        model = UnifiedPowerGridModel(G, pads, vdd=1.0, source=GridSource.SYNTHETIC)
+
+        # From PDN netlist
+        model = UnifiedPowerGridModel(graph, vsrc_nodes, vdd=1.0, source=GridSource.PDN_NETLIST)
+
+        # Solve
+        voltages = model.solve_voltages(current_injections)
+    """
+
+    def __init__(
+        self,
+        graph: Union[nx.Graph, nx.MultiDiGraph],
+        pad_nodes: Sequence[Any],
+        vdd: float = 1.0,
+        source: GridSource = GridSource.SYNTHETIC,
+        net_name: Optional[str] = None,
+        resistance_unit_kohm: bool = False,
+    ):
+        """Initialize unified power grid model.
+
+        Args:
+            graph: NetworkX graph (Graph or MultiDiGraph)
+            pad_nodes: Sequence of voltage source nodes (Dirichlet BCs)
+            vdd: Nominal supply voltage
+            source: Grid source type (SYNTHETIC or PDN_NETLIST)
+            net_name: For multi-net PDN, which net this model represents
+            resistance_unit_kohm: True if resistance values are in kOhms
+        """
+        self.graph = graph
+        self.pad_nodes = list(pad_nodes)
+        self.vdd = float(vdd)
+        self.source = source
+        self.net_name = net_name
+        self.resistance_unit_kohm = resistance_unit_kohm
+
+        # Initialize adapters
+        self._node_extractor = NodeInfoExtractor(graph)
+        self._edge_extractor = EdgeInfoExtractor(
+            is_pdn=(source == GridSource.PDN_NETLIST),
+            resistance_unit_kohm=resistance_unit_kohm,
+            capacitance_unit_ff=(source == GridSource.PDN_NETLIST),
+            inductance_unit_nh=(source == GridSource.PDN_NETLIST),
+            current_unit_ma=(source == GridSource.PDN_NETLIST),
+        )
+
+        # Build reduced system
+        self._reduced: Optional[UnifiedReducedSystem] = None
+        self._build_reduced_system()
+
+    @property
+    def reduced(self) -> UnifiedReducedSystem:
+        """Get the reduced system for solving."""
+        if self._reduced is None:
+            self._build_reduced_system()
+        return self._reduced
+
+    @property
+    def G(self) -> Union[nx.Graph, nx.MultiDiGraph]:
+        """Alias for graph (backward compatibility with PowerGridModel)."""
+        return self.graph
+
+    def get_node_info(self, node: Any) -> UnifiedNodeInfo:
+        """Get unified node information.
+
+        Args:
+            node: Node identifier
+
+        Returns:
+            UnifiedNodeInfo with coordinates and layer.
+        """
+        return self._node_extractor.get_info(node)
+
+    def get_node_layer(self, node: Any) -> Optional[LayerID]:
+        """Get layer for a node.
+
+        Args:
+            node: Node identifier
+
+        Returns:
+            Layer identifier (int or str) or None.
+        """
+        return self._node_extractor.get_layer(node)
+
+    def get_node_xy(self, node: Any) -> Optional[Tuple[float, float]]:
+        """Get (x, y) coordinates for a node.
+
+        Args:
+            node: Node identifier
+
+        Returns:
+            (x, y) tuple or None if unavailable.
+        """
+        return self._node_extractor.get_xy(node)
+
+    def _iter_resistive_edges(self):
+        """Iterate over resistive edges, handling both Graph and MultiDiGraph.
+
+        Yields:
+            Tuples of (u, v, edge_info) for each resistive edge.
+        """
+        if isinstance(self.graph, nx.MultiDiGraph):
+            # PDN MultiDiGraph: iterate over all edges, filter R type
+            for u, v, k, data in self.graph.edges(keys=True, data=True):
+                if self._edge_extractor.is_resistive_edge(data):
+                    edge_info = self._edge_extractor.get_info(data)
+                    yield u, v, edge_info
+        else:
+            # Synthetic Graph: all edges are resistive
+            for u, v, data in self.graph.edges(data=True):
+                edge_info = self._edge_extractor.get_info(data)
+                if edge_info.is_resistive:
+                    yield u, v, edge_info
+
+    def _build_conductance_matrix(self) -> Tuple[sp.csr_matrix, List[Any]]:
+        """Build conductance matrix from resistive edges.
+
+        Returns:
+            (G_matrix, node_order) where G_matrix is the nodal conductance matrix.
+        """
+        nodes = list(self.graph.nodes())
+        index = {n: i for i, n in enumerate(nodes)}
+        n_nodes = len(nodes)
+
+        data, rows, cols = [], [], []
+        diag = np.zeros(n_nodes, dtype=float)
+
+        for u, v, edge_info in self._iter_resistive_edges():
+            R = edge_info.resistance
+            if R is None or R <= 0:
+                continue
+
+            g = 1.0 / R
+            iu, iv = index[u], index[v]
+
+            # Off-diagonal entries (symmetric)
+            rows.extend([iu, iv])
+            cols.extend([iv, iu])
+            data.extend([-g, -g])
+
+            # Diagonal accumulation
+            diag[iu] += g
+            diag[iv] += g
+
+        # Add diagonal entries
+        for i in range(n_nodes):
+            rows.append(i)
+            cols.append(i)
+            data.append(diag[i])
+
+        G_mat = sp.csr_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes))
+        return G_mat, nodes
+
+    def _build_reduced_system(self) -> None:
+        """Build reduced system using Schur complement.
+
+        Eliminates pad nodes (fixed voltage) to form reduced system:
+        G_uu * V_u = I_u - G_up * V_p
+        """
+        G_mat, nodes = self._build_conductance_matrix()
+        pad_set = set(self.pad_nodes)
+
+        unknown_nodes = [n for n in nodes if n not in pad_set]
+        pad_nodes_ordered = [n for n in nodes if n in pad_set]
+
+        index = {n: i for i, n in enumerate(nodes)}
+        index_unknown = {n: i for i, n in enumerate(unknown_nodes)}
+
+        # Extract submatrices
+        u_idx = [index[n] for n in unknown_nodes]
+        p_idx = [index[n] for n in pad_nodes_ordered]
+
+        if len(u_idx) == 0:
+            # No unknowns - all nodes are pads
+            G_uu = sp.csr_matrix((0, 0))
+            G_up = sp.csr_matrix((0, len(p_idx)))
+            lu = lambda x: np.array([])
+        else:
+            G_uu = G_mat[np.ix_(u_idx, u_idx)].tocsr()
+            G_up = G_mat[np.ix_(u_idx, p_idx)].tocsr() if p_idx else sp.csr_matrix((len(u_idx), 0))
+
+            # Factorize for fast solves
+            lu = spla.factorized(G_uu.tocsc())
+
+        self._reduced = UnifiedReducedSystem(
+            node_order=nodes,
+            unknown_nodes=unknown_nodes,
+            pad_nodes=pad_nodes_ordered,
+            G_uu=G_uu,
+            G_up=G_up,
+            lu=lu,
+            pad_voltage=self.vdd,
+            index_of=index,
+            index_unknown=index_unknown,
+            net_name=self.net_name,
+        )
+
+    def solve_voltages(self, current_injections: Dict[Any, float]) -> Dict[Any, float]:
+        """Solve for nodal voltages given current injections.
+
+        Args:
+            current_injections: Dict mapping node -> current (positive = sink)
+
+        Returns:
+            Dict mapping node -> voltage
+        """
+        rs = self.reduced
+
+        if len(rs.unknown_nodes) == 0:
+            # All nodes are pads
+            return {n: rs.pad_voltage for n in rs.pad_nodes}
+
+        # Build RHS: I_u (current injections at unknown nodes)
+        I_u = np.zeros(len(rs.unknown_nodes), dtype=float)
+        for n, cur in current_injections.items():
+            if n in rs.index_unknown:
+                # Sink current is positive input, but nodal equation uses negative injection
+                I_u[rs.index_unknown[n]] += -float(cur)
+
+        # Pad voltage contribution: -G_up * V_p
+        V_p = np.full(len(rs.pad_nodes), rs.pad_voltage, dtype=float)
+        if rs.G_up.shape[1] > 0:
+            rhs = I_u - rs.G_up @ V_p
+        else:
+            rhs = I_u
+
+        # Solve: V_u = lu(rhs)
+        V_u = rs.lu(rhs)
+
+        # Assemble result
+        voltages = {}
+        for n in rs.pad_nodes:
+            voltages[n] = rs.pad_voltage
+        for i, n in enumerate(rs.unknown_nodes):
+            voltages[n] = float(V_u[i])
+
+        return voltages
+
+    def ir_drop(self, voltages: Dict[Any, float], vdd: Optional[float] = None) -> Dict[Any, float]:
+        """Compute IR-drop from voltages.
+
+        Args:
+            voltages: Dict mapping node -> voltage
+            vdd: Reference voltage (defaults to self.vdd)
+
+        Returns:
+            Dict mapping node -> IR-drop (vdd - voltage)
+        """
+        if vdd is None:
+            vdd = self.vdd
+        return {n: vdd - v for n, v in voltages.items()}
+
+    # Layer-based decomposition methods
+
+    def get_nodes_at_layer(self, layer: LayerID) -> Set[Any]:
+        """Get all nodes at a specific layer.
+
+        Args:
+            layer: Layer identifier (int or str)
+
+        Returns:
+            Set of nodes at the specified layer.
+        """
+        result = set()
+        for node in self.graph.nodes():
+            info = self.get_node_info(node)
+            node_layer = info.layer
+
+            # Direct match
+            if node_layer == layer:
+                result.add(node)
+            # String/int comparison
+            elif str(node_layer) == str(layer):
+                result.add(node)
+            # Numeric comparison for mixed types
+            elif isinstance(layer, int) and info.layer_numeric == layer:
+                result.add(node)
+
+        return result
+
+    def get_all_layers(self) -> List[LayerID]:
+        """Get all unique layers in the grid, sorted.
+
+        Returns:
+            List of layer identifiers, sorted numerically if possible.
+        """
+        layers = set()
+        for node in self.graph.nodes():
+            info = self.get_node_info(node)
+            if info.layer is not None:
+                layers.add(info.layer)
+
+        # Sort: try numeric first, then string
+        def sort_key(x):
+            if isinstance(x, int):
+                return (0, x, '')
+            if isinstance(x, str) and x.isdigit():
+                return (0, int(x), '')
+            return (1, 0, str(x))
+
+        return sorted(layers, key=sort_key)
+
+    def _decompose_at_layer(
+        self,
+        partition_layer: LayerID,
+    ) -> Tuple[Set[Any], Set[Any], Set[Any], List[Tuple[Any, Any, Any]]]:
+        """Decompose grid at partition layer into top/bottom grids.
+
+        Args:
+            partition_layer: Layer index/name to partition at
+
+        Returns:
+            (top_grid_nodes, bottom_grid_nodes, port_nodes, via_edges)
+            - top_grid_nodes: Nodes at layers >= partition_layer
+            - bottom_grid_nodes: Nodes at layers < partition_layer
+            - port_nodes: Nodes at partition_layer connected to layer below
+            - via_edges: Edges connecting partition_layer to layer below
+        """
+        all_layers = self.get_all_layers()
+
+        # Find partition layer index
+        partition_idx = None
+        for i, layer in enumerate(all_layers):
+            if layer == partition_layer or str(layer) == str(partition_layer):
+                partition_idx = i
+                break
+
+        if partition_idx is None:
+            raise ValueError(f"Partition layer {partition_layer} not found in grid")
+        if partition_idx == 0:
+            raise ValueError(f"Cannot partition at bottom layer (layer={partition_layer})")
+
+        # Categorize nodes by layer
+        top_layers = set(all_layers[partition_idx:])
+        bottom_layers = set(all_layers[:partition_idx])
+        partition_layer_below = all_layers[partition_idx - 1]
+
+        top_grid_nodes = set()
+        bottom_grid_nodes = set()
+
+        for node in self.graph.nodes():
+            info = self.get_node_info(node)
+            node_layer = info.layer
+
+            if node_layer is None:
+                continue
+
+            # Check membership
+            in_top = node_layer in top_layers or str(node_layer) in [str(l) for l in top_layers]
+            in_bottom = node_layer in bottom_layers or str(node_layer) in [str(l) for l in bottom_layers]
+
+            if in_top:
+                top_grid_nodes.add(node)
+            elif in_bottom:
+                bottom_grid_nodes.add(node)
+
+        # Find port nodes and via edges
+        port_nodes = set()
+        via_edges = []
+
+        for u, v, edge_info in self._iter_resistive_edges():
+            u_info = self.get_node_info(u)
+            v_info = self.get_node_info(v)
+
+            u_layer = u_info.layer
+            v_layer = v_info.layer
+
+            if u_layer is None or v_layer is None:
+                continue
+
+            # Check if edge crosses partition boundary
+            u_at_partition = (u_layer == partition_layer or str(u_layer) == str(partition_layer))
+            v_at_partition = (v_layer == partition_layer or str(v_layer) == str(partition_layer))
+            u_below = (u_layer == partition_layer_below or str(u_layer) == str(partition_layer_below))
+            v_below = (v_layer == partition_layer_below or str(v_layer) == str(partition_layer_below))
+
+            if u_at_partition and v_below:
+                via_edges.append((u, v, edge_info))
+                port_nodes.add(u)
+            elif v_at_partition and u_below:
+                via_edges.append((u, v, edge_info))
+                port_nodes.add(v)
+
+        return top_grid_nodes, bottom_grid_nodes, port_nodes, via_edges
+
+    def _build_subgrid_system(
+        self,
+        subgrid_nodes: Set[Any],
+        dirichlet_nodes: Set[Any],
+        dirichlet_voltage: float,
+    ) -> Optional[UnifiedReducedSystem]:
+        """Build a reduced system for a subgrid with Dirichlet boundary nodes.
+
+        Args:
+            subgrid_nodes: Set of nodes in the subgrid (including Dirichlet nodes)
+            dirichlet_nodes: Set of nodes with fixed voltage (boundary conditions)
+            dirichlet_voltage: Default voltage for Dirichlet nodes
+
+        Returns:
+            UnifiedReducedSystem for the subgrid, or None if empty.
+        """
+        if not subgrid_nodes:
+            return None
+
+        # Filter edges to subgrid
+        subgrid_edges = []
+        for u, v, edge_info in self._iter_resistive_edges():
+            if u in subgrid_nodes and v in subgrid_nodes:
+                subgrid_edges.append((u, v, edge_info))
+
+        if not subgrid_edges:
+            return None
+
+        # Build conductance matrix for subgrid
+        nodes = list(subgrid_nodes)
+        index = {n: i for i, n in enumerate(nodes)}
+        n_nodes = len(nodes)
+
+        data, rows, cols = [], [], []
+        diag = np.zeros(n_nodes, dtype=float)
+
+        for u, v, edge_info in subgrid_edges:
+            R = edge_info.resistance
+            if R is None or R <= 0:
+                continue
+
+            g = 1.0 / R
+            iu, iv = index[u], index[v]
+
+            rows.extend([iu, iv])
+            cols.extend([iv, iu])
+            data.extend([-g, -g])
+
+            diag[iu] += g
+            diag[iv] += g
+
+        for i in range(n_nodes):
+            rows.append(i)
+            cols.append(i)
+            data.append(diag[i])
+
+        G_mat = sp.csr_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes))
+
+        # Partition into unknown and Dirichlet
+        unknown_nodes = [n for n in nodes if n not in dirichlet_nodes]
+        dirichlet_ordered = [n for n in nodes if n in dirichlet_nodes]
+
+        if not unknown_nodes:
+            return None
+
+        index_unknown = {n: i for i, n in enumerate(unknown_nodes)}
+
+        u_idx = [index[n] for n in unknown_nodes]
+        d_idx = [index[n] for n in dirichlet_ordered]
+
+        G_uu = G_mat[np.ix_(u_idx, u_idx)].tocsr()
+        G_ud = G_mat[np.ix_(u_idx, d_idx)].tocsr() if d_idx else sp.csr_matrix((len(u_idx), 0))
+
+        lu = spla.factorized(G_uu.tocsc())
+
+        return UnifiedReducedSystem(
+            node_order=nodes,
+            unknown_nodes=unknown_nodes,
+            pad_nodes=dirichlet_ordered,
+            G_uu=G_uu,
+            G_up=G_ud,
+            lu=lu,
+            pad_voltage=dirichlet_voltage,
+            index_of=index,
+            index_unknown=index_unknown,
+            net_name=self.net_name,
+        )
+
+    def _solve_subgrid(
+        self,
+        reduced_system: UnifiedReducedSystem,
+        current_injections: Dict[Any, float],
+        dirichlet_voltages: Optional[Dict[Any, float]] = None,
+    ) -> Dict[Any, float]:
+        """Solve a subgrid system with given currents and boundary voltages.
+
+        Args:
+            reduced_system: UnifiedReducedSystem for the subgrid
+            current_injections: Current injections at nodes (positive = sink)
+            dirichlet_voltages: Optional custom voltages for Dirichlet nodes
+
+        Returns:
+            Dict mapping node -> voltage for all subgrid nodes
+        """
+        rs = reduced_system
+
+        if len(rs.unknown_nodes) == 0:
+            return {n: rs.pad_voltage for n in rs.pad_nodes}
+
+        # Build current vector
+        I_u = np.zeros(len(rs.unknown_nodes), dtype=float)
+        for n, cur in current_injections.items():
+            if n in rs.index_unknown:
+                I_u[rs.index_unknown[n]] += -float(cur)
+
+        # Get Dirichlet voltages
+        if dirichlet_voltages is not None:
+            V_d = np.array([dirichlet_voltages.get(n, rs.pad_voltage) for n in rs.pad_nodes])
+        else:
+            V_d = np.full(len(rs.pad_nodes), rs.pad_voltage)
+
+        # Solve
+        if rs.G_up.shape[1] > 0:
+            rhs = I_u - rs.G_up @ V_d
+        else:
+            rhs = I_u
+
+        V_u = rs.lu(rhs)
+
+        # Assemble result
+        voltages = {}
+        for i, n in enumerate(rs.pad_nodes):
+            voltages[n] = float(V_d[i])
+        for i, n in enumerate(rs.unknown_nodes):
+            voltages[n] = float(V_u[i])
+
+        return voltages

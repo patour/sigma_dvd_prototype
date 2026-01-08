@@ -4,9 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Static IR-drop analysis prototype for multi-layer power grids. Two main subsystems:
-1. **irdrop/**: Synthetic power grid generation, IR-drop solving, effective resistance, and partitioning
-2. **pdn/**: SPICE-like netlist parsing for real PDN netlists, DC voltage solving
+Static IR-drop analysis prototype for multi-layer power grids. Three main subsystems:
+1. **core/**: Unified power grid model supporting both synthetic and PDN sources
+2. **irdrop/**: Synthetic power grid generation, IR-drop solving, effective resistance, and partitioning
+3. **pdn/**: SPICE-like netlist parsing for real PDN netlists, DC voltage solving
 
 ## Commands
 
@@ -48,6 +49,31 @@ python example_effective_resistance.py
 - **NetlistParser**: Parses SPICE-like PDN netlists (supports gzip, tile-based parallel parsing, subcircuit flattening).
 - **PDNSolver**: DC voltage solver for parsed netlists (sparse direct or iterative CG).
 - **PDNPlotter**: Layer-wise heatmap visualization.
+
+### Unified Core Module (core/)
+The unified model supports both synthetic grids and PDN netlists with a common interface.
+
+**Key Classes:**
+- **UnifiedPowerGridModel**: Works with both NodeID (synthetic) and string (PDN) node types
+- **UnifiedIRDropSolver**: Flat and hierarchical solving with `solve()` and `solve_hierarchical()`
+- **UnifiedPlotter**: Voltage/IR-drop heatmaps via `plot_voltage_heatmap()`, `plot_ir_drop_heatmap()`
+- **UnifiedPartitioner**: Layer-based and spatial partitioning
+- **UnifiedStatistics**: Netlist statistics (nodes, edges, R/C/L counts per layer)
+- **UnifiedEffectiveResistanceCalculator**: Batch R_eff computation
+
+**Factory Functions:**
+```python
+from core import create_model_from_synthetic, create_model_from_pdn, create_multi_net_models
+
+# From synthetic grid
+model = create_model_from_synthetic(G, pads, vdd=1.0)
+
+# From PDN netlist (single net)
+model = create_model_from_pdn(graph, 'VDD', vdd=1.0)
+
+# From PDN netlist (all nets)
+models = create_multi_net_models(graph)  # {'VDD': model, 'VSS': model}
+```
 
 ## Critical Conventions
 
