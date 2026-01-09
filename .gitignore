@@ -2,9 +2,11 @@ __pycache__/
 *.pyc
 *.pyo
 *.swp
+*.token
 .env
 venv/
 *.egg-info/
 .ipynb_checkpoints/
+pdn/netlist_test/*.pkl
 netlist_data/
 results/

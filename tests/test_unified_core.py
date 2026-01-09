@@ -10,7 +10,7 @@ from generate_power_grid import generate_power_grid, NodeID
 from core.node_adapter import NodeInfoExtractor, UnifiedNodeInfo
 from core.edge_adapter import EdgeInfoExtractor, UnifiedEdgeInfo, ElementType
 from core.unified_model import UnifiedPowerGridModel, GridSource
-from core.factory import create_model_from_synthetic
+from core.factory import create_model_from_synthetic, create_model_from_pdn
 from core.unified_solver import UnifiedIRDropSolver
 
 
@@ -148,6 +148,26 @@ class TestUnifiedModel(unittest.TestCase):
 
         self.assertEqual(model.source, GridSource.SYNTHETIC)
         self.assertEqual(model.vdd, 1.0)
+
+    def test_pdn_factory_missing_voltage_error(self):
+        """Test that create_model_from_pdn raises ValueError when voltage cannot be determined."""
+        # Create a minimal PDN-like graph without voltage parameters
+        G = nx.MultiDiGraph()
+        G.add_node("node1_M1")
+        G.add_node("node2_M1")
+        G.add_edge("node1_M1", "node2_M1", type='R', value=1.0)
+        
+        # Set up minimal net connectivity but NO voltage parameters
+        G.graph['net_connectivity'] = {'VDD': ['node1_M1', 'node2_M1']}
+        G.graph['vsrc_nodes'] = {'node1_M1'}  # Has a vsrc node but no voltage info
+        G.graph['parameters'] = {}  # Empty - no voltage specified
+        
+        # Should raise ValueError because voltage cannot be determined
+        with self.assertRaises(ValueError) as ctx:
+            create_model_from_pdn(G, 'VDD')
+        
+        self.assertIn("Could not determine nominal voltage", str(ctx.exception))
+        self.assertIn("VDD", str(ctx.exception))
 
     def test_solve_voltages_no_load(self):
         """Test that zero load gives pad voltage everywhere."""

@@ -1,162 +1,254 @@
 # Power Grid IR-Drop Analysis Prototype
 
-AI coding guide for static IR-drop analysis, effective resistance computation, and spatial partitioning of multi-layer power grids.
+AI coding guide for static IR-drop analysis, effective resistance, and hierarchical solving for multi-layer power grids. Supports both synthetic grids and real PDN netlists.
 
 ## Architecture Overview
 
-**Data Flow**: Generate grid → Build conductance model → Generate stimuli → Solve voltages/resistances → Partition (optional) → Visualize
+**Three Subsystems:**
+1. **`core/`** - Unified model supporting BOTH synthetic grids and PDN netlists (use this for new code)
+2. **`irdrop/`** - Original synthetic grid generation, solving, partitioning  
+3. **`pdn/`** - SPICE-like netlist parsing (`NetlistParser`) and standalone DC solver (`PDNSolver`)
 
-**Core Pipeline**: `generate_power_grid()` produces NetworkX graph with resistor edges → `PowerGridModel` builds sparse Laplacian with Schur reduction for pad nodes → `IRDropSolver` or `EffectiveResistanceCalculator` compute results → `plot.py` visualizes
+**Data Flow:**
+- Synthetic: `generate_power_grid()` → `create_model_from_synthetic()` → `UnifiedIRDropSolver`
+- PDN: `NetlistParser.parse()` → `create_model_from_pdn(graph, 'VDD')` → `UnifiedIRDropSolver`
 
-**Key Constraint**: Pads (voltage sources) are Dirichlet boundary conditions at Vdd, eliminated from system via Schur complement. LU factorization is cached and reused across batch solves for performance.
+**Key Constraint:** Pads (voltage sources) are Dirichlet BCs at Vdd, eliminated via Schur complement. LU factorization cached for batch solves.
 
 ## Critical Domain Conventions
 
-### Node & Resistance Model
-- **NodeID structure**: `NodeID(layer, idx)` frozen dataclass keys the graph
-- **Load placement**: Loads exist ONLY on layer 0, inserted mid-segment (never at via/intersection nodes)
-- **Pad placement**: Pads on top layer (K-1), evenly spaced along boundaries; may truncate if `N_vsrc` exceeds available endpoints
-- **Resistance scaling**: Each layer up halves stripe and via resistances (`R_layer = max_R / 2^layer`)
+### Node Types
+- **Synthetic**: `NodeID(layer, idx)` frozen dataclass keys the graph
+- **PDN**: String node names like `'1000_2000_M1'`, `'VDD_vsrc'`, `'0'` (ground)
+
+### Unit System (PDN)
+- Resistance: kOhm, Capacitance: fF, Inductance: nH, Current: mA
+- Conductance matrix in mS (milli-Siemens) for self-consistent G·V = I
 
 ### Current Sign Convention (CRITICAL)
-- **Input**: Positive current = sink drawing from grid (e.g., `currents[node] = +1.0`)
-- **Internal**: Solver negates to `-I` for nodal equation `G·V = I` (injections are negative for sinks)
-- **IR-drop**: Always `Vdd - V_node` (positive means voltage dropped below Vdd)
+- **Input**: Positive current = sink drawing from grid (`currents[node] = +1.0 mA`)
+- **Internal**: Solver negates for nodal equation
+- **IR-drop**: Always `Vdd - V_node` (positive = voltage dropped below Vdd)
 
-### Common Type Errors
-- **Plotting**: `plot_ir_drop_map(G, voltages, vdd=1.0, ...)` requires scalar `vdd`, NOT pad list (common mistake)
-- **Stimulus area**: `StimulusGenerator(graph=G, ...)` must pass graph if using `area=(x0,y0,x1,y1)` parameter
-- **R_eff queries**: Pad nodes rejected in pairwise resistance calculations (raises `ValueError`)
+### Common Pitfalls
+- **Plotting**: `plot_ir_drop_map(G, voltages, vdd=1.0, ...)` requires scalar `vdd`, NOT pad list
+- **Stimulus area**: `StimulusGenerator(graph=G, ...)` must pass graph if using `area` parameter
+- **R_eff queries**: Pad nodes rejected in pairwise calculations (raises `ValueError`)
+- **PDN current extraction**: Use `model.extract_current_sources()` to get load currents from I-type edges
 
 ## Module Responsibilities
 
+### `core/` - Unified Model (Preferred for New Code)
+```python
+from core import create_model_from_pdn, create_model_from_synthetic, UnifiedIRDropSolver
+
+# PDN netlist
+parser = NetlistParser('./pdn/netlist_test', validate=True)
+graph = parser.parse()
+model = create_model_from_pdn(graph, 'VDD', vdd=1.0)
+load_currents = model.extract_current_sources()  # Get I-type edge currents
+
+# Flat solve
+solver = UnifiedIRDropSolver(model)
+result = solver.solve(load_currents)
+
+# Hierarchical solve (partition at layer boundary)
+hier_result = solver.solve_hierarchical(load_currents, partition_layer='M2', top_k=5)
+```
+
+**Key Classes:**
+- `UnifiedPowerGridModel`: Handles both NodeID and string nodes; auto-detects floating islands
+- `UnifiedIRDropSolver`: `solve()` for flat, `solve_hierarchical()` for layer-decomposed
+- `NodeInfoExtractor` / `EdgeInfoExtractor`: Adapt different graph representations
+
+### `pdn/` - PDN Netlist Parsing
+- **`NetlistParser`**: Parses SPICE-like tile-based netlists with gzip support
+- **`PDNSolver`**: Standalone DC solver (use if you don't need unified interface)
+- **Graph metadata**: `graph.graph['net_connectivity']`, `graph.graph['vsrc_nodes']`, `graph.graph['instance_node_map']`
+
+### `irdrop/` - Synthetic Grids (Original)
+- `generate_power_grid()`: Creates K-layer resistor mesh with `NodeID` keys
+- `PowerGridModel`, `IRDropSolver`: Original classes (use `core/` unified versions instead)
+- `GridPartitioner`: Structured slab partitioning along via rows/columns
+
 ### `generate_power_grid.py`
-Constructs K-layer resistor mesh with alternating H/V orientation. Stripe count halves per layer (ceil(N0/2^ℓ), min 1). Returns `(G, loads, pads)` where loads map `NodeID → current`.
+Constructs K-layer resistor mesh. Returns `(G, loads, pads)` where loads map `NodeID → current`.
+- Stripe count halves per layer: `ceil(N0/2^ℓ)`
+- Load nodes on layer 0 only; pads on top layer (K-1)
 
-**Key parameters**: `K` (layers), `N0` (layer-0 stripes), `I_N` (load insertion attempts), `N_vsrc` (pad count), resistances, `seed`
+## PDN Netlist Format
 
-### `irdrop/power_grid_model.py`
-Builds sparse conductance matrix `G` from resistor edges (`g = 1/R`). Performs Schur reduction to eliminate pad nodes (fixed Vdd). Caches `(G_uu, G_up, lu)` in `ReducedSystem`.
+The PDN parser reads SPICE-like tile-based netlists. Directory structure:
+```
+netlist_dir/
+├── ckt.sp              # Top-level circuit includes
+├── tile_0_0.ckt        # Tile subcircuit with R/C/L/I/V elements
+├── tile_0_0.nd         # Node coordinate mapping (x y layer node_name)
+├── package.ckt         # Package-level connections
+├── instanceModels_0_0.sp  # Instance current source models
+├── pg_net_voltage      # Power net voltage specs (VDD 1.0, VSS 0.0)
+├── additional_vsrcs    # Extra voltage source definitions
+├── decap_cell_list     # Decap cell instance names
+└── switch_cell_list    # Power switch cell names
+```
 
-**Critical**: Sign flip on input currents; batch solves reuse constant term `−G_up·V_p`
+**Element Syntax in `.ckt` files:**
+```spice
+R_name node1 node2 <resistance_kOhm>
+C_name node1 node2 <capacitance_fF>
+L_name node1 node2 <inductance_nH>
+I_name node1 node2 <current_mA>       # Current source (instance load)
+V_name node+ node- <voltage_V>        # Voltage source (pad)
+X_inst subckt node1 node2 ...         # Subcircuit instance
+```
 
-### `irdrop/solver.py`
-Single/batch voltage solves returning `IRDropResult(voltages, ir_drop, metadata)`. Use `solver.summarize(result)` for min_voltage/max_drop/avg_drop stats.
+**Node naming convention:** `<x>_<y>_<layer>` (e.g., `1000_2000_M1`)
 
-### `irdrop/stimulus.py`
-Allocates total_power across load nodes. `distribution='uniform'` splits evenly; `'gaussian'` uses |N(0,1)| weights. Optional `percent` samples subset; `area` rectangle filters candidates (requires `graph`).
-
-### `irdrop/effective_resistance.py`
-Batch R_eff computation. Pairs `(u, None)` compute to ground (uses diagonal of `G_uu^-1`); `(u, v)` pairwise. Solves sparse systems per unique node (no dense inversion). Rejects pad nodes for pairwise.
-
-### `irdrop/grid_partitioner.py`
-**Structured slab partitioning** (deterministic). Axis options: `'x'` (vertical slabs), `'y'` (horizontal), `'auto'` (selects best balance).
-
-**Constraints**: 
-- Separators = via rows/columns (no loads)
-- X-axis: layer-0 vias; Y-axis: layer-1+ vias (fewer separators)
-- Via-column snapping can cause load imbalance (ratio ≤3.5 single axis; <2.0 auto)
-- Pads never partitioned; degree≤1 nodes excluded as separators
-
-**Connectivity**: May have disconnected interior regions with loads (geometric clustering artifact). Use `get_partition_connectivity_info(G, pads)` to check.
-
-### `irdrop/plot.py`
-Voltage/IR-drop/current heatmaps. Headless default (`Agg` backend). Current map derives `I = (V_u - V_v)/R` per edge. Pass `show=False` for batch/headless.
+**Graph metadata after parsing:**
+- `graph.graph['net_connectivity']`: `{net_name: [nodes]}`
+- `graph.graph['vsrc_nodes']`: Voltage source node names
+- `graph.graph['layer_stats']`: Per-layer node/resistor counts
 
 ## Typical Workflow Patterns
 
-### Single Stimulus Solve
+### PDN Netlist Analysis (Recommended)
 ```python
-G, loads, pads = generate_power_grid(K=3, N0=12, I_N=150, N_vsrc=4, 
-                                     max_stripe_res=1.0, max_via_res=0.1,
-                                     seed=42, plot=False)
-model = PowerGridModel(G, pad_nodes=pads, vdd=1.0)
+from pdn_parser import NetlistParser
+from core import create_model_from_pdn, UnifiedIRDropSolver
+
+parser = NetlistParser('./pdn/netlist_test', validate=True)
+graph = parser.parse()
+model = create_model_from_pdn(graph, 'VDD', vdd=1.0)
+load_currents = model.extract_current_sources()
+
+solver = UnifiedIRDropSolver(model)
+result = solver.solve(load_currents)
+print(f"Max IR-drop: {max(result.ir_drop.values()):.4f} V")
+```
+
+### Synthetic Grid Analysis
+```python
+from generate_power_grid import generate_power_grid
+from core import create_model_from_synthetic, UnifiedIRDropSolver
+from irdrop import StimulusGenerator
+
+G, loads, pads = generate_power_grid(K=3, N0=12, I_N=150, N_vsrc=4, seed=42)
+model = create_model_from_synthetic(G, pads, vdd=1.0)
+
 stim_gen = StimulusGenerator(load_nodes=list(loads.keys()), vdd=1.0, seed=10, graph=G)
 meta = stim_gen.generate(total_power=1.5, percent=0.3, distribution="gaussian")
-solver = IRDropSolver(model)
+
+solver = UnifiedIRDropSolver(model)
 result = solver.solve(meta.currents)
-print(solver.summarize(result))
 ```
 
-### Batch Power Sweep (Reuses LU)
+### Hierarchical Solve (Layer Decomposition)
 ```python
-powers = [0.5, 1.0, 2.0, 4.0]
-metas = stim_gen.generate_batch(powers, percent=0.25, distribution='uniform')
-results = solver.solve_batch([m.currents for m in metas], metas)
-for m, r in zip(metas, results):
-    print(f"P={m.total_power}W: {solver.summarize(r)}")
+# Partition at layer boundary for faster bottom-grid solves
+hier_result = solver.solve_hierarchical(
+    load_currents,
+    partition_layer='M2',  # or integer layer index
+    top_k=5,               # ports per load for current aggregation
+    weighting="shortest_path"
+)
+print(f"Ports: {len(hier_result.port_nodes)}")
 ```
 
-### Effective Resistance Batch
-```python
-calc = EffectiveResistanceCalculator(model)
-nodes = list(loads.keys())
-# Mix ground and pairwise queries
-pairs = [(nodes[0], None), (nodes[1], None), (nodes[0], nodes[1])]
-reff = calc.compute_batch(pairs)  # Returns numpy array
-```
+**Hierarchical Solver Parameters:**
+- `partition_layer`: Layer name (string like `'M2'`) or integer index. Nodes at/above this layer form "top-grid"; below form "bottom-grid". Use `model.get_all_layers()` to see available layers.
+- `top_k`: Number of nearest ports per load for current aggregation (default 5). Higher values improve accuracy at cost of denser port current distribution. Start with 3-5.
+- `weighting`: How to distribute load current to ports:
+  - `"shortest_path"` (recommended): Inverse of least-resistive path length. Physically meaningful for power grids.
+  - `"uniform"`: Equal weight to all k ports. Simple but less accurate.
+  - `"distance"`: Inverse Euclidean distance. Requires node positions.
 
-### Structured Partitioning
-```python
-from irdrop.grid_partitioner import GridPartitioner
-partitioner = GridPartitioner(G, loads, pads, seed=42)
-result = partitioner.partition(P=4, axis='auto', balance_tolerance=0.15)
-# Check: result.load_balance_ratio, len(result.separator_nodes)
-fig, ax = partitioner.visualize_partitions(result, show=False)
-```
+**Hierarchical Result Fields:**
+- `hier_result.voltages`: All node voltages (combined top + bottom)
+- `hier_result.ir_drop`: IR-drop at each node (`Vdd - voltage`)
+- `hier_result.port_nodes`: Set of port nodes at partition boundary
+- `hier_result.port_voltages`: Voltage at each port (from top-grid solve)
+- `hier_result.port_currents`: Aggregated current injected at each port
+- `hier_result.aggregation_map`: `{load_node: [(port, weight, current), ...]}` for debugging
 
 ## Testing & Validation
 
 **Run tests**: `python -m unittest discover -s tests -p 'test_*.py'`
+**Run all tests**: `python run_all_tests.py`
 
-**Key invariants tested** (see `tests/test_irdrop.py`, `tests/test_partitioner.py`):
+**Test modules**: `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_unified_core.py`, `test_hierarchical_solver.py`
+
+**Key invariants tested**:
 - Zero load → all nodes at pad voltage
-- Monotonic min voltage decrease with increasing power
-- R_eff symmetry: `R(u,v) == R(v,u)`
-- R_eff triangle inequality: `R(u,w) <= R(u,v) + R(v,w)`
-- Partition balance ratio ≤3.5 (via-column constraints); auto <2.0
-- Pads excluded from partitions; separators have no loads
-- Graph topology preserved (no edge removal)
+- R_eff symmetry: `R(u,v) == R(v,u)` and triangle inequality
+- Partition balance ratio ≤3.5; pads excluded from partitions
+- Floating island detection removes disconnected components
 
 **Test helpers**: `build_small()` creates standard test grid (K=3, N0=8, I_N=80)
 
-## Performance Guidelines
+## Development Workflow
 
-- **Reuse PowerGridModel**: Build once, solve many stimuli (LU factorization cached)
-- **Batch effective resistance**: Group queries to amortize sparse solves (one per unique node)
-- **Partitioning**: Structured O(N log N) in load nodes; faster and more reliable than k-means
-- **Plotting**: Use `show=False` for headless; filter via nodes in current maps if too dense
+**Environment setup**:
+```bash
+conda activate pyspice  # or your Python env
+pip install -r requirements.txt
+```
 
-## Extension Points
+**Run examples**:
+```bash
+python example_ir_drop.py
+python example_partitioning.py
+python example_effective_resistance.py
+```
 
-### New Stimulus Distribution
-Add branch in `StimulusGenerator.generate()`. Must normalize total current to `total_power / vdd`. Return updated `StimulusMeta` with selected nodes.
+**Debug/Testing with Pylance MCP (PREFERRED)**:
+For quick debugging and testing, use the `pylanceRunCodeSnippet` MCP tool instead of terminal commands. Benefits:
+- Uses correct Python interpreter configured for workspace
+- No shell escaping issues with complex code
+- Clean stdout/stderr output
+- Runs in workspace context with proper imports
 
-### New Metrics
-Derive from `result.voltages` or `result.ir_drop` post-solve. Keep batch-aware (operate on list of results).
+Example debug snippets:
+```python
+# Check module version/state
+from core.unified_model import UnifiedPowerGridModel
+print(UnifiedPowerGridModel.__module__)
 
-### New Partition Strategy
-Return `PartitionResult` with `partitions`, `separator_nodes`, `boundary_edges`. Must preserve graph (no edge removal). Follow structured pattern for determinism.
+# Quick PDN parsing test
+from pdn_parser import NetlistParser
+parser = NetlistParser('./pdn/netlist_test', validate=True)
+graph = parser.parse()
+print(f"Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}")
+
+# Inspect edge types
+from collections import Counter
+edge_types = Counter(d.get('type') for u, v, d in graph.edges(data=True))
+print(edge_types)
+```
+
+**Notebook module reloading (CRITICAL)**:
+When modifying core modules, reload ALL dependencies in order:
+```python
+import importlib
+import core.node_adapter, core.edge_adapter, core.unified_model, core.factory
+importlib.reload(core.node_adapter)
+importlib.reload(core.edge_adapter)  # Must reload before unified_model!
+importlib.reload(core.unified_model)
+importlib.reload(core.factory)
+```
+Failure to reload `edge_adapter` causes stale cached versions with broken island detection.
 
 ## Common Pitfalls
 
 1. **Pad vs vdd confusion**: `plot_ir_drop_map(G, voltages, vdd=1.0, ...)` needs float, not list
 2. **Area filtering**: Must pass `graph=G` to `StimulusGenerator` to use `area` parameter
-3. **Partition count**: Cannot exceed load node count; raises ValueError
-4. **Gaussian degeneracy**: Falls back to uniform if weights sum to zero
-5. **Empty plots**: Very small node subsets may produce empty scatter; check `len(nodes) > 0`
+3. **Notebook stale imports**: Always reload `core.edge_adapter` before `core.unified_model`
+4. **PDN ground node**: Ground is `'0'` string; excluded from conductance matrix but preserved for I-type edges
+5. **Gaussian degeneracy**: Falls back to uniform if weights sum to zero
 
 ## File Landmarks
 
 - **Examples**: `example_ir_drop.py`, `example_partitioning.py`, `example_effective_resistance.py`
-- **Tests**: `tests/test_irdrop.py` (16 tests), `tests/test_partitioner.py`
-- **API exports**: `irdrop/__init__.py` defines public interface
-- **Documentation**: `EFFECTIVE_RESISTANCE_SUMMARY.md`, `GRID_PARTITIONING.md`
-- **Dependencies**: `requirements.txt` (networkx, matplotlib, numpy, scipy, pytest)
-
-## Development Workflow
-
-**Install**: `pip install -r requirements.txt` (use csh shell)
-**Run examples**: `python example_ir_drop.py` or `example_partitioning.py`
-**Test**: `python -m unittest discover -s tests -p 'test_*.py'`
-**Debug**: Use headless plots (`show=False`) then `fig.savefig()` for batch inspection
+- **Notebooks**: `irdrop_decomposition_pdn.ipynb` (PDN hierarchical), `irdrop_decomposition.ipynb` (synthetic)
+- **Tests**: `tests/test_*.py` (8 test modules)
+- **Test netlist**: `pdn/netlist_test/` (small PDN for testing)
+- **API exports**: `core/__init__.py`, `irdrop/__init__.py`

@@ -44,27 +44,29 @@ def create_model_from_synthetic(
 def create_model_from_pdn(
     graph: nx.MultiDiGraph,
     net_name: str,
-    vdd: Optional[float] = None,
     vsrc_nodes: Optional[Sequence[Any]] = None,
 ) -> UnifiedPowerGridModel:
     """Create unified model from PDN netlist for a specific net.
 
+    The nominal voltage is automatically extracted from the parsed graph,
+    either from the 'parameters' dict (populated from pg_net_voltage file)
+    or from voltage source edges in the graph.
+
     Args:
         graph: Graph from NetlistParser.parse()
         net_name: Power net to model (e.g., 'VDD', 'VSS')
-        vdd: Supply voltage (auto-detected from graph if None)
         vsrc_nodes: Voltage source nodes (auto-detected if None)
 
     Returns:
         UnifiedPowerGridModel configured for PDN source.
 
     Raises:
-        ValueError: If net_name not found in graph.
+        ValueError: If net_name not found in graph or nominal voltage cannot be determined.
 
     Example:
         parser = NetlistParser('./netlist_dir')
         graph = parser.parse()
-        model = create_model_from_pdn(graph, 'VDD', vdd=1.0)
+        model = create_model_from_pdn(graph, 'VDD')
     """
     # Get net connectivity
     net_connectivity = graph.graph.get('net_connectivity', {})
@@ -82,8 +84,14 @@ def create_model_from_pdn(
 
     net_nodes = set(net_connectivity[net_key])
 
-    # Extract subgraph for this net
-    net_subgraph = graph.subgraph(net_nodes).copy()
+    # Include ground node '0' to preserve current source edges
+    # Current sources connect net nodes to ground for load modeling
+    nodes_for_subgraph = net_nodes.copy()
+    if '0' in graph.nodes():
+        nodes_for_subgraph.add('0')
+
+    # Extract subgraph for this net (including ground)
+    net_subgraph = graph.subgraph(nodes_for_subgraph).copy()
 
     # Find voltage source nodes
     if vsrc_nodes is not None:
@@ -103,22 +111,40 @@ def create_model_from_pdn(
                         pad_nodes.append(v)
             pad_nodes = list(set(pad_nodes))
 
-    # Determine VDD
-    if vdd is None:
-        # Try to get from parameters
-        params = graph.graph.get('parameters', {})
-        # Look for net-specific voltage parameter
-        vdd_key = net_name.upper()
-        if vdd_key in params:
+    # Extract nominal voltage from graph (required)
+    vdd = None
+    
+    # Try to get from parameters (parsed from pg_net_voltage file)
+    params = graph.graph.get('parameters', {})
+    vdd_key = net_name.upper()
+    if vdd_key in params:
+        try:
             vdd = float(params[vdd_key])
-        else:
-            # Default based on net name
-            if 'vdd' in net_name.lower():
-                vdd = 1.0
-            elif 'vss' in net_name.lower():
-                vdd = 0.0
-            else:
-                vdd = 1.0
+        except (ValueError, TypeError):
+            pass
+    
+    # Fallback: check voltage source edges for this net
+    if vdd is None:
+        for u, v, data in graph.edges(data=True):
+            if data.get('type') == 'V':
+                edge_net = data.get('net', '').upper()
+                if edge_net == vdd_key or u in net_nodes or v in net_nodes:
+                    vsrc_voltage = data.get('value')
+                    if vsrc_voltage is not None and vsrc_voltage > 0:
+                        vdd = float(vsrc_voltage)
+                        break
+    
+    # Special case for ground nets
+    if vdd is None and 'vss' in net_name.lower():
+        vdd = 0.0
+    
+    # Error if voltage not found
+    if vdd is None:
+        raise ValueError(
+            f"Could not determine nominal voltage for net '{net_name}'. "
+            f"Ensure pg_net_voltage file contains '{vdd_key} <voltage>' or "
+            f"voltage source edges exist in the netlist."
+        )
 
     return UnifiedPowerGridModel(
         graph=net_subgraph,
@@ -126,21 +152,21 @@ def create_model_from_pdn(
         vdd=vdd,
         source=GridSource.PDN_NETLIST,
         net_name=net_name,
-        resistance_unit_kohm=True,  # PDN uses kOhms
+        resistance_unit_kohm=False,  # Keep PDN native kOhm/mA units (self-consistent mS conductance)
     )
 
 
 def create_multi_net_models(
     graph: nx.MultiDiGraph,
     net_filter: Optional[List[str]] = None,
-    vdd_map: Optional[Dict[str, float]] = None,
 ) -> Dict[str, UnifiedPowerGridModel]:
     """Create unified models for all (or filtered) nets in PDN.
+
+    Nominal voltages are automatically extracted from the graph for each net.
 
     Args:
         graph: Graph from NetlistParser.parse()
         net_filter: Optional list of net names to include (case-insensitive)
-        vdd_map: Optional dict mapping net_name -> vdd voltage
 
     Returns:
         Dict mapping net_name -> UnifiedPowerGridModel
@@ -164,14 +190,12 @@ def create_multi_net_models(
         nets_to_process = list(net_connectivity.keys())
 
     models = {}
-    vdd_map = vdd_map or {}
 
     for net_name in nets_to_process:
         try:
-            vdd = vdd_map.get(net_name)
-            models[net_name] = create_model_from_pdn(graph, net_name, vdd=vdd)
+            models[net_name] = create_model_from_pdn(graph, net_name)
         except ValueError as e:
-            # Skip nets that can't be modeled (e.g., no nodes)
+            # Skip nets that can't be modeled (e.g., no nodes, no voltage spec)
             import warnings
             warnings.warn(f"Skipping net '{net_name}': {e}")
 
