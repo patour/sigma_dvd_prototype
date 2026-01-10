@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import heapq
 import networkx as nx
 import numpy as np
 
@@ -170,6 +171,7 @@ class UnifiedIRDropSolver:
         partition_layer: LayerID,
         top_k: int = 5,
         weighting: str = "effective",
+        rmax: Optional[float] = None,
     ) -> UnifiedHierarchicalResult:
         """Solve using hierarchical decomposition.
 
@@ -188,9 +190,17 @@ class UnifiedIRDropSolver:
             partition_layer: Layer to partition at
             top_k: Number of nearest ports for current aggregation
             weighting: "effective" (effective resistance) or "shortest_path"
+            rmax: Maximum resistance distance for shortest_path weighting.
+                  Paths beyond this distance are ignored. None means no limit.
+                  Only applies when weighting="shortest_path".
 
         Returns:
             UnifiedHierarchicalResult with complete voltages and decomposition info.
+
+        Raises:
+            ValueError: If partition layer has no ports, or if load nodes are
+                electrically disconnected from ports. The error message will
+                suggest alternative partition layers if disconnection is detected.
         """
         # Step 0: Decompose the grid
         top_nodes, bottom_nodes, port_nodes, via_edges = self.model._decompose_at_layer(partition_layer)
@@ -201,6 +211,31 @@ class UnifiedIRDropSolver:
                 "Check that vias connect this layer to the layer below."
             )
 
+        # Step 0.5: Validate load-to-port connectivity before expensive computation
+        bottom_load_nodes = {
+            n for n, c in current_injections.items()
+            if n in bottom_nodes and n not in port_nodes and c != 0
+        }
+        if bottom_load_nodes:
+            disconnected_loads = self._find_disconnected_loads(
+                bottom_grid_nodes=bottom_nodes,
+                port_nodes=port_nodes,
+                load_nodes=bottom_load_nodes,
+            )
+            if disconnected_loads:
+                # Find alternative partition layers that might work better
+                suggestions = self._suggest_partition_layers(
+                    disconnected_loads=disconnected_loads,
+                    current_partition=partition_layer,
+                )
+                raise ValueError(
+                    f"{len(disconnected_loads)} load node(s) are electrically disconnected from "
+                    f"ports at partition layer {partition_layer}. "
+                    f"Example disconnected load: {next(iter(disconnected_loads))}. "
+                    f"This typically means the partition layer is too high. "
+                    f"{suggestions}"
+                )
+
         # Step 1: Aggregate bottom-grid currents onto ports
         port_currents, aggregation_map = self._aggregate_currents_to_ports(
             current_injections=current_injections,
@@ -208,6 +243,7 @@ class UnifiedIRDropSolver:
             port_nodes=port_nodes,
             top_k=top_k,
             weighting=weighting,
+            rmax=rmax,
         )
 
         # Step 2: Solve top-grid with pads as Dirichlet BC
@@ -298,6 +334,128 @@ class UnifiedIRDropSolver:
             aggregation_map=aggregation_map,
         )
 
+    def _find_disconnected_loads(
+        self,
+        bottom_grid_nodes: Set[Any],
+        port_nodes: Set[Any],
+        load_nodes: Set[Any],
+    ) -> Set[Any]:
+        """Find load nodes that are electrically disconnected from ports.
+
+        Uses connected components analysis on R-type edges to identify loads
+        that have no resistive path to any port node.
+
+        Args:
+            bottom_grid_nodes: Set of nodes in bottom-grid
+            port_nodes: Set of port nodes at partition boundary
+            load_nodes: Set of load nodes to check
+
+        Returns:
+            Set of load nodes that are disconnected from all ports.
+        """
+        # Build R-type subgraph for bottom-grid + ports
+        subgraph_nodes = bottom_grid_nodes | port_nodes
+        
+        # Use Union-Find for efficient component detection
+        parent: Dict[Any, Any] = {}
+        
+        def find(x: Any) -> Any:
+            if x not in parent:
+                parent[x] = x
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+        
+        def union(x: Any, y: Any) -> None:
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+        
+        # Process edges using EdgeInfoExtractor to handle both synthetic and PDN formats
+        edge_extractor = self.model._edge_extractor
+        for u, v, d in self.model.graph.edges(subgraph_nodes, data=True):
+            if u not in subgraph_nodes or v not in subgraph_nodes:
+                continue
+            edge_info = edge_extractor.get_info(d)
+            if not edge_info.is_resistive:
+                continue
+            R = edge_info.resistance if edge_info.resistance else 0.0
+            if R > 0 and R < float('inf'):
+                union(u, v)
+                union(u, v)
+        
+        # Find components containing ports
+        port_components = {find(p) for p in port_nodes if p in parent}
+        
+        # Find loads not in any port-containing component
+        disconnected = set()
+        for load in load_nodes:
+            if load not in parent:
+                # Node has no R-type edges at all
+                disconnected.add(load)
+            elif find(load) not in port_components:
+                disconnected.add(load)
+        
+        return disconnected
+
+    def _suggest_partition_layers(
+        self,
+        disconnected_loads: Set[Any],
+        current_partition: LayerID,
+    ) -> str:
+        """Suggest alternative partition layers that might include disconnected loads.
+
+        Args:
+            disconnected_loads: Set of load nodes disconnected from current partition
+            current_partition: The partition layer that failed
+
+        Returns:
+            String with suggestions for alternative partition layers.
+        """
+        # Get layers present in disconnected loads
+        load_layers: Dict[LayerID, int] = {}
+        for load in list(disconnected_loads)[:1000]:  # Sample for efficiency
+            info = self.model.get_node_info(load)
+            if info.layer is not None:
+                load_layers[info.layer] = load_layers.get(info.layer, 0) + 1
+        
+        if not load_layers:
+            return "Could not determine layers of disconnected loads."
+        
+        # Find the highest layer with disconnected loads
+        all_layers = sorted(self.model.get_all_layers())
+        pad_set = set(self.model.pad_nodes)
+        
+        # Try lower partition layers and check:
+        # 1. Has ports
+        # 2. Has pads in top-grid
+        suggestions = []
+        
+        for layer in reversed(all_layers):
+            if layer >= current_partition:
+                continue
+            
+            try:
+                top_nodes, bottom_nodes, ports, _ = self.model._decompose_at_layer(layer)
+            except ValueError:
+                # Skip invalid partition layers (e.g., bottom layer)
+                continue
+            if not ports:
+                continue
+            
+            # Check if pads are in top-grid
+            pads_in_top = pad_set & top_nodes
+            if not pads_in_top:
+                continue
+            
+            suggestions.append(f"layer {layer} ({len(ports)} ports, {len(pads_in_top)} pads in top-grid)")
+            if len(suggestions) >= 3:
+                break
+        
+        if suggestions:
+            return f"Try partitioning at a lower layer: {', '.join(suggestions)}."
+        return "Try using a lower partition layer closer to the load layers."
+
     def _aggregate_currents_to_ports(
         self,
         current_injections: Dict[Any, float],
@@ -305,6 +463,7 @@ class UnifiedIRDropSolver:
         port_nodes: Set[Any],
         top_k: int = 5,
         weighting: str = "effective",
+        rmax: Optional[float] = None,
     ) -> Tuple[Dict[Any, float], Dict[Any, List[Tuple[Any, float, float]]]]:
         """Aggregate bottom-grid currents to port nodes.
 
@@ -317,6 +476,7 @@ class UnifiedIRDropSolver:
             port_nodes: Set of port nodes at partition boundary
             top_k: Number of nearest ports per load
             weighting: "effective" or "shortest_path"
+            rmax: Maximum resistance distance for shortest_path (None = no limit)
 
         Returns:
             (port_currents, aggregation_map)
@@ -339,10 +499,17 @@ class UnifiedIRDropSolver:
             return port_currents, aggregation_map
 
         port_list = list(port_nodes)
-
-        # Build subgraph for resistance computation (include ports)
         subgraph_nodes = bottom_grid_nodes | port_nodes
-        subgraph = self.model.graph.subgraph(subgraph_nodes)
+
+        # Precompute multi-source shortest-path distances once for all loads
+        shortest_path_cache: Dict[Any, List[Tuple[Any, float]]] = {}
+        if weighting == "shortest_path":
+            shortest_path_cache = self._multi_source_port_distances(
+                subgrid_nodes=subgraph_nodes,
+                port_nodes=port_list,
+                top_k=top_k,
+                rmax=rmax,
+            )
 
         for load_node, load_current in bottom_currents.items():
             if load_current == 0:
@@ -350,7 +517,6 @@ class UnifiedIRDropSolver:
 
             # Compute resistance to each port
             if weighting == "effective":
-                # Use proper effective resistance calculation
                 resistances = self._compute_effective_resistance_in_subgrid(
                     subgrid_nodes=subgraph_nodes,
                     source_node=load_node,
@@ -358,37 +524,33 @@ class UnifiedIRDropSolver:
                     dirichlet_nodes=port_nodes,
                 )
             else:
-                # Use shortest path resistance
-                resistances = {}
-                for port in port_list:
-                    R = self._shortest_path_resistance(subgraph, load_node, port)
-                    if R is not None and R > 0:
-                        resistances[port] = R
+                port_distances = shortest_path_cache.get(load_node, [])
+                resistances = {p: d for p, d in port_distances if d is not None}
 
-            # Filter out invalid resistances
-            valid_resistances = {p: r for p, r in resistances.items() 
-                                if r is not None and r < float('inf') and r > 0}
+            valid_resistances = {
+                p: r for p, r in resistances.items()
+                if r is not None and r < float('inf') and r > 0
+            }
 
             if not valid_resistances:
-                # No path to any port - distribute equally
-                weight = 1.0 / len(port_list)
-                contributions = []
-                for port in port_list:
-                    contrib = load_current * weight
-                    port_currents[port] += contrib
-                    contributions.append((port, weight, contrib))
-                aggregation_map[load_node] = contributions
-                continue
+                raise ValueError(
+                    f"No valid resistance paths found from load node {load_node} to any port. "
+                    f"This indicates the load is electrically isolated from the port layer. "
+                    f"Check grid connectivity."
+                )
 
-            # Sort by resistance and take top-k
             sorted_ports = sorted(valid_resistances.items(), key=lambda x: x[1])
             selected = sorted_ports[:top_k] if top_k < len(sorted_ports) else sorted_ports
 
-            # Compute weights (inverse resistance)
             inv_R = [(p, 1.0 / R) for p, R in selected]
             total_inv_R = sum(w for _, w in inv_R)
+            if total_inv_R == 0:
+                raise ValueError(
+                    f"Total inverse resistance is zero for load node {load_node}. "
+                    f"Selected ports: {[p for p, _ in selected]}. "
+                    f"This should not happen with valid_resistances already filtered."
+                )
 
-            # Distribute current
             contributions = []
             for port, inv_r in inv_R:
                 weight = inv_r / total_inv_R
@@ -399,6 +561,199 @@ class UnifiedIRDropSolver:
             aggregation_map[load_node] = contributions
 
         return port_currents, aggregation_map
+
+    def _build_resistive_csr(
+        self,
+        subgrid_nodes: Set[Any],
+    ) -> Tuple[List[Any], Dict[Any, int], np.ndarray, np.ndarray, np.ndarray]:
+        """Build CSR adjacency with resistance weights for a node set."""
+        if not subgrid_nodes:
+            return [], {}, np.array([], dtype=np.int64), np.array([], dtype=np.int32), np.array([], dtype=float)
+
+        node_list = list(subgrid_nodes)
+        index = {n: i for i, n in enumerate(node_list)}
+
+        edge_min = {}
+        graph = self.model.graph
+        node_set = set(subgrid_nodes)
+
+        for u, v, edge_data in graph.edges(subgrid_nodes, data=True):
+            if u not in node_set or v not in node_set:
+                continue
+
+            if isinstance(graph, nx.MultiDiGraph):
+                if edge_data.get('type') != 'R':
+                    continue
+                R = float(edge_data.get('value', 0.0))
+                if self.model.resistance_unit_kohm:
+                    R *= 1e3
+            else:
+                R = float(edge_data.get('resistance', 0.0))
+
+            if R <= 0.0 or not np.isfinite(R):
+                continue
+
+            iu, iv = index[u], index[v]
+            if iu == iv:
+                continue
+
+            key = (iu, iv) if iu < iv else (iv, iu)
+            prev = edge_min.get(key)
+            if prev is None or R < prev:
+                edge_min[key] = R
+
+        n = len(node_list)
+        adjacency: List[List[Tuple[int, float]]] = [[] for _ in range(n)]
+        for (iu, iv), R in edge_min.items():
+            adjacency[iu].append((iv, R))
+            adjacency[iv].append((iu, R))
+
+        indptr = np.zeros(n + 1, dtype=np.int64)
+        indices: List[int] = []
+        data: List[float] = []
+
+        for i, nbrs in enumerate(adjacency):
+            for j, w in nbrs:
+                indices.append(j)
+                data.append(w)
+            indptr[i + 1] = len(indices)
+
+        return (
+            node_list,
+            index,
+            indptr,
+            np.array(indices, dtype=np.int32),
+            np.array(data, dtype=float),
+        )
+
+    def _multi_source_port_distances(
+        self,
+        subgrid_nodes: Set[Any],
+        port_nodes: List[Any],
+        top_k: int,
+        rmax: Optional[float] = None,
+    ) -> Dict[Any, List[Tuple[Any, float]]]:
+        """Compute up to top_k nearest ports for every node via multi-source Dijkstra.
+
+        Uses an optimized label-setting algorithm that tracks settled (port, node)
+        pairs to avoid redundant heap operations. For large graphs (1M+ nodes,
+        10K+ ports), this avoids heap explosion by pruning aggressively.
+
+        Args:
+            subgrid_nodes: Set of nodes to consider
+            port_nodes: List of port nodes (sources for Dijkstra)
+            top_k: Number of nearest ports to track per node
+            rmax: Maximum resistance distance. Paths beyond this are pruned.
+                  None means no limit (default behavior).
+
+        Complexity: O((N + E) * K * log(N * K)) where N=nodes, E=edges, K=top_k
+                    With rmax, complexity can be significantly reduced as
+                    propagation stops at the distance boundary.
+        """
+        node_list, index, indptr, indices, weights = self._build_resistive_csr(subgrid_nodes)
+        if not node_list or not port_nodes:
+            return {}
+
+        top_k = max(1, top_k)
+        n = len(node_list)
+
+        # For each node, store dict {port_id: best_distance} for O(1) lookup
+        best_dist: List[Dict[int, float]] = [{} for _ in range(n)]
+        # Max-heap (negated distances) to track k-th best distance in O(1)
+        # Format: List of max-heaps where heap[i] contains (-dist, port_id)
+        kth_heaps: List[List[Tuple[float, int]]] = [[] for _ in range(n)]
+        # Track settled (port_id, node_idx) pairs to skip redundant processing
+        settled: Set[Tuple[int, int]] = set()
+
+        # Priority queue: (distance, port_id, node_idx)
+        heap: List[Tuple[float, int, int]] = []
+        for port_id, port in enumerate(port_nodes):
+            if port not in index:
+                continue
+            node_idx = index[port]
+            heapq.heappush(heap, (0.0, port_id, node_idx))
+            best_dist[node_idx][port_id] = 0.0
+            heapq.heappush(kth_heaps[node_idx], (0.0, port_id))  # max-heap uses negated dist, but 0 is same
+
+        while heap:
+            dist, port_id, node_idx = heapq.heappop(heap)
+
+            # Early termination: skip if distance exceeds rmax
+            if rmax is not None and dist > rmax:
+                continue
+
+            # Skip if this (port, node) pair was already settled
+            key = (port_id, node_idx)
+            if key in settled:
+                continue
+
+            # Skip if we've found a better path since this was queued
+            node_best = best_dist[node_idx]
+            if port_id in node_best and dist > node_best[port_id]:
+                continue
+
+            # Mark as settled - this is the optimal distance for this (port, node) pair
+            settled.add(key)
+
+            # Propagate to neighbors
+            start, end = indptr[node_idx], indptr[node_idx + 1]
+            for offset in range(start, end):
+                nbr = int(indices[offset])
+                w = float(weights[offset])
+                if w <= 0.0 or not np.isfinite(w):
+                    continue
+
+                new_dist = dist + w
+                nbr_best = best_dist[nbr]
+                nbr_kth_heap = kth_heaps[nbr]
+
+                # Skip if already settled for this port
+                if (port_id, nbr) in settled:
+                    continue
+
+                # Pruning: if neighbor already has top_k labels and new_dist
+                # is worse than the k-th best, skip (O(1) check using max-heap)
+                if len(nbr_kth_heap) >= top_k:
+                    # Max-heap root has the largest (worst) of top-k distances
+                    kth_best = -nbr_kth_heap[0][0]  # negate to get actual distance
+                    if new_dist >= kth_best:
+                        continue
+
+                # Skip if new distance exceeds rmax
+                if rmax is not None and new_dist > rmax:
+                    continue
+
+                # Check if this improves existing distance for this port
+                if port_id in nbr_best:
+                    if new_dist >= nbr_best[port_id]:
+                        continue
+                    # Update existing - need to rebuild heap (rare case)
+                    nbr_best[port_id] = new_dist
+                else:
+                    # New port for this node
+                    nbr_best[port_id] = new_dist
+
+                # Update the k-th best heap
+                if len(nbr_kth_heap) < top_k:
+                    heapq.heappush(nbr_kth_heap, (-new_dist, port_id))
+                elif new_dist < -nbr_kth_heap[0][0]:
+                    # Replace the worst (largest distance) in top-k
+                    heapq.heapreplace(nbr_kth_heap, (-new_dist, port_id))
+
+                heapq.heappush(heap, (new_dist, port_id, nbr))
+
+        # Build result: for each node, return top-k (port, distance) pairs
+        result: Dict[Any, List[Tuple[Any, float]]] = {}
+        for idx in range(n):
+            node_best = best_dist[idx]
+            if not node_best:
+                continue
+            # Sort by distance and take top_k
+            sorted_labels = sorted(node_best.items(), key=lambda x: x[1])[:top_k]
+            node = node_list[idx]
+            result[node] = [(port_nodes[pid], d) for pid, d in sorted_labels]
+
+        return result
 
     def _compute_effective_resistance_in_subgrid(
         self,

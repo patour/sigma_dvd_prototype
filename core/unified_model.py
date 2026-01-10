@@ -601,12 +601,17 @@ class UnifiedPowerGridModel:
     ) -> Tuple[Set[Any], Set[Any], Set[Any], List[Tuple[Any, Any, Any]]]:
         """Decompose grid at partition layer into top/bottom grids.
 
+        Handles package nodes (layer=None) by including them in the top-grid
+        if they are connected to the die via resistive paths. This preserves
+        the path from die nodes through package nodes to voltage sources.
+
         Args:
             partition_layer: Layer index/name to partition at
 
         Returns:
             (top_grid_nodes, bottom_grid_nodes, port_nodes, via_edges)
-            - top_grid_nodes: Nodes at layers >= partition_layer
+            - top_grid_nodes: Nodes at layers >= partition_layer, plus pad nodes
+              and package nodes connected to top-grid via R-edges
             - bottom_grid_nodes: Nodes at layers < partition_layer
             - port_nodes: Nodes at partition_layer connected to layer below
             - via_edges: Edges connecting partition_layer to layer below
@@ -632,12 +637,16 @@ class UnifiedPowerGridModel:
 
         top_grid_nodes = set()
         bottom_grid_nodes = set()
+        package_nodes = set()  # Nodes with layer=None
 
+        # First pass: categorize die nodes (with layer info)
         for node in self.graph.nodes():
             info = self.get_node_info(node)
             node_layer = info.layer
 
             if node_layer is None:
+                # Track package nodes for later processing
+                package_nodes.add(node)
                 continue
 
             # Check membership
@@ -648,6 +657,47 @@ class UnifiedPowerGridModel:
                 top_grid_nodes.add(node)
             elif in_bottom:
                 bottom_grid_nodes.add(node)
+
+        # Second pass: assign package nodes (layer=None) to top-grid if connected to top-grid
+        # This includes pad nodes and intermediate package nodes (tap, probe, int, vsrc)
+        # Use BFS from top-grid nodes to find connected package nodes via R-type edges
+        pad_set = set(self.pad_nodes)
+        
+        # Always include pad nodes in top-grid (they are voltage sources)
+        for pad in pad_set:
+            if pad in package_nodes:
+                top_grid_nodes.add(pad)
+        
+        # BFS to find package nodes connected to top-grid via R-edges
+        from collections import deque
+        visited_pkg = set()
+        queue = deque()
+        
+        # Start from top-grid die nodes that have R-edges to package nodes
+        # Use list() to avoid "Set changed size during iteration" error
+        for node in list(top_grid_nodes):
+            if node in package_nodes:
+                continue  # Skip package nodes already added
+            for u, v, d in self.graph.edges(node, data=True):
+                if d.get('type') != 'R':
+                    continue
+                neighbor = v if u == node else u
+                if neighbor in package_nodes and neighbor not in visited_pkg:
+                    visited_pkg.add(neighbor)
+                    queue.append(neighbor)
+                    top_grid_nodes.add(neighbor)
+        
+        # Continue BFS within package nodes
+        while queue:
+            pkg_node = queue.popleft()
+            for u, v, d in self.graph.edges(pkg_node, data=True):
+                if d.get('type') != 'R':
+                    continue
+                neighbor = v if u == pkg_node else u
+                if neighbor in package_nodes and neighbor not in visited_pkg:
+                    visited_pkg.add(neighbor)
+                    queue.append(neighbor)
+                    top_grid_nodes.add(neighbor)
 
         # Find port nodes and via edges
         port_nodes = set()
@@ -714,12 +764,21 @@ class UnifiedPowerGridModel:
         data, rows, cols = [], [], []
         diag = np.zeros(n_nodes, dtype=float)
 
+        # Constants for handling short resistances (matching PDNSolver)
+        GMAX = 1e5  # Maximum conductance for shorts (mS for PDN, S for synthetic)
+        SHORT_THRESHOLD = 1e-6  # Resistance threshold for shorts (kOhm for PDN)
+
         for u, v, edge_info in subgrid_edges:
             R = edge_info.resistance
-            if R is None or R <= 0:
+            if R is None:
                 continue
 
-            g = 1.0 / R
+            # Handle short resistances (R=0 or very small R)
+            if R <= SHORT_THRESHOLD:
+                g = GMAX
+            else:
+                g = 1.0 / R
+
             iu, iv = index[u], index[v]
 
             rows.extend([iu, iv])
