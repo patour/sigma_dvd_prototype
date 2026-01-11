@@ -27,6 +27,31 @@ class GridSource(Enum):
 
 
 @dataclass
+class EdgeArrayCache:
+    """Pre-computed edge arrays for fast subgrid building.
+    
+    Stores all resistive edges in NumPy arrays for O(E) vectorized
+    filtering instead of O(E) Python iteration per subgrid.
+    
+    Attributes:
+        edge_u_idx: Source node indices (int32)
+        edge_v_idx: Target node indices (int32)
+        edge_g: Conductance values (float64)
+        node_to_idx: Dict mapping node -> global index
+        idx_to_node: List for reverse lookup (index -> node)
+        n_nodes: Total number of nodes (excluding ground)
+        n_edges: Total number of resistive edges
+    """
+    edge_u_idx: np.ndarray  # shape (n_edges,), dtype=int32
+    edge_v_idx: np.ndarray  # shape (n_edges,), dtype=int32
+    edge_g: np.ndarray      # shape (n_edges,), dtype=float64
+    node_to_idx: Dict[Any, int]
+    idx_to_node: List[Any]
+    n_nodes: int
+    n_edges: int
+
+
+@dataclass
 class UnifiedReducedSystem:
     """Reduced system for solving nodal voltages.
 
@@ -117,6 +142,9 @@ class UnifiedPowerGridModel:
         # Track removed islands for diagnostics
         self._removed_island_nodes: Set[Any] = set()
         self._island_stats: Dict[str, Any] = {}
+
+        # Cached edge arrays for fast subgrid building (lazy init)
+        self._edge_cache: Optional[EdgeArrayCache] = None
 
         # Build reduced system
         self._reduced: Optional[UnifiedReducedSystem] = None
@@ -255,6 +283,301 @@ class UnifiedPowerGridModel:
                 edge_info = self._edge_extractor.get_info(data)
                 if edge_info.is_resistive:
                     yield u, v, edge_info
+
+    def _ensure_edge_cache(self) -> EdgeArrayCache:
+        """Build or return cached edge arrays for fast subgrid building.
+        
+        Extracts all resistive edges into NumPy arrays once, enabling O(E) 
+        vectorized filtering per tile instead of O(E) Python iteration.
+        
+        Returns:
+            EdgeArrayCache with pre-computed edge arrays.
+        """
+        if self._edge_cache is not None:
+            return self._edge_cache
+        
+        # Collect all nodes (excluding ground '0')
+        all_nodes = [n for n in self.graph.nodes() if n != '0']
+        node_to_idx = {n: i for i, n in enumerate(all_nodes)}
+        n_nodes = len(all_nodes)
+        
+        # Pre-allocate lists for edges (will convert to numpy)
+        edges_u = []
+        edges_v = []
+        edges_g = []
+        
+        GMAX = 1e5
+        SHORT_THRESHOLD = 1e-6
+        
+        for u, v, edge_info in self._iter_resistive_edges():
+            R = edge_info.resistance
+            if R is None:
+                continue
+            
+            # Skip edges involving ground (handled separately in subgrid)
+            if u == '0' or v == '0':
+                continue
+            
+            if u not in node_to_idx or v not in node_to_idx:
+                continue
+            
+            g = GMAX if R <= SHORT_THRESHOLD else 1.0 / R
+            
+            edges_u.append(node_to_idx[u])
+            edges_v.append(node_to_idx[v])
+            edges_g.append(g)
+        
+        self._edge_cache = EdgeArrayCache(
+            edge_u_idx=np.array(edges_u, dtype=np.int32),
+            edge_v_idx=np.array(edges_v, dtype=np.int32),
+            edge_g=np.array(edges_g, dtype=np.float64),
+            node_to_idx=node_to_idx,
+            idx_to_node=all_nodes,
+            n_nodes=n_nodes,
+            n_edges=len(edges_u),
+        )
+        return self._edge_cache
+
+    def _build_subgrid_system_fast(
+        self,
+        subgrid_nodes: Set[Any],
+        dirichlet_nodes: Set[Any],
+        dirichlet_voltage: float,
+        node_in_subgrid: Optional[np.ndarray] = None,
+    ) -> Optional[UnifiedReducedSystem]:
+        """Build reduced system for a subgrid using vectorized operations.
+        
+        This is a faster alternative to _build_subgrid_system that uses
+        pre-computed edge arrays and NumPy boolean masking for O(E) filtering
+        instead of Python iteration.
+        
+        Args:
+            subgrid_nodes: Set of nodes in the subgrid (including Dirichlet nodes)
+            dirichlet_nodes: Set of nodes with fixed voltage (boundary conditions)
+            dirichlet_voltage: Default voltage for Dirichlet nodes
+            node_in_subgrid: Optional pre-computed boolean array of shape (n_global_nodes,)
+                             where True indicates node is in subgrid. If None, computed
+                             from subgrid_nodes. Pass this for repeated calls with same
+                             subgrid to avoid recomputation.
+        
+        Returns:
+            UnifiedReducedSystem for the subgrid, or None if empty.
+        """
+        if not subgrid_nodes:
+            return None
+        
+        cache = self._ensure_edge_cache()
+        
+        # Build boolean mask for nodes in subgrid if not provided
+        if node_in_subgrid is None:
+            node_in_subgrid = np.zeros(cache.n_nodes, dtype=bool)
+            for node in subgrid_nodes:
+                idx = cache.node_to_idx.get(node)
+                if idx is not None:
+                    node_in_subgrid[idx] = True
+        
+        return self._build_subgrid_system_fast_internal(
+            subgrid_nodes=subgrid_nodes,
+            dirichlet_nodes=dirichlet_nodes,
+            dirichlet_voltage=dirichlet_voltage,
+            node_in_subgrid=node_in_subgrid,
+            cache=cache,
+            skip_lu=False,
+        )
+
+    def build_node_membership_mask(self, nodes: Set[Any]) -> np.ndarray:
+        """Build a boolean mask array for node membership.
+        
+        Useful for building multiple subgrid systems from overlapping tiles.
+        Pre-compute the mask once per tile, then pass to _build_subgrid_system_fast.
+        
+        Args:
+            nodes: Set of nodes to include
+            
+        Returns:
+            Boolean array of shape (n_global_nodes,) where True = node in set
+        """
+        cache = self._ensure_edge_cache()
+        mask = np.zeros(cache.n_nodes, dtype=bool)
+        for node in nodes:
+            idx = cache.node_to_idx.get(node)
+            if idx is not None:
+                mask[idx] = True
+        return mask
+
+    def build_tile_systems_batch(
+        self,
+        tiles: List[Tuple[Set[Any], Set[Any], float]],
+        skip_lu: bool = False,
+    ) -> List[Optional[UnifiedReducedSystem]]:
+        """Build reduced systems for multiple tiles efficiently.
+        
+        This method is optimized for building many tile systems at once:
+        1. Pre-computes edge arrays once (shared across all tiles)
+        2. Uses vectorized NumPy operations for edge filtering
+        3. Optionally skips LU factorization for tiles that will be further processed
+        
+        Args:
+            tiles: List of (subgrid_nodes, dirichlet_nodes, dirichlet_voltage) tuples
+            skip_lu: If True, skip LU factorization (set lu=None). Useful when tiles
+                     will be merged or further processed before solving.
+        
+        Returns:
+            List of UnifiedReducedSystem (or None for empty tiles), same order as input.
+        
+        Example:
+            # Define tiles
+            tiles = [
+                (tile1_nodes, tile1_boundary, 1.0),
+                (tile2_nodes, tile2_boundary, 1.0),
+                ...
+            ]
+            systems = model.build_tile_systems_batch(tiles)
+        """
+        # Ensure cache is built once
+        cache = self._ensure_edge_cache()
+        
+        results = []
+        for subgrid_nodes, dirichlet_nodes, dirichlet_voltage in tiles:
+            if not subgrid_nodes:
+                results.append(None)
+                continue
+            
+            # Build node mask
+            node_in_subgrid = np.zeros(cache.n_nodes, dtype=bool)
+            for node in subgrid_nodes:
+                idx = cache.node_to_idx.get(node)
+                if idx is not None:
+                    node_in_subgrid[idx] = True
+            
+            # Use fast builder
+            system = self._build_subgrid_system_fast_internal(
+                subgrid_nodes=subgrid_nodes,
+                dirichlet_nodes=dirichlet_nodes,
+                dirichlet_voltage=dirichlet_voltage,
+                node_in_subgrid=node_in_subgrid,
+                cache=cache,
+                skip_lu=skip_lu,
+            )
+            results.append(system)
+        
+        return results
+
+    def _build_subgrid_system_fast_internal(
+        self,
+        subgrid_nodes: Set[Any],
+        dirichlet_nodes: Set[Any],
+        dirichlet_voltage: float,
+        node_in_subgrid: np.ndarray,
+        cache: EdgeArrayCache,
+        skip_lu: bool = False,
+    ) -> Optional[UnifiedReducedSystem]:
+        """Internal fast builder with pre-computed cache and mask.
+        
+        This is the core vectorized implementation used by both
+        _build_subgrid_system_fast and build_tile_systems_batch.
+        """
+        # Filter edges: both endpoints must be in subgrid
+        edge_mask = node_in_subgrid[cache.edge_u_idx] & node_in_subgrid[cache.edge_v_idx]
+        
+        if not np.any(edge_mask):
+            return None
+        
+        # Extract filtered edges
+        filtered_u = cache.edge_u_idx[edge_mask]
+        filtered_v = cache.edge_v_idx[edge_mask]
+        filtered_g = cache.edge_g[edge_mask]
+        n_filtered_edges = len(filtered_g)
+        
+        # Build local node indexing for subgrid
+        global_indices_in_subgrid = np.unique(np.concatenate([filtered_u, filtered_v]))
+        n_local_nodes = len(global_indices_in_subgrid)
+        
+        if n_local_nodes == 0:
+            return None
+        
+        # Map global index -> local index
+        global_to_local = np.full(cache.n_nodes, -1, dtype=np.int32)
+        global_to_local[global_indices_in_subgrid] = np.arange(n_local_nodes, dtype=np.int32)
+        
+        # Convert edge indices to local
+        local_u = global_to_local[filtered_u]
+        local_v = global_to_local[filtered_v]
+        
+        # Build COO data for conductance matrix
+        n_offdiag = 2 * n_filtered_edges
+        offdiag_rows = np.empty(n_offdiag, dtype=np.int32)
+        offdiag_cols = np.empty(n_offdiag, dtype=np.int32)
+        offdiag_data = np.empty(n_offdiag, dtype=np.float64)
+        
+        offdiag_rows[0::2] = local_u
+        offdiag_rows[1::2] = local_v
+        offdiag_cols[0::2] = local_v
+        offdiag_cols[1::2] = local_u
+        offdiag_data[0::2] = -filtered_g
+        offdiag_data[1::2] = -filtered_g
+        
+        # Diagonal: accumulate via bincount
+        diag_contrib_u = np.bincount(local_u, weights=filtered_g, minlength=n_local_nodes)
+        diag_contrib_v = np.bincount(local_v, weights=filtered_g, minlength=n_local_nodes)
+        diag_values = diag_contrib_u + diag_contrib_v
+        
+        diag_rows = np.arange(n_local_nodes, dtype=np.int32)
+        diag_cols = np.arange(n_local_nodes, dtype=np.int32)
+        
+        # Combine
+        all_rows = np.concatenate([offdiag_rows, diag_rows])
+        all_cols = np.concatenate([offdiag_cols, diag_cols])
+        all_data = np.concatenate([offdiag_data, diag_values])
+        
+        G_mat = sp.csr_matrix(
+            (all_data, (all_rows, all_cols)),
+            shape=(n_local_nodes, n_local_nodes)
+        )
+        
+        # Build node lists
+        nodes = [cache.idx_to_node[gi] for gi in global_indices_in_subgrid]
+        index = {n: i for i, n in enumerate(nodes)}
+        
+        # Partition into unknown and Dirichlet
+        unknown_nodes = [n for n in nodes if n not in dirichlet_nodes]
+        dirichlet_ordered = [n for n in nodes if n in dirichlet_nodes]
+        
+        if not unknown_nodes:
+            return None
+        
+        index_unknown = {n: i for i, n in enumerate(unknown_nodes)}
+        
+        # Extract submatrices
+        u_idx = np.array([index[n] for n in unknown_nodes], dtype=np.int32)
+        d_idx = np.array([index[n] for n in dirichlet_ordered], dtype=np.int32) if dirichlet_ordered else np.array([], dtype=np.int32)
+        
+        G_uu = G_mat[u_idx][:, u_idx].tocsr()
+        G_ud = G_mat[u_idx][:, d_idx].tocsr() if len(d_idx) > 0 else sp.csr_matrix((len(u_idx), 0))
+        
+        # LU factorization (optional)
+        if skip_lu:
+            lu = None
+        else:
+            lu = spla.factorized(G_uu.tocsc())
+        
+        return UnifiedReducedSystem(
+            node_order=nodes,
+            unknown_nodes=unknown_nodes,
+            pad_nodes=dirichlet_ordered,
+            G_uu=G_uu,
+            G_up=G_ud,
+            lu=lu,
+            pad_voltage=dirichlet_voltage,
+            index_of=index,
+            index_unknown=index_unknown,
+            net_name=self.net_name,
+        )
+
+    @property
+    def edge_cache(self) -> EdgeArrayCache:
+        """Access the edge array cache (builds if not already cached)."""
+        return self._ensure_edge_cache()
 
     def _build_conductance_matrix(self) -> Tuple[sp.csr_matrix, List[Any]]:
         """Build conductance matrix from resistive edges.

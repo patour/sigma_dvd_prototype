@@ -189,6 +189,7 @@ class UnifiedIRDropSolver:
         weighting: str = "effective",
         rmax: Optional[float] = None,
         verbose: bool = False,
+        use_fast_builder: bool = True,
     ) -> UnifiedHierarchicalResult:
         """Solve using hierarchical decomposition.
 
@@ -211,6 +212,9 @@ class UnifiedIRDropSolver:
                   Paths beyond this distance are ignored. None means no limit.
                   Only applies when weighting="shortest_path".
             verbose: If True, print timing information for each step.
+            use_fast_builder: If True (default), use vectorized subgrid builder
+                  for ~10x speedup. Set to False to use original Python-loop
+                  implementation for debugging or validation.
 
         Returns:
             UnifiedHierarchicalResult with complete voltages and decomposition info.
@@ -287,11 +291,18 @@ class UnifiedIRDropSolver:
 
         # Build and solve top-grid system
         t0 = time.perf_counter()
-        top_system = self.model._build_subgrid_system(
-            subgrid_nodes=top_nodes,
-            dirichlet_nodes=top_grid_pads,
-            dirichlet_voltage=self.model.vdd,
-        )
+        if use_fast_builder:
+            top_system = self.model._build_subgrid_system_fast(
+                subgrid_nodes=top_nodes,
+                dirichlet_nodes=top_grid_pads,
+                dirichlet_voltage=self.model.vdd,
+            )
+        else:
+            top_system = self.model._build_subgrid_system(
+                subgrid_nodes=top_nodes,
+                dirichlet_nodes=top_grid_pads,
+                dirichlet_voltage=self.model.vdd,
+            )
 
         if top_system is None:
             raise ValueError("Failed to build top-grid system")
@@ -322,11 +333,18 @@ class UnifiedIRDropSolver:
         bottom_subgrid = bottom_nodes | port_nodes
 
         t0 = time.perf_counter()
-        bottom_system = self.model._build_subgrid_system(
-            subgrid_nodes=bottom_subgrid,
-            dirichlet_nodes=port_nodes,
-            dirichlet_voltage=self.model.vdd,  # Will be overridden by dirichlet_voltages
-        )
+        if use_fast_builder:
+            bottom_system = self.model._build_subgrid_system_fast(
+                subgrid_nodes=bottom_subgrid,
+                dirichlet_nodes=port_nodes,
+                dirichlet_voltage=self.model.vdd,  # Will be overridden by dirichlet_voltages
+            )
+        else:
+            bottom_system = self.model._build_subgrid_system(
+                subgrid_nodes=bottom_subgrid,
+                dirichlet_nodes=port_nodes,
+                dirichlet_voltage=self.model.vdd,  # Will be overridden by dirichlet_voltages
+            )
 
         if bottom_system is None:
             raise ValueError("Failed to build bottom-grid system")

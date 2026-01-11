@@ -5,7 +5,7 @@ Provides a unified interface for both synthetic power grids and PDN netlists.
 
 from .node_adapter import NodeInfoExtractor, UnifiedNodeInfo
 from .edge_adapter import EdgeInfoExtractor, UnifiedEdgeInfo, ElementType
-from .unified_model import UnifiedPowerGridModel, UnifiedReducedSystem, GridSource
+from .unified_model import UnifiedPowerGridModel, UnifiedReducedSystem, GridSource, EdgeArrayCache
 from .factory import (
     create_model_from_synthetic,
     create_model_from_pdn,
@@ -30,6 +30,7 @@ __all__ = [
     "UnifiedPowerGridModel",
     "UnifiedReducedSystem",
     "GridSource",
+    "EdgeArrayCache",
     # Factory functions
     "create_model_from_synthetic",
     "create_model_from_pdn",
