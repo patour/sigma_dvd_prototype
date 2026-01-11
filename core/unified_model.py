@@ -639,8 +639,15 @@ class UnifiedPowerGridModel:
         bottom_grid_nodes = set()
         package_nodes = set()  # Nodes with layer=None
 
+        # Get nodes to exclude (floating islands that were removed during model construction)
+        excluded_nodes = self._removed_island_nodes
+
         # First pass: categorize die nodes (with layer info)
         for node in self.graph.nodes():
+            # Skip floating island nodes
+            if node in excluded_nodes:
+                continue
+                
             info = self.get_node_info(node)
             node_layer = info.layer
 
@@ -669,19 +676,34 @@ class UnifiedPowerGridModel:
                 top_grid_nodes.add(pad)
         
         # BFS to find package nodes connected to top-grid via R-edges
+        # NOTE: For directed graphs (MultiDiGraph), we must check BOTH outgoing
+        # and incoming edges since via edges may be directed (e.g., tap→M5 only)
         from collections import deque
         visited_pkg = set()
         queue = deque()
+        
+        is_directed = isinstance(self.graph, nx.MultiDiGraph)
+        
+        # Helper to get all R-type neighbors (both directions for directed graphs)
+        def get_r_neighbors(node):
+            neighbors = set()
+            # Outgoing edges
+            for u, v, d in self.graph.edges(node, data=True):
+                if d.get('type') == 'R':
+                    neighbors.add(v)
+            # Incoming edges (for directed graphs)
+            if is_directed:
+                for u, v, d in self.graph.in_edges(node, data=True):
+                    if d.get('type') == 'R':
+                        neighbors.add(u)
+            return neighbors
         
         # Start from top-grid die nodes that have R-edges to package nodes
         # Use list() to avoid "Set changed size during iteration" error
         for node in list(top_grid_nodes):
             if node in package_nodes:
                 continue  # Skip package nodes already added
-            for u, v, d in self.graph.edges(node, data=True):
-                if d.get('type') != 'R':
-                    continue
-                neighbor = v if u == node else u
+            for neighbor in get_r_neighbors(node):
                 if neighbor in package_nodes and neighbor not in visited_pkg:
                     visited_pkg.add(neighbor)
                     queue.append(neighbor)
@@ -690,39 +712,29 @@ class UnifiedPowerGridModel:
         # Continue BFS within package nodes
         while queue:
             pkg_node = queue.popleft()
-            for u, v, d in self.graph.edges(pkg_node, data=True):
-                if d.get('type') != 'R':
-                    continue
-                neighbor = v if u == pkg_node else u
+            for neighbor in get_r_neighbors(pkg_node):
                 if neighbor in package_nodes and neighbor not in visited_pkg:
                     visited_pkg.add(neighbor)
                     queue.append(neighbor)
                     top_grid_nodes.add(neighbor)
 
         # Find port nodes and via edges
+        # Port nodes are top-grid nodes that have R-edges to bottom-grid nodes
+        # This handles cases where edges skip layers (e.g., layer 28 -> layer 32)
         port_nodes = set()
         via_edges = []
 
         for u, v, edge_info in self._iter_resistive_edges():
-            u_info = self.get_node_info(u)
-            v_info = self.get_node_info(v)
+            u_in_top = u in top_grid_nodes
+            v_in_top = v in top_grid_nodes
+            u_in_bottom = u in bottom_grid_nodes
+            v_in_bottom = v in bottom_grid_nodes
 
-            u_layer = u_info.layer
-            v_layer = v_info.layer
-
-            if u_layer is None or v_layer is None:
-                continue
-
-            # Check if edge crosses partition boundary
-            u_at_partition = (u_layer == partition_layer or str(u_layer) == str(partition_layer))
-            v_at_partition = (v_layer == partition_layer or str(v_layer) == str(partition_layer))
-            u_below = (u_layer == partition_layer_below or str(u_layer) == str(partition_layer_below))
-            v_below = (v_layer == partition_layer_below or str(v_layer) == str(partition_layer_below))
-
-            if u_at_partition and v_below:
+            # Edge connects top-grid to bottom-grid
+            if u_in_top and v_in_bottom:
                 via_edges.append((u, v, edge_info))
                 port_nodes.add(u)
-            elif v_at_partition and u_below:
+            elif v_in_top and u_in_bottom:
                 via_edges.append((u, v, edge_info))
                 port_nodes.add(v)
 

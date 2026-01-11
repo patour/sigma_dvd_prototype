@@ -140,30 +140,46 @@ class UnifiedIRDropSolver:
 
         return results
 
-    def summarize(self, result: UnifiedSolveResult) -> Dict[str, float]:
+    def summarize(
+        self, result: "UnifiedSolveResult | UnifiedHierarchicalResult"
+    ) -> Dict[str, float]:
         """Compute summary statistics from a solve result.
 
         Statistics exclude pad nodes to report only free (non-vsrc) node behavior,
         consistent with PDNSolver reporting conventions.
 
         Args:
-            result: UnifiedSolveResult
+            result: UnifiedSolveResult or UnifiedHierarchicalResult
 
         Returns:
             Dict with nominal_voltage, min_voltage, max_voltage, max_drop, avg_drop.
+            For UnifiedHierarchicalResult, also includes num_ports.
         """
         # Exclude pad nodes from statistics (they are fixed at nominal voltage)
         pad_set = set(self.model.pad_nodes)
         free_voltages = [v for n, v in result.voltages.items() if n not in pad_set]
         free_drops = [d for n, d in result.ir_drop.items() if n not in pad_set]
 
-        return {
-            'nominal_voltage': result.nominal_voltage,
-            'min_voltage': min(free_voltages) if free_voltages else result.nominal_voltage,
-            'max_voltage': max(free_voltages) if free_voltages else result.nominal_voltage,
+        # Get nominal voltage (UnifiedSolveResult has it directly, hierarchical uses model)
+        if hasattr(result, 'nominal_voltage'):
+            nominal = result.nominal_voltage
+        else:
+            nominal = self.model.vdd
+
+        summary = {
+            'nominal_voltage': nominal,
+            'min_voltage': min(free_voltages) if free_voltages else nominal,
+            'max_voltage': max(free_voltages) if free_voltages else nominal,
             'max_drop': max(free_drops) if free_drops else 0.0,
             'avg_drop': sum(free_drops) / len(free_drops) if free_drops else 0.0,
         }
+
+        # Add hierarchical-specific stats
+        if isinstance(result, UnifiedHierarchicalResult):
+            summary['num_ports'] = len(result.port_nodes)
+            summary['partition_layer'] = result.partition_layer
+
+        return summary
 
     def solve_hierarchical(
         self,
@@ -172,6 +188,7 @@ class UnifiedIRDropSolver:
         top_k: int = 5,
         weighting: str = "effective",
         rmax: Optional[float] = None,
+        verbose: bool = False,
     ) -> UnifiedHierarchicalResult:
         """Solve using hierarchical decomposition.
 
@@ -193,6 +210,7 @@ class UnifiedIRDropSolver:
             rmax: Maximum resistance distance for shortest_path weighting.
                   Paths beyond this distance are ignored. None means no limit.
                   Only applies when weighting="shortest_path".
+            verbose: If True, print timing information for each step.
 
         Returns:
             UnifiedHierarchicalResult with complete voltages and decomposition info.
@@ -202,8 +220,13 @@ class UnifiedIRDropSolver:
                 electrically disconnected from ports. The error message will
                 suggest alternative partition layers if disconnection is detected.
         """
+        import time
+        timings: Dict[str, float] = {}
+        
         # Step 0: Decompose the grid
+        t0 = time.perf_counter()
         top_nodes, bottom_nodes, port_nodes, via_edges = self.model._decompose_at_layer(partition_layer)
+        timings['decompose'] = time.perf_counter() - t0
 
         if not port_nodes:
             raise ValueError(
@@ -212,6 +235,7 @@ class UnifiedIRDropSolver:
             )
 
         # Step 0.5: Validate load-to-port connectivity before expensive computation
+        t0 = time.perf_counter()
         bottom_load_nodes = {
             n for n, c in current_injections.items()
             if n in bottom_nodes and n not in port_nodes and c != 0
@@ -235,8 +259,10 @@ class UnifiedIRDropSolver:
                     f"This typically means the partition layer is too high. "
                     f"{suggestions}"
                 )
+        timings['connectivity_check'] = time.perf_counter() - t0
 
         # Step 1: Aggregate bottom-grid currents onto ports
+        t0 = time.perf_counter()
         port_currents, aggregation_map = self._aggregate_currents_to_ports(
             current_injections=current_injections,
             bottom_grid_nodes=bottom_nodes,
@@ -245,6 +271,7 @@ class UnifiedIRDropSolver:
             weighting=weighting,
             rmax=rmax,
         )
+        timings['aggregate_currents'] = time.perf_counter() - t0
 
         # Step 2: Solve top-grid with pads as Dirichlet BC
         # Top-grid includes: top_nodes (layers >= partition_layer)
@@ -259,6 +286,7 @@ class UnifiedIRDropSolver:
             )
 
         # Build and solve top-grid system
+        t0 = time.perf_counter()
         top_system = self.model._build_subgrid_system(
             subgrid_nodes=top_nodes,
             dirichlet_nodes=top_grid_pads,
@@ -267,6 +295,7 @@ class UnifiedIRDropSolver:
 
         if top_system is None:
             raise ValueError("Failed to build top-grid system")
+        timings['build_top_system'] = time.perf_counter() - t0
 
         # Current injections for top-grid: loads in top-grid + aggregated port currents
         # Note: Any loads that happen to be in top-grid are handled directly
@@ -275,11 +304,13 @@ class UnifiedIRDropSolver:
         for port, curr in port_currents.items():
             top_grid_currents[port] = top_grid_currents.get(port, 0.0) + curr
 
+        t0 = time.perf_counter()
         top_voltages = self.model._solve_subgrid(
             reduced_system=top_system,
             current_injections=top_grid_currents,
             dirichlet_voltages=None,  # Use vdd for pads
         )
+        timings['solve_top'] = time.perf_counter() - t0
 
         # Extract port voltages for bottom-grid BC
         port_voltages = {p: top_voltages[p] for p in port_nodes}
@@ -290,6 +321,7 @@ class UnifiedIRDropSolver:
         # Solution: Include ports in the bottom subgrid for the solve
         bottom_subgrid = bottom_nodes | port_nodes
 
+        t0 = time.perf_counter()
         bottom_system = self.model._build_subgrid_system(
             subgrid_nodes=bottom_subgrid,
             dirichlet_nodes=port_nodes,
@@ -298,6 +330,7 @@ class UnifiedIRDropSolver:
 
         if bottom_system is None:
             raise ValueError("Failed to build bottom-grid system")
+        timings['build_bottom_system'] = time.perf_counter() - t0
 
         # Current injections for bottom-grid: original currents in bottom-grid
         bottom_grid_currents = {
@@ -305,13 +338,16 @@ class UnifiedIRDropSolver:
             if n in bottom_nodes
         }
 
+        t0 = time.perf_counter()
         bottom_voltages = self.model._solve_subgrid(
             reduced_system=bottom_system,
             current_injections=bottom_grid_currents,
             dirichlet_voltages=port_voltages,
         )
+        timings['solve_bottom'] = time.perf_counter() - t0
 
         # Merge voltages: top-grid + bottom-grid (excluding duplicate ports)
+        t0 = time.perf_counter()
         all_voltages = {}
         all_voltages.update(top_voltages)
         # Add bottom-grid nodes (excluding ports which are already in top_voltages)
@@ -321,6 +357,20 @@ class UnifiedIRDropSolver:
 
         # Compute IR-drop
         ir_drop = self.model.ir_drop(all_voltages)
+        timings['merge_results'] = time.perf_counter() - t0
+        
+        # Print timing summary if verbose
+        if verbose:
+            total_time = sum(timings.values())
+            print(f"\n=== Hierarchical Solve Timing ===")
+            print(f"  Top nodes: {len(top_nodes):,}, Bottom nodes: {len(bottom_nodes):,}, Ports: {len(port_nodes):,}")
+            print(f"  Load nodes in bottom-grid: {len(bottom_load_nodes):,}")
+            print(f"  ---")
+            for step, t in timings.items():
+                pct = t / total_time * 100
+                print(f"  {step:25s}: {t*1000:8.1f} ms  ({pct:5.1f}%)")
+            print(f"  {'TOTAL':25s}: {total_time*1000:8.1f} ms")
+            print(f"=================================\n")
 
         return UnifiedHierarchicalResult(
             voltages=all_voltages,

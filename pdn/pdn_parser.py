@@ -87,6 +87,8 @@ except ImportError:
             pass
         def update(self, n=1):
             self.n += n
+        def set_description(self, desc):
+            pass
 
 
 # Constants matching C++ parser
