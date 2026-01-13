@@ -446,19 +446,23 @@ class PDNPlotter:
                                 anisotropic_bins: bool = False,
                                 bin_aspect_ratio: int = 50,
                                 layer_orientations: Optional[Dict[str, str]] = None,
-                                output_filename: Optional[str] = None):
+                                output_filename: Optional[str] = None,
+                                nominal_voltage: float = 1.0,
+                                show_irdrop: bool = True):
         """
-        Generate layer-wise voltage heatmaps as single multi-layer figure (2D grid mode).
+        Generate layer-wise heatmaps as one PNG per layer (2D grid mode).
         
         Args:
             net_name: Net name to generate heatmaps for
-            output_path: Directory to save heatmaps (or full path if output_filename provided)
+            output_path: Directory to save heatmaps
             plot_layers: List of layer IDs to plot. None = all layers
             plot_bin_size: Bin size for grid aggregation. None = auto-calculate
             anisotropic_bins: Enable orientation-aware anisotropic binning
             bin_aspect_ratio: Aspect ratio for anisotropic bins (default: 50)
             layer_orientations: Manual layer orientation overrides
-            output_filename: Optional custom filename (if None, uses 'voltage_heatmap_{net_name}.png')
+            output_filename: Optional custom filename (deprecated, ignored for per-layer output)
+            nominal_voltage: Nominal voltage for IR-drop calculation (default: 1.0 V)
+            show_irdrop: If True, show IR-drop in mV (default). If False, show absolute voltage.
         """
         try:
             import matplotlib.pyplot as plt
@@ -496,22 +500,25 @@ class PDNPlotter:
         except:
             layers_sorted = sorted(layers)
         
-        # Calculate subplot grid
         n_layers = len(layers_sorted)
-        n_cols = ceil(sqrt(n_layers))
-        n_rows = ceil(n_layers / n_cols)
         
-        self.logger.info(f"  Generating {n_layers} layer heatmaps...")
+        # Determine plot type label
+        net_type = self._detect_net_type(net_name)
+        if show_irdrop:
+            plot_type = 'IR-Drop' if net_type == 'power' else 'Ground-Bounce'
+            value_unit = 'mV'
+            cmap = 'RdYlGn_r'  # Inverted: red=high drop (bad), green=low drop (good)
+        else:
+            plot_type = 'Voltage'
+            value_unit = 'V'
+            cmap = 'RdYlGn'  # Normal: red=low voltage, green=high voltage
         
-        # Create figure
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
-        if n_layers == 1:
-            axes = np.array([axes])
-        axes = axes.flatten()
+        self.logger.info(f"  Generating {n_layers} layer {plot_type.lower()} heatmaps...")
         
-        # Plot each layer
-        for idx, layer_id in enumerate(layers_sorted):
-            ax = axes[idx]
+        # Generate one PNG per layer
+        for layer_id in layers_sorted:
+            # Create single-layer figure
+            fig, ax = plt.subplots(figsize=(8, 6))
             
             # Get nodes for this layer and net
             net_nodes = self.net_connectivity.get(net_name, [])
@@ -540,10 +547,8 @@ class PDNPlotter:
                     nodes_with_data.append((n, x, y, v))
             
             if not nodes_with_data:
-                ax.text(0.5, 0.5, f'Layer {layer_id}\n(No data)',
-                       ha='center', va='center', transform=ax.transAxes)
-                ax.set_xticks([])
-                ax.set_yticks([])
+                plt.close(fig)
+                self.logger.debug(f"    Layer {layer_id}: No data, skipping")
                 continue
             
             # Unpack data efficiently
@@ -551,6 +556,17 @@ class PDNPlotter:
             xs = np.array(xs_list, dtype=np.float32)
             ys = np.array(ys_list, dtype=np.float32)
             voltages = np.array(voltages_list, dtype=np.float32)
+            
+            # Convert to IR-drop/ground-bounce in mV if requested
+            if show_irdrop:
+                if net_type == 'power':
+                    # IR-drop for power nets: Vdd - V_node (positive = voltage dropped)
+                    values = (nominal_voltage - voltages) * 1000.0  # mV
+                else:
+                    # Ground-bounce for ground nets: V_node - 0 (positive = voltage rise)
+                    values = voltages * 1000.0  # mV
+            else:
+                values = voltages
             
             # Use provided bin size or auto-calculate
             x_min, x_max = xs.min(), xs.max()
@@ -596,69 +612,62 @@ class PDNPlotter:
             
             x_indices = x_indices[valid_mask]
             y_indices = y_indices[valid_mask]
-            voltages_valid = voltages[valid_mask]
-            nodes_valid = np.array([nodes_with_data[i][0] for i in np.where(valid_mask)[0]])
+            values_valid = values[valid_mask]
             
-            # Detect net type for proper aggregation
-            net_type = self._detect_net_type(net_name)
-            
-            # Aggregate using min/max instead of mean for voltage
+            # Aggregate using max for IR-drop/ground-bounce (worst case), min/max for voltage
             grid = np.full((len(y_bins) - 1, len(x_bins) - 1), np.nan)
             
-            # Track min/max per bin
-            for i, (y_idx, x_idx, v) in enumerate(zip(y_indices, x_indices, voltages_valid)):
+            # Track worst-case per bin
+            for i, (y_idx, x_idx, val) in enumerate(zip(y_indices, x_indices, values_valid)):
                 current_val = grid[y_idx, x_idx]
                 if np.isnan(current_val):
-                    grid[y_idx, x_idx] = v
+                    grid[y_idx, x_idx] = val
                 else:
-                    if net_type == 'power':
-                        grid[y_idx, x_idx] = min(current_val, v)  # Min for power
+                    if show_irdrop:
+                        # For IR-drop/ground-bounce: max is worst case
+                        grid[y_idx, x_idx] = max(current_val, val)
+                    elif net_type == 'power':
+                        grid[y_idx, x_idx] = min(current_val, val)  # Min voltage for power
                     else:
-                        grid[y_idx, x_idx] = max(current_val, v)  # Max for ground
+                        grid[y_idx, x_idx] = max(current_val, val)  # Max voltage for ground
             
-            # Get voltage range for this layer
-            valid_voltages = voltages_valid[~np.isnan(voltages_valid)]
-            if len(valid_voltages) > 0:
-                vmin = valid_voltages.min()
-                vmax = valid_voltages.max()
+            # Get value range for this layer
+            valid_values = values_valid[~np.isnan(values_valid)]
+            if len(valid_values) > 0:
+                vmin = valid_values.min()
+                vmax = valid_values.max()
             else:
                 vmin, vmax = 0, 1
             
-            # Plot (RdYlGn: red=low voltage, green=high voltage)
-            im = ax.imshow(grid, cmap='RdYlGn', origin='lower',
+            # Plot with appropriate colormap
+            im = ax.imshow(grid, cmap=cmap, origin='lower',
                           extent=[x_bins[0], x_bins[-1], y_bins[0], y_bins[-1]],
                           aspect='auto', interpolation='nearest',
                           vmin=vmin, vmax=vmax)
             
-            ax.set_title(f'Layer {layer_id} ({len(nodes_with_data)} nodes)')
+            ax.set_title(f'{plot_type} - Net: {net_name} - Layer {layer_id} ({len(nodes_with_data)} nodes)')
             ax.set_xlabel('X')
             ax.set_ylabel('Y')
             
-            # Colorbar with aggregation method
-            agg_label = 'Min' if net_type == 'power' else 'Max'
-            plt.colorbar(im, ax=ax, label=f'{agg_label} Voltage per Bin (V)')
-        
-        # Hide unused subplots
-        for idx in range(n_layers, len(axes)):
-            axes[idx].set_visible(False)
-        
-        # Overall title
-        fig.suptitle(f'PDN Voltage Heatmaps - Net: {net_name}',
-                    fontsize=16, y=0.995)
-        
-        plt.tight_layout()
-        
-        # Save
-        if output_filename:
-            # If output_filename provided, treat output_path as full path
-            output_file = Path(output_path) / output_filename if output_path.is_dir() else Path(output_path)
-        else:
-            # Default filename
-            output_file = output_path / f'voltage_heatmap_{net_name}.png'
-        plt.savefig(output_file, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        self.logger.info(f"  Saved voltage heatmap: {output_file}")
+            # Colorbar with appropriate label
+            if show_irdrop:
+                cbar_label = f'Max {plot_type} per Bin ({value_unit})'
+            else:
+                agg_label = 'Min' if net_type == 'power' else 'Max'
+                cbar_label = f'{agg_label} Voltage per Bin ({value_unit})'
+            plt.colorbar(im, ax=ax, label=cbar_label)
+            
+            plt.tight_layout()
+            
+            # Save per-layer file
+            if show_irdrop:
+                output_file = output_path / f'irdrop_heatmap_{net_name}_layer_{layer_id}.png'
+            else:
+                output_file = output_path / f'voltage_heatmap_{net_name}_layer_{layer_id}.png'
+            plt.savefig(output_file, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+            self.logger.info(f"    Saved: {output_file}")
     
     def generate_current_heatmaps(self, net_name: str, output_path: Path,
                                   plot_layers: Optional[List[str]] = None,
@@ -858,9 +867,11 @@ class PDNPlotter:
                                  max_stripes: int = 50,
                                  stripe_bin_size: Optional[int] = None,
                                  is_current: bool = False,
-                                 layer_orientations: Optional[Dict[str, str]] = None):
+                                 layer_orientations: Optional[Dict[str, str]] = None,
+                                 nominal_voltage: float = 1.0,
+                                 show_irdrop: bool = True):
         """
-        Generate stripe-based heatmaps where each stripe is plotted separately.
+        Generate stripe-based heatmaps as one PNG per layer.
         
         Nodes on each stripe are binified along the parallel dimension.
         Contiguous stripes are grouped together if count exceeds max_stripes.
@@ -871,8 +882,10 @@ class PDNPlotter:
             plot_layers: List of layer IDs to plot. None = all layers
             max_stripes: Maximum number of stripes before grouping (default: 50)
             stripe_bin_size: Bin size for within-stripe aggregation. None = auto-calculate
-            is_current: True for current heatmaps, False for voltage heatmaps
+            is_current: True for current heatmaps, False for voltage/IR-drop heatmaps
             layer_orientations: Manual layer orientation overrides
+            nominal_voltage: Nominal voltage for IR-drop calculation (default: 1.0 V)
+            show_irdrop: If True, show IR-drop in mV (default). If False, show absolute voltage.
         """
         import time
         t_start = time.time()
@@ -955,9 +968,17 @@ class PDNPlotter:
                     layer_data[layer].append((n, x, y, v))
             
             layers = [k for k in layers if k in layer_data and layer_data[k]]
-            data_type = "Voltage"
-            cmap = 'RdYlGn'
-            ylabel = 'Voltage (V)'
+            
+            # Determine data type and colormap based on show_irdrop
+            net_type = self._detect_net_type(net_name)
+            if show_irdrop:
+                data_type = 'IR-Drop' if net_type == 'power' else 'Ground-Bounce'
+                cmap = 'RdYlGn_r'  # Inverted: red=high drop (bad), green=low drop (good)
+                ylabel = f'{data_type} (mV)'
+            else:
+                data_type = "Voltage"
+                cmap = 'RdYlGn'
+                ylabel = 'Voltage (V)'
         
         # Filter by plot_layers
         if plot_layers is not None:
@@ -972,10 +993,7 @@ class PDNPlotter:
         except:
             layers_sorted = sorted(layers)
         
-        # Calculate subplot grid
         n_layers = len(layers_sorted)
-        n_cols = ceil(sqrt(n_layers))
-        n_rows = ceil(n_layers / n_cols)
         
         if enable_timing:
             t_data = time.time()
@@ -983,33 +1001,28 @@ class PDNPlotter:
         
         self.logger.info(f"  Generating {n_layers} stripe-based {data_type.lower()} heatmaps...")
         
-        # Create figure
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
-        if n_layers == 1:
-            axes = np.array([axes])
-        axes = axes.flatten()
-        
         # Get net nodes set for orientation detection
         net_nodes_set = set(self.net_connectivity.get(net_name, []))
         
-        # Use per-layer color scale for better contrast
-        global_vmin = None
-        global_vmax = None
+        # Detect net type for IR-drop conversion (only needed for voltage mode)
+        if not is_current:
+            net_type_for_irdrop = self._detect_net_type(net_name)
+        else:
+            net_type_for_irdrop = 'power'  # Not used for current
         
-        # Plot each layer
-        for idx, layer_id in enumerate(layers_sorted):
+        # Generate one PNG per layer
+        for layer_id in layers_sorted:
             if enable_timing:
                 t_layer_start = time.time()
             
-            ax = axes[idx]
+            # Create single-layer figure
+            fig, ax = plt.subplots(figsize=(10, 8))
             
             nodes_with_data = layer_data[layer_id]
             
             if not nodes_with_data:
-                ax.text(0.5, 0.5, f'Layer {layer_id}\n(No data)',
-                       ha='center', va='center', transform=ax.transAxes)
-                ax.set_xticks([])
-                ax.set_yticks([])
+                plt.close(fig)
+                self.logger.debug(f"    Layer {layer_id}: No data, skipping")
                 continue
             
             # Detect orientation
@@ -1017,10 +1030,8 @@ class PDNPlotter:
             
             # Fall back to 2D grid for MIXED layers
             if orientation == 'MIXED':
-                ax.text(0.5, 0.5, f'Layer {layer_id}\n(MIXED orientation)\nFallback to 2D grid mode',
-                       ha='center', va='center', transform=ax.transAxes, fontsize=9)
-                ax.set_xticks([])
-                ax.set_yticks([])
+                plt.close(fig)
+                self.logger.debug(f"    Layer {layer_id}: MIXED orientation, skipping stripe mode")
                 continue
             
             # Group nodes into stripes
@@ -1082,18 +1093,28 @@ class PDNPlotter:
                     valid_mask = (indices >= 0) & (indices < len(bins) - 1)
                     
                     if not is_current:
-                        # For voltage: track min/max per bin based on net type
-                        net_type = self._detect_net_type(net_name)
+                        # For voltage/IR-drop: aggregate per bin
                         bin_values = np.full(len(bins) - 1, np.nan)
                         
                         # Aggregate per bin (np.minimum/maximum.at don't work with NaN)
                         for idx in range(len(bins) - 1):
                             mask = indices[valid_mask] == idx
                             if np.any(mask):
-                                if net_type == 'power':
-                                    bin_values[idx] = np.min(values_stripe[valid_mask][mask])
+                                raw_values = values_stripe[valid_mask][mask]
+                                if show_irdrop:
+                                    # Convert to IR-drop/ground-bounce in mV
+                                    if net_type_for_irdrop == 'power':
+                                        converted = (nominal_voltage - raw_values) * 1000.0
+                                    else:
+                                        converted = raw_values * 1000.0
+                                    # Max IR-drop is worst case
+                                    bin_values[idx] = np.max(converted)
                                 else:
-                                    bin_values[idx] = np.max(values_stripe[valid_mask][mask])
+                                    # Voltage mode: min for power, max for ground
+                                    if net_type_for_irdrop == 'power':
+                                        bin_values[idx] = np.min(raw_values)
+                                    else:
+                                        bin_values[idx] = np.max(raw_values)
                     else:
                         # For current: sum is correct
                         bin_values = np.zeros(len(bins) - 1)
@@ -1105,18 +1126,28 @@ class PDNPlotter:
                     valid_mask = (indices >= 0) & (indices < len(bins) - 1)
                     
                     if not is_current:
-                        # For voltage: track min/max per bin based on net type
-                        net_type = self._detect_net_type(net_name)
+                        # For voltage/IR-drop: aggregate per bin
                         bin_values = np.full(len(bins) - 1, np.nan)
                         
                         # Aggregate per bin (np.minimum/maximum.at don't work with NaN)
                         for idx in range(len(bins) - 1):
                             mask = indices[valid_mask] == idx
                             if np.any(mask):
-                                if net_type == 'power':
-                                    bin_values[idx] = np.min(values_stripe[valid_mask][mask])
+                                raw_values = values_stripe[valid_mask][mask]
+                                if show_irdrop:
+                                    # Convert to IR-drop/ground-bounce in mV
+                                    if net_type_for_irdrop == 'power':
+                                        converted = (nominal_voltage - raw_values) * 1000.0
+                                    else:
+                                        converted = raw_values * 1000.0
+                                    # Max IR-drop is worst case
+                                    bin_values[idx] = np.max(converted)
                                 else:
-                                    bin_values[idx] = np.max(values_stripe[valid_mask][mask])
+                                    # Voltage mode: min for power, max for ground
+                                    if net_type_for_irdrop == 'power':
+                                        bin_values[idx] = np.min(raw_values)
+                                    else:
+                                        bin_values[idx] = np.max(raw_values)
                     else:
                         # For current: sum is correct
                         bin_values = np.zeros(len(bins) - 1)
@@ -1140,7 +1171,10 @@ class PDNPlotter:
             layer_vmax = max(all_bin_values) if all_bin_values else 1
             
             if not is_current:
-                self.logger.info(f"    Layer {layer_id} voltage range: [{layer_vmin:.6f}, {layer_vmax:.6f}] V")
+                if show_irdrop:
+                    self.logger.info(f"    Layer {layer_id} {data_type.lower()} range: [{layer_vmin:.3f}, {layer_vmax:.3f}] mV")
+                else:
+                    self.logger.info(f"    Layer {layer_id} voltage range: [{layer_vmin:.6f}, {layer_vmax:.6f}] V")
             
             # Create visualization using PatchCollection for better performance
             norm = plt.Normalize(vmin=layer_vmin, vmax=layer_vmax)
@@ -1199,42 +1233,36 @@ class PDNPlotter:
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
             sm.set_array([])
             if not is_current:
-                net_type = self._detect_net_type(net_name)
-                agg_label = 'Min' if net_type == 'power' else 'Max'
-                cbar_label = f'{agg_label} {ylabel} per Stripe'
+                if show_irdrop:
+                    cbar_label = f'Max {data_type} per Stripe (mV)'
+                else:
+                    agg_label = 'Min' if net_type_for_irdrop == 'power' else 'Max'
+                    cbar_label = f'{agg_label} Voltage per Stripe (V)'
             else:
                 cbar_label = f'Total {ylabel} per Stripe'
             plt.colorbar(sm, ax=ax, label=cbar_label)
             
-            ax.set_title(f'Layer {layer_id} ({num_original_stripes}→{num_display_stripes} stripes)')
+            ax.set_title(f'{data_type} - Net: {net_name} - Layer {layer_id} ({num_original_stripes}→{num_display_stripes} stripes)')
             ax.set_aspect('equal', adjustable='box')
+            
+            plt.tight_layout()
+            
+            # Save per-layer file
+            if is_current:
+                output_file = output_path / f'current_stripe_heatmap_{net_name}_layer_{layer_id}.png'
+            elif show_irdrop:
+                output_file = output_path / f'irdrop_stripe_heatmap_{net_name}_layer_{layer_id}.png'
+            else:
+                output_file = output_path / f'voltage_stripe_heatmap_{net_name}_layer_{layer_id}.png'
+            plt.savefig(output_file, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+            self.logger.info(f"    Saved: {output_file}")
             
             if enable_timing:
                 t_layer_end = time.time()
                 self.logger.debug(f"    Layer {layer_id} [TIMING] Total layer: {t_layer_end - t_layer_start:.2f}s")
         
-        # Hide unused subplots
-        for idx in range(n_layers, len(axes)):
-            axes[idx].set_visible(False)
-        
-        # Overall title
-        fig.suptitle(f'PDN {data_type} Stripe Heatmaps - Net: {net_name}',
-                    fontsize=16, y=0.995)
-        
-        plt.tight_layout()
-        
         if enable_timing:
-            t_layout = time.time()
-            self.logger.debug(f"  [TIMING] Layout: {t_layout - t_layer_end:.2f}s")
-        
-        # Save
-        output_file = output_path / f'{"current" if is_current else "voltage"}_stripe_heatmap_{net_name}.png'
-        plt.savefig(output_file, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        if enable_timing:
-            t_save = time.time()
-            self.logger.debug(f"  [TIMING] Save: {t_save - t_layout:.2f}s")
-            self.logger.debug(f"  [TIMING] TOTAL: {t_save - t_start:.2f}s")
-        
-        self.logger.info(f"  Saved {data_type.lower()} stripe heatmap: {output_file}")
+            t_total = time.time()
+            self.logger.debug(f"  [TIMING] TOTAL: {t_total - t_start:.2f}s")

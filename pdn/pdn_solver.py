@@ -798,7 +798,8 @@ class PDNSolver:
                         bin_aspect_ratio: Optional[int] = None,
                         stripe_mode: bool = False,
                         max_stripes: int = 50,
-                        stripe_bin_size: Optional[int] = None):
+                        stripe_bin_size: Optional[int] = None,
+                        show_irdrop: bool = True):
         """
         Generate visualization and reports.
         
@@ -812,6 +813,7 @@ class PDNSolver:
             stripe_mode: Enable stripe-based plotting mode (default: False)
             max_stripes: Maximum number of stripes before consolidation (default: 50)
             stripe_bin_size: Bin size for within-stripe aggregation. None = auto-calculate
+            show_irdrop: If True (default), show IR-drop/ground-bounce in mV. If False, show voltage.
         """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -822,6 +824,10 @@ class PDNSolver:
         
         self.logger.info(f"\n{'='*70}")
         self.logger.info("Generating Reports and Visualizations")
+        if show_irdrop:
+            self.logger.info("Plotting IR-drop/ground-bounce heatmaps (mV)")
+        else:
+            self.logger.info("Plotting voltage heatmaps (V)")
         if stripe_mode:
             self.logger.info(f"Using stripe-based plotting mode (max_stripes={max_stripes})")
         elif use_anisotropic:
@@ -842,14 +848,17 @@ class PDNSolver:
                 # Stripe-based heatmaps
                 plotter.generate_stripe_heatmaps(net_name, output_path, plot_layers,
                                                 max_stripes, stripe_bin_size, 
-                                                is_current=False, layer_orientations=self.layer_orientations)
+                                                is_current=False, layer_orientations=self.layer_orientations,
+                                                nominal_voltage=stats.nominal_voltage, show_irdrop=show_irdrop)
                 plotter.generate_stripe_heatmaps(net_name, output_path, plot_layers,
                                                 max_stripes, stripe_bin_size,
-                                                is_current=True, layer_orientations=self.layer_orientations)
+                                                is_current=True, layer_orientations=self.layer_orientations,
+                                                nominal_voltage=stats.nominal_voltage, show_irdrop=show_irdrop)
             else:
                 # Traditional 2D grid heatmaps
                 plotter.generate_layer_heatmaps(net_name, output_path, plot_layers, plot_bin_size,
-                                               use_anisotropic, use_aspect_ratio, self.layer_orientations)
+                                               use_anisotropic, use_aspect_ratio, self.layer_orientations,
+                                               nominal_voltage=stats.nominal_voltage, show_irdrop=show_irdrop)
                 plotter.generate_current_heatmaps(net_name, output_path, plot_layers, plot_bin_size,
                                                  use_anisotropic, use_aspect_ratio, self.layer_orientations)
     
@@ -976,6 +985,8 @@ Examples:
                        help='Maximum number of stripes before grouping (default: 50, stripe mode only)')
     parser.add_argument('--stripe-bin-size', type=int,
                        help='Physical bin size for within-stripe aggregation in coordinate units (default: auto-calculate, stripe mode only)')
+    parser.add_argument('--show-voltage', dest='show_irdrop', action='store_false', default=True,
+                       help='Show voltage heatmaps instead of IR-drop/ground-bounce (default: IR-drop in mV)')
     
     args = parser.parse_args()
     
@@ -1037,13 +1048,15 @@ Examples:
     stripe_mode = getattr(args, 'stripe_mode', False)
     max_stripes = getattr(args, 'max_stripes', 50)
     stripe_bin_size = getattr(args, 'stripe_bin_size', None)
+    show_irdrop = getattr(args, 'show_irdrop', True)
     
     solver.generate_reports(output_dir=args.output, top_k=args.top_k, 
                            plot_layers=plot_layers,
                            plot_bin_size=plot_bin_size,
                            stripe_mode=stripe_mode,
                            max_stripes=max_stripes,
-                           stripe_bin_size=stripe_bin_size)
+                           stripe_bin_size=stripe_bin_size,
+                           show_irdrop=show_irdrop)
     
     print(f"\n{'='*70}")
     print("Analysis complete!")

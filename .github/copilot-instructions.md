@@ -64,7 +64,31 @@ hier_result = solver.solve_hierarchical(load_currents, partition_layer='M2', top
 ### `pdn/` - PDN Netlist Parsing
 - **`NetlistParser`**: Parses SPICE-like tile-based netlists with gzip support
 - **`PDNSolver`**: Standalone DC solver (use if you don't need unified interface)
+- **`PDNPlotter`**: Layer-wise heatmap generation (IR-drop, voltage, current)
 - **Graph metadata**: `graph.graph['net_connectivity']`, `graph.graph['vsrc_nodes']`, `graph.graph['instance_node_map']`
+
+**Heatmap Generation:**
+- Default: IR-drop/ground-bounce heatmaps in **mV** with inverted colormap (`RdYlGn_r`: red=high drop=bad)
+- Per-layer output: One PNG per layer (e.g., `irdrop_heatmap_VDD_layer_M1.png`)
+- Voltage mode: Use `--show-voltage` CLI flag or `show_irdrop=False` for backward compatibility
+- Stripe mode: Use `--stripe-mode` for orientation-aware stripe visualization
+
+```python
+# Programmatic usage
+solver.generate_reports(
+    output_dir='./results',
+    show_irdrop=True,      # Default: IR-drop in mV (False for voltage in V)
+    stripe_mode=False,     # True for stripe-based visualization
+)
+# Output files: irdrop_heatmap_{net}_layer_{layer}.png (or voltage_heatmap_... if show_irdrop=False)
+```
+
+```bash
+# CLI usage
+python pdn/pdn_solver.py --input graph.pkl --net VDD --output ./results
+python pdn/pdn_solver.py --input graph.pkl --net VDD --output ./results --show-voltage  # Voltage mode
+python pdn/pdn_solver.py --input graph.pkl --net VDD --output ./results --stripe-mode   # Stripe mode
+```
 
 ### `irdrop/` - Synthetic Grids (Original)
 - `generate_power_grid()`: Creates K-layer resistor mesh with `NodeID` keys
@@ -169,6 +193,49 @@ print(f"Ports: {len(hier_result.port_nodes)}")
 - `hier_result.port_voltages`: Voltage at each port (from top-grid solve)
 - `hier_result.port_currents`: Aggregated current injected at each port
 - `hier_result.aggregation_map`: `{load_node: [(port, weight, current), ...]}` for debugging
+
+### Tiled Hierarchical Solve (PDN only)
+For large PDN grids, exploit spatial locality by tiling the bottom-grid into independent subproblems:
+
+```python
+# Tiled solve with 2x2 grid and 20% halo
+tiled_result = solver.solve_hierarchical_tiled(
+    current_injections=load_currents,
+    partition_layer='M2',
+    N_x=2, N_y=2,           # Tile grid dimensions
+    halo_percent=0.2,       # Halo size as fraction of tile
+    top_k=5,
+    weighting='shortest_path',
+    n_workers=4,            # Parallel workers (default: CPU count)
+    parallel_backend='process',  # 'process' or 'thread'
+    validate_against_flat=True,  # Compare against non-tiled solve
+    progress_callback=lambda done, total, tid: print(f"Tile {tid}: {done}/{total}"),
+)
+print(f"Max diff vs flat: {tiled_result.validation_stats['max_diff']*1000:.3f} mV")
+```
+
+**Tiled Solver Parameters:**
+- `N_x, N_y`: Number of tiles in X and Y dimensions
+- `halo_percent`: Halo region size as fraction of tile dimension (0.1-0.3 typical)
+- `n_workers`: Number of parallel workers (default: `os.cpu_count()`)
+- `parallel_backend`: `'process'` (default, extensible to distributed) or `'thread'` (for debugging)
+- `validate_against_flat`: If True, compare results against non-tiled bottom-grid solve
+- `progress_callback`: `Callable[[int, int, int], None]` - called with (completed, total, tile_id)
+- `verbose`: Print timing and statistics
+
+**Tile Constraints (Automatic):**
+- Each tile must have ≥ `ceil(total_ports / (N_x × N_y))` port nodes (boundary adjusted if violated)
+- Tiles with zero current sources are merged with neighbors
+- Halo regions use port voltages from top-grid solve as Dirichlet BCs
+
+**TiledBottomGridResult Fields (extends UnifiedHierarchicalResult):**
+- `tiles`: List of `BottomGridTile` objects with bounds, core_nodes, halo_nodes, port_nodes
+- `per_tile_solve_times`: `{tile_id: time_ms}` for performance profiling
+- `halo_clip_warnings`: List of tile IDs where halo was significantly clipped at grid boundary
+- `tiling_params`: `{'N_x': int, 'N_y': int, 'halo_percent': float}`
+- `validation_stats`: `{'max_diff': float, 'mean_diff': float, 'rmse': float, ...}` if validate_against_flat=True
+
+**NOTE:** Tiled solving is only supported for PDN graphs (string node names). Synthetic grids with `NodeID` tuples raise `ValueError`.
 
 ## Testing & Validation
 
