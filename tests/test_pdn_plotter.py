@@ -235,10 +235,12 @@ class TestVoltageHeatmapGeneration(unittest.TestCase):
             anisotropic_bins=True
         )
         
-        # Check that heatmap file was created
-        heatmap_file = output_path / 'voltage_heatmap_VDD.png'
-        self.assertTrue(heatmap_file.exists())
-        self.assertGreater(heatmap_file.stat().st_size, 0)
+        # Check that at least one per-layer heatmap file was created
+        # Files are named: irdrop_heatmap_VDD_layer_M1.png, etc.
+        heatmap_files = list(output_path.glob('*_heatmap_VDD_layer_*.png'))
+        self.assertGreater(len(heatmap_files), 0, "Should create at least one layer heatmap")
+        for hf in heatmap_files:
+            self.assertGreater(hf.stat().st_size, 0)
     
     def test_generate_voltage_heatmaps_single_layer(self):
         """Test voltage heatmap generation for single layer"""
@@ -251,9 +253,9 @@ class TestVoltageHeatmapGeneration(unittest.TestCase):
             anisotropic_bins=True
         )
         
-        # Check that heatmap file was created
-        heatmap_file = output_path / 'voltage_heatmap_VDD.png'
-        self.assertTrue(heatmap_file.exists())
+        # Check that M1 layer heatmap file was created
+        heatmap_files = list(output_path.glob('*_heatmap_VDD_layer_M1.png'))
+        self.assertGreater(len(heatmap_files), 0, "Should create M1 layer heatmap")
     
     def test_generate_voltage_heatmaps_custom_bin_size(self):
         """Test voltage heatmap with custom bin size"""
@@ -266,8 +268,9 @@ class TestVoltageHeatmapGeneration(unittest.TestCase):
             anisotropic_bins=False
         )
         
-        heatmap_file = output_path / 'voltage_heatmap_VDD.png'
-        self.assertTrue(heatmap_file.exists())
+        # Check that at least one per-layer heatmap file was created
+        heatmap_files = list(output_path.glob('*_heatmap_VDD_layer_*.png'))
+        self.assertGreater(len(heatmap_files), 0, "Should create at least one layer heatmap")
 
 
 class TestCurrentHeatmapGeneration(unittest.TestCase):
@@ -349,9 +352,10 @@ class TestStripeHeatmapGeneration(unittest.TestCase):
             is_current=False
         )
         
-        # Check that heatmap file was created
-        heatmap_file = output_path / 'voltage_stripe_heatmap_VDD.png'
-        self.assertTrue(heatmap_file.exists())
+        # Check that at least one per-layer stripe heatmap file was created
+        # Files are named: irdrop_stripe_heatmap_VDD_layer_M1.png, etc.
+        heatmap_files = list(output_path.glob('*_stripe_heatmap_VDD_layer_*.png'))
+        self.assertGreater(len(heatmap_files), 0, "Should create at least one layer stripe heatmap")
     
     def test_generate_stripe_current_heatmaps(self):
         """Test stripe-based current heatmap generation"""
@@ -364,9 +368,9 @@ class TestStripeHeatmapGeneration(unittest.TestCase):
             is_current=True
         )
         
-        # Check that heatmap file was created
-        heatmap_file = output_path / 'current_stripe_heatmap_VDD.png'
-        self.assertTrue(heatmap_file.exists())
+        # Check that at least one per-layer current stripe heatmap file was created
+        heatmap_files = list(output_path.glob('current_stripe_heatmap_VDD_layer_*.png'))
+        self.assertGreater(len(heatmap_files), 0, "Should create at least one layer current stripe heatmap")
 
 
 class TestWorstNodeSelection(unittest.TestCase):

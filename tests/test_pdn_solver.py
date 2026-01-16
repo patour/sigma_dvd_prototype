@@ -406,11 +406,12 @@ class TestReportGeneration(unittest.TestCase):
         # Generate reports with heatmaps
         solver.generate_reports(output_dir=self.temp_dir, top_k=10)
         
-        # Check that heatmap files were created
-        voltage_heatmap = Path(self.temp_dir) / 'voltage_heatmap_VDD.png'
-        current_heatmap = Path(self.temp_dir) / 'current_heatmap_VDD.png'
+        # Check that heatmap files were created (per-layer files)
+        output_path = Path(self.temp_dir)
+        voltage_heatmaps = list(output_path.glob('*_heatmap_VDD_layer_*.png'))
+        current_heatmap = output_path / 'current_heatmap_VDD.png'
         
-        self.assertTrue(voltage_heatmap.exists())
+        self.assertGreater(len(voltage_heatmaps), 0, "Should create at least one voltage/irdrop heatmap")
         self.assertTrue(current_heatmap.exists())
 
 
