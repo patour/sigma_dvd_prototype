@@ -21,23 +21,19 @@ except ImportError:
     print("ERROR: NumPy is required. Install with: pip install numpy")
     raise
 
-try:
-    import networkx as nx
-except ImportError:
-    print("ERROR: NetworkX is required. Install with: pip install networkx")
-    raise
+from core.rx_graph import RustworkxMultiDiGraphWrapper
 
 
 class PDNPlotter:
     """
     Visualization generator for PDN analysis results.
-    
+
     Generates voltage and current heatmaps in multiple modes:
     - 2D grid mode: Traditional rectangular binning with anisotropic support
     - Stripe mode: Orientation-aware stripe visualization with consolidation
     """
-    
-    def __init__(self, graph: nx.MultiDiGraph, 
+
+    def __init__(self, graph: RustworkxMultiDiGraphWrapper,
                  net_connectivity: Dict[str, List[str]],
                  logger: Optional[logging.Logger] = None):
         """
@@ -84,7 +80,7 @@ class PDNPlotter:
         for node in net_nodes[:10]:  # Sample first 10 nodes
             if node == '0':
                 continue
-            node_data = self.graph.nodes.get(node)
+            node_data = self.graph.nodes_dict.get(node)
             if node_data:
                 net_type = node_data.get('net_type', '').upper()
                 if 'VSS' in net_type or 'GND' in net_type:
@@ -171,7 +167,7 @@ class PDNPlotter:
             if node == '0':
                 continue
             
-            node_data = self.graph.nodes.get(node)
+            node_data = self.graph.nodes_dict.get(node)
             if not node_data or node_data.get('layer') != layer_id:
                 continue
             
@@ -185,7 +181,7 @@ class PDNPlotter:
                 if neighbor not in net_nodes_set or neighbor == '0':
                     continue
                 
-                neighbor_data = self.graph.nodes.get(neighbor)
+                neighbor_data = self.graph.nodes_dict.get(neighbor)
                 if not neighbor_data or neighbor_data.get('layer') != layer_id:
                     continue
                 
@@ -528,7 +524,7 @@ class PDNPlotter:
                 if n == '0':
                     continue
                 
-                d = self.graph.nodes[n]
+                d = self.graph.nodes_dict[n]
                 
                 # Skip package nodes (no coordinates)
                 if d.get('is_package', False):
@@ -709,7 +705,7 @@ class PDNPlotter:
             if node == '0':
                 continue
             
-            node_data = self.graph.nodes[node]
+            node_data = self.graph.nodes_dict[node]
             
             # Skip package nodes (no coordinates)
             if node_data.get('is_package', False):
@@ -913,7 +909,7 @@ class PDNPlotter:
             for node in net_nodes_set:
                 if node == '0':
                     continue
-                node_data = self.graph.nodes[node]
+                node_data = self.graph.nodes_dict[node]
                 if node_data.get('is_package', False):
                     continue
                 
@@ -955,7 +951,7 @@ class PDNPlotter:
             for n in net_nodes:
                 if n == '0':
                     continue
-                d = self.graph.nodes[n]
+                d = self.graph.nodes_dict[n]
                 if d.get('is_package', False):
                     continue
                 

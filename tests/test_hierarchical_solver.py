@@ -114,7 +114,7 @@ class TestDecomposeAtLayer(unittest.TestCase):
         _, _, ports, _ = model._decompose_at_layer(partition_layer)
 
         for port in ports:
-            layer = getattr(port, 'layer', G.nodes[port].get('layer', 0))
+            layer = getattr(port, 'layer', G.nodes_dict[port].get('layer', 0))
             self.assertEqual(layer, partition_layer, 
                            f"Port {port} should be at layer {partition_layer}")
 

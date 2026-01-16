@@ -47,18 +47,15 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 
 try:
-    import networkx as nx
-except ImportError:
-    print("ERROR: NetworkX is required. Install with: pip install networkx")
-    sys.exit(1)
-
-try:
     import numpy as np
     import scipy.sparse as sp
     import scipy.sparse.linalg as spla
 except ImportError:
     print("ERROR: NumPy and SciPy are required. Install with: pip install numpy scipy")
     sys.exit(1)
+
+from core.rx_graph import RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper
+from core.rx_algorithms import connected_components
 
 # Import constants from pdn_parser
 try:
@@ -133,7 +130,7 @@ class PDNSolver:
     Voltage sources are treated as boundary conditions with fixed voltages.
     """
     
-    def __init__(self, graph: nx.MultiDiGraph, solver: str = 'direct',
+    def __init__(self, graph: RustworkxMultiDiGraphWrapper, solver: str = 'direct',
                  tolerance: float = 1e-6, max_iterations: int = 10000,
                  verbose: bool = False, net_filter: Optional[str] = None,
                  anisotropic_bins: bool = True, bin_aspect_ratio: int = 50,
@@ -299,7 +296,7 @@ class PDNSolver:
         
         return stats
     
-    def _extract_net_subgraph(self, net_name: str, net_nodes: Set[str]) -> nx.MultiDiGraph:
+    def _extract_net_subgraph(self, net_name: str, net_nodes: Set[str]) -> RustworkxMultiDiGraphWrapper:
         """Extract subgraph containing only nodes and resistors for this net"""
         # Create subgraph with net nodes
         net_graph = self.graph.subgraph(net_nodes).copy()
@@ -318,15 +315,15 @@ class PDNSolver:
         
         return net_graph
     
-    def _detect_and_remove_islands(self, net_graph: nx.MultiDiGraph, net_name: str) -> Dict:
+    def _detect_and_remove_islands(self, net_graph: RustworkxMultiDiGraphWrapper, net_name: str) -> Dict:
         """
         Detect disconnected islands, remove floating islands, warn about islands with current sources.
         """
         # Convert to undirected for connectivity analysis
         undirected = net_graph.to_undirected()
-        
+
         # Find connected components
-        components = list(nx.connected_components(undirected))
+        components = connected_components(undirected)
         
         if len(components) == 1:
             self.logger.debug("Net is fully connected (1 component)")
@@ -415,7 +412,7 @@ class PDNSolver:
             'isources_removed': total_isources_removed
         }
     
-    def _identify_voltage_sources(self, net_graph: nx.MultiDiGraph, net_name: str) -> Tuple[Set[str], Dict[str, float]]:
+    def _identify_voltage_sources(self, net_graph: RustworkxMultiDiGraphWrapper, net_name: str) -> Tuple[Set[str], Dict[str, float]]:
         """Identify voltage source nodes and their voltage values"""
         vsrc_nodes = set()
         vsrc_voltages = {}
@@ -466,7 +463,7 @@ class PDNSolver:
                 return d.get('value', 0.0)
         
         # Try to get from parameters
-        net_type = self.graph.nodes[node].get('net_type', '').upper()
+        net_type = self.graph.nodes_dict[node].get('net_type', '').upper()
         if net_type in self.parameters:
             try:
                 return float(self.parameters[net_type])
@@ -475,7 +472,7 @@ class PDNSolver:
         
         return None
     
-    def _build_system_matrices(self, net_graph: nx.MultiDiGraph, free_nodes: List[str],
+    def _build_system_matrices(self, net_graph: RustworkxMultiDiGraphWrapper, free_nodes: List[str],
                                 node_to_idx: Dict[str, int], vsrc_nodes: Set[str],
                                 vsrc_voltages: Dict[str, float]) -> Tuple[sp.csr_matrix, np.ndarray, Dict]:
         """
@@ -685,15 +682,15 @@ class PDNSolver:
         """Store computed voltages in graph node attributes"""
         # Store free node voltages
         for i, node in enumerate(free_nodes):
-            self.graph.nodes[node]['voltage'] = float(V_free[i])
+            self.graph.nodes_dict[node]['voltage'] = float(V_free[i])
         
         # Store vsrc node voltages
         for node, voltage in vsrc_voltages.items():
-            self.graph.nodes[node]['voltage'] = voltage
+            self.graph.nodes_dict[node]['voltage'] = voltage
         
         # Ground node is always 0V
         if '0' in self.graph:
-            self.graph.nodes['0']['voltage'] = 0.0
+            self.graph.nodes_dict['0']['voltage'] = 0.0
     
     def _get_nominal_voltage(self, net_name: str, vsrc_voltages: Dict[str, float]) -> float:
         """Get nominal voltage for this net"""
@@ -712,7 +709,7 @@ class PDNSolver:
         # Default
         return 1.0
     
-    def _compute_net_statistics(self, net_name: str, net_graph: nx.MultiDiGraph,
+    def _compute_net_statistics(self, net_name: str, net_graph: RustworkxMultiDiGraphWrapper,
                                 free_nodes: List[str], vsrc_nodes: Set[str],
                                 g_stats: Dict, island_stats: Dict,
                                 V_free: np.ndarray, nominal_voltage: float,
@@ -879,7 +876,7 @@ class PDNSolver:
             if node == '0':
                 continue
             
-            node_attrs = self.graph.nodes[node]
+            node_attrs = self.graph.nodes_dict[node]
             voltage = node_attrs.get('voltage')
             if voltage is None:
                 continue
@@ -999,9 +996,11 @@ Examples:
             with open(args.input, 'rb') as f:
                 graph = pickle.load(f)
         elif args.input.endswith('.graphml'):
-            graph = nx.read_graphml(args.input)
+            print(f"ERROR: GraphML import not supported with rustworkx backend")
+            print("Use .pkl format instead")
+            return 1
         else:
-            print(f"ERROR: Unsupported input format. Use .pkl or .graphml")
+            print(f"ERROR: Unsupported input format. Use .pkl")
             return 1
             
     elif args.netlist_dir:

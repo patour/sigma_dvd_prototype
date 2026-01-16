@@ -58,11 +58,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from collections import defaultdict
 
-try:
-    import networkx as nx
-except ImportError:
-    print("ERROR: NetworkX is required. Install with: pip install networkx")
-    sys.exit(1)
+from core.rx_graph import RustworkxMultiDiGraphWrapper
+from core.rx_algorithms import contract_nodes, node_connected_component
 
 try:
     from tqdm import tqdm
@@ -259,11 +256,11 @@ class SpiceLineReader:
 
 class GraphBuilder:
     """
-    Builds and manages the NetworkX MultiDiGraph representation of the PDN.
+    Builds and manages the rustworkx MultiDiGraph representation of the PDN.
     """
-    
+
     def __init__(self, validate: bool = False, strict: bool = False, net_filter: Optional[str] = None):
-        self.graph = nx.MultiDiGraph()
+        self.graph = RustworkxMultiDiGraphWrapper()
         self.validate = validate
         self.strict = strict
         self.net_filter = net_filter.lower() if net_filter else None  # Store lowercase for case-insensitive comparison
@@ -381,7 +378,7 @@ class GraphBuilder:
             self._extract_coordinates(name)
         else:
             # Update existing node attributes
-            self.graph.nodes[name].update(attrs)
+            self.graph.nodes_dict[name].update(attrs)
             
     def _extract_coordinates(self, node_name: str):
         """
@@ -395,8 +392,8 @@ class GraphBuilder:
             x, y, layer = int(match.group(1)), int(match.group(2)), match.group(3)
             coords = {'x': x, 'y': y, 'layer': layer}
             # Also update graph if node exists
-            if node_name in self.graph.nodes:
-                self.graph.nodes[node_name].update(coords)
+            if node_name in self.graph:
+                self.graph.nodes_dict[node_name].update(coords)
             return coords
         
         # Fallback to 2D pattern: X_Y
@@ -405,8 +402,8 @@ class GraphBuilder:
             x, y = int(match.group(1)), int(match.group(2))
             coords = {'x': x, 'y': y}
             # Also update graph if node exists
-            if node_name in self.graph.nodes:
-                self.graph.nodes[node_name].update(coords)
+            if node_name in self.graph:
+                self.graph.nodes_dict[node_name].update(coords)
             return coords
         
         return {}
@@ -633,7 +630,7 @@ class GraphBuilder:
         """Mark node as boundary node (needs stitching)"""
         self.boundary_nodes.add(name)
         if name in self.graph:
-            self.graph.nodes[name]['is_boundary'] = True
+            self.graph.nodes_dict[name]['is_boundary'] = True
         self.stats.boundary_nodes += 1
         
     def stitch_nodes(self, name1: str, name2: str):
@@ -644,10 +641,10 @@ class GraphBuilder:
         if name1 not in self.graph or name2 not in self.graph:
             self.logger.warning(f"Cannot stitch nodes {name1} and {name2}: one or both not found")
             return
-            
+
         # Merge name2 into name1
         try:
-            self.graph = nx.contracted_nodes(self.graph, name1, name2, self_loops=False)
+            contract_nodes(self.graph, name1, name2, self_loops=False)
             self.merged_nodes.append((name2, name1, 0))  # 0 = stitch merge type
             self.logger.debug(f"Stitched nodes: {name2} -> {name1}")
         except Exception as e:
@@ -655,12 +652,12 @@ class GraphBuilder:
             
     def validate_node_uniqueness(self):
         """Check for node name collisions and report detailed errors"""
-        # This is mostly already handled by NetworkX, but we can add custom checks
+        # This is mostly already handled by the wrapper, but we can add custom checks
         node_sources = defaultdict(list)
-        
+
         for node in self.graph.nodes():
-            tile_id = self.graph.nodes[node].get('tile_id')
-            is_package = self.graph.nodes[node].get('is_package')
+            tile_id = self.graph.nodes_dict[node].get('tile_id')
+            is_package = self.graph.nodes_dict[node].get('is_package')
             source = f"tile_{tile_id}" if tile_id else ('package' if is_package else 'main')
             node_sources[node].append(source)
         
@@ -782,9 +779,9 @@ class NetlistParser:
         if not self.main_netlist.exists():
             raise FileNotFoundError(f"Main netlist file not found: {self.main_netlist}")
             
-    def parse(self) -> nx.MultiDiGraph:
+    def parse(self) -> RustworkxMultiDiGraphWrapper:
         """
-        Main parsing entry point. Returns populated NetworkX graph.
+        Main parsing entry point. Returns populated rustworkx graph wrapper.
         """
         self.logger.info(f"Parsing PDN netlist from: {self.netlist_dir}")
         
@@ -1053,7 +1050,7 @@ class NetlistParser:
                 net_type = self.builder._get_node_net(node)
                 if net_type:
                     # Update node attributes and lowercase map for filtering
-                    self.builder.graph.nodes[node]['net_type'] = net_type
+                    self.builder.graph.nodes_dict[node]['net_type'] = net_type
                     self.builder.node_net_map_lower[node] = net_type.lower()
         
         self.logger.debug(f"Union-find processing complete - net types propagated to package nodes")
@@ -1095,8 +1092,8 @@ class NetlistParser:
             net_type = d.get('net_type')
             if not net_type:
                 # Try to get from node attributes (set by union-find)
-                u_net = self.builder.graph.nodes[u].get('net_type') if u != '0' else None
-                v_net = self.builder.graph.nodes[v].get('net_type') if v != '0' else None
+                u_net = self.builder.graph.nodes_dict[u].get('net_type') if u != '0' else None
+                v_net = self.builder.graph.nodes_dict[v].get('net_type') if v != '0' else None
                 net_type = u_net or v_net
             
             if net_type:
@@ -1765,9 +1762,10 @@ class NetlistParser:
                 
         # BFS from grounded nodes
         connected_nodes = set()
+        undirected_graph = self.builder.graph.to_undirected()
         for node in grounded_nodes:
             if node not in connected_nodes:
-                component = nx.node_connected_component(self.builder.graph.to_undirected(), node)
+                component = node_connected_component(undirected_graph, node)
                 connected_nodes.update(component)
                 
         # Find floating nodes
@@ -1850,7 +1848,7 @@ class NetlistParser:
         # Step 4: Mark nodes in graph
         for node in vsrc_nodes:
             if node in self.builder.graph:
-                self.builder.graph.nodes[node]['is_vsrc_node'] = True
+                self.builder.graph.nodes_dict[node]['is_vsrc_node'] = True
         
         # Update statistics
         self.builder.stats.vsrc_nodes = len(vsrc_nodes)
@@ -1916,8 +1914,8 @@ class NetlistParser:
             else:
                 # Both are die nodes or ground, get their layers
                 # Treat node '0' (ground) as having no layer - use the other node's layer
-                u_layer = self.builder.graph.nodes[u].get('layer') if u in self.builder.graph and u != '0' else None
-                v_layer = self.builder.graph.nodes[v].get('layer') if v in self.builder.graph and v != '0' else None
+                u_layer = self.builder.graph.nodes_dict[u].get('layer') if u in self.builder.graph and u != '0' else None
+                v_layer = self.builder.graph.nodes_dict[v].get('layer') if v in self.builder.graph and v != '0' else None
                 
                 # Handle ground node cases
                 if u == '0':
@@ -2268,17 +2266,18 @@ Examples:
     # Save output
     if args.output:
         output_path = Path(args.output)
-        
+
         if output_path.suffix == '.graphml':
-            nx.write_graphml(graph, str(output_path))
-            print(f"Graph saved to: {output_path}")
+            print(f"ERROR: GraphML export not supported with rustworkx backend")
+            print("Use .pkl format instead")
+            sys.exit(1)
         elif output_path.suffix == '.pkl':
             with open(output_path, 'wb') as f:
                 pickle.dump(graph, f)
             print(f"Graph saved to: {output_path}")
         else:
             print(f"ERROR: Unsupported output format: {output_path.suffix}")
-            print("Supported formats: .graphml, .pkl")
+            print("Supported formats: .pkl")
             sys.exit(1)
     
     # Print summary

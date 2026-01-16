@@ -22,12 +22,14 @@ The reduced matrix is cached for reuse across multiple stimulus solves.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple, Set, Optional
+from typing import Dict, List, Sequence, Tuple, Set, Optional, Union
 
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
-import networkx as nx
+import rustworkx as rx
+
+from core.rx_graph import RustworkxGraphWrapper
 
 
 @dataclass
@@ -86,7 +88,7 @@ class ReducedSystem:
 class PowerGridModel:
     """Wraps the graph and builds sparse matrices for IR-drop solving."""
 
-    def __init__(self, G: nx.Graph, pad_nodes: Sequence, vdd: float = 1.0):
+    def __init__(self, G: RustworkxGraphWrapper, pad_nodes: Sequence, vdd: float = 1.0):
         self.G = G
         self.pad_nodes = list(pad_nodes)
         self.vdd = float(vdd)
@@ -238,7 +240,7 @@ class PowerGridModel:
         # Collect all layers present in the graph
         all_layers = set()
         for node in self.G.nodes():
-            layer = getattr(node, 'layer', self.G.nodes[node].get('layer', 0))
+            layer = getattr(node, 'layer', self.G.nodes_dict[node].get('layer', 0))
             all_layers.add(layer)
 
         max_layer = max(all_layers)
@@ -258,7 +260,7 @@ class PowerGridModel:
         bottom_grid_nodes: Set = set()
 
         for node in self.G.nodes():
-            layer = getattr(node, 'layer', self.G.nodes[node].get('layer', 0))
+            layer = getattr(node, 'layer', self.G.nodes_dict[node].get('layer', 0))
             if layer >= partition_layer:
                 top_grid_nodes.add(node)
             else:
@@ -269,8 +271,8 @@ class PowerGridModel:
         via_edges: List[Tuple] = []
 
         for u, v, data in self.G.edges(data=True):
-            u_layer = getattr(u, 'layer', self.G.nodes[u].get('layer', 0))
-            v_layer = getattr(v, 'layer', self.G.nodes[v].get('layer', 0))
+            u_layer = getattr(u, 'layer', self.G.nodes_dict[u].get('layer', 0))
+            v_layer = getattr(v, 'layer', self.G.nodes_dict[v].get('layer', 0))
 
             # Check if this edge connects M_p and M_p-1
             if (u_layer == partition_layer and v_layer == partition_layer - 1):
@@ -478,19 +480,39 @@ class PowerGridModel:
         if source_node not in subgraph:
             return {t: float('inf') for t in target_nodes}
 
-        # Use networkx's single_source_dijkstra with resistance as weight
+        # Use rustworkx's dijkstra with resistance as weight
         try:
+            source_idx = subgraph.get_index(source_node)
+            if source_idx is None:
+                return {t: float('inf') for t in target_nodes}
+
+            # Define weight function that extracts resistance from edge data
+            def weight_fn(edge_data):
+                return edge_data.get('resistance', 1.0) if edge_data else 1.0
+
             # Get shortest path lengths (by resistance) from source to all reachable nodes
-            distances = nx.single_source_dijkstra_path_length(
-                subgraph, source_node, weight='resistance'
+            # Returns dict mapping target_idx -> distance
+            distances_by_idx = rx.dijkstra_shortest_path_lengths(
+                subgraph._graph, source_idx, weight_fn
             )
-        except nx.NetworkXError:
+
+            # Convert indices back to node keys
+            distances = {}
+            for target_idx, dist in distances_by_idx.items():
+                target_node = subgraph.get_node(target_idx)
+                if target_node is not None:
+                    distances[target_node] = dist
+
+        except Exception:
             return {t: float('inf') for t in target_nodes}
 
         # Extract distances to target nodes
         results = {}
         for target in target_nodes:
-            if target in distances:
+            if target == source_node:
+                # Distance from node to itself is always 0
+                results[target] = 0.0
+            elif target in distances:
                 results[target] = distances[target]
             else:
                 results[target] = float('inf')

@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union, TYPE_CHECKING
 
-import networkx as nx
+if TYPE_CHECKING:
+    from .rx_graph import RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper
 
 
 # Type alias for coordinates
@@ -89,11 +90,11 @@ class NodeInfoExtractor:
     # Pattern for 2D node names: X_Y (e.g., "1000_2000")
     PDN_2D_PATTERN = re.compile(r'^(\d+)_(\d+)$')
 
-    def __init__(self, graph: nx.Graph):
+    def __init__(self, graph: "RustworkxGraphWrapper | RustworkxMultiDiGraphWrapper"):
         """Initialize extractor with a graph.
 
         Args:
-            graph: NetworkX graph (Graph or MultiDiGraph)
+            graph: Rustworkx graph wrapper (undirected or directed)
         """
         self.graph = graph
         self._cache: Dict[Any, UnifiedNodeInfo] = {}
@@ -150,7 +151,7 @@ class NodeInfoExtractor:
             UnifiedNodeInfo with extracted data.
         """
         # Get node data from graph if available
-        node_data = self.graph.nodes.get(node, {})
+        node_data = self.graph.nodes_dict.get(node, {})
 
         # Try NodeID-style (synthetic grids) - has layer and idx attributes
         if hasattr(node, 'layer') and hasattr(node, 'idx'):

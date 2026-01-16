@@ -319,36 +319,36 @@ class TestGridPartitioner(unittest.TestCase):
     
     def test_cross_partition_requires_separator(self):
         """Verify nodes in different partitions require separator traversal."""
-        import networkx as nx
+        from core.rx_algorithms import has_path
         G, loads, pads = build_test_grid()
         partitioner = GridPartitioner(G, loads, pads, seed=42)
         result = partitioner.partition(P=2)
-        
+
         # Get interior nodes (excluding separators and pads)
         pad_set = set(pads)
         p0_interior = result.partitions[0].interior_nodes - result.separator_nodes - pad_set
         p1_interior = result.partitions[1].interior_nodes - result.separator_nodes - pad_set
-        
+
         if not p0_interior or not p1_interior:
             self.skipTest("Empty interior in at least one partition")
-        
+
         # Create subgraph WITHOUT separators or pads
         nodes_without_seps = set(G.nodes()) - result.separator_nodes - pad_set
         G_no_seps = G.subgraph(nodes_without_seps)
-        
+
         # Pick representative nodes from each partition
         node_p0 = next(iter(p0_interior))
         node_p1 = next(iter(p1_interior))
-        
+
         # Verify no path exists without separators
         self.assertFalse(
-            nx.has_path(G_no_seps, node_p0, node_p1),
+            has_path(G_no_seps, node_p0, node_p1),
             f"Path exists from partition 0 to 1 without traversing separators"
         )
-        
+
         # Verify path DOES exist in full graph (with separators)
         self.assertTrue(
-            nx.has_path(G, node_p0, node_p1),
+            has_path(G, node_p0, node_p1),
             f"No path exists even with separators (graph disconnected)"
         )
 
@@ -385,7 +385,7 @@ class TestPartitionDataStructures(unittest.TestCase):
         layer_counts = {}
         for layer in range(3):
             layer_counts[layer] = len([n for n in result.separator_nodes 
-                                        if G.nodes[n].get('layer', 0) == layer])
+                                        if G.nodes_dict[n].get('layer', 0) == layer])
         
         # Y-axis should have ZERO layer-0 separators
         self.assertEqual(layer_counts[0], 0,
@@ -419,7 +419,7 @@ class TestPartitionDataStructures(unittest.TestCase):
             for partition in result.partitions:
                 interior = partition.interior_nodes - result.separator_nodes - pad_set
                 # Verify we have some layer-0 nodes that could be disconnected
-                layer0_nodes = [n for n in interior if G.nodes[n].get('layer', 0) == 0]
+                layer0_nodes = [n for n in interior if G.nodes_dict[n].get('layer', 0) == 0]
                 # This is the expected behavior: layer-0 nodes form separate stripe segments
     
     def test_separators_assigned_by_adjacency(self):
@@ -524,7 +524,7 @@ class TestPartitionDataStructures(unittest.TestCase):
         layer_counts = {}
         for layer in range(3):
             layer_counts[layer] = len([n for n in result.separator_nodes 
-                                        if G.nodes[n].get('layer', 0) == layer])
+                                        if G.nodes_dict[n].get('layer', 0) == layer])
         
         # X-axis should have layer-0 separators (via nodes)
         self.assertGreater(layer_counts[0], 0,

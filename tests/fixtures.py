@@ -5,12 +5,12 @@ edge case testing scenarios that cannot be triggered with netlist_small.
 """
 
 from typing import Dict, List, Set, Tuple, Any
-import networkx as nx
+from core.rx_graph import RustworkxMultiDiGraphWrapper
 
 
 def create_minimal_pdn_graph(
     scenario: str
-) -> Tuple[nx.MultiDiGraph, List[str], Dict[str, float]]:
+) -> Tuple[RustworkxMultiDiGraphWrapper, List[str], Dict[str, float]]:
     """Create minimal PDN graph for specific edge case testing.
 
     Args:
@@ -37,9 +37,9 @@ def create_minimal_pdn_graph(
         raise ValueError(f"Unknown scenario: {scenario}")
 
 
-def _create_basic_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[str, float]]:
+def _create_basic_graph() -> Tuple[RustworkxMultiDiGraphWrapper, List[str], Dict[str, float]]:
     """Create basic 3x3 M1 + 2x2 M2 grid for simple tests."""
-    G = nx.MultiDiGraph()
+    G = RustworkxMultiDiGraphWrapper()
     
     # Add ground node
     G.add_node('0')
@@ -126,7 +126,7 @@ def _create_basic_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[str, float]]
     return G, [pad_node], load_currents
 
 
-def _create_tile_merging_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[str, float]]:
+def _create_tile_merging_graph() -> Tuple[RustworkxMultiDiGraphWrapper, List[str], Dict[str, float]]:
     """Create graph where 2x2 tiling produces tiles with 0 loads.
     
     Structure:
@@ -135,7 +135,7 @@ def _create_tile_merging_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[str, 
     - Loads ONLY in bottom-left quadrant (x <= 2000, y <= 2000)
     - With 2x2 tiling, tiles (1,0), (0,1), (1,1) have 0 loads -> triggers merging
     """
-    G = nx.MultiDiGraph()
+    G = RustworkxMultiDiGraphWrapper()
     G.add_node('0')
     
     # M1 layer: 4x4 grid
@@ -221,7 +221,7 @@ def _create_tile_merging_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[str, 
     return G, [pad_node], load_currents
 
 
-def _create_path_expansion_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[str, float]]:
+def _create_path_expansion_graph() -> Tuple[RustworkxMultiDiGraphWrapper, List[str], Dict[str, float]]:
     """Create graph with sparse vias causing locally disconnected core nodes.
     
     Structure:
@@ -231,7 +231,7 @@ def _create_path_expansion_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[str
     - Load at (0, 0) M1 which is far from only via
     - With small halo, core node (0,0) may be locally disconnected from port
     """
-    G = nx.MultiDiGraph()
+    G = RustworkxMultiDiGraphWrapper()
     G.add_node('0')
     
     # M1 layer: 4x4 grid
@@ -313,13 +313,13 @@ def _create_path_expansion_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[str
     return G, [pad_node], load_currents
 
 
-def _create_severe_halo_clip_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[str, float]]:
+def _create_severe_halo_clip_graph() -> Tuple[RustworkxMultiDiGraphWrapper, List[str], Dict[str, float]]:
     """Create 6x6 grid where 3x3 tiling severely clips corner halos.
     
     With 3x3 tiling and 50% halo, corner tiles have only 25% of expected
     halo area (clipped on two sides), triggering severe clip warning.
     """
-    G = nx.MultiDiGraph()
+    G = RustworkxMultiDiGraphWrapper()
     G.add_node('0')
     
     # M1 layer: 6x6 grid
@@ -382,7 +382,7 @@ def _create_severe_halo_clip_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[s
         ('4000_4000_M1', '5000_5000_M2'),  # Center via (approximate)
     ]
     for m1, m2 in via_connections:
-        if m1 in G.nodes() and m2 in G.nodes():
+        if m1 in G and m2 in G:
             G.add_edge(m1, m2, type='R', value=R_VIA)
             G.add_edge(m2, m1, type='R', value=R_VIA)
     
@@ -410,14 +410,14 @@ def _create_severe_halo_clip_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[s
     return G, [pad_node], load_currents
 
 
-def create_floating_island_graph() -> Tuple[nx.MultiDiGraph, List[str], Dict[str, float]]:
+def create_floating_island_graph() -> Tuple[RustworkxMultiDiGraphWrapper, List[str], Dict[str, float]]:
     """Create graph with an isolated floating island (no path to pad).
     
     Returns:
         (graph, pad_nodes, load_currents) - note that island loads are included
         but will be filtered out by the model's island detection.
     """
-    G = nx.MultiDiGraph()
+    G = RustworkxMultiDiGraphWrapper()
     G.add_node('0')
     
     # Main connected grid: 3x3 M1 + 2x2 M2

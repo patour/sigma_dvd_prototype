@@ -110,10 +110,10 @@ class TestGraphBuilder(unittest.TestCase):
     def test_add_node(self):
         """Test node addition with attributes"""
         self.builder.add_node("n1", x=1000, y=2000, layer="M1")
-        self.assertIn("n1", self.builder.graph.nodes)
-        self.assertEqual(self.builder.graph.nodes["n1"]["x"], 1000)
-        self.assertEqual(self.builder.graph.nodes["n1"]["y"], 2000)
-        self.assertEqual(self.builder.graph.nodes["n1"]["layer"], "M1")
+        self.assertIn("n1", self.builder.graph)
+        self.assertEqual(self.builder.graph.nodes_dict["n1"]["x"], 1000)
+        self.assertEqual(self.builder.graph.nodes_dict["n1"]["y"], 2000)
+        self.assertEqual(self.builder.graph.nodes_dict["n1"]["layer"], "M1")
     
     def test_coordinate_extraction(self):
         """Test coordinate extraction from node names"""
@@ -132,9 +132,9 @@ class TestGraphBuilder(unittest.TestCase):
     def test_add_resistor(self):
         """Test resistor element addition"""
         self.builder.add_element('R', 'n1', 'n2', 0.1, 'R1')
-        
-        self.assertIn('n1', self.builder.graph.nodes)
-        self.assertIn('n2', self.builder.graph.nodes)
+
+        self.assertIn('n1', self.builder.graph)
+        self.assertIn('n2', self.builder.graph)
         self.assertEqual(self.builder.stats.resistors, 1)
         
         edges = list(self.builder.graph.edges(data=True))
@@ -221,8 +221,8 @@ class TestNetlistParser(unittest.TestCase):
         """Test node coordinate and layer attributes"""
         # Check a known node from test netlist
         node = '1000_1000_M1'
-        if node in self.graph.nodes:
-            attrs = self.graph.nodes[node]
+        if node in self.graph:
+            attrs = self.graph.nodes_dict[node]
             self.assertEqual(attrs.get('x'), 1000)
             self.assertEqual(attrs.get('y'), 1000)
             self.assertEqual(attrs.get('layer'), 'M1')

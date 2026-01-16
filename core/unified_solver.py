@@ -19,13 +19,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import heapq
-import networkx as nx
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 from .unified_model import UnifiedPowerGridModel, UnifiedReducedSystem, LayerID
 from .node_adapter import NodeInfoExtractor
+from .rx_graph import RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper
+from .rx_algorithms import dijkstra_path_length, NetworkXNoPath, NodeNotFound
 
 # Logger for tiling warnings
 logger = logging.getLogger(__name__)
@@ -979,7 +980,7 @@ class UnifiedIRDropSolver:
             if u not in node_set or v not in node_set:
                 continue
 
-            if isinstance(graph, nx.MultiDiGraph):
+            if isinstance(graph, RustworkxMultiDiGraphWrapper):
                 if edge_data.get('type') != 'R':
                     continue
                 R = float(edge_data.get('value', 0.0))
@@ -1193,7 +1194,7 @@ class UnifiedIRDropSolver:
 
         for u, v, edge_data in subgraph.edges(data=True):
             # Get resistance based on graph type
-            if isinstance(self.model.graph, nx.MultiDiGraph):
+            if isinstance(self.model.graph, RustworkxMultiDiGraphWrapper):
                 # PDN: R type edges
                 if edge_data.get('type') == 'R':
                     R = float(edge_data.get('value', 0.0))
@@ -1301,7 +1302,7 @@ class UnifiedIRDropSolver:
 
     def _shortest_path_resistance(
         self,
-        subgraph: nx.Graph,
+        subgraph: "RustworkxGraphWrapper | RustworkxMultiDiGraphWrapper",
         source: Any,
         target: Any,
     ) -> Optional[float]:
@@ -1310,7 +1311,7 @@ class UnifiedIRDropSolver:
         Uses Dijkstra with edge resistance as weight.
 
         Args:
-            subgraph: Graph to search in
+            subgraph: Graph wrapper to search in
             source: Source node
             target: Target node
 
@@ -1323,9 +1324,11 @@ class UnifiedIRDropSolver:
         if source not in subgraph or target not in subgraph:
             return None
 
-        # Build weight function
+        # Build weight function (receives u, v, data but our dijkstra_path_length only passes data)
+        is_pdn = isinstance(subgraph, RustworkxMultiDiGraphWrapper)
+
         def get_weight(u, v, data):
-            if isinstance(subgraph, nx.MultiDiGraph):
+            if is_pdn:
                 # For MultiDiGraph, data is already the edge dict
                 R = data.get('value', 0.0) if data.get('type') == 'R' else float('inf')
                 if self.model.resistance_unit_kohm:
@@ -1336,10 +1339,10 @@ class UnifiedIRDropSolver:
                 return R if R > 0 else float('inf')
 
         try:
-            # Use networkx shortest path with custom weight
-            length = nx.dijkstra_path_length(subgraph, source, target, weight=get_weight)
+            # Use rustworkx-based shortest path with custom weight
+            length = dijkstra_path_length(subgraph, source, target, weight_fn=get_weight)
             return length if length < float('inf') else None
-        except (nx.NetworkXNoPath, nx.NodeNotFound):
+        except (NetworkXNoPath, NodeNotFound):
             return None
 
     # ========================================================================
@@ -1866,7 +1869,7 @@ class UnifiedIRDropSolver:
         from collections import deque
         
         graph = self.model.graph
-        is_pdn = isinstance(graph, nx.MultiDiGraph)
+        is_pdn = isinstance(graph, RustworkxMultiDiGraphWrapper)
         
         # ================================================================
         # First: Find global floating islands in the bottom-grid
@@ -2173,7 +2176,7 @@ class UnifiedIRDropSolver:
         """
         args_list = []
         graph = self.model.graph
-        is_pdn = isinstance(graph, nx.MultiDiGraph)
+        is_pdn = isinstance(graph, RustworkxMultiDiGraphWrapper)
         r_unit_kohm = self.model.resistance_unit_kohm
 
         for tile in tiles:

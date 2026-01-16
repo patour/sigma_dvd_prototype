@@ -3,10 +3,10 @@
 import math
 import unittest
 
-import networkx as nx
 import numpy as np
 
 from generate_power_grid import generate_power_grid, NodeID
+from core.rx_graph import RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper
 from core.node_adapter import NodeInfoExtractor, UnifiedNodeInfo
 from core.edge_adapter import EdgeInfoExtractor, UnifiedEdgeInfo, ElementType
 from core.unified_model import UnifiedPowerGridModel, GridSource
@@ -68,7 +68,7 @@ class TestNodeAdapter(unittest.TestCase):
 
     def test_string_node_parsing(self):
         """Test parsing of string node names."""
-        G = nx.Graph()
+        G = RustworkxGraphWrapper()
         G.add_node("1000_2000_M1")
         G.add_node("500_750")
 
@@ -152,20 +152,21 @@ class TestUnifiedModel(unittest.TestCase):
     def test_pdn_factory_missing_voltage_error(self):
         """Test that create_model_from_pdn raises ValueError when voltage cannot be determined."""
         # Create a minimal PDN-like graph without voltage parameters
-        G = nx.MultiDiGraph()
+        from core.rx_graph import RustworkxMultiDiGraphWrapper
+        G = RustworkxMultiDiGraphWrapper()
         G.add_node("node1_M1")
         G.add_node("node2_M1")
         G.add_edge("node1_M1", "node2_M1", type='R', value=1.0)
-        
+
         # Set up minimal net connectivity but NO voltage parameters
         G.graph['net_connectivity'] = {'VDD': ['node1_M1', 'node2_M1']}
         G.graph['vsrc_nodes'] = {'node1_M1'}  # Has a vsrc node but no voltage info
         G.graph['parameters'] = {}  # Empty - no voltage specified
-        
+
         # Should raise ValueError because voltage cannot be determined
         with self.assertRaises(ValueError) as ctx:
             create_model_from_pdn(G, 'VDD')
-        
+
         self.assertIn("Could not determine nominal voltage", str(ctx.exception))
         self.assertIn("VDD", str(ctx.exception))
 

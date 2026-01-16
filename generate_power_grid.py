@@ -21,10 +21,11 @@ import math
 import random
 import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
-import networkx as nx
 import matplotlib.pyplot as plt
+
+from core.rx_graph import RustworkxGraphWrapper
 
 
 @dataclass(frozen=True)
@@ -45,10 +46,10 @@ def generate_power_grid(
     Ly: float = 1.0,
     seed: int | None = 42,
     plot: bool = True,
-):
+) -> Tuple[RustworkxGraphWrapper, Dict[NodeID, float], List[NodeID]]:
     """
     Returns:
-      G: nx.Graph with edge attribute 'resistance'
+      G: RustworkxGraphWrapper with edge attribute 'resistance'
       loads: Dict[node_id, current] (only on layer 0)
       pads:  List[node_id] (top-most layer)
     """
@@ -82,7 +83,7 @@ def generate_power_grid(
     #  - stripe endpoints on boundaries (to allow continuous stripes)
     # Later we’ll split segments to insert load “tap” nodes on layer 0 (not at vias).
 
-    G = nx.Graph()
+    G = RustworkxGraphWrapper()
 
     # Keep bookkeeping of nodes by (layer, x, y) to avoid duplicates at same point
     node_lookup: Dict[Tuple[int, float, float], NodeID] = {}
@@ -164,7 +165,7 @@ def generate_power_grid(
                 # collect all nodes on layer ℓ with that y
                 nodes_on_line = [
                     (nd, node_attrs[nd]["x"])
-                    for nd in G.nodes
+                    for nd in G.nodes()
                     if node_attrs[nd]["layer"] == ℓ and math.isclose(node_attrs[nd]["y"], y)
                 ]
                 # sort by x along the stripe
@@ -179,7 +180,7 @@ def generate_power_grid(
             for x in coords:
                 nodes_on_line = [
                     (nd, node_attrs[nd]["y"])
-                    for nd in G.nodes
+                    for nd in G.nodes()
                     if node_attrs[nd]["layer"] == ℓ and math.isclose(node_attrs[nd]["x"], x)
                 ]
                 nodes_on_line.sort(key=lambda t: t[1])
@@ -253,7 +254,7 @@ def generate_power_grid(
     for y in L0["coords"]:
         # Gather ordered nodes along this stripe
         nodes_on_line = sorted(
-            [nd for nd in G.nodes if node_attrs[nd]["layer"] == 0 and math.isclose(node_attrs[nd]["y"], y)],
+            [nd for nd in G.nodes() if node_attrs[nd]["layer"] == 0 and math.isclose(node_attrs[nd]["y"], y)],
             key=lambda nd: node_attrs[nd]["x"],
         )
         # Create segment list between consecutive nodes
@@ -277,7 +278,7 @@ def generate_power_grid(
     for idx in picks:
         n1, n2 = stripe_segs[idx]
         # Current edge resistance
-        R = G.edges[n1, n2]["resistance"]
+        R = G.get_edge_data(n1, n2)["resistance"]
         # Insert a midpoint node on layer 0 (not a via)
         x1, y1 = node_attrs[n1]["x"], node_attrs[n1]["y"]
         x2, y2 = node_attrs[n2]["x"], node_attrs[n2]["y"]
@@ -297,22 +298,22 @@ def generate_power_grid(
         # Register load
         load_nodes[mid] = load_current
 
-    # Attach attributes back to networkx graph
+    # Attach attributes back to graph wrapper
     for nd, attrs in node_attrs.items():
         # Convert 'kind' set to a sorted string for readability
         attrs_out = dict(attrs)
         attrs_out["kind"] = ",".join(sorted(list(attrs["kind"])))
         attrs_out["xy"] = (attrs["x"], attrs["y"])
         del attrs_out["x"], attrs_out["y"]
-        nx.set_node_attributes(G, {nd: attrs_out})
+        G.nodes_dict[nd].update(attrs_out)
 
     # ---------- Optional quick plot ----------
     if plot:
         plt.figure(figsize=(8, 7))
         # Draw edges
         for (u, v, d) in G.edges(data=True):
-            x1, y1 = G.nodes[u]["xy"]
-            x2, y2 = G.nodes[v]["xy"]
+            x1, y1 = G.nodes_dict[u]["xy"]
+            x2, y2 = G.nodes_dict[v]["xy"]
             plt.plot([x1, x2], [y1, y2], lw=0.8, color="#555555", alpha=0.7)
 
         # Draw nodes by type

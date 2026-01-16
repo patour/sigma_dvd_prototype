@@ -19,8 +19,9 @@ from typing import Dict, List, Set, Tuple, Optional
 import warnings
 import logging
 
-import networkx as nx
 import numpy as np
+
+from core.rx_graph import RustworkxGraphWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,7 @@ class PartitionResult:
                 return p
         return None
     
-    def get_partition_connectivity_info(self, graph: nx.Graph, pad_nodes: Set) -> Dict:
+    def get_partition_connectivity_info(self, graph: RustworkxGraphWrapper, pad_nodes: Set) -> Dict:
         """Analyze connectivity of interior nodes within each partition.
         
         Args:
@@ -156,8 +157,8 @@ class GridPartitioner:
     """
     
     def __init__(
-        self, 
-        graph: nx.Graph, 
+        self,
+        graph: RustworkxGraphWrapper,
         load_nodes: Dict,
         pad_nodes: List,
         seed: Optional[int] = None
@@ -248,7 +249,7 @@ class GridPartitioner:
         
         # Gather load nodes (layer 0 only by construction) with coordinates
         load_nodes_with_xy = [
-            (n, self.G.nodes[n]["xy"][0], self.G.nodes[n]["xy"][1]) for n in self.load_nodes
+            (n, self.G.nodes_dict[n]["xy"][0], self.G.nodes_dict[n]["xy"][1]) for n in self.load_nodes
         ]
         # Sort by chosen axis coordinate
         load_nodes_with_xy.sort(key=lambda t: t[coord_idx + 1])  # t[1]=x, t[2]=y
@@ -274,7 +275,7 @@ class GridPartitioner:
             # choose via position closest to mid (ensures layer-0 separators are vias)
             boundary_coords.append(self._nearest_via_position(mid, axis))
         # Precompute node coord lookup and slab ranges over all nodes (ensure endpoints included)
-        node_coord = {n: self.G.nodes[n]['xy'][coord_idx] for n in self.G.nodes()}
+        node_coord = {n: self.G.nodes_dict[n]['xy'][coord_idx] for n in self.G.nodes()}
         coord_min_all_nodes = min(node_coord.values())
         coord_max_all_nodes = max(node_coord.values())
         slab_edges = [coord_min_all_nodes] + boundary_coords + [coord_max_all_nodes + 1e-12]
@@ -295,8 +296,8 @@ class GridPartitioner:
             if n in self.load_nodes or n in self.pad_nodes:
                 continue
             
-            layer = self.G.nodes[n].get('layer', 0)
-            node_kind = self.G.nodes[n].get('kind', '')
+            layer = self.G.nodes_dict[n].get('layer', 0)
+            node_kind = self.G.nodes_dict[n].get('kind', '')
             
             if axis == 'x':
                 # X-axis (vertical slabs): use layer 0 via nodes + higher layers
@@ -405,7 +406,7 @@ class GridPartitioner:
                         
                         # Y-axis connectivity enforcement: skip layer-0 nodes
                         if axis == 'y':
-                            node_layer = self.G.nodes[node].get('layer', 0)
+                            node_layer = self.G.nodes_dict[node].get('layer', 0)
                             if node_layer == 0:
                                 # Cannot use layer-0 nodes as separators for Y-axis
                                 continue
@@ -468,7 +469,7 @@ class GridPartitioner:
 
     def _nearest_node_column(self, target_x: float) -> float:
         """Return x coordinate of existing node column closest to target_x."""
-        xs = {self.G.nodes[n]["xy"][0] for n in self.G.nodes()}
+        xs = {self.G.nodes_dict[n]["xy"][0] for n in self.G.nodes()}
         return min(xs, key=lambda xv: abs(xv - target_x))
     
     def _nearest_via_column(self, target_x: float) -> float:
@@ -477,8 +478,8 @@ class GridPartitioner:
         Via columns are x positions where via nodes exist (nodes with 'via' in kind attribute).
         Prefer via columns to ensure layer-0 separators are via nodes, not load nodes.
         """
-        via_xs = {self.G.nodes[n]["xy"][0] for n in self.G.nodes() 
-                  if 'via' in self.G.nodes[n].get('kind', '')}
+        via_xs = {self.G.nodes_dict[n]["xy"][0] for n in self.G.nodes() 
+                  if 'via' in self.G.nodes_dict[n].get('kind', '')}
         if not via_xs:
             # Fallback to any node column if no vias found
             return self._nearest_node_column(target_x)
@@ -495,11 +496,11 @@ class GridPartitioner:
             Coordinate of nearest via row/column along specified axis
         """
         coord_idx = 0 if axis == 'x' else 1
-        via_coords = {self.G.nodes[n]["xy"][coord_idx] for n in self.G.nodes() 
-                      if 'via' in self.G.nodes[n].get('kind', '')}
+        via_coords = {self.G.nodes_dict[n]["xy"][coord_idx] for n in self.G.nodes() 
+                      if 'via' in self.G.nodes_dict[n].get('kind', '')}
         if not via_coords:
             # Fallback to any node position if no vias found
-            all_coords = {self.G.nodes[n]["xy"][coord_idx] for n in self.G.nodes()}
+            all_coords = {self.G.nodes_dict[n]["xy"][coord_idx] for n in self.G.nodes()}
             return min(all_coords, key=lambda c: abs(c - target_coord))
         return min(via_coords, key=lambda c: abs(c - target_coord))
 
@@ -719,8 +720,8 @@ class GridPartitioner:
         
         # Draw all edges (graph is not modified)
         for u, v in self.G.edges():
-            x1, y1 = self.G.nodes[u]['xy']
-            x2, y2 = self.G.nodes[v]['xy']
+            x1, y1 = self.G.nodes_dict[u]['xy']
+            x2, y2 = self.G.nodes_dict[v]['xy']
             
             # Check if this is a boundary edge
             is_boundary = (u in result.separator_nodes or v in result.separator_nodes)
@@ -741,7 +742,7 @@ class GridPartitioner:
             
             # Interior nodes
             for node in partition.interior_nodes:
-                x, y = self.G.nodes[node]['xy']
+                x, y = self.G.nodes_dict[node]['xy']
                 if node in partition.load_nodes:
                     ax.scatter(x, y, c=[color], s=80, marker='o', 
                              edgecolors='black', linewidths=1, zorder=4,
@@ -752,13 +753,13 @@ class GridPartitioner:
         
         # Draw separator nodes (shared boundary nodes)
         for node in result.separator_nodes:
-            x, y = self.G.nodes[node]['xy']
+            x, y = self.G.nodes_dict[node]['xy']
             ax.scatter(x, y, c='white', s=50, marker='s', 
                      edgecolors='red', linewidths=2, zorder=5)
         
         # Draw pads
         for node in self.pad_nodes:
-            x, y = self.G.nodes[node]['xy']
+            x, y = self.G.nodes_dict[node]['xy']
             ax.scatter(x, y, c='gold', s=100, marker='*', 
                      edgecolors='black', linewidths=1.5, zorder=6)
         

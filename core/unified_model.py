@@ -11,13 +11,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-import networkx as nx
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 from .node_adapter import NodeInfoExtractor, UnifiedNodeInfo, LayerID
 from .edge_adapter import EdgeInfoExtractor, ElementType
+from .rx_graph import RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper
+from .rx_algorithms import connected_components
 
 
 class GridSource(Enum):
@@ -105,7 +106,7 @@ class UnifiedPowerGridModel:
 
     def __init__(
         self,
-        graph: Union[nx.Graph, nx.MultiDiGraph],
+        graph: Union[RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper],
         pad_nodes: Sequence[Any],
         vdd: float = 1.0,
         source: GridSource = GridSource.SYNTHETIC,
@@ -115,7 +116,7 @@ class UnifiedPowerGridModel:
         """Initialize unified power grid model.
 
         Args:
-            graph: NetworkX graph (Graph or MultiDiGraph)
+            graph: Rustworkx graph wrapper (RustworkxGraphWrapper or RustworkxMultiDiGraphWrapper)
             pad_nodes: Sequence of voltage source nodes (Dirichlet BCs)
             vdd: Nominal supply voltage
             source: Grid source type (SYNTHETIC or PDN_NETLIST)
@@ -158,7 +159,7 @@ class UnifiedPowerGridModel:
         return self._reduced
 
     @property
-    def G(self) -> Union[nx.Graph, nx.MultiDiGraph]:
+    def G(self) -> Union[RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper]:
         """Alias for graph (backward compatibility with PowerGridModel)."""
         return self.graph
 
@@ -211,18 +212,19 @@ class UnifiedPowerGridModel:
         
         pad_set = set(self.pad_nodes)
         node_set = set(nodes)
-        
+
         # Build adjacency for resistive network only
         # Create a simple undirected graph for connectivity analysis
-        resistive_graph = nx.Graph()
-        resistive_graph.add_nodes_from(nodes)
-        
+        resistive_graph = RustworkxGraphWrapper()
+        for node in nodes:
+            resistive_graph.add_node(node)
+
         for u, v, edge_info in self._iter_resistive_edges():
             if u in node_set and v in node_set:
                 resistive_graph.add_edge(u, v)
-        
+
         # Find connected components
-        components = list(nx.connected_components(resistive_graph))
+        components = connected_components(resistive_graph)
         
         if len(components) == 1:
             # Single component - no islands
@@ -271,7 +273,7 @@ class UnifiedPowerGridModel:
         Yields:
             Tuples of (u, v, edge_info) for each resistive edge.
         """
-        if isinstance(self.graph, nx.MultiDiGraph):
+        if isinstance(self.graph, RustworkxMultiDiGraphWrapper):
             # PDN MultiDiGraph: iterate over all edges, filter R type
             for u, v, k, data in self.graph.edges(keys=True, data=True):
                 if self._edge_extractor.is_resistive_edge(data):
@@ -785,8 +787,8 @@ class UnifiedPowerGridModel:
         """
         if self.source != GridSource.PDN_NETLIST:
             return {}
-        
-        if not isinstance(self.graph, nx.MultiDiGraph):
+
+        if not isinstance(self.graph, RustworkxMultiDiGraphWrapper):
             return {}
         
         current_injections = {}
@@ -1004,8 +1006,8 @@ class UnifiedPowerGridModel:
         from collections import deque
         visited_pkg = set()
         queue = deque()
-        
-        is_directed = isinstance(self.graph, nx.MultiDiGraph)
+
+        is_directed = isinstance(self.graph, RustworkxMultiDiGraphWrapper)
         
         # Helper to get all R-type neighbors (both directions for directed graphs)
         def get_r_neighbors(node):

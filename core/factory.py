@@ -8,13 +8,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Union
 
-import networkx as nx
-
 from .unified_model import UnifiedPowerGridModel, GridSource
+from .rx_graph import RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper
 
 
 def create_model_from_synthetic(
-    graph: nx.Graph,
+    graph: RustworkxGraphWrapper,
     pad_nodes: Sequence[Any],
     vdd: float = 1.0,
 ) -> UnifiedPowerGridModel:
@@ -42,7 +41,7 @@ def create_model_from_synthetic(
 
 
 def create_model_from_pdn(
-    graph: nx.MultiDiGraph,
+    graph: RustworkxMultiDiGraphWrapper,
     net_name: str,
     vsrc_nodes: Optional[Sequence[Any]] = None,
 ) -> UnifiedPowerGridModel:
@@ -87,7 +86,7 @@ def create_model_from_pdn(
     # Include ground node '0' to preserve current source edges
     # Current sources connect net nodes to ground for load modeling
     nodes_for_subgraph = net_nodes.copy()
-    if '0' in graph.nodes():
+    if '0' in graph:
         nodes_for_subgraph.add('0')
 
     # Extract subgraph for this net (including ground)
@@ -157,7 +156,7 @@ def create_model_from_pdn(
 
 
 def create_multi_net_models(
-    graph: nx.MultiDiGraph,
+    graph: RustworkxMultiDiGraphWrapper,
     net_filter: Optional[List[str]] = None,
 ) -> Dict[str, UnifiedPowerGridModel]:
     """Create unified models for all (or filtered) nets in PDN.
@@ -203,7 +202,7 @@ def create_multi_net_models(
 
 
 def create_model_from_graph(
-    graph: Union[nx.Graph, nx.MultiDiGraph],
+    graph: Union[RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper],
     pad_nodes: Sequence[Any],
     vdd: float = 1.0,
     auto_detect_source: bool = True,
@@ -211,7 +210,7 @@ def create_model_from_graph(
     """Create unified model with automatic source detection.
 
     Args:
-        graph: NetworkX graph
+        graph: Rustworkx graph wrapper
         pad_nodes: Voltage source nodes
         vdd: Supply voltage
         auto_detect_source: If True, detect source type from graph structure
@@ -221,7 +220,7 @@ def create_model_from_graph(
     """
     if auto_detect_source:
         # Detect source based on graph type and edge attributes
-        if isinstance(graph, nx.MultiDiGraph):
+        if isinstance(graph, RustworkxMultiDiGraphWrapper):
             source = GridSource.PDN_NETLIST
             resistance_unit_kohm = True
         else:
