@@ -503,7 +503,7 @@ class PowerGridModel:
         bottom_grid_nodes: Set,
         port_nodes: Set,
         top_k: int = 2,
-        weighting: str = "effective",
+        weighting: str = "shortest_path",
     ) -> Tuple[Dict, Dict]:
         """Aggregate bottom-grid currents onto interface ports.
 
@@ -517,8 +517,8 @@ class PowerGridModel:
             port_nodes: Set of port nodes (interface between grids)
             top_k: Number of nearest ports to distribute current to (default 2)
             weighting: Resistance metric for weighting, one of:
-                - "effective": Use effective electrical resistance (default)
-                - "shortest_path": Use resistance of least resistive path
+                - "shortest_path": Use resistance of least resistive path (default)
+                - "effective": Use effective electrical resistance
 
         Returns:
             Tuple of:
@@ -742,7 +742,7 @@ class PowerGridModel:
         current_injections: Dict,
         partition_layer: int,
         top_k: int = 2,
-        weighting: str = "effective",
+        weighting: str = "shortest_path",
     ) -> HierarchicalSolveResult:
         """Solve IR-drop using hierarchical decomposition at partition layer.
 
