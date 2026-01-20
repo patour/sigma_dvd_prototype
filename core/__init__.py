@@ -12,11 +12,25 @@ from .factory import (
     create_multi_net_models,
     create_model_from_graph,
 )
-from .unified_solver import UnifiedIRDropSolver, UnifiedSolveResult, UnifiedHierarchicalResult
+from .unified_solver import (
+    UnifiedIRDropSolver,
+    UnifiedSolveResult,
+    UnifiedHierarchicalResult,
+    TiledBottomGridResult,
+    TileBounds,
+    BottomGridTile,
+)
 from .unified_plotter import UnifiedPlotter, plot_voltage_map, plot_ir_drop_map
 from .unified_partitioner import UnifiedPartitioner, UnifiedPartition, UnifiedPartitionResult
 from .statistics import UnifiedStatistics, GridStats, LayerStats
 from .effective_resistance import UnifiedEffectiveResistanceCalculator, compute_effective_resistance
+from .graph_converter import (
+    detect_graph_type,
+    is_networkx_graph,
+    is_rustworkx_graph,
+    convert_networkx_to_rustworkx,
+    ensure_rustworkx_graph,
+)
 
 __all__ = [
     # Node adapter
@@ -40,6 +54,9 @@ __all__ = [
     "UnifiedIRDropSolver",
     "UnifiedSolveResult",
     "UnifiedHierarchicalResult",
+    "TiledBottomGridResult",
+    "TileBounds",
+    "BottomGridTile",
     # Plotter
     "UnifiedPlotter",
     "plot_voltage_map",
@@ -55,4 +72,10 @@ __all__ = [
     # Effective resistance
     "UnifiedEffectiveResistanceCalculator",
     "compute_effective_resistance",
+    # Graph converter
+    "detect_graph_type",
+    "is_networkx_graph",
+    "is_rustworkx_graph",
+    "convert_networkx_to_rustworkx",
+    "ensure_rustworkx_graph",
 ]

@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent / 'pdn'))
 
 from pdn_parser import NetlistParser
 from core import create_model_from_pdn, UnifiedIRDropSolver
+from core import detect_graph_type, ensure_rustworkx_graph
 
 
 class Logger:
@@ -78,25 +79,38 @@ def parse_tilings(tilings_str: str) -> List[Tuple[int, int]]:
 
 
 def load_pdn_graph(netlist_dir: Path, logger: Logger):
-    """Load PDN graph from pickle cache or parse from netlist."""
+    """Load PDN graph from pickle cache or parse from netlist.
+
+    Automatically detects and converts NetworkX graphs to Rustworkx format
+    for compatibility with the current solver infrastructure.
+    """
     pkl_path = netlist_dir / 'pdn_graph.pkl'
-    
+
     if pkl_path.exists():
         logger.log(f"Loading cached graph from {pkl_path}...")
         with open(pkl_path, 'rb') as f:
             graph = pickle.load(f)
         logger.log("Loaded cached graph successfully!")
+
+        # Detect graph type and convert if needed
+        graph_type = detect_graph_type(graph)
+        logger.log(f"  Graph type: {graph_type}")
+
+        if graph_type == 'networkx':
+            logger.log("  Converting NetworkX graph to Rustworkx format...")
+            graph = ensure_rustworkx_graph(graph, verbose=False)
+            logger.log("  Conversion complete!")
     else:
         logger.log(f"Parsing PDN netlist from {netlist_dir}...")
         logger.log("(This may take several minutes for large netlists)")
         parser = NetlistParser(str(netlist_dir), validate=True)
         graph = parser.parse()
         logger.log("Parsing complete!")
-    
-    logger.log(f"\nParsed PDN Graph Statistics:")
+
+    logger.log(f"\nPDN Graph Statistics:")
     logger.log(f"  Nodes: {graph.number_of_nodes()}")
     logger.log(f"  Edges: {graph.number_of_edges()}")
-    
+
     return graph
 
 

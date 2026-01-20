@@ -190,7 +190,7 @@ class TestFullHierarchicalFlow(unittest.TestCase):
         }
         
         # Call the aggregation function directly
-        port_currents, aggregation_map = self.solver._aggregate_currents_to_ports(
+        port_currents, aggregation_map = self.solver._aggregator.aggregate_currents_to_ports(
             current_injections=self.load_currents,
             bottom_grid_nodes=bottom_nodes,
             port_nodes=port_nodes,
@@ -234,7 +234,7 @@ class TestFullHierarchicalFlow(unittest.TestCase):
         top_nodes, bottom_nodes, port_nodes, _ = self.model._decompose_at_layer('M2')
         
         for top_k in [1, 3, 10]:
-            port_currents, aggregation_map = self.solver._aggregate_currents_to_ports(
+            port_currents, aggregation_map = self.solver._aggregator.aggregate_currents_to_ports(
                 current_injections=self.load_currents,
                 bottom_grid_nodes=bottom_nodes,
                 port_nodes=port_nodes,
@@ -442,7 +442,7 @@ class TestCurrentAggregationWeighting(unittest.TestCase):
         top_nodes, bottom_nodes, port_nodes, _ = self.model._decompose_at_layer('M2')
         
         # Use a small rmax to limit search distance
-        port_currents, aggregation_map = self.solver._aggregate_currents_to_ports(
+        port_currents, aggregation_map = self.solver._aggregator.aggregate_currents_to_ports(
             current_injections=self.load_currents,
             bottom_grid_nodes=bottom_nodes,
             port_nodes=port_nodes,
