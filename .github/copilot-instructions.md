@@ -40,8 +40,29 @@ AI coding guide for static IR-drop analysis, effective resistance, and hierarchi
 ## Module Responsibilities
 
 ### `core/` - Unified Model (Preferred for New Code)
+
+**Module Structure:**
+```
+core/
+├── __init__.py              # Public API exports
+├── unified_model.py         # UnifiedPowerGridModel class
+├── unified_solver.py        # UnifiedIRDropSolver (orchestration)
+├── solver_results.py        # Result data classes
+├── current_aggregation.py   # CurrentAggregator (port distance calculations)
+├── tiling.py                # TileManager + solve_single_tile
+├── graph_converter.py       # NetworkX ↔ Rustworkx conversion
+├── rx_graph.py              # RustworkxMultiDiGraphWrapper
+├── node_adapter.py          # NodeInfoExtractor
+├── edge_adapter.py          # EdgeInfoExtractor
+├── unified_partitioner.py   # UnifiedPartitioner
+├── unified_plotter.py       # UnifiedPlotter
+├── unified_statistics.py    # UnifiedStatistics
+├── effective_resistance.py  # UnifiedEffectiveResistanceCalculator
+└── factory.py               # Factory functions
+```
+
 ```python
-from core import (create_model_from_pdn, create_model_from_synthetic, 
+from core import (create_model_from_pdn, create_model_from_synthetic,
                   create_multi_net_models, UnifiedIRDropSolver)
 
 # PDN netlist (vdd auto-extracted from pg_net_voltage file or voltage source edges)
@@ -60,7 +81,9 @@ hier_result = solver.solve_hierarchical(load_currents, partition_layer='M2', top
 
 **Key Classes:**
 - `UnifiedPowerGridModel`: Handles both NodeID and string nodes; auto-detects floating islands
-- `UnifiedIRDropSolver`: `solve()` for flat, `solve_hierarchical()` for layer-decomposed
+- `UnifiedIRDropSolver`: `solve()` for flat, `solve_hierarchical()` for layer-decomposed, `solve_hierarchical_tiled()` for parallel tiled solving
+- `CurrentAggregator`: Distributes load currents to ports using shortest-path or effective resistance weighting
+- `TileManager`: Manages bottom-grid tile generation, halo expansion, and connectivity validation
 - `NodeInfoExtractor` / `EdgeInfoExtractor`: Adapt different graph representations
 - `UnifiedStatistics`: Compute netlist statistics (node/edge counts, R/C/L/I totals)
 - `UnifiedPartitioner`: Layer-based and spatial grid partitioning
@@ -76,6 +99,22 @@ hier_result = solver.solve_hierarchical(load_currents, partition_layer='M2', top
 **Enums:**
 - `GridSource.SYNTHETIC`, `GridSource.PDN_NETLIST`: Source type detection
 - `ElementType.RESISTOR`, `ElementType.CAPACITOR`, `ElementType.INDUCTOR`, `ElementType.CURRENT_SOURCE`
+
+**Graph Converter (for legacy pickle files):**
+```python
+from core import detect_graph_type, ensure_rustworkx_graph
+
+# Detect graph type
+graph_type = detect_graph_type(graph)  # Returns 'networkx', 'rustworkx', or 'unknown'
+
+# Auto-convert if needed (safe to call on any graph)
+graph = ensure_rustworkx_graph(graph, verbose=True)
+
+# Or convert explicitly
+from core import convert_networkx_to_rustworkx
+if is_networkx_graph(graph):
+    graph = convert_networkx_to_rustworkx(graph)
+```
 
 ### `pdn/` - PDN Netlist Parsing
 - **`NetlistParser`**: Parses SPICE-like tile-based netlists with gzip support
@@ -398,6 +437,7 @@ Failure to reload `edge_adapter` causes stale cached versions with broken island
 3. **Notebook stale imports**: Always reload `core.edge_adapter` before `core.unified_model`
 4. **PDN ground node**: Ground is `'0'` string; excluded from conductance matrix but preserved for I-type edges
 5. **Gaussian degeneracy**: Falls back to uniform if weights sum to zero
+6. **Legacy pickle files**: Old `.pkl` files may contain NetworkX graphs. Use `ensure_rustworkx_graph(graph)` to auto-convert before passing to `create_model_from_pdn()`
 
 ## File Landmarks
 
