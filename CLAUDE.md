@@ -48,9 +48,27 @@ python example_effective_resistance.py
 
 ### Core Module (core/) - Preferred for New Code
 
+**Module Structure:**
+```
+core/
+├── unified_model.py        # UnifiedPowerGridModel, grid decomposition
+├── unified_solver.py       # UnifiedIRDropSolver (orchestration)
+├── solver_results.py       # Result data classes (UnifiedSolveResult, etc.)
+├── current_aggregation.py  # CurrentAggregator for port current distribution
+├── tiling.py               # TileManager, solve_single_tile for parallel tiling
+├── graph_converter.py      # NetworkX <-> Rustworkx conversion utilities
+├── factory.py              # create_model_from_* functions
+├── node_adapter.py         # NodeInfoExtractor
+├── edge_adapter.py         # EdgeInfoExtractor, ElementType
+├── rx_graph.py             # RustworkxMultiDiGraphWrapper
+└── __init__.py             # Public API exports
+```
+
 **Key Classes:**
 - **UnifiedPowerGridModel**: Handles both NodeID and string nodes; auto-detects floating islands
 - **UnifiedIRDropSolver**: `solve()` for flat, `solve_hierarchical()` for layer-decomposed, `solve_hierarchical_tiled()` for parallel tiled solving
+- **CurrentAggregator**: Distributes load currents to ports using shortest-path or effective resistance weighting
+- **TileManager**: Manages tile generation, connectivity validation, and result merging for tiled solving
 - **NodeInfoExtractor / EdgeInfoExtractor**: Adapt different graph representations
 - **UnifiedStatistics**: Compute netlist statistics (node/edge counts, R/C/L/I totals)
 - **UnifiedPartitioner**: Layer-based and spatial grid partitioning
@@ -79,6 +97,17 @@ models = create_multi_net_models(graph)  # {'VDD': model, 'VSS': model}
 **Enums:**
 - `GridSource.SYNTHETIC`, `GridSource.PDN_NETLIST`: Source type detection
 - `ElementType.RESISTOR`, `ElementType.CAPACITOR`, `ElementType.INDUCTOR`, `ElementType.CURRENT_SOURCE`
+
+**Graph Converter (for legacy pickle files):**
+```python
+from core import detect_graph_type, ensure_rustworkx_graph
+
+# Detect graph type from pickle
+graph_type = detect_graph_type(graph)  # Returns 'networkx', 'rustworkx', or 'unknown'
+
+# Auto-convert NetworkX to Rustworkx if needed
+graph = ensure_rustworkx_graph(graph)  # No-op if already Rustworkx
+```
 
 ### PDN Module (pdn/)
 - **NetlistParser**: Parses SPICE-like tile-based netlists with gzip support
@@ -111,6 +140,7 @@ models = create_multi_net_models(graph)  # {'VDD': model, 'VSS': model}
 - **R_eff queries**: Pad nodes rejected in pairwise calculations (raises `ValueError`)
 - **PDN current extraction**: Use `model.extract_current_sources()` to get load currents from I-type edges
 - **Headless plotting**: Use `show=False` for batch/headless runs. Matplotlib backend is set to `Agg` in test runners.
+- **Legacy pickle files**: Old `pdn_graph.pkl` files contain NetworkX graphs. Use `ensure_rustworkx_graph()` to convert before creating models.
 
 ## Typical Workflow Patterns
 
