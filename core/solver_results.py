@@ -148,3 +148,43 @@ class TiledBottomGridResult(UnifiedHierarchicalResult):
     halo_clip_warnings: List[str] = field(default_factory=list)
     validation_stats: Optional[Dict[str, Any]] = None
     tiling_params: Dict[str, Any] = field(default_factory=dict)
+
+
+# ============================================================================
+# Data Classes for Coupled Hierarchical Solving
+# ============================================================================
+
+@dataclass
+class UnifiedCoupledHierarchicalResult:
+    """Result of coupled hierarchical IR-drop solve.
+
+    The coupled solver solves the top-grid + bottom-grid system exactly
+    (up to iterative tolerance) using a matrix-free Schur complement approach,
+    rather than approximating port currents via weighted distribution.
+
+    Attributes:
+        voltages: Complete node -> voltage mapping
+        ir_drop: Complete node -> IR-drop mapping (vdd - voltage)
+        partition_layer: Layer used for decomposition
+        top_grid_voltages: Voltages for top-grid nodes
+        bottom_grid_voltages: Voltages for bottom-grid nodes
+        port_nodes: Set of port nodes at partition layer
+        port_voltages: Port node -> voltage mapping
+        iterations: Number of iterative solver iterations
+        final_residual: Final residual norm from iterative solver
+        converged: True if solver converged within tolerance
+        preconditioner_type: Type of preconditioner used ('none', 'block_diagonal', 'ilu')
+        timings: Dict of timing information for each step (in seconds)
+    """
+    voltages: Dict[Any, float]
+    ir_drop: Dict[Any, float]
+    partition_layer: LayerID
+    top_grid_voltages: Dict[Any, float]
+    bottom_grid_voltages: Dict[Any, float]
+    port_nodes: Set[Any]
+    port_voltages: Dict[Any, float]
+    iterations: int
+    final_residual: float
+    converged: bool
+    preconditioner_type: str = 'none'
+    timings: Dict[str, float] = field(default_factory=dict)

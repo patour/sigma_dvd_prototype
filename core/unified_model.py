@@ -323,7 +323,7 @@ class UnifiedPowerGridModel:
             if u not in node_to_idx or v not in node_to_idx:
                 continue
             
-            g = GMAX if R <= SHORT_THRESHOLD else 1.0 / R
+            g = GMAX if (R <= 0 or R < SHORT_THRESHOLD) else 1.0 / R
             
             edges_u.append(node_to_idx[u])
             edges_v.append(node_to_idx[v])
@@ -1111,7 +1111,7 @@ class UnifiedPowerGridModel:
                 continue
 
             # Handle short resistances (R=0 or very small R)
-            if R <= SHORT_THRESHOLD:
+            if R <= 0 or R < SHORT_THRESHOLD:
                 g = GMAX
             else:
                 g = 1.0 / R

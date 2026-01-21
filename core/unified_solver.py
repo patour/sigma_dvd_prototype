@@ -17,9 +17,13 @@ import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+import numpy as np
+import scipy.sparse.linalg as spla
+
 from .solver_results import (
     UnifiedSolveResult,
     UnifiedHierarchicalResult,
+    UnifiedCoupledHierarchicalResult,
     TileBounds,
     BottomGridTile,
     TileSolveResult,
@@ -29,6 +33,16 @@ from .current_aggregation import CurrentAggregator
 from .tiling import TileManager, solve_single_tile
 from .unified_model import UnifiedPowerGridModel, LayerID
 from .edge_adapter import EdgeInfoExtractor
+from .coupled_system import (
+    BlockMatrixSystem,
+    SchurComplementOperator,
+    CoupledSystemOperator,
+    BlockDiagonalPreconditioner,
+    ILUPreconditioner,
+    extract_block_matrices,
+    compute_reduced_rhs,
+    recover_bottom_voltages,
+)
 
 # Logger for solver warnings
 logger = logging.getLogger(__name__)
@@ -39,6 +53,7 @@ __all__ = [
     'UnifiedIRDropSolver',
     'UnifiedSolveResult',
     'UnifiedHierarchicalResult',
+    'UnifiedCoupledHierarchicalResult',
     'TileBounds',
     'BottomGridTile',
     'TileSolveResult',
@@ -900,4 +915,360 @@ class UnifiedIRDropSolver:
                 'n_workers': n_workers,
                 'parallel_backend': parallel_backend,
             },
+        )
+
+    def solve_hierarchical_coupled(
+        self,
+        current_injections: Dict[Any, float],
+        partition_layer: LayerID,
+        solver: str = 'gmres',
+        tol: float = 1e-8,
+        maxiter: int = 500,
+        preconditioner: str = 'block_diagonal',
+        verbose: bool = False,
+    ) -> UnifiedCoupledHierarchicalResult:
+        """Solve using coupled hierarchical decomposition (exact up to tolerance).
+
+        This method solves the coupled top-grid + bottom-grid system exactly
+        (up to iterative tolerance) using a matrix-free Schur complement approach.
+        Unlike solve_hierarchical(), which approximates port currents via weighted
+        distribution, this method preserves the exact coupling between grids.
+
+        Mathematical formulation:
+        - Decompose grid at partition_layer into top-grid and bottom-grid
+        - Eliminate bottom-grid interior via Schur complement onto ports
+        - Solve coupled system: (G^T + S^B) at ports, coupled with top interior
+        - Recover bottom-grid voltages from port voltages
+
+        Args:
+            current_injections: Node -> current (positive = sink)
+            partition_layer: Layer to partition at
+            solver: Iterative solver to use ('gmres' or 'bicgstab')
+            tol: Convergence tolerance for iterative solver
+            maxiter: Maximum iterations for iterative solver
+            preconditioner: Preconditioner type:
+                - 'none': No preconditioning
+                - 'block_diagonal': Block diagonal approximation (default, recommended)
+                - 'ilu': ILU-based preconditioner (more expensive but may help
+                  for ill-conditioned systems)
+            verbose: If True, print timing and convergence information
+
+        Returns:
+            UnifiedCoupledHierarchicalResult with exact (up to tol) voltages.
+
+        Raises:
+            ValueError: If partition layer has no ports, or if pads not in top-grid
+            RuntimeError: If iterative solver does not converge within maxiter
+
+        Example:
+            >>> solver = UnifiedIRDropSolver(model)
+            >>> result = solver.solve_hierarchical_coupled(
+            ...     current_injections=loads,
+            ...     partition_layer='M2',
+            ...     solver='gmres',
+            ...     tol=1e-8,
+            ...     preconditioner='block_diagonal',
+            ... )
+            >>> print(f"Converged in {result.iterations} iterations")
+        """
+        timings: Dict[str, float] = {}
+
+        # ================================================================
+        # Step 1: Decompose grid at partition layer
+        # ================================================================
+        t0 = time.perf_counter()
+        top_nodes, bottom_nodes, port_nodes, via_edges = self.model._decompose_at_layer(partition_layer)
+        timings['decompose'] = time.perf_counter() - t0
+
+        if not port_nodes:
+            raise ValueError(
+                f"No ports found at partition layer {partition_layer}. "
+                "Check that vias connect this layer to the layer below."
+            )
+
+        # Validate pads are in top-grid
+        pad_set = set(self.model.pad_nodes)
+        top_grid_pads = pad_set & top_nodes
+
+        if not top_grid_pads:
+            raise ValueError(
+                f"No pad nodes found in top-grid (layers >= {partition_layer}). "
+                "Pads should be on the top-most layer."
+            )
+
+        # ================================================================
+        # Step 2: Extract block matrices for top-grid and bottom-grid
+        # ================================================================
+        t0 = time.perf_counter()
+
+        # Top-grid: includes top_nodes, pads are Dirichlet
+        # Port nodes are the interface to bottom-grid
+        top_blocks, rhs_dirichlet_top = extract_block_matrices(
+            model=self.model,
+            grid_nodes=top_nodes,
+            dirichlet_nodes=top_grid_pads,
+            port_nodes=port_nodes,
+            dirichlet_voltage=self.model.vdd,
+        )
+        timings['extract_top_blocks'] = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+
+        # Bottom-grid: includes bottom_nodes + port_nodes
+        # Port nodes are the interface; no Dirichlet nodes in bottom-grid itself
+        # IMPORTANT: exclude_port_to_port=True to avoid double-counting lateral
+        # port connections that are already in top-grid G_pp
+        bottom_subgrid = bottom_nodes | port_nodes
+        bottom_blocks, rhs_dirichlet_bottom = extract_block_matrices(
+            model=self.model,
+            grid_nodes=bottom_subgrid,
+            dirichlet_nodes=set(),  # No Dirichlet in bottom-grid
+            port_nodes=port_nodes,
+            dirichlet_voltage=self.model.vdd,
+            exclude_port_to_port=True,
+        )
+        timings['extract_bottom_blocks'] = time.perf_counter() - t0
+
+        # ================================================================
+        # Step 3: Factor bottom-grid interior (for Schur complement)
+        # ================================================================
+        t0 = time.perf_counter()
+        bottom_blocks.factor_interior()
+        timings['factor_bottom_interior'] = time.perf_counter() - t0
+
+        # ================================================================
+        # Step 4: Build Schur complement operator for bottom-grid
+        # ================================================================
+        t0 = time.perf_counter()
+        schur_B = SchurComplementOperator(
+            G_pp=bottom_blocks.G_pp,
+            G_pi=bottom_blocks.G_pi,
+            G_ip=bottom_blocks.G_ip,
+            lu_ii=bottom_blocks.lu_ii,
+        )
+        timings['build_schur_operator'] = time.perf_counter() - t0
+
+        # ================================================================
+        # Step 5: Build coupled system operator
+        # ================================================================
+        t0 = time.perf_counter()
+        coupled_op = CoupledSystemOperator(top_blocks, schur_B)
+        timings['build_coupled_operator'] = time.perf_counter() - t0
+
+        # ================================================================
+        # Step 6: Build coupled RHS
+        # ================================================================
+        t0 = time.perf_counter()
+
+        # Current injections for bottom-grid (includes ports and bottom interior)
+        # Port currents are included here and will contribute to r^B
+        bottom_currents = {n: c for n, c in current_injections.items() if n in bottom_subgrid}
+
+        # Reduced RHS from bottom-grid: r^B = i_p - G^B_pi * inv(G^B_ii) * i_i
+        # This includes port currents since ports are in bottom_subgrid
+        r_B = compute_reduced_rhs(bottom_blocks, bottom_currents, rhs_dirichlet_bottom)
+
+        # Build full RHS for coupled system
+        # Port equations: r^B + rhs_dirichlet_top[ports] (port currents already in r^B)
+        # Top interior equations: i_t + rhs_dirichlet_top[interior]
+        n_ports = top_blocks.n_ports
+        n_top_interior = top_blocks.n_interior
+
+        # Current vector for top-grid INTERIOR nodes only (negated for nodal equation)
+        # Note: Port currents are NOT added here - they're already in r^B
+        i_t = np.zeros(n_top_interior, dtype=np.float64)
+
+        for node, current in current_injections.items():
+            if node in top_blocks.interior_to_idx:
+                i_t[top_blocks.interior_to_idx[node]] -= current
+
+        # Combine RHS
+        # Port equations: r^B + Dirichlet contribution from pads coupling to ports
+        # Top interior equations: i_t + Dirichlet contribution from pads coupling to top interior
+        rhs_p = r_B + rhs_dirichlet_top[:n_ports]
+        rhs_t = i_t + rhs_dirichlet_top[n_ports:]
+        rhs = np.concatenate([rhs_p, rhs_t])
+
+        timings['build_rhs'] = time.perf_counter() - t0
+
+        # ================================================================
+        # Step 7: Build preconditioner
+        # ================================================================
+        t0 = time.perf_counter()
+        M = self._build_coupled_preconditioner(
+            preconditioner_type=preconditioner,
+            top_blocks=top_blocks,
+            bottom_blocks=bottom_blocks,
+        )
+        timings['build_preconditioner'] = time.perf_counter() - t0
+
+        # ================================================================
+        # Step 8: Solve coupled system iteratively
+        # ================================================================
+        t0 = time.perf_counter()
+
+        # Track iteration count via callback
+        iteration_count = [0]
+        residual_history = []
+
+        def callback(residual):
+            iteration_count[0] += 1
+            if isinstance(residual, np.ndarray):
+                residual_history.append(np.linalg.norm(residual))
+            else:
+                residual_history.append(residual)
+
+        # Select solver
+        if solver.lower() == 'gmres':
+            solution, info = spla.gmres(
+                coupled_op, rhs, rtol=tol, atol=0, maxiter=maxiter, M=M, callback=callback,
+                callback_type='pr_norm'
+            )
+        elif solver.lower() == 'bicgstab':
+            solution, info = spla.bicgstab(
+                coupled_op, rhs, rtol=tol, atol=0, maxiter=maxiter, M=M, callback=callback
+            )
+        else:
+            raise ValueError(f"Unknown solver: {solver}. Use 'gmres' or 'bicgstab'.")
+
+        timings['iterative_solve'] = time.perf_counter() - t0
+
+        # Check convergence
+        converged = (info == 0)
+        iterations = iteration_count[0]
+        final_residual = residual_history[-1] if residual_history else np.linalg.norm(rhs - coupled_op @ solution)
+
+        if not converged:
+            raise RuntimeError(
+                f"Coupled iterative solver did not converge after {maxiter} iterations. "
+                f"Final residual: {final_residual:.2e}, tolerance: {tol:.2e}. "
+                f"Try increasing maxiter, loosening tol, or using a different preconditioner."
+            )
+
+        # ================================================================
+        # Step 9: Extract port and top-interior voltages
+        # ================================================================
+        t0 = time.perf_counter()
+
+        v_p = solution[:n_ports]
+        v_t = solution[n_ports:]
+
+        # Map port voltages
+        port_voltages: Dict[Any, float] = {}
+        for i, node in enumerate(top_blocks.port_nodes):
+            port_voltages[node] = float(v_p[i])
+
+        # Map top-interior voltages
+        top_grid_voltages: Dict[Any, float] = {}
+        for node in top_grid_pads:
+            top_grid_voltages[node] = self.model.vdd
+        for node, v in port_voltages.items():
+            top_grid_voltages[node] = v
+        for i, node in enumerate(top_blocks.interior_nodes):
+            top_grid_voltages[node] = float(v_t[i])
+
+        timings['extract_top_voltages'] = time.perf_counter() - t0
+
+        # ================================================================
+        # Step 10: Recover bottom-grid voltages
+        # ================================================================
+        t0 = time.perf_counter()
+
+        bottom_interior_voltages = recover_bottom_voltages(
+            bottom_blocks=bottom_blocks,
+            port_voltages=v_p,
+            current_injections=bottom_currents,
+            rhs_dirichlet_bottom=rhs_dirichlet_bottom,
+        )
+
+        # Combine with port voltages for full bottom-grid
+        bottom_grid_voltages: Dict[Any, float] = {}
+        bottom_grid_voltages.update(port_voltages)
+        bottom_grid_voltages.update(bottom_interior_voltages)
+
+        timings['recover_bottom_voltages'] = time.perf_counter() - t0
+
+        # ================================================================
+        # Step 11: Merge results
+        # ================================================================
+        t0 = time.perf_counter()
+
+        all_voltages: Dict[Any, float] = {}
+        all_voltages.update(top_grid_voltages)
+        # Add bottom-grid nodes (excluding ports already in top)
+        for n, v in bottom_interior_voltages.items():
+            all_voltages[n] = v
+
+        ir_drop = self.model.ir_drop(all_voltages)
+
+        timings['merge_results'] = time.perf_counter() - t0
+
+        # ================================================================
+        # Verbose output
+        # ================================================================
+        if verbose:
+            total_time = sum(timings.values())
+            print(f"\n=== Coupled Hierarchical Solve ===")
+            print(f"  Top nodes: {len(top_nodes):,}, Bottom nodes: {len(bottom_nodes):,}")
+            print(f"  Ports: {len(port_nodes):,}, Top interior: {n_top_interior:,}")
+            print(f"  Bottom interior: {bottom_blocks.n_interior:,}")
+            print(f"  Solver: {solver}, Preconditioner: {preconditioner}")
+            print(f"  Iterations: {iterations}, Final residual: {final_residual:.2e}")
+            print(f"  ---")
+            for step, t in timings.items():
+                pct = t / total_time * 100
+                print(f"  {step:25s}: {t*1000:8.1f} ms  ({pct:5.1f}%)")
+            print(f"  {'TOTAL':25s}: {total_time*1000:8.1f} ms")
+            print(f"==================================\n")
+
+        return UnifiedCoupledHierarchicalResult(
+            voltages=all_voltages,
+            ir_drop=ir_drop,
+            partition_layer=partition_layer,
+            top_grid_voltages=top_grid_voltages,
+            bottom_grid_voltages=bottom_grid_voltages,
+            port_nodes=port_nodes,
+            port_voltages=port_voltages,
+            iterations=iterations,
+            final_residual=final_residual,
+            converged=converged,
+            preconditioner_type=preconditioner,
+            timings=timings,
+        )
+
+    def _build_coupled_preconditioner(
+        self,
+        preconditioner_type: str,
+        top_blocks: BlockMatrixSystem,
+        bottom_blocks: BlockMatrixSystem,
+    ) -> Optional[spla.LinearOperator]:
+        """Build preconditioner for coupled system.
+
+        Args:
+            preconditioner_type: 'none', 'block_diagonal', or 'ilu'
+            top_blocks: Top-grid block matrices
+            bottom_blocks: Bottom-grid block matrices
+
+        Returns:
+            LinearOperator for preconditioning, or None if 'none'
+        """
+        if preconditioner_type == 'none':
+            return None
+
+        if preconditioner_type == 'block_diagonal':
+            # Use diagonal of bottom G_pp as approximation to Schur complement diagonal
+            bottom_G_pp_diag = np.array(bottom_blocks.G_pp.diagonal()).flatten()
+
+            # Factor top interior if not already done
+            if top_blocks.lu_ii is None and top_blocks.n_interior > 0:
+                top_blocks.factor_interior()
+
+            return BlockDiagonalPreconditioner(top_blocks, bottom_G_pp_diag)
+
+        if preconditioner_type == 'ilu':
+            return ILUPreconditioner(top_blocks, bottom_blocks.G_pp)
+
+        raise ValueError(
+            f"Unknown preconditioner type: {preconditioner_type}. "
+            "Use 'none', 'block_diagonal', or 'ilu'."
         )

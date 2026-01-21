@@ -16,9 +16,16 @@ from .unified_solver import (
     UnifiedIRDropSolver,
     UnifiedSolveResult,
     UnifiedHierarchicalResult,
+    UnifiedCoupledHierarchicalResult,
     TiledBottomGridResult,
     TileBounds,
     BottomGridTile,
+)
+from .coupled_system import (
+    BlockMatrixSystem,
+    SchurComplementOperator,
+    CoupledSystemOperator,
+    extract_block_matrices,
 )
 from .unified_plotter import UnifiedPlotter, plot_voltage_map, plot_ir_drop_map
 from .unified_partitioner import UnifiedPartitioner, UnifiedPartition, UnifiedPartitionResult
@@ -54,9 +61,15 @@ __all__ = [
     "UnifiedIRDropSolver",
     "UnifiedSolveResult",
     "UnifiedHierarchicalResult",
+    "UnifiedCoupledHierarchicalResult",
     "TiledBottomGridResult",
     "TileBounds",
     "BottomGridTile",
+    # Coupled system
+    "BlockMatrixSystem",
+    "SchurComplementOperator",
+    "CoupledSystemOperator",
+    "extract_block_matrices",
     # Plotter
     "UnifiedPlotter",
     "plot_voltage_map",
