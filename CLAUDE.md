@@ -54,6 +54,7 @@ core/
 ├── unified_model.py        # UnifiedPowerGridModel, grid decomposition
 ├── unified_solver.py       # UnifiedIRDropSolver (orchestration)
 ├── solver_results.py       # Result data classes (UnifiedSolveResult, etc.)
+├── coupled_system.py       # Block matrices, Schur complement for coupled solver
 ├── current_aggregation.py  # CurrentAggregator for port current distribution
 ├── tiling.py               # TileManager, solve_single_tile for parallel tiling
 ├── graph_converter.py      # NetworkX <-> Rustworkx conversion utilities
@@ -66,7 +67,10 @@ core/
 
 **Key Classes:**
 - **UnifiedPowerGridModel**: Handles both NodeID and string nodes; auto-detects floating islands
-- **UnifiedIRDropSolver**: `solve()` for flat, `solve_hierarchical()` for layer-decomposed, `solve_hierarchical_tiled()` for parallel tiled solving
+- **UnifiedIRDropSolver**: `solve()` for flat, `solve_hierarchical()` for layer-decomposed (approximate), `solve_hierarchical_coupled()` for exact coupled solve, `solve_hierarchical_tiled()` for parallel tiled solving
+- **BlockMatrixSystem**: Block-partitioned conductance matrix (port/interior splits)
+- **SchurComplementOperator**: Matrix-free Schur complement for coupled solver
+- **CoupledSystemOperator**: Full coupled top-grid + Schur complement operator
 - **CurrentAggregator**: Distributes load currents to ports using shortest-path or effective resistance weighting
 - **TileManager**: Manages tile generation, connectivity validation, and result merging for tiled solving
 - **NodeInfoExtractor / EdgeInfoExtractor**: Adapt different graph representations
@@ -92,6 +96,7 @@ models = create_multi_net_models(graph)  # {'VDD': model, 'VSS': model}
 **Result Data Classes:**
 - `UnifiedSolveResult`: Basic solve result with voltages, ir_drop, metadata
 - `UnifiedHierarchicalResult`: Hierarchical result with port_nodes, port_voltages, port_currents, aggregation_map
+- `UnifiedCoupledHierarchicalResult`: Coupled solver result with iterations, final_residual, converged, timings
 - `TiledBottomGridResult`: Tiled solve result with tiles, per_tile_solve_times, validation_stats
 
 **Enums:**
@@ -179,6 +184,42 @@ print(f"Ports: {len(hier_result.port_nodes)}")
 - `rmax`: Maximum resistance distance for shortest_path weighting
 - `use_fast_builder`: If True (default), use vectorized subgrid builder (~10x speedup)
 
+### Coupled Hierarchical Solve (Exact)
+For exact solutions (up to iterative tolerance) without current aggregation approximation:
+
+```python
+# Coupled solve using matrix-free Schur complement
+coupled_result = solver.solve_hierarchical_coupled(
+    load_currents,
+    partition_layer='M2',
+    solver='gmres',            # 'gmres' or 'bicgstab'
+    tol=1e-8,                  # Iterative solver tolerance
+    maxiter=500,               # Max iterations
+    preconditioner='block_diagonal',  # 'none', 'block_diagonal', or 'ilu'
+    verbose=True,
+)
+print(f"Converged in {coupled_result.iterations} iterations")
+print(f"Final residual: {coupled_result.final_residual:.2e}")
+```
+
+**Coupled vs Uncoupled Hierarchical:**
+- **Uncoupled (`solve_hierarchical`)**: Approximates port currents via weighted distribution, then solves top/bottom grids independently. Fast but introduces ~0.5 mV error from current aggregation.
+- **Coupled (`solve_hierarchical_coupled`)**: Solves the full coupled system iteratively using matrix-free Schur complement. Exact up to solver tolerance (~0.02 µV error). Slower but highly accurate.
+
+**Coupled Solver Parameters:**
+- `solver`: `'gmres'` (default) or `'bicgstab'`. GMRES is generally more robust.
+- `tol`: Residual tolerance for iterative solver (default 1e-8)
+- `maxiter`: Maximum iterations before raising RuntimeError (default 500)
+- `preconditioner`: `'block_diagonal'` (default), `'none'`, or `'ilu'`
+
+**UnifiedCoupledHierarchicalResult Fields:**
+- All fields from `UnifiedHierarchicalResult` plus:
+- `iterations`: Number of iterative solver iterations
+- `final_residual`: Final residual norm
+- `converged`: Boolean indicating convergence
+- `preconditioner_type`: Preconditioner used
+- `timings`: Dict with 'factor_bottom', 'build_rhs', 'iterative_solve', 'recover_bottom'
+
 ### Tiled Hierarchical Solve (PDN only)
 For large PDN grids, exploit spatial locality by tiling the bottom-grid:
 
@@ -217,7 +258,7 @@ result = solver.solve(meta.currents)
 
 ## Testing
 
-**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`
+**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`
 
 **Test fixtures:** `tests/fixtures.py` provides factory functions for edge case testing scenarios.
 
