@@ -481,6 +481,19 @@ class RustworkxMultiDiGraphWrapper:
         del self._idx_to_node[idx]
         del self._node_attrs[node]
 
+    def remove_nodes_from(self, nodes: Iterable[Any]) -> None:
+        """Remove multiple nodes and all their incident edges.
+
+        Args:
+            nodes: Iterable of node keys to remove
+
+        Note:
+            Nodes not in the graph are silently skipped.
+        """
+        for node in nodes:
+            if node in self._node_to_idx:
+                self.remove_node(node)
+
     def has_node(self, node: Any) -> bool:
         """Check if node exists."""
         return node in self._node_to_idx

@@ -94,27 +94,234 @@ class TestNetSubgraphExtraction(unittest.TestCase):
 
 class TestIslandDetection(unittest.TestCase):
     """Test floating island detection and removal"""
-    
+
     @classmethod
     def setUpClass(cls):
         test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
         if not test_netlist_dir.exists():
             raise unittest.SkipTest("Test netlist not found")
-        
+
         parser = NetlistParser(str(test_netlist_dir))
         cls.graph = parser.parse()
         cls.solver = PDNSolver(cls.graph, verbose=False)
-    
+
     def test_no_islands_in_test_netlist(self):
         """Test that test netlist has no floating islands"""
         net_nodes = set(self.solver.net_connectivity.get('VDD', []))
         net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
-        
+
         island_stats = self.solver._detect_and_remove_islands(net_graph, 'VDD')
-        
+
         # Test netlist should have no floating islands
         self.assertEqual(island_stats['islands_removed'], 0)
         self.assertEqual(island_stats['nodes_removed'], 0)
+
+
+class TestIslandDetectionSynthetic(unittest.TestCase):
+    """Test island detection with synthetic graphs containing disconnected components"""
+
+    def setUp(self):
+        """Create a synthetic graph with disconnected components"""
+        from core.rx_graph import RustworkxMultiDiGraphWrapper
+
+        # Create main graph
+        self.graph = RustworkxMultiDiGraphWrapper()
+
+        # Component 1: Connected to voltage source (3 nodes)
+        self.graph.add_node('n1', x=0, y=0, layer='M1')
+        self.graph.add_node('n2', x=1000, y=0, layer='M1')
+        self.graph.add_node('n3', x=2000, y=0, layer='M1')
+        self.graph.add_edge('n1', 'n2', type='R', value=0.01)
+        self.graph.add_edge('n2', 'n3', type='R', value=0.01)
+
+        # Component 2: Floating island (2 nodes, no vsrc)
+        self.graph.add_node('f1', x=5000, y=0, layer='M1')
+        self.graph.add_node('f2', x=6000, y=0, layer='M1')
+        self.graph.add_edge('f1', 'f2', type='R', value=0.01)
+
+        # Component 3: Another floating island (2 nodes)
+        self.graph.add_node('f3', x=10000, y=0, layer='M1')
+        self.graph.add_node('f4', x=11000, y=0, layer='M1')
+        self.graph.add_edge('f3', 'f4', type='R', value=0.01)
+
+        # Add voltage source connecting n1 to ground
+        self.graph.add_node('0')  # Ground
+        self.graph.add_node('vsrc_node')
+        self.graph.add_edge('vsrc_node', '0', type='V', value=1.0)
+        self.graph.add_edge('vsrc_node', 'n1', type='R', value=0.001)
+
+        # Add current sources to component 2 (makes it a warning case)
+        self.graph.add_edge('f1', '0', type='I', value=1.0)
+
+        # Setup metadata
+        self.graph.graph['net_connectivity'] = {
+            'VDD': ['n1', 'n2', 'n3', 'f1', 'f2', 'f3', 'f4', 'vsrc_node']
+        }
+        self.graph.graph['vsrc_dict'] = {'vsrc_node': {'voltage': 1.0}}
+        self.graph.graph['vsrc_nodes'] = {'vsrc_node'}
+        self.graph.graph['parameters'] = {}
+        self.graph.graph['instance_node_map'] = {}
+
+        # Create solver
+        self.solver = PDNSolver(self.graph, verbose=False)
+
+    def test_detects_floating_islands(self):
+        """Test that floating islands are detected"""
+        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
+        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
+
+        # Before removal, should have 3 components
+        from core.rx_algorithms import connected_components
+        components_before = connected_components(net_graph)
+        self.assertEqual(len(components_before), 3)
+
+        island_stats = self.solver._detect_and_remove_islands(net_graph, 'VDD')
+
+        # Should remove 2 floating islands
+        self.assertEqual(island_stats['islands_removed'], 2)
+
+    def test_removes_correct_node_count(self):
+        """Test that correct number of nodes are removed"""
+        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
+        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
+
+        island_stats = self.solver._detect_and_remove_islands(net_graph, 'VDD')
+
+        # f1, f2, f3, f4 = 4 nodes removed
+        self.assertEqual(island_stats['nodes_removed'], 4)
+
+    def test_removes_correct_resistor_count(self):
+        """Test that correct number of resistors are removed"""
+        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
+        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
+
+        island_stats = self.solver._detect_and_remove_islands(net_graph, 'VDD')
+
+        # 2 resistors (f1-f2, f3-f4) should be removed
+        self.assertEqual(island_stats['resistors_removed'], 2)
+
+    def test_tracks_current_sources_in_removed_islands(self):
+        """Test that current sources in removed islands are tracked"""
+        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
+        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
+
+        island_stats = self.solver._detect_and_remove_islands(net_graph, 'VDD')
+
+        # 1 current source in component 2 should be tracked
+        self.assertEqual(island_stats['isources_removed'], 1)
+
+    def test_keeps_component_with_vsrc(self):
+        """Test that component with voltage source is kept"""
+        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
+        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
+
+        nodes_before = set(net_graph.nodes())
+        self.assertIn('n1', nodes_before)
+        self.assertIn('n2', nodes_before)
+        self.assertIn('n3', nodes_before)
+
+        self.solver._detect_and_remove_islands(net_graph, 'VDD')
+
+        nodes_after = set(net_graph.nodes())
+        # n1, n2, n3 should still be present (connected to vsrc)
+        self.assertIn('n1', nodes_after)
+        self.assertIn('n2', nodes_after)
+        self.assertIn('n3', nodes_after)
+
+    def test_removes_floating_nodes(self):
+        """Test that floating nodes are actually removed from graph"""
+        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
+        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
+
+        nodes_before = set(net_graph.nodes())
+        self.assertIn('f1', nodes_before)
+        self.assertIn('f2', nodes_before)
+
+        self.solver._detect_and_remove_islands(net_graph, 'VDD')
+
+        nodes_after = set(net_graph.nodes())
+        # f1, f2, f3, f4 should be removed
+        self.assertNotIn('f1', nodes_after)
+        self.assertNotIn('f2', nodes_after)
+        self.assertNotIn('f3', nodes_after)
+        self.assertNotIn('f4', nodes_after)
+
+    def test_single_component_no_removal(self):
+        """Test that fully connected graph has no islands removed"""
+        from core.rx_graph import RustworkxMultiDiGraphWrapper
+
+        # Create fully connected graph
+        graph = RustworkxMultiDiGraphWrapper()
+        graph.add_node('a', x=0, y=0, layer='M1')
+        graph.add_node('b', x=1000, y=0, layer='M1')
+        graph.add_node('c', x=2000, y=0, layer='M1')
+        graph.add_edge('a', 'b', type='R', value=0.01)
+        graph.add_edge('b', 'c', type='R', value=0.01)
+
+        # Add voltage source
+        graph.add_node('0')
+        graph.add_node('vsrc')
+        graph.add_edge('vsrc', '0', type='V', value=1.0)
+        graph.add_edge('vsrc', 'a', type='R', value=0.001)
+
+        graph.graph['net_connectivity'] = {'VDD': ['a', 'b', 'c', 'vsrc']}
+        graph.graph['vsrc_dict'] = {}
+        graph.graph['vsrc_nodes'] = {'vsrc'}
+        graph.graph['parameters'] = {}
+        graph.graph['instance_node_map'] = {}
+
+        solver = PDNSolver(graph, verbose=False)
+        net_nodes = set(solver.net_connectivity.get('VDD', []))
+        net_graph = solver._extract_net_subgraph('VDD', net_nodes)
+
+        island_stats = solver._detect_and_remove_islands(net_graph, 'VDD')
+
+        self.assertEqual(island_stats['islands_removed'], 0)
+        self.assertEqual(island_stats['nodes_removed'], 0)
+
+
+class TestIslandDetectionOptimization(unittest.TestCase):
+    """Test that optimized island detection produces same results as reference"""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse netlist_small for comparison tests"""
+        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not test_netlist_dir.exists():
+            raise unittest.SkipTest("netlist_small not found")
+
+        parser = NetlistParser(str(test_netlist_dir), validate=False)
+        cls.graph = parser.parse()
+
+    def test_optimized_matches_reference(self):
+        """Test optimized island detection (no to_undirected) matches reference"""
+        from core.rx_algorithms import connected_components
+
+        # Extract net subgraph
+        net_nodes = set(self.graph.graph.get('net_connectivity', {}).get('VDD_XLV', []))
+        net_graph = self.graph.subgraph(net_nodes).copy()
+
+        # Remove non-resistor edges
+        edges_to_remove = []
+        for u, v, k, d in net_graph.edges(keys=True, data=True):
+            if d.get('type') != 'R':
+                edges_to_remove.append((u, v, k))
+        for u, v, k in edges_to_remove:
+            net_graph.remove_edge(u, v, k)
+
+        # Reference: to_undirected + connected_components
+        undirected = net_graph.to_undirected()
+        ref_components = connected_components(undirected)
+
+        # Optimized: direct connected_components on directed graph
+        opt_components = connected_components(net_graph)
+
+        # Compare as sets of frozensets
+        ref_sets = set(frozenset(c) for c in ref_components)
+        opt_sets = set(frozenset(c) for c in opt_components)
+
+        self.assertEqual(ref_sets, opt_sets)
+        self.assertEqual(len(ref_components), len(opt_components))
 
 
 class TestVoltageSourceIdentification(unittest.TestCase):

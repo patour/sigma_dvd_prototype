@@ -318,12 +318,12 @@ class PDNSolver:
     def _detect_and_remove_islands(self, net_graph: RustworkxMultiDiGraphWrapper, net_name: str) -> Dict:
         """
         Detect disconnected islands, remove floating islands, warn about islands with current sources.
-        """
-        # Convert to undirected for connectivity analysis
-        undirected = net_graph.to_undirected()
 
-        # Find connected components
-        components = connected_components(undirected)
+        Note: connected_components() already uses rx.weakly_connected_components()
+        for directed graphs, so no need to convert to undirected first.
+        """
+        # Find connected components (weak connectivity for directed graphs)
+        components = connected_components(net_graph)
         
         if len(components) == 1:
             self.logger.debug("Net is fully connected (1 component)")
