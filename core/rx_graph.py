@@ -363,6 +363,8 @@ class RustworkxGraphWrapper:
         """Return a subgraph containing only the specified nodes.
 
         Creates a new independent graph (not a view).
+        Uses rustworkx native subgraph for O(n+m) performance where n, m are
+        the subgraph node/edge counts, rather than O(N+M) for full graph.
 
         Args:
             nodes: Iterable of node keys to include
@@ -371,25 +373,35 @@ class RustworkxGraphWrapper:
             New RustworkxGraphWrapper with only specified nodes and edges between them
         """
         nodes_set = set(nodes)
-        sub = RustworkxGraphWrapper()
 
-        # Copy metadata
+        # Get rustworkx indices for requested nodes
+        node_indices = [self._node_to_idx[n] for n in nodes_set if n in self._node_to_idx]
+
+        if not node_indices:
+            # Return empty graph
+            sub = RustworkxGraphWrapper()
+            sub._metadata = dict(self._metadata)
+            return sub
+
+        # Use rustworkx native subgraph (Rust implementation - much faster)
+        rx_sub, node_map = self._graph.subgraph_with_nodemap(node_indices, preserve_attrs=True)
+
+        # Build new wrapper with correct mappings
+        sub = RustworkxGraphWrapper.__new__(RustworkxGraphWrapper)
+        sub._graph = rx_sub
         sub._metadata = dict(self._metadata)
+        sub._node_to_idx = {}
+        sub._idx_to_node = {}
+        sub._node_attrs = {}
 
-        # Copy nodes
-        for node in nodes_set:
-            if node in self._node_attrs:
-                sub.add_node(node, **self._node_attrs[node])
-
-        # Copy edges between nodes in subset
-        for edge_idx in self._graph.edge_indices():
-            u_idx, v_idx = self._graph.get_edge_endpoints_by_index(edge_idx)
-            u = self._idx_to_node[u_idx]
-            v = self._idx_to_node[v_idx]
-
-            if u in nodes_set and v in nodes_set:
-                edge_data = self._graph.get_edge_data_by_index(edge_idx)
-                sub.add_edge(u, v, **(edge_data or {}))
+        # Rebuild node mappings using node_map (new_idx -> old_idx)
+        for new_idx in range(rx_sub.num_nodes()):
+            old_idx = node_map[new_idx]
+            node_key = self._idx_to_node[old_idx]
+            sub._node_to_idx[node_key] = new_idx
+            sub._idx_to_node[new_idx] = node_key
+            if node_key in self._node_attrs:
+                sub._node_attrs[node_key] = self._node_attrs[node_key]
 
         return sub
 
@@ -825,27 +837,48 @@ class RustworkxMultiDiGraphWrapper:
     # =========================================================================
 
     def subgraph(self, nodes: Iterable[Any]) -> 'RustworkxMultiDiGraphWrapper':
-        """Return a subgraph containing only the specified nodes."""
+        """Return a subgraph containing only the specified nodes.
+
+        Creates a new independent graph (not a view).
+        Uses rustworkx native subgraph for O(n+m) performance where n, m are
+        the subgraph node/edge counts, rather than O(N+M) for full graph.
+
+        Args:
+            nodes: Iterable of node keys to include
+
+        Returns:
+            New RustworkxMultiDiGraphWrapper with only specified nodes and edges between them
+        """
         nodes_set = set(nodes)
-        sub = RustworkxMultiDiGraphWrapper()
 
-        # Copy metadata
+        # Get rustworkx indices for requested nodes
+        node_indices = [self._node_to_idx[n] for n in nodes_set if n in self._node_to_idx]
+
+        if not node_indices:
+            # Return empty graph
+            sub = RustworkxMultiDiGraphWrapper()
+            sub._metadata = dict(self._metadata)
+            return sub
+
+        # Use rustworkx native subgraph (Rust implementation - much faster)
+        rx_sub, node_map = self._graph.subgraph_with_nodemap(node_indices, preserve_attrs=True)
+
+        # Build new wrapper with correct mappings
+        sub = RustworkxMultiDiGraphWrapper.__new__(RustworkxMultiDiGraphWrapper)
+        sub._graph = rx_sub
         sub._metadata = dict(self._metadata)
+        sub._node_to_idx = {}
+        sub._idx_to_node = {}
+        sub._node_attrs = {}
 
-        # Copy nodes
-        for node in nodes_set:
-            if node in self._node_attrs:
-                sub.add_node(node, **self._node_attrs[node])
-
-        # Copy edges between nodes in subset
-        for edge_idx in self._graph.edge_indices():
-            u_idx, v_idx = self._graph.get_edge_endpoints_by_index(edge_idx)
-            u = self._idx_to_node[u_idx]
-            v = self._idx_to_node[v_idx]
-
-            if u in nodes_set and v in nodes_set:
-                edge_data = self._graph.get_edge_data_by_index(edge_idx)
-                sub.add_edge(u, v, **(edge_data or {}))
+        # Rebuild node mappings using node_map (new_idx -> old_idx)
+        for new_idx in range(rx_sub.num_nodes()):
+            old_idx = node_map[new_idx]
+            node_key = self._idx_to_node[old_idx]
+            sub._node_to_idx[node_key] = new_idx
+            sub._idx_to_node[new_idx] = node_key
+            if node_key in self._node_attrs:
+                sub._node_attrs[node_key] = self._node_attrs[node_key]
 
         return sub
 

@@ -90,7 +90,8 @@ def create_model_from_pdn(
         nodes_for_subgraph.add('0')
 
     # Extract subgraph for this net (including ground)
-    net_subgraph = graph.subgraph(nodes_for_subgraph).copy()
+    # Note: subgraph() already creates an independent copy, no need for .copy()
+    net_subgraph = graph.subgraph(nodes_for_subgraph)
 
     # Find voltage source nodes
     if vsrc_nodes is not None:
