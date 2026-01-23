@@ -294,7 +294,11 @@ class GraphBuilder:
         # Node tracking
         self.boundary_nodes: Set[str] = set()
         self.node_attributes: Dict[str, Dict] = defaultdict(dict)
-        
+
+        # Edge index tracking for efficient filtering (avoid full graph iteration)
+        self.package_edge_indices: List[int] = []  # Edge indices from package.ckt
+        self.vsrc_edge_indices: List[int] = []     # Voltage source edge indices
+
         self.logger = logging.getLogger(__name__)
         
     def _uf_find(self, node: str) -> str:
@@ -472,8 +476,14 @@ class GraphBuilder:
         edge_attrs.update(attrs)
         
         # Add edge (MultiDiGraph allows multiple edges between same nodes)
-        self.graph.add_edge(node1, node2, **edge_attrs)
-        
+        edge_idx = self.graph.add_edge(node1, node2, **edge_attrs)
+
+        # Track edge indices for efficient post-processing filtering
+        if elem_type == 'V':
+            self.vsrc_edge_indices.append(edge_idx)
+        if self.current_file_type == 'package':
+            self.package_edge_indices.append(edge_idx)
+
         # Update global statistics
         self.stats.elements_total += 1
         if elem_type == 'R':
@@ -1200,77 +1210,112 @@ class NetlistParser:
         """
         Remove voltage sources and package elements that don't connect to the filtered net.
         This is called after _propagate_net_connectivity has assigned net types to package nodes.
-        
-        Strategy: Use the union-find results to filter - keep only voltage sources and package
-        elements whose nodes have the filtered net type.
+
+        Strategy: Use tracked edge indices from parsing to avoid iterating over all edges.
+        Only voltage sources and package elements (from package.ckt) need to be checked.
         """
         if self.builder.net_filter is None:
             return
-        
+
         self.logger.info(f"Filtering voltage sources and package elements by net '{self.builder.net_filter}'...")
-        
-        # Remove voltage sources whose positive terminal doesn't have the filtered net type
-        vsrc_edges_to_remove = []
-        for u, v, k, d in self.builder.graph.edges(keys=True, data=True):
-            if d.get('type') == 'V':
-                # Get positive terminal (non-ground node)
-                vsrc_pos_node = u if u != '0' else v
-                if vsrc_pos_node == '0':
-                    # Both terminals grounded - remove
-                    vsrc_edges_to_remove.append((u, v, k, d.get('elem_name', 'unknown')))
-                    continue
-                
-                # Check if positive terminal has the filtered net type (from union-find)
-                node_net_lower = self.builder.node_net_map_lower.get(vsrc_pos_node)
-                if node_net_lower != self.builder.net_filter:
-                    vsrc_edges_to_remove.append((u, v, k, d.get('elem_name', 'unknown')))
-        
-        # Remove voltage sources
-        for u, v, k, name in vsrc_edges_to_remove:
-            self.logger.debug(f"Removing voltage source {name} - not connected to {self.net_filter}")
-            self.builder.graph.remove_edge(u, v, k)
-            self.builder.stats.vsources -= 1
-            self.builder.stats.elements_total -= 1
-        
-        # Remove package edges (both nodes are package nodes) that don't have the filtered net type
-        package_edges_to_remove = []
-        for u, v, k, d in self.builder.graph.edges(keys=True, data=True):
-            # Package edges: both nodes are not in die node map (not from .nd files)
-            if u not in self.builder.node_net_map and u != '0' and v not in self.builder.node_net_map and v != '0':
-                # Check if either node has the filtered net type
+        self.logger.debug(f"Checking {len(self.builder.vsrc_edge_indices)} vsrc edges, "
+                         f"{len(self.builder.package_edge_indices)} package edges")
+
+        # Access internal rustworkx graph for efficient index-based operations
+        rx_graph = self.builder.graph._graph
+        idx_to_node = self.builder.graph._idx_to_node
+
+        # Collect edge indices to remove and statistics updates
+        edges_to_remove = []
+        vsrc_remove_count = 0
+        pkg_remove_count = 0
+        stats_updates = {'R': 0, 'C': 0, 'L': 0, 'V': 0}
+        per_net_updates = []  # [(net_type, elem_type, value, u, v), ...]
+
+        # Check voltage source edges (only iterate over tracked vsrc indices)
+        for edge_idx in self.builder.vsrc_edge_indices:
+            try:
+                u_idx, v_idx = rx_graph.get_edge_endpoints_by_index(edge_idx)
+                u = idx_to_node[u_idx]
+                v = idx_to_node[v_idx]
+            except Exception:
+                # Edge may have been removed by earlier processing
+                continue
+
+            # Get positive terminal (non-ground node)
+            vsrc_pos_node = u if u != '0' else v
+            if vsrc_pos_node == '0':
+                # Both terminals grounded - remove
+                edges_to_remove.append(edge_idx)
+                vsrc_remove_count += 1
+                stats_updates['V'] += 1
+                continue
+
+            # Check if positive terminal has the filtered net type
+            node_net_lower = self.builder.node_net_map_lower.get(vsrc_pos_node)
+            if node_net_lower != self.builder.net_filter:
+                edges_to_remove.append(edge_idx)
+                vsrc_remove_count += 1
+                stats_updates['V'] += 1
+
+        # Check package edges (only iterate over tracked package indices)
+        # Skip edges already marked for removal (vsrc edges that are also in package)
+        edges_to_remove_set = set(edges_to_remove)
+
+        for edge_idx in self.builder.package_edge_indices:
+            if edge_idx in edges_to_remove_set:
+                continue  # Already marked for removal as vsrc
+
+            try:
+                u_idx, v_idx = rx_graph.get_edge_endpoints_by_index(edge_idx)
+                u = idx_to_node[u_idx]
+                v = idx_to_node[v_idx]
+                edge_data = rx_graph.get_edge_data_by_index(edge_idx)
+            except Exception:
+                continue
+
+            # Package edges: both nodes are not in die node map
+            if u not in self.builder.node_net_map and u != '0' and \
+               v not in self.builder.node_net_map and v != '0':
                 u_net_lower = self.builder.node_net_map_lower.get(u)
                 v_net_lower = self.builder.node_net_map_lower.get(v)
-                # Keep only if at least one node has the filtered net type
+
+                # Remove if neither node has the filtered net type
                 if u_net_lower != self.builder.net_filter and v_net_lower != self.builder.net_filter:
-                    package_edges_to_remove.append((u, v, k, d.get('type')))
-        
-        # Remove package edges and update per-net statistics
-        for u, v, k, elem_type in package_edges_to_remove:
-            # Get edge data before removing
-            edge_data = self.builder.graph.get_edge_data(u, v, k)
-            net_type = edge_data.get('net_type') if edge_data else None
-            value = edge_data.get('value', 0.0) if edge_data else 0.0
-            
-            self.builder.graph.remove_edge(u, v, k)
-            self.builder.stats.elements_total -= 1
-            
-            # Update global statistics
-            if elem_type == 'R':
-                self.builder.stats.resistors -= 1
-            elif elem_type == 'C':
-                self.builder.stats.capacitors -= 1
-            elif elem_type == 'L':
-                self.builder.stats.inductors -= 1
-            
-            # Update per-net statistics (package category)
-            if net_type and net_type in self.builder.stats.net_stats:
+                    edges_to_remove.append(edge_idx)
+                    pkg_remove_count += 1
+
+                    elem_type = edge_data.get('type') if edge_data else None
+                    if elem_type and elem_type in stats_updates:
+                        stats_updates[elem_type] += 1
+
+                    # Track per-net statistics update
+                    net_type = edge_data.get('net_type') if edge_data else None
+                    value = edge_data.get('value', 0.0) if edge_data else 0.0
+                    if net_type:
+                        per_net_updates.append((net_type, elem_type, value, u, v))
+
+        # Batch remove edges (sort descending to avoid index invalidation issues)
+        for edge_idx in sorted(edges_to_remove, reverse=True):
+            try:
+                rx_graph.remove_edge_from_index(edge_idx)
+            except Exception:
+                pass  # Edge already removed
+
+        # Update global statistics
+        self.builder.stats.vsources -= stats_updates['V']
+        self.builder.stats.resistors -= stats_updates['R']
+        self.builder.stats.capacitors -= stats_updates['C']
+        self.builder.stats.inductors -= stats_updates['L']
+        self.builder.stats.elements_total -= len(edges_to_remove)
+
+        # Update per-net statistics
+        for net_type, elem_type, value, u, v in per_net_updates:
+            if net_type in self.builder.stats.net_stats:
                 net_stat = self.builder.stats.net_stats[net_type].get('package')
                 if net_stat:
-                    # Remove nodes from set
                     net_stat['nodes'].discard(u)
                     net_stat['nodes'].discard(v)
-                    
-                    # Update element counts and totals
                     if elem_type == 'R':
                         net_stat['resistors'] -= 1
                         net_stat['total_resistance'] -= value
@@ -1280,18 +1325,32 @@ class NetlistParser:
                     elif elem_type == 'L':
                         net_stat['inductors'] -= 1
                         net_stat['total_inductance'] -= value
-        
-        # Remove isolated package nodes (degree 0)
+
+        # Remove isolated package nodes (only check package nodes, not all nodes)
+        # Build set of package nodes from the tracked edges for efficiency
+        package_nodes_to_check = set()
+        for edge_idx in self.builder.package_edge_indices:
+            try:
+                u_idx, v_idx = rx_graph.get_edge_endpoints_by_index(edge_idx)
+                u = idx_to_node.get(u_idx)
+                v = idx_to_node.get(v_idx)
+                if u and u not in self.builder.node_net_map and u != '0':
+                    package_nodes_to_check.add(u)
+                if v and v not in self.builder.node_net_map and v != '0':
+                    package_nodes_to_check.add(v)
+            except Exception:
+                pass
+
         package_nodes_to_remove = []
-        for node in list(self.builder.graph.nodes()):
-            if node not in self.builder.node_net_map and node != '0' and self.builder.graph.degree(node) == 0:
+        for node in package_nodes_to_check:
+            if node in self.builder.graph and self.builder.graph.degree(node) == 0:
                 package_nodes_to_remove.append(node)
-        
+
         for node in package_nodes_to_remove:
             self.builder.graph.remove_node(node)
-        
-        self.logger.info(f"Filtered out {len(vsrc_edges_to_remove)} voltage sources, "
-                        f"{len(package_edges_to_remove)} package edges, {len(package_nodes_to_remove)} package nodes")
+
+        self.logger.info(f"Filtered out {vsrc_remove_count} voltage sources, "
+                        f"{pkg_remove_count} package edges, {len(package_nodes_to_remove)} package nodes")
     
     def _parse_tiles(self):
         """Parse all queued tile files with progress bar"""
