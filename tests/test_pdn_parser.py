@@ -359,5 +359,311 @@ class TestNodeNetMapping(unittest.TestCase):
             self.assertEqual(net, 'VDD')
 
 
+class TestValidation(unittest.TestCase):
+    """Test validation methods: _check_shorts and _check_floating_nodes"""
+
+    def setUp(self):
+        """Create a temporary directory for test netlists"""
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        """Clean up temporary directory"""
+        import shutil
+        shutil.rmtree(self.temp_dir)
+
+    def _create_minimal_netlist(self, tile_content, nd_content, package_content="",
+                                 additional_vsrcs="", pg_net_voltage="VDD 1.0"):
+        """Helper to create a minimal netlist directory structure"""
+        netlist_dir = Path(self.temp_dir) / "test_netlist"
+        netlist_dir.mkdir()
+
+        # ckt.sp - main file
+        ckt_sp = f""".partition_info 1 1
+.include tile_0_0.ckt
+.include package.ckt
+"""
+        (netlist_dir / "ckt.sp").write_text(ckt_sp)
+
+        # tile_0_0.ckt
+        (netlist_dir / "tile_0_0.ckt").write_text(tile_content)
+
+        # tile_0_0.nd
+        (netlist_dir / "tile_0_0.nd").write_text(nd_content)
+
+        # package.ckt
+        (netlist_dir / "package.ckt").write_text(package_content)
+
+        # pg_net_voltage
+        (netlist_dir / "pg_net_voltage").write_text(pg_net_voltage)
+
+        # additional_vsrcs
+        (netlist_dir / "additional_vsrcs").write_text(additional_vsrcs)
+
+        return str(netlist_dir)
+
+    def test_check_shorts_detects_zero_resistance(self):
+        """Test that _check_shorts detects resistors below SHORT_THRESHOLD"""
+        tile_content = """
+R1 1000_1000_M1 2000_1000_M1 0.01
+R2 2000_1000_M1 3000_1000_M1 0.0000001
+R3 3000_1000_M1 4000_1000_M1 0.01
+"""
+        nd_content = """1000 1000 M1 1000_1000_M1 VDD
+2000 1000 M1 2000_1000_M1 VDD
+3000 1000 M1 3000_1000_M1 VDD
+4000 1000 M1 4000_1000_M1 VDD
+"""
+        package_content = "VVDD VDD_vsrc 0 1.0\nRs VDD_vsrc 1000_1000_M1 0.0"
+
+        netlist_dir = self._create_minimal_netlist(tile_content, nd_content, package_content)
+
+        parser = NetlistParser(netlist_dir, validate=True)
+        graph = parser.parse()
+
+        # Should detect 2 shorts: R2 (0.0000001) and Rs (0.0)
+        self.assertEqual(parser.builder.stats.shorted_elements, 2)
+
+    def test_check_shorts_no_shorts(self):
+        """Test that _check_shorts reports zero when no shorts exist"""
+        tile_content = """
+R1 1000_1000_M1 2000_1000_M1 0.01
+R2 2000_1000_M1 3000_1000_M1 0.01
+"""
+        nd_content = """1000 1000 M1 1000_1000_M1 VDD
+2000 1000 M1 2000_1000_M1 VDD
+3000 1000 M1 3000_1000_M1 VDD
+"""
+        package_content = "VVDD VDD_vsrc 0 1.0\nRs VDD_vsrc 1000_1000_M1 0.001"
+
+        netlist_dir = self._create_minimal_netlist(tile_content, nd_content, package_content)
+
+        parser = NetlistParser(netlist_dir, validate=True)
+        graph = parser.parse()
+
+        self.assertEqual(parser.builder.stats.shorted_elements, 0)
+
+    def test_check_floating_nodes_detects_disconnected(self):
+        """Test that _check_floating_nodes detects nodes not connected to voltage source"""
+        # Create two disconnected components - one with vsrc, one without
+        tile_content = """
+R1 1000_1000_M1 2000_1000_M1 0.01
+R2 5000_5000_M1 6000_5000_M1 0.01
+"""
+        nd_content = """1000 1000 M1 1000_1000_M1 VDD
+2000 1000 M1 2000_1000_M1 VDD
+5000 5000 M1 5000_5000_M1 VDD
+6000 5000 M1 6000_5000_M1 VDD
+"""
+        # Voltage source only connects to the first component
+        package_content = "VVDD VDD_vsrc 0 1.0\nRs VDD_vsrc 1000_1000_M1 0.001"
+
+        netlist_dir = self._create_minimal_netlist(tile_content, nd_content, package_content)
+
+        parser = NetlistParser(netlist_dir, validate=True)
+        graph = parser.parse()
+
+        # Second component (5000_5000_M1, 6000_5000_M1) should be floating
+        self.assertEqual(parser.builder.stats.floating_nodes, 2)
+
+    def test_check_floating_nodes_all_connected(self):
+        """Test that _check_floating_nodes reports zero when all nodes connected"""
+        tile_content = """
+R1 1000_1000_M1 2000_1000_M1 0.01
+R2 2000_1000_M1 3000_1000_M1 0.01
+"""
+        nd_content = """1000 1000 M1 1000_1000_M1 VDD
+2000 1000 M1 2000_1000_M1 VDD
+3000 1000 M1 3000_1000_M1 VDD
+"""
+        package_content = "VVDD VDD_vsrc 0 1.0\nRs VDD_vsrc 1000_1000_M1 0.001"
+
+        netlist_dir = self._create_minimal_netlist(tile_content, nd_content, package_content)
+
+        parser = NetlistParser(netlist_dir, validate=True)
+        graph = parser.parse()
+
+        self.assertEqual(parser.builder.stats.floating_nodes, 0)
+
+    def test_validation_uses_tracked_vsrc_indices(self):
+        """Test that validation uses tracked vsrc_edge_indices correctly"""
+        tile_content = """
+R1 1000_1000_M1 2000_1000_M1 0.01
+"""
+        nd_content = """1000 1000 M1 1000_1000_M1 VDD
+2000 1000 M1 2000_1000_M1 VDD
+"""
+        package_content = "VVDD VDD_vsrc 0 1.0\nRs VDD_vsrc 1000_1000_M1 0.001"
+
+        netlist_dir = self._create_minimal_netlist(tile_content, nd_content, package_content)
+
+        parser = NetlistParser(netlist_dir, validate=True)
+        graph = parser.parse()
+
+        # Verify vsrc_edge_indices were tracked
+        self.assertEqual(len(parser.builder.vsrc_edge_indices), 1)
+
+        # Verify the tracked index points to a voltage source
+        rx_graph = parser.builder.graph._graph
+        edge_data = rx_graph.get_edge_data_by_index(parser.builder.vsrc_edge_indices[0])
+        self.assertEqual(edge_data['type'], 'V')
+
+    def test_validation_disabled(self):
+        """Test that validation is skipped when validate=False"""
+        # Create netlist with intentional issues
+        tile_content = """
+R1 1000_1000_M1 2000_1000_M1 0.0000001
+R2 5000_5000_M1 6000_5000_M1 0.01
+"""
+        nd_content = """1000 1000 M1 1000_1000_M1 VDD
+2000 1000 M1 2000_1000_M1 VDD
+5000 5000 M1 5000_5000_M1 VDD
+6000 5000 M1 6000_5000_M1 VDD
+"""
+        package_content = "VVDD VDD_vsrc 0 1.0\nRs VDD_vsrc 1000_1000_M1 0.001"
+
+        netlist_dir = self._create_minimal_netlist(tile_content, nd_content, package_content)
+
+        parser = NetlistParser(netlist_dir, validate=False)
+        graph = parser.parse()
+
+        # With validate=False, these should remain at 0 (not computed)
+        self.assertEqual(parser.builder.stats.shorted_elements, 0)
+        self.assertEqual(parser.builder.stats.floating_nodes, 0)
+
+    def test_validation_with_multiple_voltage_sources(self):
+        """Test floating node detection with multiple voltage sources"""
+        tile_content = """
+R1 1000_1000_M1 2000_1000_M1 0.01
+R2 3000_3000_M1 4000_3000_M1 0.01
+R3 5000_5000_M1 6000_5000_M1 0.01
+"""
+        nd_content = """1000 1000 M1 1000_1000_M1 VDD
+2000 1000 M1 2000_1000_M1 VDD
+3000 3000 M1 3000_3000_M1 VDD
+4000 3000 M1 4000_3000_M1 VDD
+5000 5000 M1 5000_5000_M1 VDD
+6000 5000 M1 6000_5000_M1 VDD
+"""
+        # Two voltage sources connecting to first two components
+        package_content = """VVDD1 VDD_vsrc1 0 1.0
+Rs1 VDD_vsrc1 1000_1000_M1 0.001
+VVDD2 VDD_vsrc2 0 1.0
+Rs2 VDD_vsrc2 3000_3000_M1 0.001
+"""
+
+        netlist_dir = self._create_minimal_netlist(tile_content, nd_content, package_content)
+
+        parser = NetlistParser(netlist_dir, validate=True)
+        graph = parser.parse()
+
+        # Third component (5000_5000_M1, 6000_5000_M1) should be floating
+        self.assertEqual(parser.builder.stats.floating_nodes, 2)
+
+        # Should track 2 voltage sources
+        self.assertEqual(len(parser.builder.vsrc_edge_indices), 2)
+
+
+class TestValidationOptimization(unittest.TestCase):
+    """Test that optimized validation produces same results as reference implementation"""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse netlist_small for comparison tests"""
+        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not test_netlist_dir.exists():
+            raise unittest.SkipTest("netlist_small not found")
+
+        cls.parser = NetlistParser(str(test_netlist_dir), validate=False)
+        cls.graph = cls.parser.parse()
+
+    def test_optimized_shorts_matches_reference(self):
+        """Test optimized _check_shorts produces same results as reference"""
+        from core.rx_algorithms import node_connected_component
+
+        # Reference implementation (iterate all edges via wrapper)
+        def reference_check_shorts(graph):
+            shorts = []
+            for u, v, key, data in graph.edges(keys=True, data=True):
+                if data.get('type') == 'R':
+                    value = data.get('value', float('inf'))
+                    if value < SHORT_THRESHOLD:
+                        shorts.append((u, v, data.get('elem_name'), value))
+            return shorts
+
+        # Optimized implementation (direct rustworkx access)
+        def optimized_check_shorts(graph):
+            rx_graph = graph._graph
+            idx_to_node = graph._idx_to_node
+            shorts = []
+            for edge_idx in rx_graph.edge_indices():
+                data = rx_graph.get_edge_data_by_index(edge_idx)
+                if data and data.get('type') == 'R':
+                    value = data.get('value', float('inf'))
+                    if value < SHORT_THRESHOLD:
+                        u_idx, v_idx = rx_graph.get_edge_endpoints_by_index(edge_idx)
+                        shorts.append((idx_to_node[u_idx], idx_to_node[v_idx],
+                                      data.get('elem_name'), value))
+            return shorts
+
+        ref_shorts = reference_check_shorts(self.graph)
+        opt_shorts = optimized_check_shorts(self.graph)
+
+        # Compare as sets of (sorted endpoints, name, value)
+        ref_set = set((tuple(sorted([u, v])), n, v) for u, v, n, v in ref_shorts)
+        opt_set = set((tuple(sorted([u, v])), n, v) for u, v, n, v in opt_shorts)
+
+        self.assertEqual(ref_set, opt_set)
+
+    def test_optimized_floating_matches_reference(self):
+        """Test optimized _check_floating_nodes produces same results as reference"""
+        from core.rx_algorithms import node_connected_component
+
+        # Reference implementation (iterate all edges, use to_undirected)
+        def reference_check_floating(graph):
+            grounded_nodes = set()
+            for u, v, data in graph.edges(data=True):
+                if data.get('type') == 'V':
+                    grounded_nodes.add(u)
+                    grounded_nodes.add(v)
+
+            connected_nodes = set()
+            undirected_graph = graph.to_undirected()
+            for node in grounded_nodes:
+                if node not in connected_nodes:
+                    component = node_connected_component(undirected_graph, node)
+                    connected_nodes.update(component)
+
+            all_nodes = set(graph.nodes())
+            return all_nodes - connected_nodes
+
+        # Optimized implementation (tracked indices, direct weak connectivity)
+        def optimized_check_floating(graph, vsrc_edge_indices):
+            rx_graph = graph._graph
+            idx_to_node = graph._idx_to_node
+
+            grounded_nodes = set()
+            for edge_idx in vsrc_edge_indices:
+                try:
+                    u_idx, v_idx = rx_graph.get_edge_endpoints_by_index(edge_idx)
+                    grounded_nodes.add(idx_to_node[u_idx])
+                    grounded_nodes.add(idx_to_node[v_idx])
+                except Exception:
+                    pass
+
+            connected_nodes = set()
+            for node in grounded_nodes:
+                if node not in connected_nodes:
+                    component = node_connected_component(graph, node)
+                    connected_nodes.update(component)
+
+            all_nodes = set(graph.nodes())
+            return all_nodes - connected_nodes
+
+        ref_floating = reference_check_floating(self.graph)
+        opt_floating = optimized_check_floating(self.graph, self.parser.builder.vsrc_edge_indices)
+
+        self.assertEqual(ref_floating, opt_floating)
+
+
 if __name__ == '__main__':
     unittest.main()

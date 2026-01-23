@@ -1834,16 +1834,24 @@ class NetlistParser:
         self._check_grounded_nodes()
         
     def _check_shorts(self):
-        """Detect and report shorted resistors"""
+        """Detect and report shorted resistors.
+
+        Optimized to use rustworkx directly instead of wrapper iteration.
+        """
+        rx_graph = self.builder.graph._graph
+        idx_to_node = self.builder.graph._idx_to_node
         shorts = []
-        
-        for u, v, key, data in self.builder.graph.edges(keys=True, data=True):
-            if data.get('type') == 'R':
+
+        for edge_idx in rx_graph.edge_indices():
+            data = rx_graph.get_edge_data_by_index(edge_idx)
+            if data and data.get('type') == 'R':
                 value = data.get('value', float('inf'))
                 if value < SHORT_THRESHOLD:
-                    shorts.append((u, v, data.get('elem_name'), value))
+                    u_idx, v_idx = rx_graph.get_edge_endpoints_by_index(edge_idx)
+                    shorts.append((idx_to_node[u_idx], idx_to_node[v_idx],
+                                  data.get('elem_name'), value))
                     self.builder.stats.shorted_elements += 1
-                    
+
         if shorts:
             msg = f"Found {len(shorts)} shorted resistors:\n"
             for u, v, name, value in shorts[:10]:  # Show first 10
@@ -1857,36 +1865,48 @@ class NetlistParser:
                 self.logger.warning(msg)
                 
     def _check_floating_nodes(self):
-        """Detect nodes not connected to any voltage source"""
-        # Find all nodes connected to voltage sources
+        """Detect nodes not connected to any voltage source.
+
+        Optimized to:
+        1. Use tracked vsrc_edge_indices instead of iterating all edges
+        2. Use directed graph directly - node_connected_component already
+           handles weak connectivity for directed graphs via
+           rx.weakly_connected_components(), so to_undirected() is unnecessary.
+        """
+        rx_graph = self.builder.graph._graph
+        idx_to_node = self.builder.graph._idx_to_node
+
+        # Find all nodes connected to voltage sources using tracked indices
         grounded_nodes = set()
-        
-        for u, v, data in self.builder.graph.edges(data=True):
-            if data.get('type') == 'V':
-                grounded_nodes.add(u)
-                grounded_nodes.add(v)
-                
-        # BFS from grounded nodes
+        for edge_idx in self.builder.vsrc_edge_indices:
+            try:
+                u_idx, v_idx = rx_graph.get_edge_endpoints_by_index(edge_idx)
+                grounded_nodes.add(idx_to_node[u_idx])
+                grounded_nodes.add(idx_to_node[v_idx])
+            except Exception:
+                # Edge may have been removed by earlier processing
+                pass
+
+        # BFS from grounded nodes using weak connectivity on directed graph
         connected_nodes = set()
-        undirected_graph = self.builder.graph.to_undirected()
         for node in grounded_nodes:
             if node not in connected_nodes:
-                component = node_connected_component(undirected_graph, node)
+                component = node_connected_component(self.builder.graph, node)
                 connected_nodes.update(component)
-                
+
         # Find floating nodes
         all_nodes = set(self.builder.graph.nodes())
         floating = all_nodes - connected_nodes
-        
+
         self.builder.stats.floating_nodes = len(floating)
-        
+
         if floating:
             msg = f"Found {len(floating)} floating nodes (not connected to voltage source)"
             if len(floating) <= 10:
                 msg += f": {', '.join(list(floating)[:10])}"
             else:
                 msg += f". First 10: {', '.join(list(floating)[:10])}"
-                
+
             self.logger.warning(msg)
             
     def _check_grounded_nodes(self):
