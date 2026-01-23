@@ -53,10 +53,17 @@ import gzip
 import re
 import pickle
 import logging
+import time
+from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Set, TextIO, Union
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections import defaultdict
+
+# Add project root to path for imports when running as script
+_project_root = Path(__file__).resolve().parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 from core.rx_graph import RustworkxMultiDiGraphWrapper
 from core.rx_algorithms import contract_nodes, node_connected_component
@@ -764,6 +771,14 @@ class NetlistParser:
         logging.basicConfig(level=log_level, 
                           format='%(levelname)s: %(message)s')
         self.logger = logging.getLogger(__name__)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_file = self.netlist_dir / f'pdn_parser_{timestamp}.log'
+        if not any(isinstance(h, logging.FileHandler) for h in self.logger.handlers):
+            file_handler = logging.FileHandler(log_file, mode='a')
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
+            self.logger.addHandler(file_handler)
+            self.logger.info(f"Logging to file: {log_file}")
         
         # Initialize graph builder
         self.builder = GraphBuilder(validate=validate, strict=strict, net_filter=net_filter)
@@ -784,47 +799,79 @@ class NetlistParser:
         Main parsing entry point. Returns populated rustworkx graph wrapper.
         """
         self.logger.info(f"Parsing PDN netlist from: {self.netlist_dir}")
+        timings: Dict[str, float] = {}
+        parse_start = time.perf_counter()
         
         try:
             # Parse main netlist file
+            t0 = time.perf_counter()
             self._parse_file(str(self.main_netlist), is_main=True)
+            timings["parse_main"] = time.perf_counter() - t0
             
             # Parse tiles if present
             if self.tile_queue:
+                t0 = time.perf_counter()
                 self._parse_tiles()
+                timings["parse_tiles"] = time.perf_counter() - t0
                 
             # Parse instance models
             if self.instance_queue:
+                t0 = time.perf_counter()
                 self._parse_instance_models()
+                timings["parse_instance_models"] = time.perf_counter() - t0
             
             # Propagate net connectivity through package elements
             # This handles cases where package elements were parsed before die elements
+            t0 = time.perf_counter()
             self._propagate_net_connectivity()
+            timings["propagate_net_connectivity"] = time.perf_counter() - t0
             
             # Update per-net statistics for package elements now that net types are known
+            t0 = time.perf_counter()
             self._update_package_statistics()
+            timings["update_package_statistics"] = time.perf_counter() - t0
             
             # Filter voltage sources based on connectivity to filtered net
+            t0 = time.perf_counter()
             self._filter_voltage_sources_by_net()
+            timings["filter_voltage_sources_by_net"] = time.perf_counter() - t0
             
             # Identify voltage source nodes (must be before validation for floating node check)
+            t0 = time.perf_counter()
             self._identify_vsrc_nodes()
+            timings["identify_vsrc_nodes"] = time.perf_counter() - t0
             
             # Compute layer statistics
+            t0 = time.perf_counter()
             self._compute_layer_stats()
+            timings["compute_layer_stats"] = time.perf_counter() - t0
                 
             # Perform validation if requested (after vsrc node identification)
             if self.validate:
+                t0 = time.perf_counter()
                 self._perform_validation()
+                timings["perform_validation"] = time.perf_counter() - t0
                 
             # Validate node uniqueness
+            t0 = time.perf_counter()
             self.builder.validate_node_uniqueness()
+            timings["validate_node_uniqueness"] = time.perf_counter() - t0
             
             # Finalize graph
+            t0 = time.perf_counter()
             self.builder.finalize()
+            timings["finalize"] = time.perf_counter() - t0
             
             # Print statistics
+            t0 = time.perf_counter()
             self._print_statistics()
+            timings["print_statistics"] = time.perf_counter() - t0
+
+            timings["total_parse"] = time.perf_counter() - parse_start
+
+            self.logger.info("Parse timing breakdown (s):")
+            for key in sorted(timings.keys()):
+                self.logger.info(f"  {key}: {timings[key]:.4f}")
             
             return self.builder.graph
             
