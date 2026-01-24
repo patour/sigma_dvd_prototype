@@ -456,6 +456,132 @@ class TestCurrentAggregationWeighting(unittest.TestCase):
         self.assertIsInstance(port_currents, dict)
 
 
+class TestCGAMGIntegration(unittest.TestCase):
+    """Integration tests for CG + AMG solver on real PDN netlist."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Load real PDN netlist for integration testing."""
+        result = _load_pdn_small()
+        if result is None:
+            cls.model = None
+            cls.solver = None
+            cls.load_currents = None
+        else:
+            cls.model, cls.load_currents, cls.solver = result
+
+        # Check pyamg availability
+        from core import HAS_PYAMG
+        cls.has_pyamg = HAS_PYAMG
+
+    def setUp(self):
+        """Skip tests if PDN netlist or pyamg not available."""
+        if self.model is None:
+            self.skipTest("PDN netlist_small not available")
+        if not self.has_pyamg:
+            self.skipTest("pyamg not installed")
+
+    @timeout(120)
+    def test_cg_amg_on_pdn_netlist(self):
+        """Test CG + AMG on real PDN netlist."""
+        result = self.solver.solve_hierarchical_coupled(
+            current_injections=self.load_currents,
+            partition_layer='M2',
+            solver='cg',
+            tol=1e-8,
+            preconditioner='amg',
+        )
+
+        self.assertTrue(result.converged)
+        self.assertGreater(len(result.voltages), 0)
+        self.assertLess(result.iterations, 100)  # AMG should converge quickly
+
+    @timeout(120)
+    def test_cg_amg_accuracy_vs_flat(self):
+        """CG + AMG should match flat solver on PDN netlist."""
+        flat_result = self.solver.solve(self.load_currents)
+
+        coupled_result = self.solver.solve_hierarchical_coupled(
+            current_injections=self.load_currents,
+            partition_layer='M2',
+            solver='cg',
+            tol=1e-10,
+            maxiter=500,
+            preconditioner='amg',
+        )
+
+        # Compare voltages
+        max_diff = 0.0
+        for node in flat_result.voltages:
+            if node in coupled_result.voltages:
+                diff = abs(flat_result.voltages[node] - coupled_result.voltages[node])
+                max_diff = max(max_diff, diff)
+
+        # Should match to within 1 µV
+        self.assertLess(max_diff * 1e6, 1.0,
+                       f"Max voltage difference {max_diff*1e6:.4f} µV exceeds 1 µV")
+
+    @timeout(120)
+    def test_cg_amg_batch_solving_pdn(self):
+        """Test batch solving with CG + AMG on PDN netlist."""
+        # Prepare context
+        ctx = self.solver.prepare_hierarchical_coupled(
+            partition_layer='M2',
+            solver='cg',
+            tol=1e-8,
+            preconditioner='amg',
+        )
+
+        # Solve multiple scenarios
+        results = []
+        for scale in [0.5, 1.0, 2.0]:
+            scaled_currents = {n: c * scale for n, c in self.load_currents.items()}
+            result = self.solver.solve_hierarchical_coupled_prepared(scaled_currents, ctx)
+            results.append(result)
+            self.assertTrue(result.converged)
+
+        # IR-drop should scale with current
+        ir_drops = [max(r.ir_drop.values()) for r in results]
+        # 2x current should give ~2x IR-drop (within 10%)
+        ratio = ir_drops[2] / ir_drops[1]  # scale 2.0 / scale 1.0
+        self.assertAlmostEqual(ratio, 2.0, delta=0.2)
+
+    @timeout(120)
+    def test_all_solver_precond_combinations_pdn(self):
+        """Test various solver/preconditioner combinations on PDN netlist."""
+        configs = [
+            ('cg', 'amg'),
+            ('gmres', 'amg'),
+            ('bicgstab', 'amg'),
+            ('cg', 'block_diagonal'),
+        ]
+
+        results = {}
+        for solver_name, precond in configs:
+            result = self.solver.solve_hierarchical_coupled(
+                current_injections=self.load_currents,
+                partition_layer='M2',
+                solver=solver_name,
+                tol=1e-8,
+                preconditioner=precond,
+            )
+            self.assertTrue(result.converged,
+                           f"{solver_name}+{precond} did not converge")
+            results[(solver_name, precond)] = result
+
+        # All results should be similar
+        ref_result = results[('cg', 'amg')]
+        for key, result in results.items():
+            if key == ('cg', 'amg'):
+                continue
+            max_diff = max(
+                abs(ref_result.voltages[n] - result.voltages[n])
+                for n in ref_result.voltages if n in result.voltages
+            )
+            self.assertLess(max_diff, 1e-5,
+                           f"{key} differs from CG+AMG by {max_diff}")
+
+
 if __name__ == '__main__':
     # Run with verbose output
     unittest.main(verbosity=2)

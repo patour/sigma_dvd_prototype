@@ -619,6 +619,384 @@ class TestILUPreconditioner(unittest.TestCase):
         self.assertEqual(result.preconditioner_type, 'ilu')
 
 
+class TestCGSolver(unittest.TestCase):
+    """Tests for CG (Conjugate Gradient) solver option."""
+
+    def test_cg_solver_basic(self):
+        """Test that CG solver works with block_diagonal preconditioner."""
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_small_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        result = solver.solve_hierarchical_coupled(
+            current_injections=loads,
+            partition_layer=1,
+            solver='cg',
+            tol=1e-8,
+            preconditioner='block_diagonal',
+        )
+
+        self.assertTrue(result.converged)
+        self.assertGreater(len(result.voltages), 0)
+
+    def test_cg_matches_gmres(self):
+        """CG and GMRES should produce similar results on SPD system."""
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_small_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        result_cg = solver.solve_hierarchical_coupled(
+            current_injections=loads,
+            partition_layer=1,
+            solver='cg',
+            tol=1e-8,
+            preconditioner='block_diagonal',
+        )
+
+        result_gmres = solver.solve_hierarchical_coupled(
+            current_injections=loads,
+            partition_layer=1,
+            solver='gmres',
+            tol=1e-8,
+            preconditioner='block_diagonal',
+        )
+
+        # Both should produce similar results
+        max_diff = 0.0
+        for node in result_cg.voltages:
+            if node in result_gmres.voltages:
+                diff = abs(result_cg.voltages[node] - result_gmres.voltages[node])
+                max_diff = max(max_diff, diff)
+
+        self.assertLess(max_diff, 1e-6, f"CG vs GMRES max diff {max_diff} exceeds 1e-6")
+
+    def test_cg_matches_flat(self):
+        """CG solution should match flat solver within tolerance."""
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_small_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        flat_result = solver.solve(loads)
+        cg_result = solver.solve_hierarchical_coupled(
+            current_injections=loads,
+            partition_layer=1,
+            solver='cg',
+            tol=1e-10,
+            maxiter=1000,
+            preconditioner='block_diagonal',
+        )
+
+        max_diff = 0.0
+        for node in flat_result.voltages:
+            if node in cg_result.voltages:
+                diff = abs(flat_result.voltages[node] - cg_result.voltages[node])
+                max_diff = max(max_diff, diff)
+
+        self.assertLess(max_diff, 1e-6, f"CG vs flat max diff {max_diff} exceeds 1e-6")
+
+    def test_invalid_solver_raises(self):
+        """Invalid solver name should raise ValueError."""
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_small_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        with self.assertRaises(ValueError) as ctx:
+            solver.solve_hierarchical_coupled(
+                current_injections=loads,
+                partition_layer=1,
+                solver='invalid_solver',
+            )
+
+        self.assertIn('invalid_solver', str(ctx.exception).lower())
+
+
+class TestAMGPreconditioner(unittest.TestCase):
+    """Tests for AMG (Algebraic Multigrid) preconditioner."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Check if pyamg is available."""
+        from core import HAS_PYAMG
+        cls.has_pyamg = HAS_PYAMG
+
+    def test_amg_preconditioner_basic(self):
+        """Test that AMG preconditioner works."""
+        if not self.has_pyamg:
+            self.skipTest("pyamg not installed")
+
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_small_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        result = solver.solve_hierarchical_coupled(
+            current_injections=loads,
+            partition_layer=1,
+            solver='gmres',
+            tol=1e-8,
+            preconditioner='amg',
+        )
+
+        self.assertTrue(result.converged)
+        self.assertEqual(result.preconditioner_type, 'amg')
+
+    def test_amg_with_cg(self):
+        """Test CG + AMG combination (optimal for SPD)."""
+        if not self.has_pyamg:
+            self.skipTest("pyamg not installed")
+
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_small_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        result = solver.solve_hierarchical_coupled(
+            current_injections=loads,
+            partition_layer=1,
+            solver='cg',
+            tol=1e-8,
+            preconditioner='amg',
+        )
+
+        self.assertTrue(result.converged)
+
+    def test_amg_with_bicgstab(self):
+        """Test BiCGSTAB + AMG combination."""
+        if not self.has_pyamg:
+            self.skipTest("pyamg not installed")
+
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_small_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        result = solver.solve_hierarchical_coupled(
+            current_injections=loads,
+            partition_layer=1,
+            solver='bicgstab',
+            tol=1e-8,
+            preconditioner='amg',
+        )
+
+        self.assertTrue(result.converged)
+
+    def test_amg_matches_flat(self):
+        """AMG-preconditioned solution should match flat solver."""
+        if not self.has_pyamg:
+            self.skipTest("pyamg not installed")
+
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_small_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        flat_result = solver.solve(loads)
+        amg_result = solver.solve_hierarchical_coupled(
+            current_injections=loads,
+            partition_layer=1,
+            solver='cg',
+            tol=1e-10,
+            maxiter=500,
+            preconditioner='amg',
+        )
+
+        max_diff = 0.0
+        for node in flat_result.voltages:
+            if node in amg_result.voltages:
+                diff = abs(flat_result.voltages[node] - amg_result.voltages[node])
+                max_diff = max(max_diff, diff)
+
+        self.assertLess(max_diff, 1e-6, f"AMG vs flat max diff {max_diff} exceeds 1e-6")
+
+    def test_amg_fewer_iterations_than_none(self):
+        """AMG should converge in fewer iterations than no preconditioner."""
+        if not self.has_pyamg:
+            self.skipTest("pyamg not installed")
+
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_medium_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        result_none = solver.solve_hierarchical_coupled(
+            current_injections=loads,
+            partition_layer=2,
+            solver='gmres',
+            tol=1e-6,
+            maxiter=1000,
+            preconditioner='none',
+        )
+
+        result_amg = solver.solve_hierarchical_coupled(
+            current_injections=loads,
+            partition_layer=2,
+            solver='gmres',
+            tol=1e-6,
+            preconditioner='amg',
+        )
+
+        self.assertLess(result_amg.iterations, result_none.iterations,
+                       f"AMG iterations {result_amg.iterations} should be < none {result_none.iterations}")
+
+    def test_amg_preconditioner_class_directly(self):
+        """Test AMGPreconditioner class directly."""
+        if not self.has_pyamg:
+            self.skipTest("pyamg not installed")
+
+        from core import AMGPreconditioner
+        from core.coupled_system import BlockMatrixSystem
+        import scipy.sparse as sp
+        import numpy as np
+
+        # Create simple test matrices
+        n = 10
+        G_pp = sp.diags([4.0] * n, format='csr') - sp.diags([1.0] * (n-1), 1, format='csr') - sp.diags([1.0] * (n-1), -1, format='csr')
+        G_pi = sp.csr_matrix((n, 0))
+        G_ip = sp.csr_matrix((0, n))
+        G_ii = sp.csr_matrix((0, 0))
+
+        # Create minimal BlockMatrixSystem
+        top_blocks = BlockMatrixSystem(
+            G_pp=G_pp, G_pi=G_pi, G_ip=G_ip, G_ii=G_ii,
+            port_nodes=list(range(n)), interior_nodes=[],
+            port_to_idx={i: i for i in range(n)}, interior_to_idx={},
+        )
+
+        bottom_G_pp = sp.diags([2.0] * n, format='csr')
+
+        # Create AMG preconditioner
+        precond = AMGPreconditioner(top_blocks, bottom_G_pp)
+
+        # Test matvec
+        x = np.ones(n)
+        y = precond @ x
+
+        self.assertEqual(y.shape, (n,))
+        self.assertTrue(np.all(np.isfinite(y)))
+
+        # Check AMG properties
+        self.assertGreater(precond.levels, 0)
+        self.assertGreater(precond.operator_complexity, 0)
+
+    def test_invalid_preconditioner_raises(self):
+        """Invalid preconditioner name should raise ValueError."""
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_small_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        with self.assertRaises(ValueError) as ctx:
+            solver.solve_hierarchical_coupled(
+                current_injections=loads,
+                partition_layer=1,
+                preconditioner='invalid_precond',
+            )
+
+        self.assertIn('invalid_precond', str(ctx.exception).lower())
+
+
+class TestCGAMGBatchSolving(unittest.TestCase):
+    """Tests for batch solving with CG + AMG."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Check if pyamg is available."""
+        from core import HAS_PYAMG
+        cls.has_pyamg = HAS_PYAMG
+
+    def test_batch_solve_with_cg_amg(self):
+        """Test batch solving with CG + AMG using prepare/solve_prepared."""
+        if not self.has_pyamg:
+            self.skipTest("pyamg not installed")
+
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_small_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        # Prepare context
+        ctx = solver.prepare_hierarchical_coupled(
+            partition_layer=1,
+            solver='cg',
+            tol=1e-8,
+            preconditioner='amg',
+        )
+
+        # Create multiple load scenarios
+        scenarios = []
+        for scale in [0.5, 1.0, 1.5, 2.0]:
+            scaled_loads = {n: c * scale for n, c in loads.items()}
+            scenarios.append(scaled_loads)
+
+        # Solve each scenario
+        results = []
+        for scenario in scenarios:
+            result = solver.solve_hierarchical_coupled_prepared(scenario, ctx)
+            results.append(result)
+            self.assertTrue(result.converged)
+
+        # Verify results scale appropriately
+        # IR-drop should scale roughly linearly with current
+        ir_drops = [max(r.ir_drop.values()) for r in results]
+        for i in range(1, len(ir_drops)):
+            expected_ratio = (i + 1) * 0.5 / 0.5  # scale ratios
+            actual_ratio = ir_drops[i] / ir_drops[0]
+            self.assertAlmostEqual(actual_ratio, expected_ratio, places=1)
+
+    def test_batch_solve_consistency(self):
+        """Batch solve should produce same result as single solve."""
+        if not self.has_pyamg:
+            self.skipTest("pyamg not installed")
+
+        from core import create_model_from_synthetic, UnifiedIRDropSolver
+
+        G, loads, pads = build_small_grid()
+        model = create_model_from_synthetic(G, pads, vdd=1.0)
+        solver = UnifiedIRDropSolver(model)
+
+        # Single solve
+        single_result = solver.solve_hierarchical_coupled(
+            current_injections=loads,
+            partition_layer=1,
+            solver='cg',
+            tol=1e-8,
+            preconditioner='amg',
+        )
+
+        # Batch solve with prepare/solve_prepared
+        ctx = solver.prepare_hierarchical_coupled(
+            partition_layer=1,
+            solver='cg',
+            tol=1e-8,
+            preconditioner='amg',
+        )
+        batch_result = solver.solve_hierarchical_coupled_prepared(loads, ctx)
+
+        # Results should match
+        max_diff = 0.0
+        for node in single_result.voltages:
+            if node in batch_result.voltages:
+                diff = abs(single_result.voltages[node] - batch_result.voltages[node])
+                max_diff = max(max_diff, diff)
+
+        self.assertLess(max_diff, 1e-10, f"Single vs batch max diff {max_diff}")
+
+
 class TestCoupledSystemWithFixtures(unittest.TestCase):
     """Tests using fixture graphs for edge cases."""
 
