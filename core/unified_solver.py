@@ -1107,22 +1107,35 @@ class UnifiedIRDropSolver:
         # ================================================================
         t0 = time.perf_counter()
 
-        # Track iteration count via callback
+        # Track iteration count and residuals via callback
         iteration_count = [0]
-        residual_history = []
+        true_residual_history: List[float] = []  # True residual ||b - Ax|| at each iteration
+        initial_residual_norm = np.linalg.norm(rhs)
 
-        def callback(residual):
-            iteration_count[0] += 1
-            if isinstance(residual, np.ndarray):
-                residual_history.append(np.linalg.norm(residual))
-            else:
-                residual_history.append(residual)
+        if verbose:
+            # Use iterate-based callback to compute true residual ||b - Ax||
+            def callback(x):
+                iteration_count[0] += 1
+                true_res = np.linalg.norm(rhs - coupled_op @ x)
+                true_residual_history.append(true_res)
+
+            gmres_callback_type = 'x'
+        else:
+            # Lightweight callback - just count iterations
+            def callback(residual):
+                iteration_count[0] += 1
+                if isinstance(residual, np.ndarray):
+                    true_residual_history.append(np.linalg.norm(residual))
+                else:
+                    true_residual_history.append(residual)
+
+            gmres_callback_type = 'pr_norm'
 
         # Select solver
         if solver.lower() == 'gmres':
             solution, info = spla.gmres(
                 coupled_op, rhs, rtol=tol, atol=0, maxiter=maxiter, M=M, callback=callback,
-                callback_type='pr_norm'
+                callback_type=gmres_callback_type
             )
         elif solver.lower() == 'bicgstab':
             solution, info = spla.bicgstab(
@@ -1133,15 +1146,37 @@ class UnifiedIRDropSolver:
 
         timings['iterative_solve'] = time.perf_counter() - t0
 
-        # Check convergence
+        # Check convergence and compute final true residual
         converged = (info == 0)
         iterations = iteration_count[0]
-        final_residual = residual_history[-1] if residual_history else np.linalg.norm(rhs - coupled_op @ solution)
+        final_residual = np.linalg.norm(rhs - coupled_op @ solution)
+        final_relative_residual = final_residual / initial_residual_norm if initial_residual_norm > 0 else final_residual
+
+        # Build residual history string for error reporting
+        def _format_residual_history(history: List[float], max_entries: int = 20) -> str:
+            """Format residual history for display."""
+            if not history:
+                return "  (no iterations recorded)"
+            lines = []
+            step = max(1, len(history) // max_entries)
+            for i in range(0, len(history), step):
+                rel_res = history[i] / initial_residual_norm if initial_residual_norm > 0 else history[i]
+                lines.append(f"  iter {i+1:4d}: ||r|| = {history[i]:.6e}, ||r||/||b|| = {rel_res:.6e}")
+            # Always include the last entry
+            if (len(history) - 1) % step != 0:
+                rel_res = history[-1] / initial_residual_norm if initial_residual_norm > 0 else history[-1]
+                lines.append(f"  iter {len(history):4d}: ||r|| = {history[-1]:.6e}, ||r||/||b|| = {rel_res:.6e}")
+            return "\n".join(lines)
 
         if not converged:
+            residual_info = _format_residual_history(true_residual_history)
             raise RuntimeError(
-                f"Coupled iterative solver did not converge after {maxiter} iterations. "
-                f"Final residual: {final_residual:.2e}, tolerance: {tol:.2e}. "
+                f"Coupled iterative solver did not converge after {maxiter} iterations.\n"
+                f"Final true residual ||r||: {final_residual:.2e}\n"
+                f"Final relative residual ||r||/||b||: {final_relative_residual:.2e}\n"
+                f"Tolerance (rtol): {tol:.2e}\n"
+                f"Initial RHS norm ||b||: {initial_residual_norm:.2e}\n"
+                f"Residual history:\n{residual_info}\n"
                 f"Try increasing maxiter, loosening tol, or using a different preconditioner."
             )
 
@@ -1213,12 +1248,22 @@ class UnifiedIRDropSolver:
             print(f"  Ports: {len(port_nodes):,}, Top interior: {n_top_interior:,}")
             print(f"  Bottom interior: {bottom_blocks.n_interior:,}")
             print(f"  Solver: {solver}, Preconditioner: {preconditioner}")
-            print(f"  Iterations: {iterations}, Final residual: {final_residual:.2e}")
             print(f"  ---")
+            print(f"  Convergence:")
+            print(f"    Iterations: {iterations}")
+            print(f"    Initial ||b||: {initial_residual_norm:.6e}")
+            print(f"    Final ||r||: {final_residual:.6e}")
+            print(f"    Final ||r||/||b||: {final_relative_residual:.6e}")
+            print(f"    Tolerance (rtol): {tol:.2e}")
+            print(f"  ---")
+            print(f"  Residual history (true residual ||b - Ax|| at each iteration):")
+            print(_format_residual_history(true_residual_history))
+            print(f"  ---")
+            print(f"  Timing breakdown:")
             for step, t in timings.items():
                 pct = t / total_time * 100
-                print(f"  {step:25s}: {t*1000:8.1f} ms  ({pct:5.1f}%)")
-            print(f"  {'TOTAL':25s}: {total_time*1000:8.1f} ms")
+                print(f"    {step:25s}: {t*1000:8.1f} ms  ({pct:5.1f}%)")
+            print(f"    {'TOTAL':25s}: {total_time*1000:8.1f} ms")
             print(f"==================================\n")
 
         return UnifiedCoupledHierarchicalResult(
