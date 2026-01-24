@@ -28,6 +28,10 @@ from .solver_results import (
     BottomGridTile,
     TileSolveResult,
     TiledBottomGridResult,
+    FlatSolverContext,
+    HierarchicalSolverContext,
+    CoupledHierarchicalSolverContext,
+    TiledHierarchicalSolverContext,
 )
 from .current_aggregation import CurrentAggregator
 from .tiling import TileManager, solve_single_tile
@@ -99,16 +103,30 @@ class UnifiedIRDropSolver:
         self,
         current_injections: Dict[Any, float],
         metadata: Optional[Dict[str, Any]] = None,
+        context: Optional[FlatSolverContext] = None,
     ) -> UnifiedSolveResult:
         """Solve for voltages using flat (direct) method.
 
         Args:
             current_injections: Node -> current (positive = sink)
             metadata: Optional metadata to include in result
+            context: Optional pre-computed FlatSolverContext for efficiency.
+                     If provided, reuses cached LU factorization.
 
         Returns:
             UnifiedSolveResult with voltages and IR-drop.
+
+        Example:
+            # Single solve
+            result = solver.solve(currents)
+
+            # Batch solve with cached context
+            ctx = solver.prepare_flat()
+            results = [solver.solve(stim, context=ctx) for stim in stimuli]
         """
+        if context is not None:
+            return self.solve_prepared(current_injections, context, metadata)
+
         voltages = self.model.solve_voltages(current_injections)
         ir_drop = self.model.ir_drop(voltages)
 
@@ -142,6 +160,94 @@ class UnifiedIRDropSolver:
             results.append(result)
 
         return results
+
+    def prepare_flat(self) -> FlatSolverContext:
+        """Prepare context for efficient batch flat solving.
+
+        Builds and caches the reduced system with LU factorization.
+        Subsequent calls to solve_prepared() reuse this factorization.
+
+        Returns:
+            FlatSolverContext with cached LU factorization.
+
+        Example:
+            ctx = solver.prepare_flat()
+            results = [solver.solve_prepared(stim, ctx) for stim in stimuli]
+        """
+        # Ensure reduced system is built (triggers LU factorization)
+        _ = self.model.reduced
+
+        return FlatSolverContext(
+            reduced_system=self.model.reduced,
+            vdd=self.model.vdd,
+            net_name=self.model.net_name,
+            pad_nodes=set(self.model.pad_nodes),
+        )
+
+    def solve_prepared(
+        self,
+        current_injections: Dict[Any, float],
+        context: FlatSolverContext,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> UnifiedSolveResult:
+        """Solve using pre-computed context for efficiency.
+
+        Uses the cached LU factorization from the context, avoiding
+        expensive matrix construction and factorization.
+
+        Args:
+            current_injections: Node -> current (positive = sink)
+            context: Pre-computed FlatSolverContext from prepare_flat()
+            metadata: Optional metadata to include in result
+
+        Returns:
+            UnifiedSolveResult with voltages and IR-drop.
+
+        Example:
+            ctx = solver.prepare_flat()
+            for stim in stimuli:
+                result = solver.solve_prepared(stim, ctx)
+        """
+        rs = context.reduced_system
+
+        if len(rs.unknown_nodes) == 0:
+            # All nodes are pads
+            voltages = {n: rs.pad_voltage for n in rs.pad_nodes}
+        else:
+            # Build RHS: I_u (current injections at unknown nodes)
+            I_u = np.zeros(len(rs.unknown_nodes), dtype=float)
+            for n, cur in current_injections.items():
+                if n in rs.index_unknown:
+                    # Sink current is positive input, but nodal equation uses negative injection
+                    I_u[rs.index_unknown[n]] += -float(cur)
+
+            # Pad voltage contribution: -G_up * V_p
+            V_p = np.full(len(rs.pad_nodes), rs.pad_voltage, dtype=float)
+            if rs.G_up.shape[1] > 0:
+                rhs = I_u - rs.G_up @ V_p
+            else:
+                rhs = I_u
+
+            # Solve: V_u = lu(rhs)
+            V_u = rs.lu(rhs)
+
+            # Build voltage dict
+            voltages = {}
+            for n in rs.pad_nodes:
+                voltages[n] = rs.pad_voltage
+            for i, n in enumerate(rs.unknown_nodes):
+                voltages[n] = float(V_u[i])
+
+        # Compute IR-drop
+        ir_drop = {n: context.vdd - v for n, v in voltages.items()}
+
+        return UnifiedSolveResult(
+            voltages=voltages,
+            ir_drop=ir_drop,
+            nominal_voltage=context.vdd,
+            net_name=context.net_name,
+            metadata=metadata or {},
+        )
 
     def summarize(
         self, result: "UnifiedSolveResult | UnifiedHierarchicalResult"
@@ -193,6 +299,7 @@ class UnifiedIRDropSolver:
         rmax: Optional[float] = None,
         verbose: bool = False,
         use_fast_builder: bool = True,
+        context: Optional[HierarchicalSolverContext] = None,
     ) -> UnifiedHierarchicalResult:
         """Solve using hierarchical decomposition.
 
@@ -218,6 +325,8 @@ class UnifiedIRDropSolver:
             use_fast_builder: If True (default), use vectorized subgrid builder
                   for ~10x speedup. Set to False to use original Python-loop
                   implementation for debugging or validation.
+            context: Optional pre-computed HierarchicalSolverContext for efficiency.
+                     If provided, reuses cached LU factorizations and path cache.
 
         Returns:
             UnifiedHierarchicalResult with complete voltages and decomposition info.
@@ -226,7 +335,18 @@ class UnifiedIRDropSolver:
             ValueError: If partition layer has no ports, or if load nodes are
                 electrically disconnected from ports. The error message will
                 suggest alternative partition layers if disconnection is detected.
+
+        Example:
+            # Single solve
+            result = solver.solve_hierarchical(currents, partition_layer='M2')
+
+            # Batch solve with cached context
+            ctx = solver.prepare_hierarchical(partition_layer='M2')
+            results = [solver.solve_hierarchical(stim, partition_layer='M2', context=ctx) for stim in stimuli]
         """
+        if context is not None:
+            return self.solve_hierarchical_prepared(current_injections, context, verbose)
+
         timings: Dict[str, float] = {}
 
         # Step 0: Decompose the grid
@@ -404,6 +524,315 @@ class UnifiedIRDropSolver:
             aggregation_map=aggregation_map,
         )
 
+    def prepare_hierarchical(
+        self,
+        partition_layer: LayerID,
+        top_k: int = 5,
+        weighting: str = "shortest_path",
+        rmax: Optional[float] = None,
+        use_fast_builder: bool = True,
+    ) -> HierarchicalSolverContext:
+        """Prepare context for efficient batch hierarchical solving.
+
+        Pre-computes grid decomposition, builds and factors top/bottom systems,
+        and caches shortest-path distances for current aggregation.
+
+        Args:
+            partition_layer: Layer to partition at
+            top_k: Number of nearest ports for current aggregation
+            weighting: "effective" or "shortest_path" for current aggregation
+            rmax: Maximum resistance distance for shortest_path weighting
+            use_fast_builder: If True (default), use vectorized subgrid builder
+
+        Returns:
+            HierarchicalSolverContext with cached artifacts.
+
+        Raises:
+            ValueError: If partition layer has no ports or pads not in top-grid.
+
+        Example:
+            ctx = solver.prepare_hierarchical(partition_layer='M2', top_k=5)
+            results = [solver.solve_hierarchical_prepared(stim, ctx) for stim in stimuli]
+        """
+        # Step 1: Decompose grid
+        top_nodes, bottom_nodes, port_nodes, via_edges = self.model._decompose_at_layer(partition_layer)
+
+        if not port_nodes:
+            raise ValueError(
+                f"No ports found at partition layer {partition_layer}. "
+                "Check that vias connect this layer to the layer below."
+            )
+
+        # Step 2: Validate pads in top-grid
+        pad_set = set(self.model.pad_nodes)
+        top_grid_pads = pad_set & top_nodes
+
+        if not top_grid_pads:
+            raise ValueError(
+                f"No pad nodes found in top-grid (layers >= {partition_layer}). "
+                "Pads should be on the top-most layer."
+            )
+
+        # Step 3: Build and factor top-grid system
+        if use_fast_builder:
+            top_system = self.model._build_subgrid_system_fast(
+                subgrid_nodes=top_nodes,
+                dirichlet_nodes=top_grid_pads,
+                dirichlet_voltage=self.model.vdd,
+            )
+        else:
+            top_system = self.model._build_subgrid_system(
+                subgrid_nodes=top_nodes,
+                dirichlet_nodes=top_grid_pads,
+                dirichlet_voltage=self.model.vdd,
+            )
+
+        if top_system is None:
+            raise ValueError("Failed to build top-grid system")
+
+        # Step 4: Build and factor bottom-grid system
+        bottom_subgrid = bottom_nodes | port_nodes
+
+        if use_fast_builder:
+            bottom_system = self.model._build_subgrid_system_fast(
+                subgrid_nodes=bottom_subgrid,
+                dirichlet_nodes=port_nodes,
+                dirichlet_voltage=self.model.vdd,
+            )
+        else:
+            bottom_system = self.model._build_subgrid_system(
+                subgrid_nodes=bottom_subgrid,
+                dirichlet_nodes=port_nodes,
+                dirichlet_voltage=self.model.vdd,
+            )
+
+        if bottom_system is None:
+            raise ValueError("Failed to build bottom-grid system")
+
+        # Step 5: Pre-compute shortest-path cache for current aggregation
+        shortest_path_cache: Dict[Any, List[Tuple[Any, float]]] = {}
+        if weighting == "shortest_path":
+            shortest_path_cache = self._aggregator.multi_source_port_distances(
+                subgrid_nodes=bottom_subgrid,
+                port_nodes=list(port_nodes),
+                top_k=top_k,
+                rmax=rmax,
+            )
+
+        return HierarchicalSolverContext(
+            partition_layer=partition_layer,
+            top_nodes=top_nodes,
+            bottom_nodes=bottom_nodes,
+            port_nodes=port_nodes,
+            via_edges=via_edges,
+            top_system=top_system,
+            bottom_system=bottom_system,
+            top_k=top_k,
+            weighting=weighting,
+            rmax=rmax,
+            shortest_path_cache=shortest_path_cache,
+            pad_nodes=pad_set,
+            top_grid_pads=top_grid_pads,
+            vdd=self.model.vdd,
+        )
+
+    def solve_hierarchical_prepared(
+        self,
+        current_injections: Dict[Any, float],
+        context: HierarchicalSolverContext,
+        verbose: bool = False,
+    ) -> UnifiedHierarchicalResult:
+        """Solve using pre-computed hierarchical context for efficiency.
+
+        Uses cached LU factorizations and shortest-path distances,
+        avoiding expensive matrix construction and factorization.
+
+        Args:
+            current_injections: Node -> current (positive = sink)
+            context: Pre-computed HierarchicalSolverContext from prepare_hierarchical()
+            verbose: If True, print timing information
+
+        Returns:
+            UnifiedHierarchicalResult with voltages and decomposition info.
+
+        Raises:
+            ValueError: If load nodes are disconnected from ports.
+
+        Example:
+            ctx = solver.prepare_hierarchical(partition_layer='M2')
+            for stim in stimuli:
+                result = solver.solve_hierarchical_prepared(stim, ctx)
+        """
+        timings: Dict[str, float] = {}
+
+        # Validate load-to-port connectivity
+        t0 = time.perf_counter()
+        bottom_load_nodes = {
+            n for n, c in current_injections.items()
+            if n in context.bottom_nodes and n not in context.port_nodes and c != 0
+        }
+        if bottom_load_nodes:
+            disconnected_loads = self._find_disconnected_loads(
+                bottom_grid_nodes=context.bottom_nodes,
+                port_nodes=context.port_nodes,
+                load_nodes=bottom_load_nodes,
+            )
+            if disconnected_loads:
+                suggestions = self._suggest_partition_layers(
+                    disconnected_loads=disconnected_loads,
+                    current_partition=context.partition_layer,
+                )
+                raise ValueError(
+                    f"{len(disconnected_loads)} load node(s) are electrically disconnected from "
+                    f"ports at partition layer {context.partition_layer}. "
+                    f"{suggestions}"
+                )
+        timings['connectivity_check'] = time.perf_counter() - t0
+
+        # Step 1: Aggregate bottom-grid currents to ports using cached distances
+        t0 = time.perf_counter()
+        port_currents, aggregation_map = self._aggregate_with_cache(
+            current_injections=current_injections,
+            context=context,
+        )
+        timings['aggregate_currents'] = time.perf_counter() - t0
+
+        # Step 2: Solve top-grid using cached LU
+        t0 = time.perf_counter()
+        top_grid_currents = {n: c for n, c in current_injections.items() if n in context.top_nodes}
+        for port, curr in port_currents.items():
+            top_grid_currents[port] = top_grid_currents.get(port, 0.0) + curr
+
+        top_voltages = self.model._solve_subgrid(
+            reduced_system=context.top_system,
+            current_injections=top_grid_currents,
+            dirichlet_voltages=None,
+        )
+        timings['solve_top'] = time.perf_counter() - t0
+
+        # Extract port voltages
+        port_voltages = {p: top_voltages[p] for p in context.port_nodes}
+
+        # Step 3: Solve bottom-grid using cached LU with port voltages as Dirichlet BC
+        t0 = time.perf_counter()
+        bottom_grid_currents = {
+            n: c for n, c in current_injections.items()
+            if n in context.bottom_nodes
+        }
+
+        bottom_voltages = self.model._solve_subgrid(
+            reduced_system=context.bottom_system,
+            current_injections=bottom_grid_currents,
+            dirichlet_voltages=port_voltages,
+        )
+        timings['solve_bottom'] = time.perf_counter() - t0
+
+        # Merge voltages
+        t0 = time.perf_counter()
+        all_voltages = {}
+        all_voltages.update(top_voltages)
+        for n, v in bottom_voltages.items():
+            if n not in context.port_nodes:
+                all_voltages[n] = v
+
+        ir_drop = self.model.ir_drop(all_voltages)
+        timings['merge_results'] = time.perf_counter() - t0
+
+        if verbose:
+            total_time = sum(timings.values())
+            print(f"\n=== Hierarchical Solve (Prepared) Timing ===")
+            print(f"  Top nodes: {len(context.top_nodes):,}, Bottom nodes: {len(context.bottom_nodes):,}, Ports: {len(context.port_nodes):,}")
+            print(f"  Load nodes in bottom-grid: {len(bottom_load_nodes):,}")
+            print(f"  ---")
+            for step, t in timings.items():
+                pct = t / total_time * 100
+                print(f"  {step:25s}: {t*1000:8.1f} ms  ({pct:5.1f}%)")
+            print(f"  {'TOTAL':25s}: {total_time*1000:8.1f} ms")
+            print(f"=============================================\n")
+
+        return UnifiedHierarchicalResult(
+            voltages=all_voltages,
+            ir_drop=ir_drop,
+            partition_layer=context.partition_layer,
+            top_grid_voltages=top_voltages,
+            bottom_grid_voltages=bottom_voltages,
+            port_nodes=context.port_nodes,
+            port_voltages=port_voltages,
+            port_currents=port_currents,
+            aggregation_map=aggregation_map,
+        )
+
+    def _aggregate_with_cache(
+        self,
+        current_injections: Dict[Any, float],
+        context: HierarchicalSolverContext,
+    ) -> Tuple[Dict[Any, float], Dict[Any, List[Tuple[Any, float, float]]]]:
+        """Aggregate bottom-grid currents to ports using cached distances.
+
+        Args:
+            current_injections: Node -> current
+            context: HierarchicalSolverContext with cached shortest_path_cache
+
+        Returns:
+            (port_currents, aggregation_map)
+        """
+        port_currents = {p: 0.0 for p in context.port_nodes}
+        aggregation_map: Dict[Any, List[Tuple[Any, float, float]]] = {}
+
+        # Filter currents to bottom-grid nodes (excluding ports)
+        bottom_currents = {
+            n: c for n, c in current_injections.items()
+            if n in context.bottom_nodes and n not in context.port_nodes and c != 0
+        }
+
+        if not bottom_currents:
+            return port_currents, aggregation_map
+
+        port_list = list(context.port_nodes)
+
+        for load_node, load_current in bottom_currents.items():
+            if context.weighting == "effective":
+                # Effective resistance weighting (not cached, computed on-the-fly)
+                subgraph_nodes = context.bottom_nodes | context.port_nodes
+                resistances = self._aggregator.compute_effective_resistance_in_subgrid(
+                    subgrid_nodes=subgraph_nodes,
+                    source_node=load_node,
+                    target_nodes=port_list,
+                    dirichlet_nodes=context.port_nodes,
+                )
+            else:
+                # Use cached shortest-path distances
+                port_distances = context.shortest_path_cache.get(load_node, [])
+                resistances = {p: d for p, d in port_distances if d is not None}
+
+            valid_resistances = {
+                p: r for p, r in resistances.items()
+                if r is not None and r < float('inf') and r > 0
+            }
+
+            if not valid_resistances:
+                raise ValueError(
+                    f"No valid resistance paths found from load node {load_node} to any port. "
+                    f"This indicates the load is electrically isolated from the port layer."
+                )
+
+            sorted_ports = sorted(valid_resistances.items(), key=lambda x: x[1])
+            selected = sorted_ports[:context.top_k] if context.top_k < len(sorted_ports) else sorted_ports
+
+            inv_R = [(p, 1.0 / R) for p, R in selected]
+            total_inv_R = sum(w for _, w in inv_R)
+
+            contributions = []
+            for port, inv_r in inv_R:
+                weight = inv_r / total_inv_R
+                contrib = load_current * weight
+                port_currents[port] += contrib
+                contributions.append((port, weight, contrib))
+
+            aggregation_map[load_node] = contributions
+
+        return port_currents, aggregation_map
+
     def _find_disconnected_loads(
         self,
         bottom_grid_nodes: Set[Any],
@@ -542,6 +971,7 @@ class UnifiedIRDropSolver:
         validate_against_flat: bool = False,
         verbose: bool = False,
         override_port_voltages: Optional[Dict[Any, float]] = None,
+        context: Optional[TiledHierarchicalSolverContext] = None,
     ) -> TiledBottomGridResult:
         """Solve using tiled hierarchical decomposition with locality exploitation.
 
@@ -574,6 +1004,8 @@ class UnifiedIRDropSolver:
             override_port_voltages: If provided, skip top-grid solve and use
                                     these port voltages as Dirichlet BCs.
                                     Useful for validation against flat solver.
+            context: Optional pre-computed TiledHierarchicalSolverContext for efficiency.
+                     If provided, reuses cached structures.
 
         Returns:
             TiledBottomGridResult with voltages, tiles, and optional validation stats
@@ -581,7 +1013,20 @@ class UnifiedIRDropSolver:
         Raises:
             ValueError: If graph is synthetic, partition layer is invalid,
                         or tile constraints cannot be satisfied
+
+        Example:
+            # Single solve
+            result = solver.solve_hierarchical_tiled(currents, partition_layer='M2', N_x=4, N_y=4)
+
+            # Batch solve with cached context
+            ctx = solver.prepare_hierarchical_tiled(partition_layer='M2', N_x=4, N_y=4)
+            results = [solver.solve_hierarchical_tiled(stim, partition_layer='M2', N_x=4, N_y=4, context=ctx) for stim in stimuli]
         """
+        if context is not None:
+            return self.solve_hierarchical_tiled_prepared(
+                current_injections, context, progress_callback, validate_against_flat, verbose
+            )
+
         import os
         timings: Dict[str, float] = {}
 
@@ -917,6 +1362,374 @@ class UnifiedIRDropSolver:
             },
         )
 
+    def prepare_hierarchical_tiled(
+        self,
+        partition_layer: LayerID,
+        N_x: int,
+        N_y: int,
+        halo_percent: float,
+        min_ports_per_tile: Optional[int] = None,
+        top_k: int = 5,
+        weighting: str = "shortest_path",
+        rmax: Optional[float] = None,
+        n_workers: Optional[int] = None,
+        parallel_backend: str = "thread",
+    ) -> TiledHierarchicalSolverContext:
+        """Prepare context for efficient batch tiled hierarchical solving.
+
+        Pre-computes grid decomposition, top-grid system, tile structure,
+        and shortest-path cache for current aggregation.
+
+        Note: Individual tile solves still perform their own LU factorization
+        per solve, as tile port voltages change with each stimulus.
+
+        Args:
+            partition_layer: Layer to partition at
+            N_x: Number of tiles in x direction
+            N_y: Number of tiles in y direction
+            halo_percent: Halo size as percentage of tile dimensions
+            min_ports_per_tile: Minimum port nodes per tile
+            top_k: Number of nearest ports for current aggregation
+            weighting: "effective" or "shortest_path" for current aggregation
+            rmax: Maximum resistance distance for shortest_path weighting
+            n_workers: Number of parallel workers (default: CPU count)
+            parallel_backend: "thread" or "process"
+
+        Returns:
+            TiledHierarchicalSolverContext with cached artifacts.
+
+        Example:
+            ctx = solver.prepare_hierarchical_tiled(partition_layer='M2', N_x=4, N_y=4)
+            results = [solver.solve_hierarchical_tiled_prepared(stim, ctx) for stim in stimuli]
+        """
+        import os
+
+        # Step 1: Decompose grid
+        top_nodes, bottom_nodes, port_nodes, via_edges = self.model._decompose_at_layer(partition_layer)
+
+        if not port_nodes:
+            raise ValueError(
+                f"No ports found at partition layer {partition_layer}. "
+                "Check that vias connect this layer to the layer below."
+            )
+
+        # Validate pads in top-grid
+        pad_set = set(self.model.pad_nodes)
+        top_grid_pads = pad_set & top_nodes
+
+        if not top_grid_pads:
+            raise ValueError(
+                f"No pad nodes found in top-grid (layers >= {partition_layer})."
+            )
+
+        # Step 2: Build and factor top-grid system
+        top_system = self.model._build_subgrid_system_fast(
+            subgrid_nodes=top_nodes,
+            dirichlet_nodes=top_grid_pads,
+            dirichlet_voltage=self.model.vdd,
+        )
+        if top_system is None:
+            raise ValueError("Failed to build top-grid system")
+
+        # Step 3: Extract coordinates and generate tiles
+        bottom_coords, port_coords, grid_bounds = self._tile_manager.extract_bottom_grid_coordinates(
+            bottom_nodes, port_nodes
+        )
+
+        initial_bounds = self._tile_manager.generate_uniform_tile_bounds(N_x, N_y, grid_bounds)
+
+        total_ports_with_coords = len(port_coords)
+        if min_ports_per_tile is None:
+            min_ports_per_tile = max(1, math.ceil(total_ports_with_coords / (N_x * N_y)))
+
+        # Note: We need dummy load_nodes for tile assignment - will be updated per solve
+        # For prepare, we use empty set since actual loads vary per stimulus
+        adjusted_bounds, tile_nodes, tile_ports, tile_loads = self._tile_manager.assign_nodes_to_tiles(
+            bottom_coords=bottom_coords,
+            port_coords=port_coords,
+            tile_bounds=initial_bounds,
+            port_nodes=port_nodes,
+            load_nodes=set(),  # Empty for prepare, actual loads handled per solve
+            min_ports_per_tile=min_ports_per_tile,
+            N_x=N_x,
+            N_y=N_y,
+        )
+
+        # Step 4: Expand tiles with halos (using empty load_nodes for now)
+        tiles: List[BottomGridTile] = []
+        for bounds in adjusted_bounds:
+            tid = bounds.tile_id
+            tile = self._tile_manager.expand_tile_with_halo(
+                tile=bounds,
+                tile_core_nodes=tile_nodes.get(tid, set()),
+                bottom_coords=bottom_coords,
+                grid_bounds=grid_bounds,
+                halo_percent=halo_percent,
+                port_nodes=port_nodes,
+                port_coords=port_coords,
+                load_nodes=set(),  # Empty for prepare
+            )
+            tiles.append(tile)
+
+        # Step 5: Validate and fix tile connectivity
+        tiles = self._tile_manager.validate_and_fix_tile_connectivity(tiles, bottom_nodes, port_nodes)
+
+        # Step 6: Pre-compute shortest-path cache
+        bottom_subgrid = bottom_nodes | port_nodes
+        shortest_path_cache: Dict[Any, List[Tuple[Any, float]]] = {}
+        if weighting == "shortest_path":
+            shortest_path_cache = self._aggregator.multi_source_port_distances(
+                subgrid_nodes=bottom_subgrid,
+                port_nodes=list(port_nodes),
+                top_k=top_k,
+                rmax=rmax,
+            )
+
+        if n_workers is None:
+            n_workers = os.cpu_count() or 1
+
+        return TiledHierarchicalSolverContext(
+            partition_layer=partition_layer,
+            top_nodes=top_nodes,
+            bottom_nodes=bottom_nodes,
+            port_nodes=port_nodes,
+            top_system=top_system,
+            top_grid_pads=top_grid_pads,
+            tiles=tiles,
+            bottom_coords=bottom_coords,
+            port_coords=port_coords,
+            grid_bounds=grid_bounds,
+            top_k=top_k,
+            weighting=weighting,
+            rmax=rmax,
+            shortest_path_cache=shortest_path_cache,
+            N_x=N_x,
+            N_y=N_y,
+            halo_percent=halo_percent,
+            min_ports_per_tile=min_ports_per_tile,
+            n_workers=n_workers,
+            parallel_backend=parallel_backend,
+            vdd=self.model.vdd,
+            pad_nodes=pad_set,
+        )
+
+    def solve_hierarchical_tiled_prepared(
+        self,
+        current_injections: Dict[Any, float],
+        context: TiledHierarchicalSolverContext,
+        progress_callback: Optional[Callable[[int, int, int], None]] = None,
+        validate_against_flat: bool = False,
+        verbose: bool = False,
+    ) -> TiledBottomGridResult:
+        """Solve using pre-computed tiled hierarchical context for efficiency.
+
+        Uses cached top-grid system and tile structure.
+        Per-solve operations: current aggregation, top-grid solve, tile solves.
+
+        Args:
+            current_injections: Node -> current (positive = sink)
+            context: Pre-computed TiledHierarchicalSolverContext
+            progress_callback: Optional callback(completed, total, tile_id)
+            validate_against_flat: If True, run validation against flat solve
+            verbose: If True, print timing information
+
+        Returns:
+            TiledBottomGridResult with voltages and tile information.
+
+        Example:
+            ctx = solver.prepare_hierarchical_tiled(partition_layer='M2', N_x=4, N_y=4)
+            for stim in stimuli:
+                result = solver.solve_hierarchical_tiled_prepared(stim, ctx)
+        """
+        timings: Dict[str, float] = {}
+
+        # Validate load-to-port connectivity
+        t0 = time.perf_counter()
+        bottom_load_nodes = {
+            n for n, c in current_injections.items()
+            if n in context.bottom_nodes and n not in context.port_nodes and c != 0
+        }
+        if bottom_load_nodes:
+            disconnected_loads = self._find_disconnected_loads(
+                bottom_grid_nodes=context.bottom_nodes,
+                port_nodes=context.port_nodes,
+                load_nodes=bottom_load_nodes,
+            )
+            if disconnected_loads:
+                suggestions = self._suggest_partition_layers(
+                    disconnected_loads=disconnected_loads,
+                    current_partition=context.partition_layer,
+                )
+                raise ValueError(
+                    f"{len(disconnected_loads)} load node(s) are electrically disconnected from "
+                    f"ports at partition layer {context.partition_layer}. "
+                    f"{suggestions}"
+                )
+        timings['connectivity_check'] = time.perf_counter() - t0
+
+        # Aggregate currents using cached distances
+        t0 = time.perf_counter()
+        # Create a temporary hierarchical context for aggregation
+        temp_hier_ctx = HierarchicalSolverContext(
+            partition_layer=context.partition_layer,
+            top_nodes=context.top_nodes,
+            bottom_nodes=context.bottom_nodes,
+            port_nodes=context.port_nodes,
+            via_edges=set(),
+            top_system=context.top_system,
+            bottom_system=context.top_system,  # Not used for aggregation
+            top_k=context.top_k,
+            weighting=context.weighting,
+            rmax=context.rmax,
+            shortest_path_cache=context.shortest_path_cache,
+            pad_nodes=context.pad_nodes,
+            top_grid_pads=context.top_grid_pads,
+            vdd=context.vdd,
+        )
+        port_currents, aggregation_map = self._aggregate_with_cache(
+            current_injections=current_injections,
+            context=temp_hier_ctx,
+        )
+        timings['aggregate_currents'] = time.perf_counter() - t0
+
+        # Solve top-grid using cached LU
+        t0 = time.perf_counter()
+        top_grid_currents = {n: c for n, c in current_injections.items() if n in context.top_nodes}
+        for port, curr in port_currents.items():
+            top_grid_currents[port] = top_grid_currents.get(port, 0.0) + curr
+
+        top_voltages = self.model._solve_subgrid(
+            reduced_system=context.top_system,
+            current_injections=top_grid_currents,
+            dirichlet_voltages=None,
+        )
+        timings['solve_top'] = time.perf_counter() - t0
+
+        port_voltages = {p: top_voltages[p] for p in context.port_nodes}
+
+        # Build tile solve arguments
+        t0 = time.perf_counter()
+        solve_args = self._tile_manager.build_tile_solve_args(
+            context.tiles, port_voltages, current_injections
+        )
+        timings['build_args'] = time.perf_counter() - t0
+
+        # Parallel tile solves
+        t0 = time.perf_counter()
+        tile_results: Dict[int, Dict[Any, float]] = {}
+        per_tile_times: Dict[int, float] = {}
+        n_tiles = len(context.tiles)
+        disconnected_halo_counts: Dict[int, int] = {}
+
+        if n_tiles == 0:
+            pass
+        elif context.n_workers == 1 or n_tiles == 1:
+            for args in solve_args:
+                tile_id, voltages, solve_time, disconnected_halo = solve_single_tile(*args)
+                tile_results[tile_id] = voltages
+                per_tile_times[tile_id] = solve_time
+                if disconnected_halo:
+                    disconnected_halo_counts[tile_id] = len(disconnected_halo)
+                if progress_callback:
+                    progress_callback(len(tile_results), n_tiles, tile_id)
+        else:
+            ExecutorClass = (
+                ProcessPoolExecutor if context.parallel_backend == "process"
+                else ThreadPoolExecutor
+            )
+
+            with ExecutorClass(max_workers=context.n_workers) as executor:
+                futures = {
+                    executor.submit(solve_single_tile, *args): args[0]
+                    for args in solve_args
+                }
+
+                for future in as_completed(futures):
+                    try:
+                        tile_id, voltages, solve_time, disconnected_halo = future.result()
+                        tile_results[tile_id] = voltages
+                        per_tile_times[tile_id] = solve_time
+                        if disconnected_halo:
+                            disconnected_halo_counts[tile_id] = len(disconnected_halo)
+                    except Exception as e:
+                        tile_id = futures[future]
+                        logger.error(f"Tile {tile_id} solve failed: {e}")
+                        raise
+
+                    if progress_callback:
+                        progress_callback(len(tile_results), n_tiles, tile_id)
+
+        timings['solve_tiles'] = time.perf_counter() - t0
+
+        if sum(disconnected_halo_counts.values()) > 0 and verbose:
+            print(f"  Dropped {sum(disconnected_halo_counts.values())} disconnected halo nodes")
+
+        # Merge results
+        t0 = time.perf_counter()
+        bottom_voltages, halo_warnings = self._tile_manager.merge_tiled_voltages(
+            tiles=context.tiles,
+            tile_results=tile_results,
+            bottom_grid_nodes=context.bottom_nodes,
+        )
+
+        all_voltages: Dict[Any, float] = {}
+        all_voltages.update(top_voltages)
+        all_voltages.update(bottom_voltages)
+
+        ir_drop = self.model.ir_drop(all_voltages)
+        timings['merge_results'] = time.perf_counter() - t0
+
+        # Optional validation
+        validation_stats = None
+        if validate_against_flat:
+            t0 = time.perf_counter()
+            validation_stats = self._tile_manager.validate_tiled_accuracy(
+                tiled_voltages=bottom_voltages,
+                bottom_grid_nodes=context.bottom_nodes,
+                port_nodes=context.port_nodes,
+                port_voltages=port_voltages,
+                current_injections=current_injections,
+            )
+            timings['validate'] = time.perf_counter() - t0
+
+        if verbose:
+            total_time = sum(timings.values())
+            print(f"\n=== Tiled Hierarchical Solve (Prepared) ===")
+            print(f"  Tiles: {len(context.tiles)}, Workers: {context.n_workers}")
+            print(f"  ---")
+            for step, t in timings.items():
+                pct = t / total_time * 100
+                print(f"  {step:25s}: {t*1000:8.1f} ms  ({pct:5.1f}%)")
+            print(f"  {'TOTAL':25s}: {total_time*1000:8.1f} ms")
+            if validation_stats:
+                print(f"  --- Validation ---")
+                print(f"  Max diff: {validation_stats['max_diff']*1000:.4f} mV")
+            print(f"============================================\n")
+
+        return TiledBottomGridResult(
+            voltages=all_voltages,
+            ir_drop=ir_drop,
+            partition_layer=context.partition_layer,
+            top_grid_voltages=top_voltages,
+            bottom_grid_voltages=bottom_voltages,
+            port_nodes=context.port_nodes,
+            port_voltages=port_voltages,
+            port_currents=port_currents,
+            aggregation_map=aggregation_map,
+            tiles=context.tiles,
+            per_tile_solve_times=per_tile_times,
+            halo_clip_warnings=halo_warnings,
+            validation_stats=validation_stats,
+            tiling_params={
+                'N_x': context.N_x,
+                'N_y': context.N_y,
+                'halo_percent': context.halo_percent,
+                'min_ports_per_tile': context.min_ports_per_tile,
+                'n_workers': context.n_workers,
+                'parallel_backend': context.parallel_backend,
+            },
+        )
+
     def solve_hierarchical_coupled(
         self,
         current_injections: Dict[Any, float],
@@ -926,6 +1739,7 @@ class UnifiedIRDropSolver:
         maxiter: int = 500,
         preconditioner: str = 'block_diagonal',
         verbose: bool = False,
+        context: Optional[CoupledHierarchicalSolverContext] = None,
     ) -> UnifiedCoupledHierarchicalResult:
         """Solve using coupled hierarchical decomposition (exact up to tolerance).
 
@@ -952,6 +1766,8 @@ class UnifiedIRDropSolver:
                 - 'ilu': ILU-based preconditioner (more expensive but may help
                   for ill-conditioned systems)
             verbose: If True, print timing and convergence information
+            context: Optional pre-computed CoupledHierarchicalSolverContext for efficiency.
+                     If provided, reuses cached matrices and operators.
 
         Returns:
             UnifiedCoupledHierarchicalResult with exact (up to tol) voltages.
@@ -961,16 +1777,16 @@ class UnifiedIRDropSolver:
             RuntimeError: If iterative solver does not converge within maxiter
 
         Example:
-            >>> solver = UnifiedIRDropSolver(model)
-            >>> result = solver.solve_hierarchical_coupled(
-            ...     current_injections=loads,
-            ...     partition_layer='M2',
-            ...     solver='gmres',
-            ...     tol=1e-8,
-            ...     preconditioner='block_diagonal',
-            ... )
-            >>> print(f"Converged in {result.iterations} iterations")
+            # Single solve
+            result = solver.solve_hierarchical_coupled(currents, partition_layer='M2')
+
+            # Batch solve with cached context
+            ctx = solver.prepare_hierarchical_coupled(partition_layer='M2')
+            results = [solver.solve_hierarchical_coupled(stim, partition_layer='M2', context=ctx) for stim in stimuli]
         """
+        if context is not None:
+            return self.solve_hierarchical_coupled_prepared(current_injections, context, verbose)
+
         timings: Dict[str, float] = {}
 
         # ================================================================
@@ -1278,6 +2094,315 @@ class UnifiedIRDropSolver:
             final_residual=final_residual,
             converged=converged,
             preconditioner_type=preconditioner,
+            timings=timings,
+        )
+
+    def prepare_hierarchical_coupled(
+        self,
+        partition_layer: LayerID,
+        solver: str = 'gmres',
+        tol: float = 1e-8,
+        maxiter: int = 500,
+        preconditioner: str = 'block_diagonal',
+    ) -> CoupledHierarchicalSolverContext:
+        """Prepare context for efficient batch coupled hierarchical solving.
+
+        Pre-computes grid decomposition, block matrices, LU factorizations,
+        Schur complement operator, coupled system operator, and preconditioner.
+
+        Args:
+            partition_layer: Layer to partition at
+            solver: Iterative solver to use ('gmres' or 'bicgstab')
+            tol: Convergence tolerance for iterative solver
+            maxiter: Maximum iterations for iterative solver
+            preconditioner: Preconditioner type ('none', 'block_diagonal', 'ilu')
+
+        Returns:
+            CoupledHierarchicalSolverContext with cached artifacts.
+
+        Raises:
+            ValueError: If partition layer has no ports or pads not in top-grid.
+
+        Example:
+            ctx = solver.prepare_hierarchical_coupled(partition_layer='M2', tol=1e-8)
+            results = [solver.solve_hierarchical_coupled_prepared(stim, ctx) for stim in stimuli]
+        """
+        # Step 1: Decompose grid
+        top_nodes, bottom_nodes, port_nodes, via_edges = self.model._decompose_at_layer(partition_layer)
+
+        if not port_nodes:
+            raise ValueError(
+                f"No ports found at partition layer {partition_layer}. "
+                "Check that vias connect this layer to the layer below."
+            )
+
+        # Validate pads in top-grid
+        pad_set = set(self.model.pad_nodes)
+        top_grid_pads = pad_set & top_nodes
+
+        if not top_grid_pads:
+            raise ValueError(
+                f"No pad nodes found in top-grid (layers >= {partition_layer}). "
+                "Pads should be on the top-most layer."
+            )
+
+        # Step 2: Extract block matrices
+        top_blocks, rhs_dirichlet_top = extract_block_matrices(
+            model=self.model,
+            grid_nodes=top_nodes,
+            dirichlet_nodes=top_grid_pads,
+            port_nodes=port_nodes,
+            dirichlet_voltage=self.model.vdd,
+        )
+
+        bottom_subgrid = bottom_nodes | port_nodes
+        bottom_blocks, rhs_dirichlet_bottom = extract_block_matrices(
+            model=self.model,
+            grid_nodes=bottom_subgrid,
+            dirichlet_nodes=set(),
+            port_nodes=port_nodes,
+            dirichlet_voltage=self.model.vdd,
+            exclude_port_to_port=True,
+        )
+
+        # Step 3: Factor bottom-grid interior
+        bottom_blocks.factor_interior()
+
+        # Step 4: Build Schur complement operator
+        schur_B = SchurComplementOperator(
+            G_pp=bottom_blocks.G_pp,
+            G_pi=bottom_blocks.G_pi,
+            G_ip=bottom_blocks.G_ip,
+            lu_ii=bottom_blocks.lu_ii,
+        )
+
+        # Step 5: Build coupled system operator
+        coupled_op = CoupledSystemOperator(top_blocks, schur_B)
+
+        # Step 6: Build preconditioner
+        M = self._build_coupled_preconditioner(
+            preconditioner_type=preconditioner,
+            top_blocks=top_blocks,
+            bottom_blocks=bottom_blocks,
+        )
+
+        return CoupledHierarchicalSolverContext(
+            partition_layer=partition_layer,
+            top_nodes=top_nodes,
+            bottom_nodes=bottom_nodes,
+            port_nodes=port_nodes,
+            bottom_subgrid=bottom_subgrid,
+            top_blocks=top_blocks,
+            bottom_blocks=bottom_blocks,
+            rhs_dirichlet_top=rhs_dirichlet_top,
+            rhs_dirichlet_bottom=rhs_dirichlet_bottom,
+            schur_B=schur_B,
+            coupled_op=coupled_op,
+            preconditioner=M,
+            preconditioner_type=preconditioner,
+            solver=solver,
+            tol=tol,
+            maxiter=maxiter,
+            vdd=self.model.vdd,
+            top_grid_pads=top_grid_pads,
+            n_ports=top_blocks.n_ports,
+            n_top_interior=top_blocks.n_interior,
+        )
+
+    def solve_hierarchical_coupled_prepared(
+        self,
+        current_injections: Dict[Any, float],
+        context: CoupledHierarchicalSolverContext,
+        verbose: bool = False,
+    ) -> UnifiedCoupledHierarchicalResult:
+        """Solve using pre-computed coupled hierarchical context for efficiency.
+
+        Uses cached block matrices, LU factorizations, and operators.
+        Only builds RHS and runs iterative solver.
+
+        Args:
+            current_injections: Node -> current (positive = sink)
+            context: Pre-computed CoupledHierarchicalSolverContext
+            verbose: If True, print timing and convergence information
+
+        Returns:
+            UnifiedCoupledHierarchicalResult with exact (up to tol) voltages.
+
+        Raises:
+            RuntimeError: If iterative solver does not converge within maxiter.
+
+        Example:
+            ctx = solver.prepare_hierarchical_coupled(partition_layer='M2')
+            for stim in stimuli:
+                result = solver.solve_hierarchical_coupled_prepared(stim, ctx)
+        """
+        timings: Dict[str, float] = {}
+
+        # Build RHS from current injections
+        t0 = time.perf_counter()
+
+        bottom_currents = {n: c for n, c in current_injections.items() if n in context.bottom_subgrid}
+        r_B = compute_reduced_rhs(context.bottom_blocks, bottom_currents, context.rhs_dirichlet_bottom)
+
+        i_t = np.zeros(context.n_top_interior, dtype=np.float64)
+        for node, current in current_injections.items():
+            if node in context.top_blocks.interior_to_idx:
+                i_t[context.top_blocks.interior_to_idx[node]] -= current
+
+        rhs_p = r_B + context.rhs_dirichlet_top[:context.n_ports]
+        rhs_t = i_t + context.rhs_dirichlet_top[context.n_ports:]
+        rhs = np.concatenate([rhs_p, rhs_t])
+
+        timings['build_rhs'] = time.perf_counter() - t0
+
+        # Iterative solve
+        t0 = time.perf_counter()
+
+        iteration_count = [0]
+        true_residual_history: List[float] = []
+        initial_residual_norm = np.linalg.norm(rhs)
+
+        if verbose:
+            def callback(x):
+                iteration_count[0] += 1
+                true_res = np.linalg.norm(rhs - context.coupled_op @ x)
+                true_residual_history.append(true_res)
+            gmres_callback_type = 'x'
+        else:
+            def callback(residual):
+                iteration_count[0] += 1
+                if isinstance(residual, np.ndarray):
+                    true_residual_history.append(np.linalg.norm(residual))
+                else:
+                    true_residual_history.append(residual)
+            gmres_callback_type = 'pr_norm'
+
+        if context.solver.lower() == 'gmres':
+            solution, info = spla.gmres(
+                context.coupled_op, rhs, rtol=context.tol, atol=0,
+                maxiter=context.maxiter, M=context.preconditioner,
+                callback=callback, callback_type=gmres_callback_type
+            )
+        elif context.solver.lower() == 'bicgstab':
+            solution, info = spla.bicgstab(
+                context.coupled_op, rhs, rtol=context.tol, atol=0,
+                maxiter=context.maxiter, M=context.preconditioner,
+                callback=callback
+            )
+        else:
+            raise ValueError(f"Unknown solver: {context.solver}. Use 'gmres' or 'bicgstab'.")
+
+        timings['iterative_solve'] = time.perf_counter() - t0
+
+        converged = (info == 0)
+        iterations = iteration_count[0]
+        final_residual = np.linalg.norm(rhs - context.coupled_op @ solution)
+        final_relative_residual = final_residual / initial_residual_norm if initial_residual_norm > 0 else final_residual
+
+        if not converged:
+            def _format_residual_history(history: List[float], max_entries: int = 20) -> str:
+                if not history:
+                    return "  (no iterations recorded)"
+                lines = []
+                step = max(1, len(history) // max_entries)
+                for i in range(0, len(history), step):
+                    rel_res = history[i] / initial_residual_norm if initial_residual_norm > 0 else history[i]
+                    lines.append(f"  iter {i+1:4d}: ||r|| = {history[i]:.6e}, ||r||/||b|| = {rel_res:.6e}")
+                if (len(history) - 1) % step != 0:
+                    rel_res = history[-1] / initial_residual_norm if initial_residual_norm > 0 else history[-1]
+                    lines.append(f"  iter {len(history):4d}: ||r|| = {history[-1]:.6e}, ||r||/||b|| = {rel_res:.6e}")
+                return "\n".join(lines)
+
+            residual_info = _format_residual_history(true_residual_history)
+            raise RuntimeError(
+                f"Coupled iterative solver did not converge after {context.maxiter} iterations.\n"
+                f"Final true residual ||r||: {final_residual:.2e}\n"
+                f"Final relative residual ||r||/||b||: {final_relative_residual:.2e}\n"
+                f"Tolerance (rtol): {context.tol:.2e}\n"
+                f"Residual history:\n{residual_info}\n"
+                f"Try increasing maxiter, loosening tol, or using a different preconditioner."
+            )
+
+        # Extract voltages
+        t0 = time.perf_counter()
+
+        v_p = solution[:context.n_ports]
+        v_t = solution[context.n_ports:]
+
+        port_voltages: Dict[Any, float] = {}
+        for i, node in enumerate(context.top_blocks.port_nodes):
+            port_voltages[node] = float(v_p[i])
+
+        top_grid_voltages: Dict[Any, float] = {}
+        for node in context.top_grid_pads:
+            top_grid_voltages[node] = context.vdd
+        for node, v in port_voltages.items():
+            top_grid_voltages[node] = v
+        for i, node in enumerate(context.top_blocks.interior_nodes):
+            top_grid_voltages[node] = float(v_t[i])
+
+        timings['extract_top_voltages'] = time.perf_counter() - t0
+
+        # Recover bottom-grid voltages
+        t0 = time.perf_counter()
+
+        bottom_interior_voltages = recover_bottom_voltages(
+            bottom_blocks=context.bottom_blocks,
+            port_voltages=v_p,
+            current_injections=bottom_currents,
+            rhs_dirichlet_bottom=context.rhs_dirichlet_bottom,
+        )
+
+        bottom_grid_voltages: Dict[Any, float] = {}
+        bottom_grid_voltages.update(port_voltages)
+        bottom_grid_voltages.update(bottom_interior_voltages)
+
+        timings['recover_bottom_voltages'] = time.perf_counter() - t0
+
+        # Merge results
+        t0 = time.perf_counter()
+
+        all_voltages: Dict[Any, float] = {}
+        all_voltages.update(top_grid_voltages)
+        for n, v in bottom_interior_voltages.items():
+            all_voltages[n] = v
+
+        ir_drop = self.model.ir_drop(all_voltages)
+
+        timings['merge_results'] = time.perf_counter() - t0
+
+        if verbose:
+            total_time = sum(timings.values())
+            print(f"\n=== Coupled Hierarchical Solve (Prepared) ===")
+            print(f"  Ports: {context.n_ports:,}, Top interior: {context.n_top_interior:,}")
+            print(f"  Bottom interior: {context.bottom_blocks.n_interior:,}")
+            print(f"  Solver: {context.solver}, Preconditioner: {context.preconditioner_type}")
+            print(f"  ---")
+            print(f"  Convergence:")
+            print(f"    Iterations: {iterations}")
+            print(f"    Initial ||b||: {initial_residual_norm:.6e}")
+            print(f"    Final ||r||: {final_residual:.6e}")
+            print(f"    Final ||r||/||b||: {final_relative_residual:.6e}")
+            print(f"  ---")
+            print(f"  Timing breakdown:")
+            for step, t in timings.items():
+                pct = t / total_time * 100
+                print(f"    {step:25s}: {t*1000:8.1f} ms  ({pct:5.1f}%)")
+            print(f"    {'TOTAL':25s}: {total_time*1000:8.1f} ms")
+            print(f"==============================================\n")
+
+        return UnifiedCoupledHierarchicalResult(
+            voltages=all_voltages,
+            ir_drop=ir_drop,
+            partition_layer=context.partition_layer,
+            top_grid_voltages=top_grid_voltages,
+            bottom_grid_voltages=bottom_grid_voltages,
+            port_nodes=context.port_nodes,
+            port_voltages=port_voltages,
+            iterations=iterations,
+            final_residual=final_residual,
+            converged=converged,
+            preconditioner_type=context.preconditioner_type,
             timings=timings,
         )
 

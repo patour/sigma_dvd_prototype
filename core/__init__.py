@@ -21,6 +21,12 @@ from .unified_solver import (
     TileBounds,
     BottomGridTile,
 )
+from .solver_results import (
+    FlatSolverContext,
+    HierarchicalSolverContext,
+    CoupledHierarchicalSolverContext,
+    TiledHierarchicalSolverContext,
+)
 from .coupled_system import (
     BlockMatrixSystem,
     SchurComplementOperator,
@@ -65,6 +71,11 @@ __all__ = [
     "TiledBottomGridResult",
     "TileBounds",
     "BottomGridTile",
+    # Solver contexts for batch solving
+    "FlatSolverContext",
+    "HierarchicalSolverContext",
+    "CoupledHierarchicalSolverContext",
+    "TiledHierarchicalSolverContext",
     # Coupled system
     "BlockMatrixSystem",
     "SchurComplementOperator",
