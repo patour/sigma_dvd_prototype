@@ -67,7 +67,7 @@ core/
 
 **Key Classes:**
 - **UnifiedPowerGridModel**: Handles both NodeID and string nodes; auto-detects floating islands
-- **UnifiedIRDropSolver**: `solve()` for flat, `solve_hierarchical()` for layer-decomposed (approximate), `solve_hierarchical_coupled()` for exact coupled solve, `solve_hierarchical_tiled()` for parallel tiled solving
+- **UnifiedIRDropSolver**: `solve()` for flat, `solve_hierarchical()` for layer-decomposed (approximate), `solve_hierarchical_coupled()` for exact coupled solve, `solve_hierarchical_tiled()` for parallel tiled solving. Supports batch solving via `prepare_*()` / `solve_*_prepared()` methods.
 - **BlockMatrixSystem**: Block-partitioned conductance matrix (port/interior splits)
 - **SchurComplementOperator**: Matrix-free Schur complement for coupled solver
 - **CoupledSystemOperator**: Full coupled top-grid + Schur complement operator
@@ -98,6 +98,12 @@ models = create_multi_net_models(graph)  # {'VDD': model, 'VSS': model}
 - `UnifiedHierarchicalResult`: Hierarchical result with port_nodes, port_voltages, port_currents, aggregation_map
 - `UnifiedCoupledHierarchicalResult`: Coupled solver result with iterations, final_residual, converged, timings
 - `TiledBottomGridResult`: Tiled solve result with tiles, per_tile_solve_times, validation_stats
+
+**Solver Context Classes (for batch solving):**
+- `FlatSolverContext`: Caches reduced system LU factorization for repeated flat solves
+- `HierarchicalSolverContext`: Caches top/bottom grid systems and shortest-path distances
+- `CoupledHierarchicalSolverContext`: Caches block matrices, Schur complement operator, preconditioner
+- `TiledHierarchicalSolverContext`: Caches top-grid system, tile structure, path distances
 
 **Enums:**
 - `GridSource.SYNTHETIC`, `GridSource.PDN_NETLIST`: Source type detection
@@ -256,9 +262,56 @@ solver = UnifiedIRDropSolver(model)
 result = solver.solve(meta.currents)
 ```
 
+### Batch Solving (Multiple Current Scenarios)
+For solving multiple current scenarios efficiently, use the prepare/solve_prepared pattern to cache expensive precomputation (LU factorization, block matrices, operators):
+
+```python
+from core import UnifiedIRDropSolver, FlatSolverContext
+
+solver = UnifiedIRDropSolver(model)
+
+# Prepare once (expensive: builds and factors matrices)
+ctx = solver.prepare_flat()
+
+# Solve multiple scenarios (cheap: reuses cached factorization)
+for scenario in current_scenarios:
+    result = solver.solve_prepared(ctx, scenario)
+    print(f"Max IR-drop: {max(result.ir_drop.values()):.4f} V")
+```
+
+**Available prepare/solve_prepared methods:**
+| Method | Context Class | Use Case |
+|--------|---------------|----------|
+| `prepare_flat()` | `FlatSolverContext` | Multiple flat solves |
+| `prepare_hierarchical()` | `HierarchicalSolverContext` | Multiple hierarchical solves |
+| `prepare_hierarchical_coupled()` | `CoupledHierarchicalSolverContext` | Multiple coupled solves |
+| `prepare_hierarchical_tiled()` | `TiledHierarchicalSolverContext` | Multiple tiled solves |
+
+**Hierarchical batch solving example:**
+```python
+# Prepare hierarchical solver (caches top/bottom systems, path distances)
+ctx = solver.prepare_hierarchical(partition_layer='M2', top_k=5)
+
+# Solve multiple scenarios
+for scenario in current_scenarios:
+    result = solver.solve_hierarchical_prepared(ctx, scenario)
+```
+
+**Coupled batch solving example:**
+```python
+# Prepare coupled solver (caches block matrices, Schur complement, preconditioner)
+ctx = solver.prepare_hierarchical_coupled(partition_layer='M2', preconditioner='block_diagonal')
+
+# Solve multiple scenarios
+for scenario in current_scenarios:
+    result = solver.solve_hierarchical_coupled_prepared(ctx, scenario)
+```
+
+**NOTE:** All standard `solve*()` methods also accept an optional `context` parameter for backward compatibility. If not provided, they create a temporary context internally.
+
 ## Testing
 
-**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`
+**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`
 
 **Test fixtures:** `tests/fixtures.py` provides factory functions for edge case testing scenarios.
 
