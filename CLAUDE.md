@@ -213,10 +213,23 @@ print(f"Final residual: {coupled_result.final_residual:.2e}")
 - **Coupled (`solve_hierarchical_coupled`)**: Solves the full coupled system iteratively using matrix-free Schur complement. Exact up to solver tolerance (~0.02 µV error). Slower but highly accurate.
 
 **Coupled Solver Parameters:**
-- `solver`: `'gmres'` (default) or `'bicgstab'`. GMRES is generally more robust.
+- `solver`: Iterative solver type:
+  - `'cg'`: Conjugate Gradient - optimal for SPD systems, recommended for large problems
+  - `'gmres'` (default): GMRES - robust, works for non-symmetric systems
+  - `'bicgstab'`: BiCGSTAB - often faster than GMRES
 - `tol`: Residual tolerance for iterative solver (default 1e-8)
 - `maxiter`: Maximum iterations before raising RuntimeError (default 500)
-- `preconditioner`: `'block_diagonal'` (default), `'none'`, or `'ilu'`
+- `preconditioner`: Preconditioner type:
+  - `'block_diagonal'` (default): Fast, diagonal approximation
+  - `'ilu'`: Incomplete LU - better for ill-conditioned systems
+  - `'amg'`: Algebraic Multigrid - best for large problems (requires pyamg)
+  - `'none'`: No preconditioning
+
+**Recommended configurations:**
+- Small problems (<100K nodes): `solver='bicgstab', preconditioner='ilu'`
+- Large problems (>1M nodes): `solver='cg', preconditioner='amg'` (O(1) iterations)
+
+**Note:** CG requires an SPD preconditioner. Use `'amg'` or `'block_diagonal'` with CG, not `'ilu'`.
 
 **UnifiedCoupledHierarchicalResult Fields:**
 - All fields from `UnifiedHierarchicalResult` plus:

@@ -510,6 +510,105 @@ class ILUPreconditioner(spla.LinearOperator):
         return self.ilu.solve(x)
 
 
+# Try to import pyamg for AMG preconditioner (optional dependency)
+try:
+    import pyamg
+    HAS_PYAMG = True
+except ImportError:
+    HAS_PYAMG = False
+    pyamg = None
+
+
+class AMGPreconditioner(spla.LinearOperator):
+    """Algebraic Multigrid (AMG) preconditioner for the coupled system.
+
+    AMG is near-optimal for graph Laplacians (like conductance matrices):
+    - O(n) complexity per iteration
+    - Mesh-independent convergence (iteration count stays ~10-20 regardless of size)
+    - Excellent for large-scale problems (10M+ nodes)
+
+    Uses pyamg's smoothed aggregation solver. Requires pyamg to be installed.
+
+    Args:
+        top_blocks: BlockMatrixSystem for top-grid
+        bottom_G_pp: Bottom-grid G_pp matrix (used as Schur complement approximation)
+        strength: Strength of connection threshold for AMG (default 'symmetric')
+        max_coarse: Maximum coarse grid size (default 500)
+
+    Raises:
+        ImportError: If pyamg is not installed
+
+    Example:
+        >>> precond = AMGPreconditioner(top_blocks, bottom_blocks.G_pp)
+        >>> x, info = scipy.sparse.linalg.cg(A, b, M=precond)
+    """
+
+    def __init__(
+        self,
+        top_blocks: BlockMatrixSystem,
+        bottom_G_pp: sp.csr_matrix,
+        strength: str = 'symmetric',
+        max_coarse: int = 500,
+    ):
+        if not HAS_PYAMG:
+            raise ImportError(
+                "pyamg is required for AMG preconditioner. "
+                "Install it with: pip install pyamg"
+            )
+
+        self.n_ports = top_blocks.n_ports
+        self.n_top_interior = top_blocks.n_interior
+        self.n_total = self.n_ports + self.n_top_interior
+
+        # Build approximate coupled matrix (same as ILU)
+        # A_approx = [[G^T_pp + G^B_pp, G^T_pt],
+        #             [G^T_tp,          G^T_tt]]
+        if self.n_top_interior > 0:
+            A_pp = top_blocks.G_pp + bottom_G_pp
+            A_approx = sp.bmat(
+                [
+                    [A_pp, top_blocks.G_pi],
+                    [top_blocks.G_ip, top_blocks.G_ii],
+                ],
+                format="csr",
+            )
+        else:
+            A_approx = (top_blocks.G_pp + bottom_G_pp).tocsr()
+
+        # Build AMG hierarchy using smoothed aggregation
+        # This is a one-time cost that gets amortized over many solves
+        self.ml = pyamg.smoothed_aggregation_solver(
+            A_approx,
+            strength=strength,
+            max_coarse=max_coarse,
+            symmetry='hermitian',  # SPD system
+        )
+
+        # Store the preconditioner (M^{-1} application)
+        self._M = self.ml.aspreconditioner(cycle='V')
+
+        super().__init__(dtype=np.float64, shape=(self.n_total, self.n_total))
+
+    def _matvec(self, x: np.ndarray) -> np.ndarray:
+        """Apply M^{-1} * x using AMG V-cycle."""
+        return self._M @ x
+
+    @property
+    def levels(self) -> int:
+        """Number of levels in AMG hierarchy."""
+        return len(self.ml.levels)
+
+    @property
+    def operator_complexity(self) -> float:
+        """Operator complexity (nnz ratio across levels)."""
+        return self.ml.operator_complexity()
+
+    @property
+    def grid_complexity(self) -> float:
+        """Grid complexity (size ratio across levels)."""
+        return self.ml.grid_complexity()
+
+
 def compute_reduced_rhs(
     bottom_blocks: BlockMatrixSystem,
     current_injections: Dict[Any, float],

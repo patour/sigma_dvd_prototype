@@ -1757,14 +1757,17 @@ class UnifiedIRDropSolver:
         Args:
             current_injections: Node -> current (positive = sink)
             partition_layer: Layer to partition at
-            solver: Iterative solver to use ('gmres' or 'bicgstab')
+            solver: Iterative solver to use:
+                - 'gmres': GMRES (robust, works for non-symmetric systems)
+                - 'bicgstab': BiCGSTAB (often faster than GMRES)
+                - 'cg': Conjugate Gradient (optimal for SPD systems, recommended)
             tol: Convergence tolerance for iterative solver
             maxiter: Maximum iterations for iterative solver
             preconditioner: Preconditioner type:
                 - 'none': No preconditioning
-                - 'block_diagonal': Block diagonal approximation (default, recommended)
-                - 'ilu': ILU-based preconditioner (more expensive but may help
-                  for ill-conditioned systems)
+                - 'block_diagonal': Block diagonal approximation (default)
+                - 'ilu': ILU-based preconditioner
+                - 'amg': Algebraic Multigrid (best for large problems, requires pyamg)
             verbose: If True, print timing and convergence information
             context: Optional pre-computed CoupledHierarchicalSolverContext for efficiency.
                      If provided, reuses cached matrices and operators.
@@ -1957,8 +1960,14 @@ class UnifiedIRDropSolver:
             solution, info = spla.bicgstab(
                 coupled_op, rhs, rtol=tol, atol=0, maxiter=maxiter, M=M, callback=callback
             )
+        elif solver.lower() == 'cg':
+            # CG is optimal for SPD systems (conductance matrices are SPD)
+            # Note: CG callback receives residual norm, not solution vector
+            solution, info = spla.cg(
+                coupled_op, rhs, rtol=tol, atol=0, maxiter=maxiter, M=M, callback=callback
+            )
         else:
-            raise ValueError(f"Unknown solver: {solver}. Use 'gmres' or 'bicgstab'.")
+            raise ValueError(f"Unknown solver: {solver}. Use 'gmres', 'bicgstab', or 'cg'.")
 
         timings['iterative_solve'] = time.perf_counter() - t0
 
@@ -2289,8 +2298,15 @@ class UnifiedIRDropSolver:
                 maxiter=context.maxiter, M=context.preconditioner,
                 callback=callback
             )
+        elif context.solver.lower() == 'cg':
+            # CG is optimal for SPD systems (conductance matrices are SPD)
+            solution, info = spla.cg(
+                context.coupled_op, rhs, rtol=context.tol, atol=0,
+                maxiter=context.maxiter, M=context.preconditioner,
+                callback=callback
+            )
         else:
-            raise ValueError(f"Unknown solver: {context.solver}. Use 'gmres' or 'bicgstab'.")
+            raise ValueError(f"Unknown solver: {context.solver}. Use 'gmres', 'bicgstab', or 'cg'.")
 
         timings['iterative_solve'] = time.perf_counter() - t0
 
@@ -2438,7 +2454,16 @@ class UnifiedIRDropSolver:
         if preconditioner_type == 'ilu':
             return ILUPreconditioner(top_blocks, bottom_blocks.G_pp)
 
+        if preconditioner_type == 'amg':
+            from core.coupled_system import AMGPreconditioner, HAS_PYAMG
+            if not HAS_PYAMG:
+                raise ImportError(
+                    "pyamg is required for AMG preconditioner. "
+                    "Install it with: pip install pyamg"
+                )
+            return AMGPreconditioner(top_blocks, bottom_blocks.G_pp)
+
         raise ValueError(
             f"Unknown preconditioner type: {preconditioner_type}. "
-            "Use 'none', 'block_diagonal', or 'ilu'."
+            "Use 'none', 'block_diagonal', 'ilu', or 'amg'."
         )

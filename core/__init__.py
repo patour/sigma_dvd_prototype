@@ -32,6 +32,8 @@ from .coupled_system import (
     SchurComplementOperator,
     CoupledSystemOperator,
     extract_block_matrices,
+    AMGPreconditioner,
+    HAS_PYAMG,
 )
 from .unified_plotter import UnifiedPlotter, plot_voltage_map, plot_ir_drop_map
 from .unified_partitioner import UnifiedPartitioner, UnifiedPartition, UnifiedPartitionResult
@@ -81,6 +83,8 @@ __all__ = [
     "SchurComplementOperator",
     "CoupledSystemOperator",
     "extract_block_matrices",
+    "AMGPreconditioner",
+    "HAS_PYAMG",
     # Plotter
     "UnifiedPlotter",
     "plot_voltage_map",
