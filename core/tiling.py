@@ -14,10 +14,27 @@ from collections import deque
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
+import scipy
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+from packaging import version as pkg_version
 
 from .solver_results import TileBounds, BottomGridTile
+
+# Scipy version compatibility for tol vs rtol parameter
+_SCIPY_VERSION = pkg_version.parse(scipy.__version__)
+_SCIPY_USE_RTOL = _SCIPY_VERSION >= pkg_version.parse("1.12.0")
+
+
+def _get_tol_kwargs(tol: float, atol: float = 0.0) -> dict:
+    """Return tolerance kwargs compatible with current scipy version.
+
+    Scipy 1.12+ uses 'rtol' and 'atol', while older versions use 'tol'.
+    """
+    if _SCIPY_USE_RTOL:
+        return {"rtol": tol, "atol": atol}
+    else:
+        return {"tol": tol}
 from .unified_model import UnifiedPowerGridModel
 from .node_adapter import NodeInfoExtractor
 from .rx_graph import RustworkxMultiDiGraphWrapper
@@ -227,7 +244,7 @@ def solve_single_tile(
         V_u = lu.solve(rhs)
     except Exception:
         # Fallback: use iterative solver
-        V_u, info = spla.cg(G_uu, rhs, tol=1e-10)
+        V_u, info = spla.cg(G_uu, rhs, **_get_tol_kwargs(1e-10))
         if info != 0:
             # If solver fails, return port voltages for unknowns as fallback
             V_u = np.full(n_unknown, vdd)

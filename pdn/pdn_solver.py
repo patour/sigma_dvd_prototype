@@ -48,11 +48,28 @@ from collections import defaultdict
 
 try:
     import numpy as np
+    import scipy
     import scipy.sparse as sp
     import scipy.sparse.linalg as spla
+    from packaging import version as pkg_version
 except ImportError:
     print("ERROR: NumPy and SciPy are required. Install with: pip install numpy scipy")
     sys.exit(1)
+
+# Scipy version compatibility for tol vs rtol parameter
+_SCIPY_VERSION = pkg_version.parse(scipy.__version__)
+_SCIPY_USE_RTOL = _SCIPY_VERSION >= pkg_version.parse("1.12.0")
+
+
+def _get_tol_kwargs(tol: float, atol: float = 0.0) -> dict:
+    """Return tolerance kwargs compatible with current scipy version.
+
+    Scipy 1.12+ uses 'rtol' and 'atol', while older versions use 'tol'.
+    """
+    if _SCIPY_USE_RTOL:
+        return {"rtol": tol, "atol": atol}
+    else:
+        return {"tol": tol}
 
 from core.rx_graph import RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper
 from core.rx_algorithms import connected_components
@@ -626,7 +643,7 @@ class PDNSolver:
                     M_op = None
                 
                 # Solve with CG
-                V, info = spla.cg(G, I, rtol=self.tolerance, maxiter=self.max_iterations, M=M_op)
+                V, info = spla.cg(G, I, maxiter=self.max_iterations, M=M_op, **_get_tol_kwargs(self.tolerance))
                 
                 if info > 0:
                     self.logger.warning(f"CG did not converge after {info} iterations")
@@ -650,7 +667,7 @@ class PDNSolver:
                     M_op = None
                 
                 # Solve with BiCGSTAB
-                V, info = spla.bicgstab(G, I, rtol=self.tolerance, maxiter=self.max_iterations, M=M_op)
+                V, info = spla.bicgstab(G, I, maxiter=self.max_iterations, M=M_op, **_get_tol_kwargs(self.tolerance))
                 
                 if info > 0:
                     self.logger.warning(f"BiCGSTAB did not converge after {info} iterations")

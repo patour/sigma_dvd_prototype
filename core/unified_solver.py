@@ -18,7 +18,9 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
+import scipy
 import scipy.sparse.linalg as spla
+from packaging import version as pkg_version
 
 from .solver_results import (
     UnifiedSolveResult,
@@ -50,6 +52,31 @@ from .coupled_system import (
 
 # Logger for solver warnings
 logger = logging.getLogger(__name__)
+
+# Scipy version compatibility for iterative solvers
+# - scipy < 1.12: uses 'tol' parameter
+# - scipy >= 1.12: 'tol' deprecated in favor of 'rtol'
+# - scipy >= 1.14: 'tol' removed, only 'rtol' works
+_SCIPY_VERSION = pkg_version.parse(scipy.__version__)
+_SCIPY_USE_RTOL = _SCIPY_VERSION >= pkg_version.parse("1.12.0")
+
+
+def _get_tol_kwargs(tol: float, atol: float = 0.0) -> dict:
+    """Get tolerance kwargs compatible with current scipy version.
+
+    Args:
+        tol: Relative tolerance for convergence
+        atol: Absolute tolerance for convergence (default 0.0)
+
+    Returns:
+        Dict with appropriate tolerance parameters for scipy version.
+    """
+    if _SCIPY_USE_RTOL:
+        return {"rtol": tol, "atol": atol}
+    else:
+        # scipy < 1.12 uses 'tol' parameter
+        # Note: older scipy had different atol handling ('legacy' default)
+        return {"tol": tol}
 
 
 # Re-export for backward compatibility
@@ -1951,20 +1978,23 @@ class UnifiedIRDropSolver:
             gmres_callback_type = 'pr_norm'
 
         # Select solver
+        # Use _get_tol_kwargs for scipy version compatibility (tol vs rtol)
+        tol_kwargs = _get_tol_kwargs(tol)
+
         if solver.lower() == 'gmres':
             solution, info = spla.gmres(
-                coupled_op, rhs, rtol=tol, atol=0, maxiter=maxiter, M=M, callback=callback,
+                coupled_op, rhs, **tol_kwargs, maxiter=maxiter, M=M, callback=callback,
                 callback_type=gmres_callback_type
             )
         elif solver.lower() == 'bicgstab':
             solution, info = spla.bicgstab(
-                coupled_op, rhs, rtol=tol, atol=0, maxiter=maxiter, M=M, callback=callback
+                coupled_op, rhs, **tol_kwargs, maxiter=maxiter, M=M, callback=callback
             )
         elif solver.lower() == 'cg':
             # CG is optimal for SPD systems (conductance matrices are SPD)
             # Note: CG callback receives residual norm, not solution vector
             solution, info = spla.cg(
-                coupled_op, rhs, rtol=tol, atol=0, maxiter=maxiter, M=M, callback=callback
+                coupled_op, rhs, **tol_kwargs, maxiter=maxiter, M=M, callback=callback
             )
         else:
             raise ValueError(f"Unknown solver: {solver}. Use 'gmres', 'bicgstab', or 'cg'.")
@@ -2286,22 +2316,25 @@ class UnifiedIRDropSolver:
                     true_residual_history.append(residual)
             gmres_callback_type = 'pr_norm'
 
+        # Use _get_tol_kwargs for scipy version compatibility (tol vs rtol)
+        tol_kwargs = _get_tol_kwargs(context.tol)
+
         if context.solver.lower() == 'gmres':
             solution, info = spla.gmres(
-                context.coupled_op, rhs, rtol=context.tol, atol=0,
+                context.coupled_op, rhs, **tol_kwargs,
                 maxiter=context.maxiter, M=context.preconditioner,
                 callback=callback, callback_type=gmres_callback_type
             )
         elif context.solver.lower() == 'bicgstab':
             solution, info = spla.bicgstab(
-                context.coupled_op, rhs, rtol=context.tol, atol=0,
+                context.coupled_op, rhs, **tol_kwargs,
                 maxiter=context.maxiter, M=context.preconditioner,
                 callback=callback
             )
         elif context.solver.lower() == 'cg':
             # CG is optimal for SPD systems (conductance matrices are SPD)
             solution, info = spla.cg(
-                context.coupled_op, rhs, rtol=context.tol, atol=0,
+                context.coupled_op, rhs, **tol_kwargs,
                 maxiter=context.maxiter, M=context.preconditioner,
                 callback=callback
             )
