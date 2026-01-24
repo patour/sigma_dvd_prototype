@@ -285,16 +285,20 @@ def compute_boundary_response_matrix(
     boundary_ports: List[Any],
     partition_layer: str,
     verbose: bool = False,
+    context: Optional[Any] = None,
 ) -> np.ndarray:
     """Solve coupled system for each injection pattern and extract boundary voltages.
 
-    Uses existing solve_hierarchical_coupled() - no explicit L_c needed.
+    Uses batched solving with prepare/solve_prepared for efficiency.
 
     Args:
         solver: UnifiedIRDropSolver instance
         injection_patterns: List of {node: current} dicts
         boundary_ports: Ordered list of boundary port nodes
         partition_layer: Layer for hierarchical decomposition
+        verbose: Print progress
+        context: Optional pre-computed CoupledHierarchicalSolverContext.
+                 If None, will be created and cached internally.
 
     Returns:
         H: Boundary response matrix (|B| × n_patterns)
@@ -304,20 +308,24 @@ def compute_boundary_response_matrix(
     n_boundary = len(boundary_ports)
     H = np.zeros((n_boundary, n_patterns))
 
-    boundary_set = set(boundary_ports)
-
-    for k, currents in enumerate(injection_patterns):
-        if verbose:
-            print(f"  Solving pattern {k+1}/{n_patterns}...")
-
-        # Solve using coupled hierarchical solver
-        result = solver.solve_hierarchical_coupled(
-            current_injections=currents,
+    # Prepare context once for efficient batch solving
+    if context is None:
+        context = solver.prepare_hierarchical_coupled(
             partition_layer=partition_layer,
             solver='gmres',
             tol=1e-8,
             maxiter=500,
             preconditioner='block_diagonal',
+        )
+
+    for k, currents in enumerate(injection_patterns):
+        if verbose:
+            print(f"  Solving pattern {k+1}/{n_patterns}...")
+
+        # Solve using prepared context (reuses LU factorizations and operators)
+        result = solver.solve_hierarchical_coupled_prepared(
+            current_injections=currents,
+            context=context,
             verbose=False,
         )
 
@@ -473,10 +481,11 @@ def validate_against_flat_solve(
     boundary_ports: List[Any],
     H_coupled: np.ndarray,
     verbose: bool = False,
+    context: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Validate coupled solver results against flat (non-hierarchical) solve.
 
-    Uses existing solver.solve() for ground truth comparison.
+    Uses batched flat solving with prepare/solve_prepared for efficiency.
 
     Args:
         solver: UnifiedIRDropSolver instance
@@ -484,6 +493,8 @@ def validate_against_flat_solve(
         boundary_ports: Ordered list of boundary port nodes
         H_coupled: Response matrix from coupled solver
         verbose: Print progress
+        context: Optional pre-computed FlatSolverContext.
+                 If None, will be created and cached internally.
 
     Returns:
         Dict with max_diff, mean_diff, rmse between coupled and flat solutions
@@ -491,12 +502,16 @@ def validate_against_flat_solve(
     n_patterns = len(injection_patterns)
     H_flat = np.zeros_like(H_coupled)
 
+    # Prepare context once for efficient batch solving
+    if context is None:
+        context = solver.prepare_flat()
+
     for k, currents in enumerate(injection_patterns):
         if verbose:
             print(f"  Flat solve pattern {k+1}/{n_patterns}...")
 
-        # Flat solve
-        result_flat = solver.solve(currents)
+        # Flat solve using prepared context (reuses LU factorization)
+        result_flat = solver.solve_prepared(currents, context)
 
         # Extract boundary port voltages
         for i, port in enumerate(boundary_ports):
@@ -610,12 +625,25 @@ def run_farfield_analysis(
     if verbose:
         print(f"  Total injection patterns: {len(patterns)}")
 
-    # Compute boundary response matrix
+    # Prepare solver contexts for batch solving
+    if verbose:
+        print("Preparing solver contexts...")
+
+    coupled_context = solver.prepare_hierarchical_coupled(
+        partition_layer=partition_layer,
+        solver='gmres',
+        tol=1e-8,
+        maxiter=500,
+        preconditioner='block_diagonal',
+    )
+
+    # Compute boundary response matrix using batch solving
     if verbose:
         print("Computing boundary response matrix H...")
 
     H = compute_boundary_response_matrix(
-        solver, patterns, boundary_ports, partition_layer, verbose
+        solver, patterns, boundary_ports, partition_layer, verbose,
+        context=coupled_context
     )
 
     if verbose:
@@ -634,14 +662,16 @@ def run_farfield_analysis(
         print(f"  Compression ratio (99%): {svd_results['compression_ratio_99pct']:.1f}x")
         print(f"  Decay rate: {svd_results['decay_rate']:.3f}")
 
-    # Optional validation
+    # Optional validation using batch flat solving
     validation_results = None
     if validate:
         if verbose:
             print("Validating against flat solve...")
 
+        flat_context = solver.prepare_flat()
         validation_results = validate_against_flat_solve(
-            solver, patterns, boundary_ports, H, verbose
+            solver, patterns, boundary_ports, H, verbose,
+            context=flat_context
         )
 
         if verbose:

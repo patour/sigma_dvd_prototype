@@ -312,6 +312,18 @@ def run_distance_analysis(
         for i, ring in enumerate(rings):
             print(f"Ring {i}: {len(ring)} nodes")
 
+    # Prepare solver context once for efficient batch solving across all rings
+    if verbose:
+        print("Preparing solver context for batch solving...")
+
+    coupled_context = solver.prepare_hierarchical_coupled(
+        partition_layer=partition_layer,
+        solver='gmres',
+        tol=1e-8,
+        maxiter=500,
+        preconditioner='block_diagonal',
+    )
+
     results = {'rings': [], 'ring_sizes': [len(r) for r in rings]}
 
     for ring_idx, ring_nodes in enumerate(rings):
@@ -334,9 +346,10 @@ def run_distance_analysis(
         if verbose:
             print(f"  Patterns: {len(patterns)}")
 
-        # Compute response matrix
+        # Compute response matrix using prepared context
         H = compute_boundary_response_matrix(
-            solver, patterns, boundary_ports, partition_layer, verbose=False
+            solver, patterns, boundary_ports, partition_layer, verbose=False,
+            context=coupled_context
         )
 
         # Analyze
