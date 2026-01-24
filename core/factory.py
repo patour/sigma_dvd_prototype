@@ -16,6 +16,7 @@ def create_model_from_synthetic(
     graph: RustworkxGraphWrapper,
     pad_nodes: Sequence[Any],
     vdd: float = 1.0,
+    lazy_factor: bool = True,
 ) -> UnifiedPowerGridModel:
     """Create unified model from synthetic power grid.
 
@@ -23,6 +24,8 @@ def create_model_from_synthetic(
         graph: Graph from generate_power_grid()
         pad_nodes: List of pad NodeID objects (voltage sources)
         vdd: Supply voltage
+        lazy_factor: If True (default), defer LU factorization until first flat solve.
+                    Set to False for backward compatibility if you need eager factorization.
 
     Returns:
         UnifiedPowerGridModel configured for synthetic source.
@@ -37,6 +40,7 @@ def create_model_from_synthetic(
         vdd=vdd,
         source=GridSource.SYNTHETIC,
         resistance_unit_kohm=False,  # Synthetic uses Ohms
+        lazy_factor=lazy_factor,
     )
 
 
@@ -44,6 +48,7 @@ def create_model_from_pdn(
     graph: RustworkxMultiDiGraphWrapper,
     net_name: str,
     vsrc_nodes: Optional[Sequence[Any]] = None,
+    lazy_factor: bool = True,
 ) -> UnifiedPowerGridModel:
     """Create unified model from PDN netlist for a specific net.
 
@@ -55,6 +60,9 @@ def create_model_from_pdn(
         graph: Graph from NetlistParser.parse()
         net_name: Power net to model (e.g., 'VDD', 'VSS')
         vsrc_nodes: Voltage source nodes (auto-detected if None)
+        lazy_factor: If True (default), defer LU factorization until first flat solve.
+                    This significantly improves model creation time when using
+                    hierarchical solvers. Set to False for backward compatibility.
 
     Returns:
         UnifiedPowerGridModel configured for PDN source.
@@ -153,12 +161,14 @@ def create_model_from_pdn(
         source=GridSource.PDN_NETLIST,
         net_name=net_name,
         resistance_unit_kohm=False,  # Keep PDN native kOhm/mA units (self-consistent mS conductance)
+        lazy_factor=lazy_factor,
     )
 
 
 def create_multi_net_models(
     graph: RustworkxMultiDiGraphWrapper,
     net_filter: Optional[List[str]] = None,
+    lazy_factor: bool = True,
 ) -> Dict[str, UnifiedPowerGridModel]:
     """Create unified models for all (or filtered) nets in PDN.
 
@@ -167,6 +177,7 @@ def create_multi_net_models(
     Args:
         graph: Graph from NetlistParser.parse()
         net_filter: Optional list of net names to include (case-insensitive)
+        lazy_factor: If True (default), defer LU factorization until first flat solve.
 
     Returns:
         Dict mapping net_name -> UnifiedPowerGridModel
@@ -193,7 +204,7 @@ def create_multi_net_models(
 
     for net_name in nets_to_process:
         try:
-            models[net_name] = create_model_from_pdn(graph, net_name)
+            models[net_name] = create_model_from_pdn(graph, net_name, lazy_factor=lazy_factor)
         except ValueError as e:
             # Skip nets that can't be modeled (e.g., no nodes, no voltage spec)
             import warnings
@@ -207,6 +218,7 @@ def create_model_from_graph(
     pad_nodes: Sequence[Any],
     vdd: float = 1.0,
     auto_detect_source: bool = True,
+    lazy_factor: bool = True,
 ) -> UnifiedPowerGridModel:
     """Create unified model with automatic source detection.
 
@@ -215,6 +227,7 @@ def create_model_from_graph(
         pad_nodes: Voltage source nodes
         vdd: Supply voltage
         auto_detect_source: If True, detect source type from graph structure
+        lazy_factor: If True (default), defer LU factorization until first flat solve.
 
     Returns:
         UnifiedPowerGridModel with appropriate configuration.
@@ -243,4 +256,5 @@ def create_model_from_graph(
         vdd=vdd,
         source=source,
         resistance_unit_kohm=resistance_unit_kohm,
+        lazy_factor=lazy_factor,
     )

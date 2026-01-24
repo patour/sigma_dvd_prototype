@@ -112,6 +112,7 @@ class UnifiedPowerGridModel:
         source: GridSource = GridSource.SYNTHETIC,
         net_name: Optional[str] = None,
         resistance_unit_kohm: bool = False,
+        lazy_factor: bool = True,
     ):
         """Initialize unified power grid model.
 
@@ -122,6 +123,9 @@ class UnifiedPowerGridModel:
             source: Grid source type (SYNTHETIC or PDN_NETLIST)
             net_name: For multi-net PDN, which net this model represents
             resistance_unit_kohm: True if resistance values are in kOhms
+            lazy_factor: If True (default), defer LU factorization until first solve.
+                        This significantly improves model creation time when using
+                        hierarchical solvers which build their own systems.
         """
         self.graph = graph
         self.pad_nodes = list(pad_nodes)
@@ -144,12 +148,21 @@ class UnifiedPowerGridModel:
         self._removed_island_nodes: Set[Any] = set()
         self._island_stats: Dict[str, Any] = {}
 
+        # Valid nodes (non-floating-island nodes) - computed during island detection
+        self._valid_nodes: Optional[Set[Any]] = None
+
         # Cached edge arrays for fast subgrid building (lazy init)
         self._edge_cache: Optional[EdgeArrayCache] = None
 
-        # Build reduced system
+        # Reduced system (lazy init unless lazy_factor=False)
         self._reduced: Optional[UnifiedReducedSystem] = None
-        self._build_reduced_system()
+
+        # Always detect floating islands (cheap) - needed for extract_current_sources
+        self._detect_floating_islands()
+
+        # Optionally build full reduced system eagerly (for backward compatibility)
+        if not lazy_factor:
+            self._build_reduced_system()
 
     @property
     def reduced(self) -> UnifiedReducedSystem:
@@ -195,6 +208,109 @@ class UnifiedPowerGridModel:
             (x, y) tuple or None if unavailable.
         """
         return self._node_extractor.get_xy(node)
+
+    def _iter_resistive_edges_fast(self):
+        """Fast iteration over resistive edges for connectivity analysis only.
+
+        This is a lightweight version of _iter_resistive_edges that only checks
+        edge type without extracting full edge info. Used for island detection
+        where we only need to know if edges exist, not their resistance values.
+
+        Yields:
+            Tuples of (u, v) for each resistive edge.
+        """
+        if isinstance(self.graph, RustworkxMultiDiGraphWrapper):
+            # PDN MultiDiGraph: filter by type='R'
+            for u, v, k, data in self.graph.edges(keys=True, data=True):
+                if data.get('type') == 'R':
+                    yield u, v
+        else:
+            # Synthetic Graph: all edges are resistive (have 'resistance' attr)
+            for u, v, data in self.graph.edges(data=True):
+                if 'resistance' in data:
+                    yield u, v
+
+    def _detect_floating_islands(self) -> None:
+        """Detect and mark floating islands (disconnected from voltage sources).
+
+        This is a lightweight operation (O(N+E)) that only computes connectivity
+        without building the full conductance matrix or LU factorization.
+        Called at model construction to support extract_current_sources()
+        without requiring the expensive full system build.
+
+        Sets:
+            self._valid_nodes: Set of nodes connected to voltage sources
+            self._removed_island_nodes: Set of floating island nodes
+            self._island_stats: Statistics about detected islands
+        """
+        import warnings
+
+        # Get all nodes (excluding ground '0')
+        all_nodes = [n for n in self.graph.nodes() if n != '0']
+        pad_set = set(self.pad_nodes)
+        node_set = set(all_nodes)
+
+        # Build adjacency for resistive network only (fast - no edge info extraction)
+        resistive_graph = RustworkxGraphWrapper()
+        for node in all_nodes:
+            resistive_graph.add_node(node)
+
+        for u, v in self._iter_resistive_edges_fast():
+            if u in node_set and v in node_set:
+                resistive_graph.add_edge(u, v)
+
+        # Find connected components
+        components = connected_components(resistive_graph)
+
+        if len(components) == 1:
+            # Single component - no islands
+            self._valid_nodes = node_set
+            self._island_stats = {
+                'num_components': 1,
+                'islands_removed': 0,
+                'nodes_removed': 0,
+            }
+            return
+
+        # Identify which components have voltage sources
+        valid_nodes = set()
+        islands_removed = 0
+        nodes_removed = 0
+
+        for component in components:
+            has_vsrc = bool(component & pad_set)
+
+            if has_vsrc:
+                valid_nodes.update(component)
+            else:
+                islands_removed += 1
+                nodes_removed += len(component)
+                self._removed_island_nodes.update(component)
+
+        if islands_removed > 0:
+            warnings.warn(
+                f"Removed {islands_removed} floating island(s) with {nodes_removed} nodes "
+                f"(not connected to any voltage source). "
+                f"Total components: {len(components)}, kept: {len(components) - islands_removed}"
+            )
+
+        self._valid_nodes = valid_nodes
+        self._island_stats = {
+            'num_components': len(components),
+            'islands_removed': islands_removed,
+            'nodes_removed': nodes_removed,
+        }
+
+    @property
+    def valid_nodes(self) -> Set[Any]:
+        """Get the set of valid nodes (excluding floating islands).
+
+        Returns:
+            Set of nodes that are connected to voltage sources.
+        """
+        if self._valid_nodes is None:
+            self._detect_floating_islands()
+        return self._valid_nodes
 
     def _detect_and_remove_islands(self, nodes: List[Any]) -> List[Any]:
         """Detect disconnected islands and remove those not connected to voltage sources.
@@ -657,15 +773,17 @@ class UnifiedPowerGridModel:
 
         Eliminates pad nodes (fixed voltage) to form reduced system:
         G_uu * V_u = I_u - G_up * V_p
-        
-        Also detects and removes floating islands (disconnected components
-        not connected to any voltage source).
+
+        Uses pre-computed valid_nodes from _detect_floating_islands() if available,
+        otherwise detects floating islands during build.
         """
-        G_mat, all_nodes = self._build_conductance_matrix()
-        
-        # Detect and remove floating islands
-        nodes = self._detect_and_remove_islands(all_nodes)
-        
+        # Use pre-computed valid nodes if available, otherwise detect now
+        if self._valid_nodes is not None:
+            nodes = list(self._valid_nodes)
+        else:
+            all_nodes = [n for n in self.graph.nodes() if n != '0']
+            nodes = self._detect_and_remove_islands(all_nodes)
+
         pad_set = set(self.pad_nodes)
 
         unknown_nodes = [n for n in nodes if n not in pad_set]
@@ -675,60 +793,57 @@ class UnifiedPowerGridModel:
         index = {n: i for i, n in enumerate(nodes)}
         index_unknown = {n: i for i, n in enumerate(unknown_nodes)}
 
-        # Re-extract submatrices for valid nodes only
-        # We need to rebuild the matrix with only valid nodes
-        if self._removed_island_nodes:
-            # Rebuild conductance matrix for valid nodes only (excluding ground '0')
-            n_nodes = len(nodes)
-            data, rows, cols = [], [], []
-            diag = np.zeros(n_nodes, dtype=float)
-            node_set = set(nodes)
-            
-            # Constants for handling short resistances (matching PDNSolver)
-            GMAX = 1e5  # Maximum conductance for shorts
-            SHORT_THRESHOLD = 1e-6  # Resistance threshold for shorts (kOhm)
+        # Build conductance matrix for valid nodes only (excluding ground '0')
+        n_nodes = len(nodes)
+        data, rows, cols = [], [], []
+        diag = np.zeros(n_nodes, dtype=float)
+        node_set = set(nodes)
 
-            for u, v, edge_info in self._iter_resistive_edges():
-                R = edge_info.resistance
-                if R is None:
+        # Constants for handling short resistances (matching PDNSolver)
+        GMAX = 1e5  # Maximum conductance for shorts
+        SHORT_THRESHOLD = 1e-6  # Resistance threshold for shorts (kOhm)
+
+        for u, v, edge_info in self._iter_resistive_edges():
+            R = edge_info.resistance
+            if R is None:
+                continue
+
+            # Handle zero/short resistance like PDNSolver
+            if R <= 0 or R < SHORT_THRESHOLD:
+                g = GMAX
+            else:
+                g = 1.0 / R
+
+            # Handle ground node
+            u_is_ground = (u == '0')
+            v_is_ground = (v == '0')
+
+            if u_is_ground and v_is_ground:
+                continue
+            elif u_is_ground:
+                if v in node_set and v in index:
+                    diag[index[v]] += g
+            elif v_is_ground:
+                if u in node_set and u in index:
+                    diag[index[u]] += g
+            else:
+                if u not in node_set or v not in node_set:
                     continue
+                iu, iv = index[u], index[v]
 
-                # Handle zero/short resistance like PDNSolver
-                if R <= 0 or R < SHORT_THRESHOLD:
-                    g = GMAX
-                else:
-                    g = 1.0 / R
-                
-                # Handle ground node
-                u_is_ground = (u == '0')
-                v_is_ground = (v == '0')
-                
-                if u_is_ground and v_is_ground:
-                    continue
-                elif u_is_ground:
-                    if v in node_set and v in index:
-                        diag[index[v]] += g
-                elif v_is_ground:
-                    if u in node_set and u in index:
-                        diag[index[u]] += g
-                else:
-                    if u not in node_set or v not in node_set:
-                        continue
-                    iu, iv = index[u], index[v]
+                rows.extend([iu, iv])
+                cols.extend([iv, iu])
+                data.extend([-g, -g])
 
-                    rows.extend([iu, iv])
-                    cols.extend([iv, iu])
-                    data.extend([-g, -g])
+                diag[iu] += g
+                diag[iv] += g
 
-                    diag[iu] += g
-                    diag[iv] += g
+        for i in range(n_nodes):
+            rows.append(i)
+            cols.append(i)
+            data.append(diag[i])
 
-            for i in range(n_nodes):
-                rows.append(i)
-                cols.append(i)
-                data.append(diag[i])
-
-            G_mat = sp.csr_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes))
+        G_mat = sp.csr_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes))
 
         # Extract submatrices
         u_idx = [index[n] for n in unknown_nodes]
@@ -792,7 +907,7 @@ class UnifiedPowerGridModel:
             return {}
         
         current_injections = {}
-        valid_nodes = set(self.reduced.node_order)  # Only nodes not in floating islands
+        valid_node_set = self.valid_nodes  # Only nodes not in floating islands
         
         for u, v, data in self.graph.edges(data=True):
             if data.get('type') != 'I':
@@ -805,10 +920,10 @@ class UnifiedPowerGridModel:
             # Current flows from u to v
             # For power delivery: current source from net node (u) to ground (v='0')
             # This represents load current sinking from the power net
-            if u in valid_nodes and u != '0':
+            if u in valid_node_set and u != '0':
                 # Current is pulled OUT of the power net at u
                 current_injections[u] = current_injections.get(u, 0.0) + current_ma
-            elif v in valid_nodes and v != '0':
+            elif v in valid_node_set and v != '0':
                 # If edge is reversed (ground to net node), current enters at v
                 # This is less common but handle it for completeness
                 current_injections[v] = current_injections.get(v, 0.0) + current_ma
