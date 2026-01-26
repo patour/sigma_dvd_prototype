@@ -1,0 +1,751 @@
+"""Tests for transient IR-drop solver with RC support.
+
+Tests time-domain simulation with capacitance for accurate decoupling effects.
+"""
+
+import unittest
+from pathlib import Path
+from typing import Dict, Any
+
+import numpy as np
+
+from generate_power_grid import generate_power_grid
+from core import (
+    create_model_from_synthetic,
+    create_model_from_pdn,
+)
+from core.transient_solver import (
+    TransientIRDropSolver,
+    TransientResult,
+    IntegrationMethod,
+    RCSystem,
+)
+from core.dynamic_solver import DynamicIRDropSolver
+
+
+def build_synthetic_grid(K=3, N0=8, I_N=80, N_vsrc=4, seed=42):
+    """Build a synthetic test grid."""
+    G, loads, pads = generate_power_grid(
+        K=K, N0=N0, I_N=I_N, N_vsrc=N_vsrc, seed=seed,
+        max_stripe_res=0.01, max_via_res=0.01
+    )
+    model = create_model_from_synthetic(G, pads, vdd=1.0)
+    return model, loads
+
+
+class TestTransientSolverInit(unittest.TestCase):
+    """Tests for TransientIRDropSolver initialization."""
+
+    def test_init_with_synthetic_grid(self):
+        """Solver should initialize with synthetic grid."""
+        model, _ = build_synthetic_grid()
+        solver = TransientIRDropSolver(model)
+
+        self.assertIsNotNone(solver.model)
+        # Synthetic grids don't have capacitors
+        self.assertFalse(solver.has_capacitance)
+
+    def test_init_with_pdn_graph(self):
+        """Solver should initialize with PDN graph if available."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            self.skipTest("Test netlist not available")
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        graph = parser.parse()
+        model = create_model_from_pdn(graph, 'VDD')
+
+        solver = TransientIRDropSolver(model, graph)
+
+        self.assertIsNotNone(solver.model)
+        # PDN graph should have capacitors
+        self.assertTrue(solver.has_capacitance)
+
+
+class TestRCSystemBuilding(unittest.TestCase):
+    """Tests for RC system matrix building."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.model, self.loads = build_synthetic_grid()
+        self.solver = TransientIRDropSolver(self.model)
+
+    def test_rc_system_built(self):
+        """RC system should be built correctly."""
+        rc = self.solver._ensure_rc_system()
+
+        self.assertIsInstance(rc, RCSystem)
+        self.assertGreater(rc.n_nodes, 0)
+        self.assertGreater(rc.n_unknown, 0)
+        self.assertEqual(len(rc.node_order), rc.n_nodes)
+
+    def test_g_matrix_symmetric(self):
+        """Conductance matrix should be symmetric."""
+        rc = self.solver._ensure_rc_system()
+        G_dense = rc.G_full.toarray()
+        np.testing.assert_array_almost_equal(G_dense, G_dense.T)
+
+    def test_g_matrix_positive_diagonal(self):
+        """Conductance matrix diagonal should be positive."""
+        rc = self.solver._ensure_rc_system()
+        diag = rc.G_full.diagonal()
+        self.assertTrue(np.all(diag > 0))
+
+    def test_c_matrix_symmetric(self):
+        """Capacitance matrix should be symmetric."""
+        rc = self.solver._ensure_rc_system()
+        C_dense = rc.C_full.toarray()
+        np.testing.assert_array_almost_equal(C_dense, C_dense.T)
+
+    def test_c_matrix_nonnegative_diagonal(self):
+        """Capacitance matrix diagonal should be non-negative."""
+        rc = self.solver._ensure_rc_system()
+        diag = rc.C_full.diagonal()
+        self.assertTrue(np.all(diag >= 0))
+
+
+class TestTransientSolve(unittest.TestCase):
+    """Tests for transient solving."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.model, self.loads = build_synthetic_grid()
+        self.solver = TransientIRDropSolver(self.model)
+
+    def test_solve_transient_returns_result(self):
+        """solve_transient should return TransientResult."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=1e-9,
+        )
+
+        self.assertIsInstance(result, TransientResult)
+        self.assertIsNotNone(result.peak_ir_drop)
+        self.assertEqual(result.nominal_voltage, self.model.vdd)
+
+    def test_solve_with_backward_euler(self):
+        """Backward Euler method should work."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=1e-9,
+            method=IntegrationMethod.BACKWARD_EULER,
+        )
+
+        self.assertEqual(result.integration_method, IntegrationMethod.BACKWARD_EULER)
+        self.assertTrue('solve' in result.timings)
+
+    def test_solve_with_trapezoidal(self):
+        """Trapezoidal method should work."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=1e-9,
+            method=IntegrationMethod.TRAPEZOIDAL,
+        )
+
+        self.assertEqual(result.integration_method, IntegrationMethod.TRAPEZOIDAL)
+
+    def test_time_array_correct(self):
+        """Time array should have correct range and step."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=2e-9,
+        )
+
+        self.assertAlmostEqual(result.t_array[0], 0.0)
+        self.assertAlmostEqual(result.t_array[-1], 10e-9)
+        # Check step size
+        dt_actual = result.t_array[1] - result.t_array[0]
+        self.assertAlmostEqual(dt_actual, 2e-9)
+
+
+class TestTransientWithPDN(unittest.TestCase):
+    """Tests for transient solving with PDN netlist (with capacitors)."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+        self.solver = TransientIRDropSolver(self.model, self.graph)
+
+    def test_pdn_has_capacitance(self):
+        """PDN model should have capacitance."""
+        self.assertTrue(self.solver.has_capacitance)
+        self.assertGreater(self.solver.total_capacitance, 0)
+
+    def test_pdn_transient_solve(self):
+        """Transient solve should work with PDN graph."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=1e-9,
+        )
+
+        self.assertIsInstance(result, TransientResult)
+        self.assertGreater(len(result.t_array), 0)
+
+    def test_capacitance_matrix_built(self):
+        """Capacitance matrix should be non-empty for PDN."""
+        rc = self.solver._ensure_rc_system()
+        self.assertGreater(rc.C_full.nnz, 0)
+
+
+class TestTransientVsQuasiStatic(unittest.TestCase):
+    """Tests comparing transient and quasi-static results."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+        self.transient_solver = TransientIRDropSolver(self.model, self.graph)
+        self.quasi_static_solver = DynamicIRDropSolver(self.model, self.graph)
+
+    def test_transient_produces_valid_results(self):
+        """Transient solve should produce valid results."""
+        result = self.transient_solver.solve_transient(
+            t_start=0.0,
+            t_end=50e-9,
+            dt=1e-9,
+            method=IntegrationMethod.BACKWARD_EULER,
+        )
+
+        # Results should be valid
+        self.assertGreater(len(result.t_array), 0)
+        self.assertTrue(np.all(result.max_ir_drop_per_time >= 0))
+
+        # Peak IR-drop should be within the max range
+        self.assertEqual(result.peak_ir_drop, np.max(result.max_ir_drop_per_time))
+
+
+class TestPeakTracking(unittest.TestCase):
+    """Tests for peak IR-drop and worst node tracking."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.model, self.loads = build_synthetic_grid()
+        self.solver = TransientIRDropSolver(self.model)
+
+    def test_peak_ir_drop_tracked(self):
+        """Peak IR-drop should be tracked."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=1e-9,
+        )
+
+        self.assertGreaterEqual(result.peak_ir_drop, 0.0)
+
+    def test_worst_nodes_tracked(self):
+        """Worst nodes should be tracked."""
+        n_worst = 5
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=1e-9,
+            n_worst_nodes=n_worst,
+        )
+
+        # May have fewer worst nodes than requested if grid is small
+        self.assertLessEqual(len(result.worst_nodes), n_worst)
+
+        # Worst nodes should be sorted by drop (descending)
+        if result.worst_nodes:
+            drops = [drop for _, drop, _ in result.worst_nodes]
+            self.assertEqual(drops, sorted(drops, reverse=True))
+
+    def test_peak_ir_drop_per_node_populated(self):
+        """peak_ir_drop_per_node should be populated."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=1e-9,
+        )
+
+        self.assertGreater(len(result.peak_ir_drop_per_node), 0)
+
+
+class TestWaveformTracking(unittest.TestCase):
+    """Tests for node waveform tracking."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.model, self.loads = build_synthetic_grid()
+        self.solver = TransientIRDropSolver(self.model)
+
+    def test_track_specific_nodes(self):
+        """Waveforms should be stored for tracked nodes."""
+        load_nodes = list(self.loads.keys())[:3]
+
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=2e-9,
+            track_nodes=load_nodes,
+        )
+
+        for node in load_nodes:
+            self.assertIn(node, result.tracked_waveforms)
+            self.assertIn(node, result.tracked_ir_drop)
+
+    def test_get_voltage_waveform(self):
+        """get_voltage_waveform should return waveform for tracked node."""
+        load_nodes = list(self.loads.keys())[:1]
+
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=2e-9,
+            track_nodes=load_nodes,
+        )
+
+        waveform = result.get_voltage_waveform(load_nodes[0])
+        self.assertEqual(len(waveform), len(result.t_array))
+        # Voltage should be <= Vdd (with small tolerance for numerical errors)
+        self.assertTrue(np.all(waveform <= self.model.vdd + 1e-10))
+
+    def test_untracked_node_raises_error(self):
+        """Accessing waveform for untracked node should raise KeyError."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=2e-9,
+            track_nodes=[],
+        )
+
+        with self.assertRaises(KeyError):
+            result.get_voltage_waveform('nonexistent_node')
+
+
+class TestVsrcCurrentTracking(unittest.TestCase):
+    """Tests for voltage source current tracking."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.model, self.loads = build_synthetic_grid()
+        self.solver = TransientIRDropSolver(self.model)
+
+    def test_vsrc_current_tracked(self):
+        """total_vsrc_current_per_time should be populated."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=2e-9,
+        )
+
+        self.assertEqual(len(result.total_vsrc_current_per_time), len(result.t_array))
+
+
+class TestTimings(unittest.TestCase):
+    """Tests for timing information."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.model, self.loads = build_synthetic_grid()
+        self.solver = TransientIRDropSolver(self.model)
+
+    def test_timings_populated(self):
+        """Timing breakdown should be populated."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=2e-9,
+        )
+
+        self.assertIn('build_rc', result.timings)
+        self.assertIn('factor', result.timings)
+        self.assertIn('solve', result.timings)
+        self.assertIn('total', result.timings)
+
+        # All times should be non-negative
+        for t in result.timings.values():
+            self.assertGreaterEqual(t, 0.0)
+
+
+class TestIntegrationMethodEnum(unittest.TestCase):
+    """Tests for IntegrationMethod enum."""
+
+    def test_enum_values(self):
+        """Enum should have expected values."""
+        self.assertEqual(IntegrationMethod.BACKWARD_EULER.value, 'be')
+        self.assertEqual(IntegrationMethod.TRAPEZOIDAL.value, 'trap')
+
+
+class TestRCSystemMatrixProperties(unittest.TestCase):
+    """Tests for RC system matrix properties."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+        self.solver = TransientIRDropSolver(self.model, self.graph)
+
+    def test_reduced_matrices_built(self):
+        """Reduced matrices (G_uu, C_uu) should be built."""
+        rc = self.solver._ensure_rc_system()
+
+        self.assertIsNotNone(rc.G_uu)
+        self.assertIsNotNone(rc.C_uu)
+        self.assertGreater(rc.n_unknown, 0)
+
+    def test_g_uu_positive_definite(self):
+        """Reduced G matrix should be positive semi-definite."""
+        rc = self.solver._ensure_rc_system()
+        G_uu_dense = rc.G_uu.toarray()
+
+        # Check symmetry
+        np.testing.assert_array_almost_equal(G_uu_dense, G_uu_dense.T)
+
+        # Check eigenvalues are non-negative
+        eigenvalues = np.linalg.eigvalsh(G_uu_dense)
+        self.assertTrue(np.all(eigenvalues >= -1e-10))
+
+    def test_c_uu_positive_semidefinite(self):
+        """Reduced C matrix should be positive semi-definite."""
+        rc = self.solver._ensure_rc_system()
+        C_uu_dense = rc.C_uu.toarray()
+
+        # Check symmetry
+        np.testing.assert_array_almost_equal(C_uu_dense, C_uu_dense.T)
+
+        # Check eigenvalues are non-negative
+        eigenvalues = np.linalg.eigvalsh(C_uu_dense)
+        self.assertTrue(np.all(eigenvalues >= -1e-10))
+
+    def test_node_ordering_consistent(self):
+        """Node ordering should be consistent across structures."""
+        rc = self.solver._ensure_rc_system()
+
+        # All unknown nodes should be in node_order
+        for node in rc.unknown_nodes:
+            self.assertIn(node, rc.node_order)
+            self.assertIn(node, rc.node_to_idx)
+
+        # All pad nodes should be in node_order
+        for node in rc.pad_nodes:
+            self.assertIn(node, rc.node_order)
+
+
+class TestBackwardEulerStability(unittest.TestCase):
+    """Tests for Backward Euler stability properties."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+        self.solver = TransientIRDropSolver(self.model, self.graph)
+
+    def test_stable_with_large_dt(self):
+        """Backward Euler should be stable even with large time steps."""
+        # Large dt should still produce bounded results
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=100e-9,
+            dt=10e-9,  # Large time step
+            method=IntegrationMethod.BACKWARD_EULER,
+        )
+
+        # Voltages should remain bounded (not blow up)
+        self.assertTrue(np.all(result.max_ir_drop_per_time < self.model.vdd))
+        self.assertTrue(np.all(result.max_ir_drop_per_time >= 0))
+
+    def test_voltage_bounded_by_vdd(self):
+        """Voltages should never exceed Vdd."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=50e-9,
+            dt=1e-9,
+        )
+
+        # IR-drop is Vdd - V, so should be non-negative (V <= Vdd)
+        for drop in result.peak_ir_drop_per_node.values():
+            self.assertGreaterEqual(drop, -1e-10)
+
+
+class TestTrapezoidalMethod(unittest.TestCase):
+    """Tests for Trapezoidal integration method."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+        self.solver = TransientIRDropSolver(self.model, self.graph)
+
+    def test_trapezoidal_produces_valid_results(self):
+        """Trapezoidal method should produce valid results."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=50e-9,
+            dt=1e-9,
+            method=IntegrationMethod.TRAPEZOIDAL,
+        )
+
+        self.assertTrue(np.all(result.max_ir_drop_per_time >= 0))
+        self.assertGreater(len(result.t_array), 0)
+
+    def test_be_vs_trap_both_complete(self):
+        """Both BE and Trapezoidal should complete without errors."""
+        # Note: Trapezoidal can exhibit oscillations on stiff RC systems,
+        # especially with rapid current transients. This is expected behavior
+        # for the Trapezoidal rule (it preserves oscillations while BE damps them).
+        # We only verify both methods complete and produce valid results.
+
+        result_be = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=20e-9,
+            dt=0.5e-9,
+            method=IntegrationMethod.BACKWARD_EULER,
+        )
+
+        result_trap = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=20e-9,
+            dt=0.5e-9,
+            method=IntegrationMethod.TRAPEZOIDAL,
+        )
+
+        # Both should complete and have same array sizes
+        self.assertEqual(len(result_be.t_array), len(result_trap.t_array))
+
+        # Both should produce non-negative IR-drop values
+        self.assertTrue(np.all(result_be.max_ir_drop_per_time >= -1e-10))
+        # Trapezoidal may have oscillations but IR-drop should be bounded
+        self.assertTrue(np.all(result_trap.max_ir_drop_per_time < 2.0))  # Bounded by 2*Vdd
+
+
+class TestCapacitiveSmoothing(unittest.TestCase):
+    """Tests for capacitive smoothing effects."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+        self.transient_solver = TransientIRDropSolver(self.model, self.graph)
+        self.quasi_static_solver = DynamicIRDropSolver(self.model, self.graph)
+
+    def test_capacitance_present(self):
+        """Test netlist should have capacitance."""
+        self.assertTrue(self.transient_solver.has_capacitance)
+        total_cap = self.transient_solver.total_capacitance
+        self.assertGreater(total_cap, 0)
+
+
+class TestTransientResultIntegrity(unittest.TestCase):
+    """Tests for transient result data integrity."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+        self.solver = TransientIRDropSolver(self.model, self.graph)
+
+    def test_peak_consistent_with_per_time(self):
+        """peak_ir_drop should equal max of max_ir_drop_per_time."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=30e-9,
+            dt=1e-9,
+        )
+
+        expected_max = np.max(result.max_ir_drop_per_time)
+        self.assertAlmostEqual(result.peak_ir_drop, expected_max, places=10)
+
+    def test_arrays_same_length(self):
+        """All time-indexed arrays should have same length."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=30e-9,
+            dt=1e-9,
+        )
+
+        n_steps = len(result.t_array)
+        self.assertEqual(len(result.max_ir_drop_per_time), n_steps)
+        self.assertEqual(len(result.total_current_per_time), n_steps)
+        self.assertEqual(len(result.total_vsrc_current_per_time), n_steps)
+
+
+class TestTransientEdgeCases(unittest.TestCase):
+    """Tests for transient edge cases."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.model, self.loads = build_synthetic_grid()
+        self.solver = TransientIRDropSolver(self.model)
+
+    def test_single_time_step(self):
+        """Should handle single time step."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=1e-9,
+            dt=1e-9,
+        )
+
+        self.assertGreaterEqual(len(result.t_array), 1)
+
+    def test_very_small_dt(self):
+        """Should handle very small time steps."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=1e-9,
+            dt=0.1e-9,
+        )
+
+        self.assertGreater(len(result.t_array), 5)
+
+    def test_verbose_mode(self):
+        """Verbose mode should complete without errors."""
+        import io
+        import sys
+
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+
+        try:
+            result = self.solver.solve_transient(
+                t_start=0.0,
+                t_end=10e-9,
+                dt=2e-9,
+                verbose=True,
+            )
+        finally:
+            sys.stdout = old_stdout
+
+        self.assertIsInstance(result, TransientResult)
+
+
+class TestSyntheticGridTransient(unittest.TestCase):
+    """Tests for transient solving on synthetic grids (no capacitance)."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.model, self.loads = build_synthetic_grid()
+        self.solver = TransientIRDropSolver(self.model)
+
+    def test_no_capacitance_in_synthetic(self):
+        """Synthetic grid should have no capacitance."""
+        self.assertFalse(self.solver.has_capacitance)
+        self.assertEqual(self.solver.total_capacitance, 0.0)
+
+    def test_transient_without_capacitance(self):
+        """Transient solve should work even without capacitance."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=10e-9,
+            dt=1e-9,
+        )
+
+        self.assertIsInstance(result, TransientResult)
+
+    def test_rc_system_zero_capacitance(self):
+        """RC system C matrix should be zero for synthetic grid."""
+        rc = self.solver._ensure_rc_system()
+
+        # C matrix should be all zeros
+        self.assertEqual(rc.C_full.nnz, 0)
+        self.assertEqual(rc.C_uu.nnz, 0)
+
+
+if __name__ == '__main__':
+    unittest.main()

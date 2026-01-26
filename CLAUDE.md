@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Static IR-drop analysis prototype for multi-layer power grids. Supports both synthetic grids and real PDN netlists.
+Static and dynamic IR-drop analysis prototype for multi-layer power grids. Supports both synthetic grids and real PDN netlists. Includes quasi-static (batch DC) and transient RC analysis.
 
 **Three Subsystems:**
 1. **`core/`** - Unified model supporting BOTH synthetic grids and PDN netlists (use this for new code)
@@ -57,6 +57,9 @@ core/
 ├── coupled_system.py       # Block matrices, Schur complement for coupled solver
 ├── current_aggregation.py  # CurrentAggregator for port current distribution
 ├── tiling.py               # TileManager, solve_single_tile for parallel tiling
+├── dynamic_solver.py       # DynamicIRDropSolver, QuasiStaticResult (batch DC)
+├── transient_solver.py     # TransientIRDropSolver, TransientResult, RCSystem
+├── dynamic_plotter.py      # DynamicPlotter for time-domain results
 ├── graph_converter.py      # NetworkX <-> Rustworkx conversion utilities
 ├── factory.py              # create_model_from_* functions
 ├── node_adapter.py         # NodeInfoExtractor
@@ -78,6 +81,9 @@ core/
 - **UnifiedPartitioner**: Layer-based and spatial grid partitioning
 - **UnifiedPlotter**: Voltage/IR-drop heatmap generation
 - **UnifiedEffectiveResistanceCalculator**: Pairwise and single-node effective resistance
+- **DynamicIRDropSolver**: Quasi-static analysis via batch DC solves at discrete time points
+- **TransientIRDropSolver**: Transient RC analysis with Backward Euler or Trapezoidal integration
+- **DynamicPlotter**: Heatmap and time series plotting for dynamic analysis results
 
 **Factory Functions:**
 ```python
@@ -348,9 +354,97 @@ for scenario in current_scenarios:
 
 **NOTE:** All standard `solve*()` methods also accept an optional `context` parameter for backward compatibility. If not provided, they create a temporary context internally.
 
+### Dynamic IR-Drop Analysis (Time-Domain)
+
+For time-varying currents, use the dynamic solvers which evaluate current sources at discrete time points.
+
+#### Quasi-Static Analysis (Batch DC Solves)
+```python
+from pdn.pdn_parser import NetlistParser
+from core import create_model_from_pdn, DynamicIRDropSolver
+
+parser = NetlistParser('./netlist_dir')
+graph = parser.parse()
+model = create_model_from_pdn(graph, 'VDD')
+
+solver = DynamicIRDropSolver(model, graph)
+result = solver.solve_quasi_static(
+    t_start=0, t_end=100e-9, n_points=101,
+    method='flat',           # 'flat' or 'hierarchical'
+    n_worst_nodes=10,        # Track N worst-case nodes
+    track_nodes=['node1'],   # Store full waveforms for these nodes
+)
+
+print(f"Peak IR-drop: {result.peak_ir_drop*1000:.2f} mV at t={result.peak_ir_drop_time*1e9:.2f} ns")
+print(f"Peak node: {result.peak_ir_drop_node}")
+```
+
+**QuasiStaticResult Fields:**
+- `t_array`: Time points array
+- `peak_ir_drop`, `peak_ir_drop_time`, `peak_ir_drop_node`: Global peak info
+- `worst_nodes`: List of (node, max_drop, time) for top N worst nodes
+- `max_ir_drop_per_time`: Max IR-drop at each time step
+- `total_current_per_time`, `total_vsrc_current_per_time`: Aggregate currents
+- `peak_ir_drop_per_node`, `peak_current_per_node`: Spatial peaks for heatmaps
+- `tracked_waveforms`, `tracked_ir_drop`: Waveforms for selected nodes
+
+#### Transient RC Analysis (with Capacitance)
+```python
+from core import TransientIRDropSolver, IntegrationMethod
+
+solver = TransientIRDropSolver(model, graph)
+result = solver.solve_transient(
+    t_start=0, t_end=100e-9, dt=0.1e-9,
+    method=IntegrationMethod.BACKWARD_EULER,  # or TRAPEZOIDAL
+    n_worst_nodes=10,
+    track_nodes=['node1'],
+)
+
+# Capacitors provide smoothing, so peak may be lower than quasi-static
+print(f"Transient peak: {result.peak_ir_drop*1000:.2f} mV")
+```
+
+**Transient vs Quasi-Static:**
+- **Quasi-static**: Ignores capacitance, solves independent DC problems at each time point. Faster, useful for steady-state approximation.
+- **Transient**: Includes capacitance via implicit time integration (Backward Euler or Trapezoidal). Captures decoupling effects but slower.
+
+**TransientResult Fields:**
+- Same as QuasiStaticResult, plus `integration_method`
+- Timings include `build_rc`, `factor`, `solve`
+
+#### Dynamic Analysis Plotting
+```python
+from core import DynamicPlotter
+
+# Peak IR-drop heatmap (worst IR-drop each node saw across time)
+DynamicPlotter.plot_peak_ir_drop_heatmap(
+    model, result, layer='M1',
+    title='Peak IR-Drop During Transient',
+    save_path='peak_ir_drop.png'
+)
+
+# Peak current heatmap
+DynamicPlotter.plot_peak_current_heatmap(
+    model, result, layer='M1',
+    save_path='peak_current.png'
+)
+
+# Time series of aggregate metrics
+DynamicPlotter.plot_time_series(
+    result, metrics=['max_ir_drop', 'total_current', 'vsrc_current'],
+    save_path='time_series.png'
+)
+
+# Node waveforms (for tracked nodes)
+DynamicPlotter.plot_node_waveforms(
+    result, plot_ir_drop=True,
+    save_path='waveforms.png'
+)
+```
+
 ## Testing
 
-**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`
+**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`, `test_dynamic_solver.py`, `test_transient_solver.py`, `test_dynamic_integration.py`
 
 **Test fixtures:** `tests/fixtures.py` provides factory functions for edge case testing scenarios.
 

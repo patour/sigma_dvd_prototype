@@ -27,6 +27,8 @@ test_modules = [
     'tests.test_pdn_solver',
     'tests.test_regional_solver',
     'tests.test_unified_core',
+    'tests.test_dynamic_solver',
+    'tests.test_transient_solver',
 ]
 
 for module in test_modules:

@@ -22,6 +22,7 @@ suite = unittest.TestSuite()
 # Load integration test modules
 integration_modules = [
     'tests.test_hierarchical_integration',
+    'tests.test_dynamic_integration',
 ]
 
 for module in integration_modules:

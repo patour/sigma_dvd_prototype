@@ -46,6 +46,23 @@ from .graph_converter import (
     convert_networkx_to_rustworkx,
     ensure_rustworkx_graph,
 )
+from .dynamic_solver import (
+    DynamicIRDropSolver,
+    QuasiStaticResult,
+)
+from .transient_solver import (
+    TransientIRDropSolver,
+    TransientResult,
+    RCSystem,
+    IntegrationMethod,
+)
+from .dynamic_plotter import (
+    DynamicPlotter,
+    plot_peak_ir_drop_heatmap,
+    plot_peak_current_heatmap,
+    plot_time_series,
+    plot_node_waveforms,
+)
 
 __all__ = [
     # Node adapter
@@ -106,4 +123,18 @@ __all__ = [
     "is_rustworkx_graph",
     "convert_networkx_to_rustworkx",
     "ensure_rustworkx_graph",
+    # Dynamic solver (quasi-static)
+    "DynamicIRDropSolver",
+    "QuasiStaticResult",
+    # Transient solver (RC)
+    "TransientIRDropSolver",
+    "TransientResult",
+    "RCSystem",
+    "IntegrationMethod",
+    # Dynamic plotter
+    "DynamicPlotter",
+    "plot_peak_ir_drop_heatmap",
+    "plot_peak_current_heatmap",
+    "plot_time_series",
+    "plot_node_waveforms",
 ]
