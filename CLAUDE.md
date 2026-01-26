@@ -97,7 +97,7 @@ model = create_model_from_pdn(graph, 'VDD', lazy_factor=False)
 ```
 
 **Lazy Factorization (default):**
-Model creation uses `lazy_factor=True` by default, deferring LU factorization until the first flat solve. This provides ~3x faster model creation when using hierarchical solvers (which build their own systems). Set `lazy_factor=False` for backward compatibility or when using only flat solves.
+Model creation uses `lazy_factor=True` by default, deferring LU factorization until the first flat solve. This provides ~4.6x faster model creation when using hierarchical solvers (which build their own systems). Set `lazy_factor=False` for backward compatibility or when using only flat solves.
 
 **Result Data Classes:**
 - `UnifiedSolveResult`: Basic solve result with voltages, ir_drop, metadata
