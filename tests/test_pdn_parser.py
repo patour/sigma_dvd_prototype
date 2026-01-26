@@ -1161,16 +1161,21 @@ class TestCurrentSourceLineParsing(unittest.TestCase):
 
 
 class TestInstanceSourcesIntegration(unittest.TestCase):
-    """Integration tests for instance_sources in parsed graph"""
-    
+    """Integration tests for instance_sources in parsed graph.
+
+    These tests verify the serialization functionality when store_instance_sources=True.
+    """
+
     @classmethod
     def setUpClass(cls):
         """Parse test netlist once for all tests"""
         test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
         if not test_netlist_dir.exists():
             raise unittest.SkipTest("Test netlist not found")
-        
-        cls.parser = NetlistParser(str(test_netlist_dir), validate=True)
+
+        # Use store_instance_sources=True to test serialization (not default)
+        cls.parser = NetlistParser(str(test_netlist_dir), validate=True,
+                                   store_instance_sources=True)
         cls.graph = cls.parser.parse()
     
     def test_instance_sources_populated(self):
@@ -1226,9 +1231,53 @@ class TestInstanceSourcesIntegration(unittest.TestCase):
         """Test that instance_node_map is still populated for backward compat"""
         inst_node_map = self.graph.graph.get('instance_node_map', {})
         inst_sources = self.graph.graph.get('instance_sources', {})
-        
+
         # Both should have same keys
         self.assertEqual(set(inst_node_map.keys()), set(inst_sources.keys()))
+
+
+class TestInstanceSourcesRawObjects(unittest.TestCase):
+    """Test the default behavior: store raw CurrentSource objects (not serialized)."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests"""
+        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist_dir.exists():
+            raise unittest.SkipTest("Test netlist not found")
+
+        # Use default store_instance_sources=False for raw object storage
+        cls.parser = NetlistParser(str(test_netlist_dir), validate=True)
+        cls.graph = cls.parser.parse()
+
+    def test_raw_objects_stored(self):
+        """Test that raw CurrentSource objects are stored under _instance_sources_objects"""
+        raw_sources = self.graph.graph.get('_instance_sources_objects', {})
+        # Should have raw objects stored
+        self.assertGreater(len(raw_sources), 0)
+        # Should NOT have serialized version
+        self.assertEqual(len(self.graph.graph.get('instance_sources', {})), 0)
+
+    def test_raw_objects_are_current_source(self):
+        """Test that raw objects are CurrentSource instances"""
+        raw_sources = self.graph.graph.get('_instance_sources_objects', {})
+        for name, src in raw_sources.items():
+            self.assertIsInstance(src, CurrentSource)
+            self.assertEqual(src.name, name)
+
+    def test_raw_objects_match_isource_count(self):
+        """Test that raw object count matches I-type edges"""
+        raw_sources = self.graph.graph.get('_instance_sources_objects', {})
+        isource_edges = [(u, v, d) for u, v, d in self.graph.edges(data=True)
+                        if d.get('type') == 'I']
+        self.assertEqual(len(raw_sources), len(isource_edges))
+
+    def test_backward_compat_instance_node_map_with_raw(self):
+        """Test that instance_node_map matches raw objects"""
+        inst_node_map = self.graph.graph.get('instance_node_map', {})
+        raw_sources = self.graph.graph.get('_instance_sources_objects', {})
+        # Both should have same keys
+        self.assertEqual(set(inst_node_map.keys()), set(raw_sources.keys()))
 
 
 if __name__ == '__main__':

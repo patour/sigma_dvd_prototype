@@ -15,6 +15,7 @@ import numpy as np
 from .unified_model import UnifiedPowerGridModel, GridSource
 from .unified_solver import UnifiedIRDropSolver
 from .solver_results import FlatSolverContext, HierarchicalSolverContext
+from .vectorized_sources import VectorizedCurrentSources
 
 # Try to import CurrentSource for type checking
 try:
@@ -105,52 +106,166 @@ class DynamicIRDropSolver:
         print(f"Peak IR-drop: {result.peak_ir_drop*1000:.2f} mV")
     """
 
-    def __init__(self, model: UnifiedPowerGridModel, graph: Any = None):
+    def __init__(
+        self,
+        model: UnifiedPowerGridModel,
+        graph: Any = None,
+        vectorize_threshold: int = 10000,
+        clear_graph_metadata: bool = False,
+    ):
         """Initialize dynamic solver.
 
         Args:
             model: UnifiedPowerGridModel instance
             graph: Original parsed graph with 'instance_sources' metadata.
                    If None, will try to use model.graph.
+            vectorize_threshold: Use vectorized evaluation when source count
+                                 exceeds this threshold. Set to 0 to always use
+                                 vectorized, or -1 to never use it. Default 10000.
+            clear_graph_metadata: If True and vectorized mode is used, clear the
+                                  serialized instance_sources from graph metadata
+                                  after vectorization to save memory. Default False.
         """
         self.model = model
         self._graph = graph if graph is not None else model.graph
         self._solver = UnifiedIRDropSolver(model)
         self._current_sources: Dict[str, Any] = {}  # name -> CurrentSource
         self._node_to_sources: Dict[Any, List[str]] = {}  # node -> [source_names]
+        self._vectorize_threshold = vectorize_threshold
+        self._clear_graph_metadata = clear_graph_metadata
 
-        # Load current source data from graph metadata
-        self._load_current_sources()
+        # Vectorized sources (initialized after loading current sources)
+        self._vec_sources: Optional[VectorizedCurrentSources] = None
 
-    def _load_current_sources(self) -> None:
-        """Load current source data from graph metadata."""
-        # Import here to avoid circular imports and allow for missing pdn module
-        try:
-            from pdn.pdn_parser import CurrentSource as CS
-        except ImportError:
-            return
+        # Track data source format
+        self._has_raw_objects = False  # True if graph has raw CurrentSource objects
 
-        # Get instance_sources from graph metadata
+        # Get instance_sources from graph metadata (raw objects or serialized dicts)
+        self._instance_sources_raw = self._get_instance_sources_data()
+
+        # Initialize current sources - either vectorized or object-based
+        self._init_current_sources()
+
+        # Pre-compute pad-adjacent edges for efficient vsrc current calculation
+        self._pad_edges = self._build_pad_edges()
+
+    def _get_instance_sources_data(self) -> Dict[str, Any]:
+        """Get instance_sources from graph metadata.
+
+        Checks for raw CurrentSource objects first ('_instance_sources_objects'),
+        then falls back to serialized dicts ('instance_sources').
+
+        Returns:
+            Dict mapping name -> CurrentSource object or serialized dict
+        """
         graph_obj = self._graph
-        instance_sources = {}
-
-        # Handle different graph wrapper types
+        graph_dict = None
         if hasattr(graph_obj, 'graph') and isinstance(graph_obj.graph, dict):
-            instance_sources = graph_obj.graph.get('instance_sources', {})
+            graph_dict = graph_obj.graph
         elif hasattr(graph_obj, '_attrs'):
-            instance_sources = graph_obj._attrs.get('instance_sources', {})
+            graph_dict = graph_obj._attrs
 
-        # Reconstruct CurrentSource objects and build node mapping
-        for name, data in instance_sources.items():
-            src = CS.from_dict(data)
-            self._current_sources[name] = src
+        if graph_dict is None:
+            return {}
 
-            # Map nodes to sources for faster evaluation
-            node1 = src.node1
-            if node1 and node1 != '0':
-                if node1 not in self._node_to_sources:
-                    self._node_to_sources[node1] = []
-                self._node_to_sources[node1].append(name)
+        # Check for raw CurrentSource objects first (memory-efficient storage)
+        if '_instance_sources_objects' in graph_dict:
+            self._has_raw_objects = True
+            return graph_dict.get('_instance_sources_objects', {})
+
+        # Fall back to serialized dict format (backward compat)
+        return graph_dict.get('instance_sources', {})
+
+    def _init_current_sources(self) -> None:
+        """Initialize current sources - vectorized or object-based.
+
+        For large source counts (>= threshold), converts to vectorized format.
+        Handles both raw CurrentSource objects and serialized dicts.
+        """
+        n_sources = len(self._instance_sources_raw)
+        threshold = self._vectorize_threshold
+
+        # Determine if we should use vectorized mode
+        use_vectorized = (
+            threshold >= 0 and
+            (threshold == 0 or n_sources >= threshold)
+        )
+
+        if use_vectorized and n_sources > 0:
+            edge_cache = self.model.edge_cache
+
+            if self._has_raw_objects:
+                # Convert directly from CurrentSource objects
+                self._vec_sources = VectorizedCurrentSources.from_current_sources(
+                    self._instance_sources_raw,
+                    edge_cache.node_to_idx,
+                    edge_cache.n_nodes,
+                )
+            else:
+                # Parse from serialized dicts
+                self._vec_sources = VectorizedCurrentSources.from_serialized_dicts(
+                    self._instance_sources_raw,
+                    edge_cache.node_to_idx,
+                    edge_cache.n_nodes,
+                )
+            # Don't need object-based storage when using vectorized
+            self._current_sources = {}
+            self._node_to_sources = {}
+
+            # Clear graph metadata to save memory (optional)
+            if self._clear_graph_metadata:
+                self._clear_instance_sources_from_graph()
+        else:
+            # Fall back to object-based storage for sequential evaluation
+            self._load_current_sources_as_objects()
+
+        # Clear local reference to raw data (no longer needed)
+        self._instance_sources_raw = {}
+
+    def _clear_instance_sources_from_graph(self) -> None:
+        """Clear instance_sources from graph metadata to save memory."""
+        graph_obj = self._graph
+        graph_dict = None
+        if hasattr(graph_obj, 'graph') and isinstance(graph_obj.graph, dict):
+            graph_dict = graph_obj.graph
+        elif hasattr(graph_obj, '_attrs'):
+            graph_dict = graph_obj._attrs
+
+        if graph_dict is not None:
+            # Clear both possible keys
+            graph_dict.pop('instance_sources', None)
+            graph_dict.pop('_instance_sources_objects', None)
+
+    def _load_current_sources_as_objects(self) -> None:
+        """Load current sources as CurrentSource objects (sequential mode).
+
+        Handles both raw CurrentSource objects and serialized dicts.
+        """
+        if self._has_raw_objects:
+            # Already have CurrentSource objects - use directly
+            for name, src in self._instance_sources_raw.items():
+                self._current_sources[name] = src
+                node1 = src.node1
+                if node1 and node1 != '0':
+                    if node1 not in self._node_to_sources:
+                        self._node_to_sources[node1] = []
+                    self._node_to_sources[node1].append(name)
+        else:
+            # Reconstruct from serialized dicts
+            try:
+                from pdn.pdn_parser import CurrentSource as CS
+            except ImportError:
+                return
+
+            for name, data in self._instance_sources_raw.items():
+                src = CS.from_dict(data)
+                self._current_sources[name] = src
+
+                node1 = src.node1
+                if node1 and node1 != '0':
+                    if node1 not in self._node_to_sources:
+                        self._node_to_sources[node1] = []
+                    self._node_to_sources[node1].append(name)
 
     def _evaluate_currents_at_time(self, t: float) -> Dict[Any, float]:
         """Evaluate all current sources at a given time.
@@ -161,47 +276,45 @@ class DynamicIRDropSolver:
         Returns:
             Dict mapping node -> current (positive = sink, in mA for PDN)
         """
-        if not self._current_sources:
-            # Fall back to static current sources from model
-            return self.model.extract_current_sources()
+        # Use vectorized evaluation if available (much faster for large source counts)
+        if self._vec_sources is not None:
+            edge_cache = self.model.edge_cache
+            return self._vec_sources.evaluate_at_time_as_dict(t, edge_cache.idx_to_node)
 
-        current_injections: Dict[Any, float] = {}
-        valid_nodes = self.model.valid_nodes
+        # Use object-based sequential evaluation
+        if self._current_sources:
+            current_injections: Dict[Any, float] = {}
+            valid_nodes = self.model.valid_nodes
 
-        for name, src in self._current_sources.items():
-            current_ma = src.get_current_at_time(t)
-            if current_ma == 0:
-                continue
+            for name, src in self._current_sources.items():
+                current_ma = src.get_current_at_time(t)
+                if current_ma == 0:
+                    continue
 
-            node = src.node1
-            if node and node in valid_nodes and node != '0':
-                current_injections[node] = current_injections.get(node, 0.0) + current_ma
+                node = src.node1
+                if node and node in valid_nodes and node != '0':
+                    current_injections[node] = current_injections.get(node, 0.0) + current_ma
+
+            return current_injections
+
+        # Fall back to static current sources from model
+        return self.model.extract_current_sources()
 
         return current_injections
 
-    def _compute_vsrc_current(
-        self,
-        voltages: Dict[Any, float],
-    ) -> float:
-        """Compute total current flowing through voltage sources (pads).
-
-        Uses Kirchhoff's current law: for each pad, sum currents through
-        all connected resistive branches.
-
-        Args:
-            voltages: Node voltages from solve
+    def _build_pad_edges(self) -> List[Tuple[Any, Any, float]]:
+        """Pre-compute edges adjacent to pads for efficient vsrc current calculation.
 
         Returns:
-            Total current in mA (for PDN) or A (for synthetic)
+            List of (other_node, conductance, sign) tuples where:
+            - other_node: The non-pad endpoint
+            - conductance: Edge conductance (1/R)
+            - sign: +1 if current flows pad->other, -1 if other->pad
         """
-        # Sum current at each pad using conductance * voltage difference
-        total = 0.0
         pad_set = set(self.model.pad_nodes)
-        vdd = self.model.vdd
-
-        # Constants for handling short resistances
         GMAX = 1e5
         SHORT_THRESHOLD = 1e-6
+        edges: List[Tuple[Any, Any, float]] = []
 
         for u, v, edge_info in self.model._iter_resistive_edges():
             R = edge_info.resistance
@@ -217,17 +330,36 @@ class DynamicIRDropSolver:
             u_is_pad = u in pad_set
             v_is_pad = v in pad_set
 
-            # Only count edges where one end is a pad
+            # Only store edges where exactly one end is a pad
             if u_is_pad and not v_is_pad and v != '0':
-                # Current from pad u to non-pad v
-                v_u = vdd
-                v_v = voltages.get(v, vdd)
-                total += g * (v_u - v_v)
+                # Current from pad u to non-pad v: I = g * (Vdd - V_v)
+                edges.append((v, g, 1.0))
             elif v_is_pad and not u_is_pad and u != '0':
-                # Current from pad v to non-pad u
-                v_v = vdd
-                v_u = voltages.get(u, vdd)
-                total += g * (v_v - v_u)
+                # Current from pad v to non-pad u: I = g * (Vdd - V_u)
+                edges.append((u, g, 1.0))
+
+        return edges
+
+    def _compute_vsrc_current(
+        self,
+        voltages: Dict[Any, float],
+    ) -> float:
+        """Compute total current flowing through voltage sources (pads).
+
+        Uses pre-computed pad-adjacent edges for O(E_pad) instead of O(E).
+
+        Args:
+            voltages: Node voltages from solve
+
+        Returns:
+            Total current in mA (for PDN) or A (for synthetic)
+        """
+        total = 0.0
+        vdd = self.model.vdd
+
+        for other_node, g, sign in self._pad_edges:
+            v_other = voltages.get(other_node, vdd)
+            total += sign * g * (vdd - v_other)
 
         return total
 

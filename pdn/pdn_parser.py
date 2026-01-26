@@ -47,6 +47,7 @@ Author: Based on mpower C++ parser implementation
 Date: December 9, 2025
 """
 
+import bisect
 import os
 import sys
 import gzip
@@ -302,15 +303,22 @@ class Pulse:
 class PWL:
     """
     Piece-wise linear waveform.
-    
+
     points: List of (time, value) tuples.
     """
     points: List[Tuple[float, float]] = field(default_factory=list)
     period: float = 0.0
     delay: float = 0.0
+    _times_cache: Optional[Tuple[float, ...]] = field(default=None, init=False, repr=False)
+
+    def _get_times(self) -> Tuple[float, ...]:
+        """Get cached tuple of time values for binary search."""
+        if self._times_cache is None:
+            self._times_cache = tuple(p[0] for p in self.points)
+        return self._times_cache
 
     def evaluate(self, time: float) -> float:
-        """Evaluate PWL value at given time."""
+        """Evaluate PWL value at given time using binary search (O(log N))."""
         if not self.points:
             return 0.0
 
@@ -326,15 +334,15 @@ class PWL:
                 return self.points[0][1]
             return self.points[-1][1]
 
-        for i in range(len(self.points) - 1):
-            t1, v1 = self.points[i]
-            t2, v2 = self.points[i + 1]
-            if t1 <= t <= t2:
-                if t2 == t1:
-                    return v1
-                return v1 + (v2 - v1) * (t - t1) / (t2 - t1)
+        # Binary search for the interval containing t
+        times = self._get_times()
+        i = bisect.bisect_right(times, t) - 1
 
-        return self.points[-1][1]
+        t1, v1 = self.points[i]
+        t2, v2 = self.points[i + 1]
+        if t2 == t1:
+            return v1
+        return v1 + (v2 - v1) * (t - t1) / (t2 - t1)
 
     def get_dc(self) -> float:
         """Calculate average DC value of PWL over one period."""
@@ -763,11 +771,13 @@ class GraphBuilder:
     Builds and manages the rustworkx MultiDiGraph representation of the PDN.
     """
 
-    def __init__(self, validate: bool = False, strict: bool = False, net_filter: Optional[str] = None):
+    def __init__(self, validate: bool = False, strict: bool = False, net_filter: Optional[str] = None,
+                 store_instance_sources: bool = False):
         self.graph = RustworkxMultiDiGraphWrapper()
         self.validate = validate
         self.strict = strict
         self.net_filter = net_filter.lower() if net_filter else None  # Store lowercase for case-insensitive comparison
+        self.store_instance_sources = store_instance_sources
         # Union-Find structure for package/main netlist connectivity
         self.uf_parent: Dict[str, str] = {}  # Union-Find parent pointers for package nodes
         self.uf_net: Dict[str, str] = {}  # Net type for each union-find root
@@ -1228,17 +1238,23 @@ class GraphBuilder:
                 if net:
                     net_connectivity[net].append(node)
         
-        # Serialize instance_sources for storage (lazy reconstruction on access)
-        instance_sources_serialized = {
-            name: src.to_dict() for name, src in self.instance_sources.items()
-        }
-        
         # Add metadata to graph (vsrc_nodes and layer_stats already added by compute methods)
         self.graph.graph['vsrc_dict'] = self.vsrc_dict
         self.graph.graph['parameters'] = self.parameters
         self.graph.graph['tile_grid'] = self.tile_grid
         self.graph.graph['instance_node_map'] = self.instance_node_map
-        self.graph.graph['instance_sources'] = instance_sources_serialized
+
+        # Store instance_sources - either serialized (for pickle compatibility) or raw objects (for memory efficiency)
+        if self.store_instance_sources:
+            # Serialize for storage (backward compat, pickle-safe)
+            instance_sources_serialized = {
+                name: src.to_dict() for name, src in self.instance_sources.items()
+            }
+            self.graph.graph['instance_sources'] = instance_sources_serialized
+        else:
+            # Store raw CurrentSource objects directly (memory efficient, not pickle-safe)
+            # Solvers can access via '_instance_sources_objects' key
+            self.graph.graph['_instance_sources_objects'] = self.instance_sources
         self.graph.graph['merged_nodes'] = self.merged_nodes
         self.graph.graph['mutual_inductors'] = self.mutual_inductors
         self.graph.graph['net_connectivity'] = dict(net_connectivity)
@@ -1274,17 +1290,35 @@ class NetlistParser:
     
     def __init__(self, netlist_dir: str, validate: bool = False, strict: bool = False,
                  net_filter: Optional[str] = None, verbose: bool = False,
-                 vsrc_resistor_pattern: str = 'rs', vsrc_depth_limit: int = 3):
+                 vsrc_resistor_pattern: str = 'rs', vsrc_depth_limit: int = 3,
+                 store_instance_sources: bool = False):
+        """
+        Initialize PDN netlist parser.
+
+        Args:
+            netlist_dir: Path to directory containing netlist files
+            validate: Enable validation checks during parsing
+            strict: Raise errors on validation failures (vs warnings)
+            net_filter: Only parse elements for this net (e.g., 'VDD')
+            verbose: Enable debug logging
+            vsrc_resistor_pattern: Pattern for identifying voltage source resistors
+            vsrc_depth_limit: Max depth for voltage source node traversal
+            store_instance_sources: If True, serialize instance_sources to graph metadata
+                                   (needed for pickling). If False (default), store raw
+                                   CurrentSource objects for memory efficiency (~60% savings
+                                   for large netlists with 1M+ sources).
+        """
         self.netlist_dir = Path(netlist_dir)
         self.validate = validate
         self.strict = strict
         self.net_filter = net_filter
         self.vsrc_resistor_pattern = vsrc_resistor_pattern
         self.vsrc_depth_limit = vsrc_depth_limit
-        
+        self.store_instance_sources = store_instance_sources
+
         # Setup logging
         log_level = logging.DEBUG if verbose else logging.INFO
-        logging.basicConfig(level=log_level, 
+        logging.basicConfig(level=log_level,
                           format='%(levelname)s: %(message)s')
         self.logger = logging.getLogger(__name__)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1295,9 +1329,10 @@ class NetlistParser:
             file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
             self.logger.addHandler(file_handler)
             self.logger.info(f"Logging to file: {log_file}")
-        
+
         # Initialize graph builder
-        self.builder = GraphBuilder(validate=validate, strict=strict, net_filter=net_filter)
+        self.builder = GraphBuilder(validate=validate, strict=strict, net_filter=net_filter,
+                                    store_instance_sources=store_instance_sources)
         
         # Parsing state
         self.subcircuits: Dict[str, Dict] = {}  # name -> {pins: [...], body: [...]}

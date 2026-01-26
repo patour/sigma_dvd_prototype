@@ -50,6 +50,7 @@ from .dynamic_solver import (
     DynamicIRDropSolver,
     QuasiStaticResult,
 )
+from .vectorized_sources import VectorizedCurrentSources
 from .transient_solver import (
     TransientIRDropSolver,
     TransientResult,
@@ -126,6 +127,7 @@ __all__ = [
     # Dynamic solver (quasi-static)
     "DynamicIRDropSolver",
     "QuasiStaticResult",
+    "VectorizedCurrentSources",
     # Transient solver (RC)
     "TransientIRDropSolver",
     "TransientResult",

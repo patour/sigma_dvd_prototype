@@ -145,17 +145,28 @@ graph = ensure_rustworkx_graph(graph)  # No-op if already Rustworkx
 
 **Accessing Current Source Data:**
 ```python
-# After parsing, instance_sources contains full waveform data
+# By default, parser stores raw CurrentSource objects (memory efficient)
 graph = parser.parse()
-instance_sources = graph.graph.get('instance_sources', {})
+raw_sources = graph.graph.get('_instance_sources_objects', {})
 
-# Reconstruct CurrentSource objects from serialized data
-from pdn.pdn_parser import CurrentSource
-for name, data in instance_sources.items():
-    src = CurrentSource.from_dict(data)
+# Access CurrentSource objects directly
+for name, src in raw_sources.items():
     static_ma = src.get_static_current()      # DC analysis
     current_at_t = src.get_current_at_time(1e-9)  # Transient at 1ns
+
+# For portable pickle files, use store_instance_sources=True (serializes to dicts)
+parser = NetlistParser('./netlist_dir', store_instance_sources=True)
+graph = parser.parse()
+instance_sources = graph.graph.get('instance_sources', {})  # Serialized dicts
 ```
+
+**Memory Optimization for Large Netlists:**
+The default `store_instance_sources=False` avoids serializing CurrentSource objects to dicts, saving ~60% parse-time memory for large netlists (1.7GB -> 1.1GB for 1M sources). The dynamic/transient solvers automatically handle both formats.
+
+**Pickle Compatibility:**
+Both modes support pickle. The difference is portability:
+- `store_instance_sources=False` (default): Pickle works but requires `pdn.pdn_parser` module when loading
+- `store_instance_sources=True`: Pickle is portable (no module dependency), better for long-term storage/sharing
 
 ### IRDrop Module (irdrop/) - Original Synthetic
 - `generate_power_grid()`: Creates K-layer resistor mesh with `NodeID` keys
