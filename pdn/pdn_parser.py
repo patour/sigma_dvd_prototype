@@ -130,6 +130,503 @@ class ParseStats:
     layer_stats: Dict[str, Dict] = field(default_factory=dict)
     net_stats: Dict[str, Dict] = field(default_factory=dict)
     unmapped_nodes: int = 0
+    # Instance current statistics
+    instances_with_waveforms: int = 0
+    total_static_current_ma: float = 0.0
+
+
+# =============================================================================
+# Instance Current Source Data Structures
+# =============================================================================
+# These classes support parsing and evaluation of time-domain current waveforms
+# from instanceModels*.sp files. All current values are stored in mA.
+
+@dataclass
+class InstanceInfo:
+    """
+    Parsed instance name information.
+    
+    Instance name format:
+      i_<instance_name>:<vdd_net>:<vdd_pin>:<vss_net>:<vss_pin>:<tile_x>:<tile_y>[:<extra>]
+    
+    Example:
+      i_U123/cell:VDD_XLV:VDD:0:0:5:3:0
+    """
+    full_name: str
+    instance_name: str
+    vdd_net: Optional[str] = None
+    vdd_pin: Optional[str] = None
+    vss_net: Optional[str] = None
+    vss_pin: Optional[str] = None
+    tile_x: int = 0
+    tile_y: int = 0
+
+    @classmethod
+    def parse(cls, name: str, delimiter: str = ':') -> 'InstanceInfo':
+        """Parse instance name to extract net and location info."""
+        info = cls(full_name=name, instance_name=name)
+        
+        # Remove 'i_' or 'I_' prefix for parsing
+        parse_name = name
+        if parse_name.lower().startswith('i_'):
+            parse_name = parse_name[2:]
+        
+        parts = parse_name.split(delimiter)
+        
+        if len(parts) >= 1:
+            info.instance_name = parts[0]
+        if len(parts) >= 2:
+            info.vdd_net = parts[1] if parts[1] != '0' else None
+        if len(parts) >= 3:
+            info.vdd_pin = parts[2] if parts[2] != '0' else None
+        if len(parts) >= 4:
+            info.vss_net = parts[3] if parts[3] != '0' else None
+        if len(parts) >= 5:
+            info.vss_pin = parts[4] if parts[4] != '0' else None
+        if len(parts) >= 6:
+            try:
+                info.tile_x = int(parts[5])
+            except ValueError:
+                pass
+        if len(parts) >= 7:
+            try:
+                info.tile_y = int(parts[6])
+            except ValueError:
+                pass
+        
+        return info
+    
+    def to_dict(self) -> Dict:
+        """Serialize to dictionary for JSON-compatible storage."""
+        return {
+            'full_name': self.full_name,
+            'instance_name': self.instance_name,
+            'vdd_net': self.vdd_net,
+            'vdd_pin': self.vdd_pin,
+            'vss_net': self.vss_net,
+            'vss_pin': self.vss_pin,
+            'tile_x': self.tile_x,
+            'tile_y': self.tile_y
+        }
+    
+    @classmethod
+    def from_dict(cls, d: Dict) -> 'InstanceInfo':
+        """Reconstruct from dictionary."""
+        return cls(
+            full_name=d.get('full_name', ''),
+            instance_name=d.get('instance_name', ''),
+            vdd_net=d.get('vdd_net'),
+            vdd_pin=d.get('vdd_pin'),
+            vss_net=d.get('vss_net'),
+            vss_pin=d.get('vss_pin'),
+            tile_x=d.get('tile_x', 0),
+            tile_y=d.get('tile_y', 0)
+        )
+
+
+@dataclass
+class Pulse:
+    """
+    Pulse waveform definition.
+    
+    All values in base units (Amperes for current). Convert to mA when storing.
+    """
+    v1: float = 0.0       # Initial value
+    v2: float = 0.0       # Pulsed value
+    delay: float = 0.0    # Delay time (s)
+    rt: float = 0.0       # Rise time (s)
+    ft: float = 0.0       # Fall time (s)
+    width: float = 0.0    # Pulse width (s)
+    period: float = 0.0   # Period (s), 0 = non-periodic
+
+    def evaluate(self, time: float) -> float:
+        """Evaluate pulse value at given time."""
+        if self.period <= 0:
+            t = time
+        else:
+            t = time % self.period
+
+        t_rel = t - self.delay
+        if t_rel < 0:
+            if self.period > 0:
+                t_rel += self.period
+            else:
+                return self.v1
+
+        if t_rel < 0:
+            return self.v1
+        elif t_rel < self.rt:
+            if self.rt > 0:
+                return self.v1 + (self.v2 - self.v1) * (t_rel / self.rt)
+            return self.v2
+        elif t_rel < self.rt + self.width:
+            return self.v2
+        elif t_rel < self.rt + self.width + self.ft:
+            if self.ft > 0:
+                t_fall = t_rel - self.rt - self.width
+                return self.v2 + (self.v1 - self.v2) * (t_fall / self.ft)
+            return self.v1
+        else:
+            return self.v1
+
+    def get_dc(self) -> float:
+        """Calculate average DC value of pulse over one period."""
+        if self.period <= 0:
+            return 0.0
+        rise_area = 0.5 * self.rt * (self.v1 + self.v2)
+        high_area = self.width * self.v2
+        fall_area = 0.5 * self.ft * (self.v1 + self.v2)
+        low_time = self.period - self.rt - self.width - self.ft
+        low_area = max(0, low_time) * self.v1
+        total_area = rise_area + high_area + fall_area + low_area
+        return total_area / self.period
+    
+    def to_dict(self) -> Dict:
+        """Serialize to dictionary."""
+        return {
+            'v1': self.v1, 'v2': self.v2, 'delay': self.delay,
+            'rt': self.rt, 'ft': self.ft, 'width': self.width, 'period': self.period
+        }
+    
+    @classmethod
+    def from_dict(cls, d: Dict) -> 'Pulse':
+        """Reconstruct from dictionary."""
+        return cls(
+            v1=d.get('v1', 0.0), v2=d.get('v2', 0.0), delay=d.get('delay', 0.0),
+            rt=d.get('rt', 0.0), ft=d.get('ft', 0.0), width=d.get('width', 0.0),
+            period=d.get('period', 0.0)
+        )
+
+
+@dataclass
+class PWL:
+    """
+    Piece-wise linear waveform.
+    
+    points: List of (time, value) tuples.
+    """
+    points: List[Tuple[float, float]] = field(default_factory=list)
+    period: float = 0.0
+    delay: float = 0.0
+
+    def evaluate(self, time: float) -> float:
+        """Evaluate PWL value at given time."""
+        if not self.points:
+            return 0.0
+
+        t = time - self.delay
+        if self.period > 0 and t >= 0:
+            t = t % self.period
+
+        if t <= self.points[0][0]:
+            return self.points[0][1]
+
+        if t >= self.points[-1][0]:
+            if self.period > 0:
+                return self.points[0][1]
+            return self.points[-1][1]
+
+        for i in range(len(self.points) - 1):
+            t1, v1 = self.points[i]
+            t2, v2 = self.points[i + 1]
+            if t1 <= t <= t2:
+                if t2 == t1:
+                    return v1
+                return v1 + (v2 - v1) * (t - t1) / (t2 - t1)
+
+        return self.points[-1][1]
+
+    def get_dc(self) -> float:
+        """Calculate average DC value of PWL over one period."""
+        if not self.points or len(self.points) < 2:
+            if self.points:
+                return self.points[0][1]
+            return 0.0
+
+        if self.period <= 0:
+            return 0.0
+
+        total_area = 0.0
+        for i in range(len(self.points) - 1):
+            t1, v1 = self.points[i]
+            t2, v2 = self.points[i + 1]
+            total_area += 0.5 * (v1 + v2) * (t2 - t1)
+
+        if self.period > self.points[-1][0]:
+            t_last, v_last = self.points[-1]
+            t_first, v_first = self.points[0]
+            remaining = self.period - t_last + t_first
+            total_area += 0.5 * (v_last + v_first) * remaining
+
+        return total_area / self.period
+    
+    def to_dict(self) -> Dict:
+        """Serialize to dictionary."""
+        return {'points': self.points, 'period': self.period, 'delay': self.delay}
+    
+    @classmethod
+    def from_dict(cls, d: Dict) -> 'PWL':
+        """Reconstruct from dictionary."""
+        return cls(
+            points=[(p[0], p[1]) for p in d.get('points', [])],
+            period=d.get('period', 0.0),
+            delay=d.get('delay', 0.0)
+        )
+
+
+@dataclass
+class CurrentSource:
+    """
+    Current source instance with full waveform data.
+    
+    All current values are stored in mA for consistency with the PDN parser.
+    Use get_static_current() for DC analysis, get_current_at_time(t) for transient.
+    """
+    name: str
+    node1: str
+    node2: str
+    dc_value: float = 0.0                           # DC component (mA)
+    static_value: Optional[float] = None            # Static value override (mA)
+    pulses: List[Pulse] = field(default_factory=list)
+    pwls: List[PWL] = field(default_factory=list)
+    info: Optional[InstanceInfo] = None
+
+    def has_waveform_data(self) -> bool:
+        """Check if instance has any dynamic waveform data (Pulse or PWL)."""
+        return len(self.pulses) > 0 or len(self.pwls) > 0
+
+    def has_current_data(self) -> bool:
+        """Check if instance has any current data."""
+        return (self.dc_value != 0.0 or
+                self.static_value is not None or
+                self.has_waveform_data())
+
+    def get_static_current(self) -> float:
+        """Get static/DC current value (mA)."""
+        if self.static_value is not None:
+            return self.dc_value + self.static_value
+        total = self.dc_value
+        for pulse in self.pulses:
+            total += pulse.get_dc()
+        for pwl in self.pwls:
+            total += pwl.get_dc()
+        return total
+
+    def get_current_at_time(self, time: float) -> float:
+        """Get current value at specified time (mA)."""
+        total = self.dc_value
+        for pulse in self.pulses:
+            total += pulse.evaluate(time)
+        for pwl in self.pwls:
+            total += pwl.evaluate(time)
+        return total
+    
+    def to_dict(self) -> Dict:
+        """Serialize to dictionary for JSON-compatible storage."""
+        return {
+            'name': self.name,
+            'node1': self.node1,
+            'node2': self.node2,
+            'dc_value': self.dc_value,
+            'static_value': self.static_value,
+            'pulses': [p.to_dict() for p in self.pulses],
+            'pwls': [p.to_dict() for p in self.pwls],
+            'info': self.info.to_dict() if self.info else None
+        }
+    
+    @classmethod
+    def from_dict(cls, d: Dict) -> 'CurrentSource':
+        """Reconstruct from dictionary."""
+        return cls(
+            name=d.get('name', ''),
+            node1=d.get('node1', ''),
+            node2=d.get('node2', ''),
+            dc_value=d.get('dc_value', 0.0),
+            static_value=d.get('static_value'),
+            pulses=[Pulse.from_dict(p) for p in d.get('pulses', [])],
+            pwls=[PWL.from_dict(p) for p in d.get('pwls', [])],
+            info=InstanceInfo.from_dict(d['info']) if d.get('info') else None
+        )
+
+
+# =============================================================================
+# Instance Current Source Parsing Helpers
+# =============================================================================
+
+def _parse_spice_value(value_str: str) -> float:
+    """
+    Parse a numeric value with optional SPICE unit suffix.
+    
+    Supports: f (femto), p (pico), n (nano), u (micro), m (milli),
+              k (kilo), meg (mega), g (giga), t (tera)
+    """
+    value_str = value_str.strip().lower()
+    multipliers = {
+        'f': 1e-15, 'p': 1e-12, 'n': 1e-9, 'u': 1e-6,
+        'm': 1e-3, 'k': 1e3, 'meg': 1e6, 'g': 1e9, 't': 1e12
+    }
+
+    match = re.match(r'^([+-]?[\d.]+(?:e[+-]?\d+)?)\s*(\w*)$', value_str)
+    if match:
+        num = float(match.group(1))
+        unit = match.group(2)
+        if unit in multipliers:
+            return num * multipliers[unit]
+        elif unit.startswith('meg'):
+            return num * 1e6
+        return num
+
+    return float(value_str)
+
+
+def _parse_pulse(pulse_str: str) -> Pulse:
+    """Parse pulse definition: pulse(v1, v2, delay, rt, ft, width, period)"""
+    match = re.search(r'pulse\s*\(\s*([^)]+)\)', pulse_str, re.IGNORECASE)
+    if not match:
+        return Pulse()
+
+    values = re.split(r'[,\s]+', match.group(1).strip())
+    values = [v for v in values if v]
+
+    pulse = Pulse()
+    if len(values) >= 1:
+        pulse.v1 = _parse_spice_value(values[0])
+    if len(values) >= 2:
+        pulse.v2 = _parse_spice_value(values[1])
+    if len(values) >= 3:
+        pulse.delay = _parse_spice_value(values[2])
+    if len(values) >= 4:
+        pulse.rt = _parse_spice_value(values[3])
+    if len(values) >= 5:
+        pulse.ft = _parse_spice_value(values[4])
+    if len(values) >= 6:
+        pulse.width = _parse_spice_value(values[5])
+    if len(values) >= 7:
+        pulse.period = _parse_spice_value(values[6])
+
+    return pulse
+
+
+def _parse_pwl(pwl_str: str) -> PWL:
+    """Parse PWL definition: pwl(t1 v1 t2 v2 ...)"""
+    match = re.search(r'pwl\s*\(\s*([^)]+)\)', pwl_str, re.IGNORECASE)
+    if not match:
+        return PWL()
+
+    values = re.split(r'[,\s]+', match.group(1).strip())
+    values = [v for v in values if v]
+
+    pwl = PWL()
+    for i in range(0, len(values) - 1, 2):
+        t = _parse_spice_value(values[i])
+        v = _parse_spice_value(values[i + 1])
+        pwl.points.append((t, v))
+
+    pwl.points.sort(key=lambda x: x[0])
+    return pwl
+
+
+def _parse_current_source_line(line: str) -> Optional[CurrentSource]:
+    """
+    Parse a current source line and return a CurrentSource object.
+    
+    Handles complex formats including:
+    - DC values with optional 'dc' prefix
+    - static_value= parameter
+    - pulse(...) waveforms
+    - pwl(...) waveforms with pwl_period= and pwl_delay=
+    - sp= (source period) parameter
+    
+    Note: Values are returned in base SPICE units (Amperes). Caller must convert to mA.
+    """
+    line = line.strip()
+    if not line or not line[0].lower() == 'i':
+        return None
+
+    # Tokenize preserving parenthesized expressions
+    tokens = []
+    current = ""
+    paren_depth = 0
+
+    for char in line:
+        if char == '(':
+            paren_depth += 1
+            current += char
+        elif char == ')':
+            paren_depth -= 1
+            current += char
+        elif char in ' \t' and paren_depth == 0:
+            if current:
+                tokens.append(current)
+                current = ""
+        else:
+            current += char
+
+    if current:
+        tokens.append(current)
+
+    if len(tokens) < 4:
+        return None
+
+    isrc = CurrentSource(
+        name=tokens[0],
+        node1=tokens[1],
+        node2=tokens[2]
+    )
+    
+    # Parse instance name to extract net information
+    isrc.info = InstanceInfo.parse(tokens[0])
+
+    # Parse DC value (might be prefixed with 'dc')
+    idx = 3
+    if tokens[idx].lower() == 'dc' or tokens[idx].lower().startswith('dc.'):
+        idx += 1
+        if idx < len(tokens):
+            try:
+                isrc.dc_value = _parse_spice_value(tokens[idx])
+                idx += 1
+            except ValueError:
+                pass
+    else:
+        try:
+            isrc.dc_value = _parse_spice_value(tokens[idx])
+            idx += 1
+        except ValueError:
+            pass
+
+    # Parse remaining parameters
+    i = idx
+    while i < len(tokens):
+        token = tokens[i]
+        token_lower = token.lower()
+
+        if token_lower.startswith('pulse'):
+            isrc.pulses.append(_parse_pulse(token))
+        elif token_lower.startswith('pwl') and not token_lower.startswith('pwl_'):
+            pwl = _parse_pwl(token)
+            isrc.pwls.append(pwl)
+        elif token_lower.startswith('pwl_period='):
+            period = _parse_spice_value(token.split('=')[1])
+            for pwl in isrc.pwls:
+                if pwl.period == 0:
+                    pwl.period = period
+        elif token_lower.startswith('pwl_delay='):
+            delay = _parse_spice_value(token.split('=')[1])
+            for pwl in isrc.pwls:
+                if pwl.delay == 0:
+                    pwl.delay = delay
+        elif token_lower.startswith('static_value='):
+            isrc.static_value = _parse_spice_value(token.split('=')[1])
+        elif token_lower.startswith('sp='):
+            # Source period - apply to pulses
+            period = _parse_spice_value(token.split('=')[1])
+            for pulse in isrc.pulses:
+                if pulse.period == 0:
+                    pulse.period = period
+
+        i += 1
+
+    return isrc
 
 
 class SpiceLineReader:
@@ -280,7 +777,8 @@ class GraphBuilder:
         # Metadata dictionaries
         self.vsrc_dict: Dict[str, Dict] = {}
         self.parameters: Dict[str, str] = {}
-        self.instance_node_map: Dict[str, List[str]] = {}
+        self.instance_node_map: Dict[str, List[str]] = {}  # Backward compat: name -> [node+, node-]
+        self.instance_sources: Dict[str, CurrentSource] = {}  # Full current source data
         self.merged_nodes: List[Tuple[str, str, int]] = []
         self.mutual_inductors: Dict[str, Tuple[str, str, float]] = {}
         self.node_net_map: Dict[str, str] = {}  # Die node name -> net name from .nd files
@@ -730,11 +1228,17 @@ class GraphBuilder:
                 if net:
                     net_connectivity[net].append(node)
         
+        # Serialize instance_sources for storage (lazy reconstruction on access)
+        instance_sources_serialized = {
+            name: src.to_dict() for name, src in self.instance_sources.items()
+        }
+        
         # Add metadata to graph (vsrc_nodes and layer_stats already added by compute methods)
         self.graph.graph['vsrc_dict'] = self.vsrc_dict
         self.graph.graph['parameters'] = self.parameters
         self.graph.graph['tile_grid'] = self.tile_grid
         self.graph.graph['instance_node_map'] = self.instance_node_map
+        self.graph.graph['instance_sources'] = instance_sources_serialized
         self.graph.graph['merged_nodes'] = self.merged_nodes
         self.graph.graph['mutual_inductors'] = self.mutual_inductors
         self.graph.graph['net_connectivity'] = dict(net_connectivity)
@@ -752,7 +1256,9 @@ class GraphBuilder:
             'vsrc_nodes': self.stats.vsrc_nodes,
             'tiles_parsed': self.stats.tiles_parsed,
             'tiles_failed': self.stats.tiles_failed,
-            'unmapped_nodes': self.stats.unmapped_nodes
+            'unmapped_nodes': self.stats.unmapped_nodes,
+            'instances_with_waveforms': self.stats.instances_with_waveforms,
+            'total_static_current_ma': self.stats.total_static_current_ma
         }
         self.graph.graph['net_stats'] = net_stats_serializable
         
@@ -1635,77 +2141,96 @@ class NetlistParser:
             self.logger.warning(f"Error parsing voltage source in line: {line}: {e}")
             
     def _parse_isource(self, line: str):
-        """Parse current source: I<name> <node+> <node-> <dc_value> [PWL ...] [fsdb ...]"""
-        tokens = line.split()
-        if len(tokens) < 4:
+        """
+        Parse current source with full waveform support.
+        
+        Handles:
+        - I<name> <node+> <node-> <dc_value> [static_value=...] [pulse(...)] [pwl(...)] [fsdb ...]
+        
+        All current values are converted to mA and stored in CurrentSource objects
+        for both static DC analysis and time-domain evaluation.
+        """
+        # Use the enhanced parser to extract all waveform data
+        isrc = _parse_current_source_line(line)
+        if isrc is None:
             self.logger.warning(f"Invalid current source line: {line}")
             return
-            
-        name = tokens[0]
-        node_pos = tokens[1]
-        node_neg = tokens[2]
         
-        # Handle boundary nodes
+        name = isrc.name
+        node_pos = isrc.node1
+        node_neg = isrc.node2
+        
+        # Handle boundary nodes (marked with *)
         if node_pos.startswith('*'):
             node_pos = node_pos[1:]
             self.builder.mark_boundary_node(node_pos)
         if node_neg.startswith('*'):
             node_neg = node_neg[1:]
             self.builder.mark_boundary_node(node_neg)
-            
-        try:
-            dc_value = self._parse_value(tokens[3])
-            
-            # Parse additional parameters and look for static_value
-            attrs = {}
-            static_value = None
-            
-            # Search for static_value= parameter in remaining tokens
-            for i, token in enumerate(tokens[4:], start=4):
-                if token.startswith('static_value='):
+        
+        # Update node names in CurrentSource after boundary handling
+        isrc.node1 = node_pos
+        isrc.node2 = node_neg
+        
+        # Convert all current values from Amperes to mA
+        isrc.dc_value = isrc.dc_value * I_TO_MA
+        if isrc.static_value is not None:
+            isrc.static_value = isrc.static_value * I_TO_MA
+        
+        # Convert pulse waveform values to mA
+        for pulse in isrc.pulses:
+            pulse.v1 *= I_TO_MA
+            pulse.v2 *= I_TO_MA
+        
+        # Convert PWL waveform values to mA
+        for pwl in isrc.pwls:
+            pwl.points = [(t, v * I_TO_MA) for t, v in pwl.points]
+        
+        # Calculate static current value (mA) for DC analysis
+        static_current_ma = isrc.get_static_current()
+        
+        # Build edge attributes for graph element
+        attrs = {
+            'dc': static_current_ma,
+            'has_waveform': isrc.has_waveform_data()
+        }
+        
+        # Parse FSDB reference if present (legacy support)
+        tokens = line.split()
+        for i, token in enumerate(tokens):
+            if token.lower() == 'fsdb' and i + 1 < len(tokens):
+                attrs['fsdb_path'] = tokens[i + 1]
+                if i + 2 < len(tokens):
                     try:
-                        static_value = float(token.split('=')[1])
-                    except (ValueError, IndexError):
-                        self.logger.warning(f"Invalid static_value in line: {line}")
-                elif token.lower() == 'fsdb' and i + 1 < len(tokens):
-                    attrs['fsdb_path'] = tokens[i + 1]
-                    # Check for coefficient and shift
-                    if i + 2 < len(tokens):
-                        try:
-                            attrs['fsdb_coeff'] = float(tokens[i + 2])
-                        except ValueError:
-                            pass
-                    if i + 3 < len(tokens):
-                        try:
-                            attrs['fsdb_shift'] = float(tokens[i + 3])
-                        except ValueError:
-                            pass
-                    break
-                elif token.upper().startswith('PWL'):
-                    attrs['pwl'] = line[line.upper().find('PWL'):]
-                    break
-            
-            # Use static_value if present, otherwise fall back to dc_value
-            if static_value is not None:
-                dc_value_ma = static_value * I_TO_MA
-            else:
-                dc_value_ma = dc_value * I_TO_MA
-            
-            attrs['dc'] = dc_value_ma
-            
-            # Extract coordinates from instance name (e.g., i_cell:1000_2000:vdd)
-            coord_match = re.search(r':(\d+)_(\d+):', name)
-            if coord_match:
-                attrs['inst_x'] = int(coord_match.group(1))
-                attrs['inst_y'] = int(coord_match.group(2))
-                    
-            self.builder.add_element('I', node_pos, node_neg, dc_value_ma, name, **attrs)
-            
-            # Add to instance-node mapping
-            self.builder.instance_node_map[name] = [node_pos, node_neg]
-            
-        except ValueError as e:
-            self.logger.warning(f"Error parsing current source in line: {line}: {e}")
+                        attrs['fsdb_coeff'] = float(tokens[i + 2])
+                    except ValueError:
+                        pass
+                if i + 3 < len(tokens):
+                    try:
+                        attrs['fsdb_shift'] = float(tokens[i + 3])
+                    except ValueError:
+                        pass
+                break
+        
+        # Extract coordinates from instance name (e.g., i_cell:1000_2000:vdd)
+        coord_match = re.search(r':(\d+)_(\d+):', name)
+        if coord_match:
+            attrs['inst_x'] = int(coord_match.group(1))
+            attrs['inst_y'] = int(coord_match.group(2))
+        
+        # Add element to graph
+        self.builder.add_element('I', node_pos, node_neg, static_current_ma, name, **attrs)
+        
+        # Backward compatibility: instance_node_map
+        self.builder.instance_node_map[name] = [node_pos, node_neg]
+        
+        # Store full CurrentSource for time-domain analysis
+        self.builder.instance_sources[name] = isrc
+        
+        # Update statistics
+        if isrc.has_waveform_data():
+            self.builder.stats.instances_with_waveforms += 1
+        self.builder.stats.total_static_current_ma += abs(static_current_ma)
             
     def _parse_controlled_source(self, line: str, source_type: str):
         """Parse controlled sources (E/F/G/H)"""

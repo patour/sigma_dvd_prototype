@@ -538,9 +538,10 @@ class TestStatisticsComputation(unittest.TestCase):
         """Test current injection statistics"""
         vdd_stats = self.results.net_stats.get('VDD')
         if vdd_stats:
-            # Test netlist has 17 current sources totaling 38mA
+            # Test netlist has 17 current sources totaling 55mA
+            # (dc_value + static_value for each instance)
             self.assertGreater(vdd_stats.total_current_injection, 0.0)
-            self.assertAlmostEqual(vdd_stats.total_current_injection, 38.0, delta=1.0)
+            self.assertAlmostEqual(vdd_stats.total_current_injection, 55.0, delta=1.0)
 
 
 class TestMultiNetSolving(unittest.TestCase):

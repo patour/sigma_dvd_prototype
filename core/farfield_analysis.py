@@ -631,10 +631,10 @@ def run_farfield_analysis(
 
     coupled_context = solver.prepare_hierarchical_coupled(
         partition_layer=partition_layer,
-        solver='gmres',
+        solver='cg',
         tol=1e-8,
-        maxiter=500,
-        preconditioner='block_diagonal',
+        maxiter=100,
+        preconditioner='amg',
     )
 
     # Compute boundary response matrix using batch solving

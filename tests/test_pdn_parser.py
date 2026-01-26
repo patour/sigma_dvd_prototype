@@ -26,7 +26,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'pdn'))
 
 from pdn_parser import (
     NetlistParser, SpiceLineReader, GraphBuilder,
-    R_TO_KOHM, C_TO_FF, L_TO_NH, I_TO_MA, SHORT_THRESHOLD
+    R_TO_KOHM, C_TO_FF, L_TO_NH, I_TO_MA, SHORT_THRESHOLD,
+    # Waveform parsing classes and functions
+    InstanceInfo, Pulse, PWL, CurrentSource,
+    _parse_spice_value, _parse_pulse, _parse_pwl, _parse_current_source_line
 )
 
 
@@ -663,6 +666,569 @@ class TestValidationOptimization(unittest.TestCase):
         opt_floating = optimized_check_floating(self.graph, self.parser.builder.vsrc_edge_indices)
 
         self.assertEqual(ref_floating, opt_floating)
+
+
+# =============================================================================
+# Instance Current Source Waveform Parsing Tests
+# =============================================================================
+
+class TestInstanceInfo(unittest.TestCase):
+    """Test InstanceInfo dataclass parsing and serialization"""
+    
+    def test_parse_full_format(self):
+        """Test parsing full instance name format"""
+        # Format: i_<instance_name>:<vdd_net>:<vdd_pin>:<vss_net>:<vss_pin>:<tile_x>:<tile_y>
+        info = InstanceInfo.parse("i_U123/cell:VDD_XLV:VDD:VSS:0:5:3")
+        
+        self.assertEqual(info.full_name, "i_U123/cell:VDD_XLV:VDD:VSS:0:5:3")
+        self.assertEqual(info.instance_name, "U123/cell")
+        self.assertEqual(info.vdd_net, "VDD_XLV")
+        self.assertEqual(info.vdd_pin, "VDD")
+        self.assertEqual(info.vss_net, "VSS")
+        self.assertIsNone(info.vss_pin)  # '0' is converted to None
+        self.assertEqual(info.tile_x, 5)
+        self.assertEqual(info.tile_y, 3)
+    
+    def test_parse_minimal_format(self):
+        """Test parsing minimal instance name"""
+        info = InstanceInfo.parse("i_simple_inst")
+        
+        self.assertEqual(info.full_name, "i_simple_inst")
+        self.assertEqual(info.instance_name, "simple_inst")
+        self.assertIsNone(info.vdd_net)
+        self.assertIsNone(info.vdd_pin)
+    
+    def test_parse_without_i_prefix(self):
+        """Test parsing name without i_ prefix"""
+        info = InstanceInfo.parse("plain_name:VDD:pin")
+        
+        self.assertEqual(info.full_name, "plain_name:VDD:pin")
+        self.assertEqual(info.instance_name, "plain_name")
+        self.assertEqual(info.vdd_net, "VDD")
+    
+    def test_serialization_roundtrip(self):
+        """Test to_dict/from_dict roundtrip"""
+        original = InstanceInfo(
+            full_name="i_test",
+            instance_name="test",
+            vdd_net="VDD",
+            vdd_pin="vdd",
+            vss_net="VSS",
+            vss_pin=None,
+            tile_x=2,
+            tile_y=4
+        )
+        
+        d = original.to_dict()
+        restored = InstanceInfo.from_dict(d)
+        
+        self.assertEqual(original.full_name, restored.full_name)
+        self.assertEqual(original.instance_name, restored.instance_name)
+        self.assertEqual(original.vdd_net, restored.vdd_net)
+        self.assertEqual(original.tile_x, restored.tile_x)
+        self.assertEqual(original.tile_y, restored.tile_y)
+
+
+class TestPulseWaveform(unittest.TestCase):
+    """Test Pulse waveform dataclass"""
+    
+    def test_evaluate_before_delay(self):
+        """Test pulse evaluation before delay time"""
+        pulse = Pulse(v1=0.0, v2=1.0, delay=1e-9, rt=0.1e-9, ft=0.1e-9, 
+                     width=0.5e-9, period=2e-9)
+        
+        # Before delay, should return v1
+        self.assertEqual(pulse.evaluate(0.5e-9), 0.0)
+    
+    def test_evaluate_at_high(self):
+        """Test pulse evaluation during high period"""
+        pulse = Pulse(v1=0.0, v2=1.0, delay=0.0, rt=0.1e-9, ft=0.1e-9, 
+                     width=0.5e-9, period=2e-9)
+        
+        # During high (after rise, before fall)
+        self.assertEqual(pulse.evaluate(0.3e-9), 1.0)
+    
+    def test_evaluate_during_rise(self):
+        """Test pulse evaluation during rise time"""
+        pulse = Pulse(v1=0.0, v2=1.0, delay=0.0, rt=1.0, ft=1.0, 
+                     width=2.0, period=10.0)
+        
+        # Halfway through rise
+        value = pulse.evaluate(0.5)
+        self.assertAlmostEqual(value, 0.5, places=5)
+    
+    def test_evaluate_during_fall(self):
+        """Test pulse evaluation during fall time"""
+        pulse = Pulse(v1=0.0, v2=1.0, delay=0.0, rt=1.0, ft=1.0, 
+                     width=2.0, period=10.0)
+        
+        # Halfway through fall (at t=1+2+0.5=3.5)
+        value = pulse.evaluate(3.5)
+        self.assertAlmostEqual(value, 0.5, places=5)
+    
+    def test_get_dc(self):
+        """Test DC average calculation"""
+        # 50% duty cycle square wave
+        pulse = Pulse(v1=0.0, v2=1.0, delay=0.0, rt=0.0, ft=0.0, 
+                     width=5.0, period=10.0)
+        
+        dc = pulse.get_dc()
+        self.assertAlmostEqual(dc, 0.5, places=5)
+    
+    def test_get_dc_non_periodic(self):
+        """Test DC average returns 0 for non-periodic pulse"""
+        pulse = Pulse(v1=0.0, v2=1.0, delay=0.0, period=0.0)
+        self.assertEqual(pulse.get_dc(), 0.0)
+    
+    def test_serialization_roundtrip(self):
+        """Test to_dict/from_dict roundtrip"""
+        original = Pulse(v1=0.1, v2=2.0, delay=1e-9, rt=0.5e-9, 
+                        ft=0.6e-9, width=3e-9, period=10e-9)
+        
+        d = original.to_dict()
+        restored = Pulse.from_dict(d)
+        
+        self.assertEqual(original.v1, restored.v1)
+        self.assertEqual(original.v2, restored.v2)
+        self.assertEqual(original.delay, restored.delay)
+        self.assertEqual(original.rt, restored.rt)
+        self.assertEqual(original.period, restored.period)
+
+
+class TestPWLWaveform(unittest.TestCase):
+    """Test PWL (piece-wise linear) waveform dataclass"""
+    
+    def test_evaluate_before_first_point(self):
+        """Test PWL evaluation before first time point"""
+        pwl = PWL(points=[(1.0, 0.5), (2.0, 1.0), (3.0, 0.0)])
+        
+        # Before first point, return first value
+        self.assertEqual(pwl.evaluate(0.5), 0.5)
+    
+    def test_evaluate_after_last_point(self):
+        """Test PWL evaluation after last time point (non-periodic)"""
+        pwl = PWL(points=[(1.0, 0.5), (2.0, 1.0), (3.0, 0.0)], period=0.0)
+        
+        # After last point, return last value
+        self.assertEqual(pwl.evaluate(5.0), 0.0)
+    
+    def test_evaluate_at_point(self):
+        """Test PWL evaluation at exact time point"""
+        pwl = PWL(points=[(1.0, 0.5), (2.0, 1.0), (3.0, 0.0)])
+        
+        self.assertEqual(pwl.evaluate(2.0), 1.0)
+    
+    def test_evaluate_interpolation(self):
+        """Test PWL linear interpolation between points"""
+        pwl = PWL(points=[(0.0, 0.0), (2.0, 2.0)])
+        
+        # Midpoint should interpolate to 1.0
+        self.assertAlmostEqual(pwl.evaluate(1.0), 1.0, places=5)
+    
+    def test_evaluate_with_delay(self):
+        """Test PWL evaluation with delay offset"""
+        pwl = PWL(points=[(0.0, 0.0), (1.0, 1.0)], delay=5.0)
+        
+        # At t=5, effective time is 0, so value is 0
+        self.assertEqual(pwl.evaluate(5.0), 0.0)
+        # At t=5.5, effective time is 0.5, interpolate to 0.5
+        self.assertAlmostEqual(pwl.evaluate(5.5), 0.5, places=5)
+    
+    def test_evaluate_periodic(self):
+        """Test PWL evaluation with periodic wrapping"""
+        pwl = PWL(points=[(0.0, 0.0), (1.0, 1.0)], period=2.0)
+        
+        # At t=3.5, wraps to t=1.5, which is after last point
+        # With period, returns first value (0.0)
+        value = pwl.evaluate(3.5)
+        self.assertEqual(value, 0.0)
+    
+    def test_get_dc(self):
+        """Test DC average calculation for triangular wave"""
+        # Triangle from 0 to 2 back to 0
+        pwl = PWL(points=[(0.0, 0.0), (1.0, 2.0), (2.0, 0.0)], period=2.0)
+        
+        dc = pwl.get_dc()
+        # Average of triangle is 1.0
+        self.assertAlmostEqual(dc, 1.0, places=5)
+    
+    def test_get_dc_non_periodic(self):
+        """Test DC average returns 0 for non-periodic PWL"""
+        pwl = PWL(points=[(0.0, 0.0), (1.0, 1.0)], period=0.0)
+        self.assertEqual(pwl.get_dc(), 0.0)
+    
+    def test_empty_pwl(self):
+        """Test empty PWL returns 0"""
+        pwl = PWL(points=[])
+        self.assertEqual(pwl.evaluate(1.0), 0.0)
+        self.assertEqual(pwl.get_dc(), 0.0)
+    
+    def test_serialization_roundtrip(self):
+        """Test to_dict/from_dict roundtrip"""
+        original = PWL(points=[(0.0, 0.1), (1.0, 0.5), (2.0, 0.2)], 
+                      period=3.0, delay=0.5)
+        
+        d = original.to_dict()
+        restored = PWL.from_dict(d)
+        
+        self.assertEqual(original.points, restored.points)
+        self.assertEqual(original.period, restored.period)
+        self.assertEqual(original.delay, restored.delay)
+
+
+class TestCurrentSource(unittest.TestCase):
+    """Test CurrentSource dataclass"""
+    
+    def test_has_waveform_data_with_pulse(self):
+        """Test waveform detection with pulse"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2")
+        self.assertFalse(cs.has_waveform_data())
+        
+        cs.pulses.append(Pulse())
+        self.assertTrue(cs.has_waveform_data())
+    
+    def test_has_waveform_data_with_pwl(self):
+        """Test waveform detection with PWL"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2")
+        cs.pwls.append(PWL(points=[(0, 0), (1, 1)]))
+        self.assertTrue(cs.has_waveform_data())
+    
+    def test_has_current_data(self):
+        """Test current data detection"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2")
+        self.assertFalse(cs.has_current_data())
+        
+        cs.dc_value = 1.0
+        self.assertTrue(cs.has_current_data())
+    
+    def test_get_static_current_dc_only(self):
+        """Test static current with DC value only"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2", dc_value=5.0)
+        self.assertEqual(cs.get_static_current(), 5.0)
+    
+    def test_get_static_current_with_static_value(self):
+        """Test static current with static_value override"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2", 
+                          dc_value=2.0, static_value=3.0)
+        # dc_value + static_value
+        self.assertEqual(cs.get_static_current(), 5.0)
+    
+    def test_get_static_current_with_pulse(self):
+        """Test static current includes pulse DC average"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2", dc_value=1.0)
+        # 50% duty cycle pulse with amplitude 2.0 -> DC = 1.0
+        cs.pulses.append(Pulse(v1=0.0, v2=2.0, width=5.0, period=10.0))
+        
+        # dc_value + pulse_dc = 1.0 + 1.0 = 2.0
+        self.assertAlmostEqual(cs.get_static_current(), 2.0, places=5)
+    
+    def test_get_current_at_time(self):
+        """Test time-domain current evaluation"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2", dc_value=1.0)
+        cs.pulses.append(Pulse(v1=0.0, v2=2.0, delay=0.0, rt=0.0, ft=0.0, 
+                              width=5.0, period=10.0))
+        
+        # During high: dc + pulse_high = 1.0 + 2.0 = 3.0
+        self.assertEqual(cs.get_current_at_time(2.5), 3.0)
+        
+        # During low: dc + pulse_low = 1.0 + 0.0 = 1.0
+        self.assertEqual(cs.get_current_at_time(7.5), 1.0)
+    
+    def test_serialization_roundtrip(self):
+        """Test to_dict/from_dict roundtrip"""
+        original = CurrentSource(
+            name="I_test",
+            node1="vdd_node",
+            node2="0",
+            dc_value=1.5,
+            static_value=2.0,
+            pulses=[Pulse(v1=0, v2=1, period=10)],
+            pwls=[PWL(points=[(0, 0), (1, 1)])],
+            info=InstanceInfo(full_name="i_test", instance_name="test")
+        )
+        
+        d = original.to_dict()
+        restored = CurrentSource.from_dict(d)
+        
+        self.assertEqual(original.name, restored.name)
+        self.assertEqual(original.node1, restored.node1)
+        self.assertEqual(original.node2, restored.node2)
+        self.assertEqual(original.dc_value, restored.dc_value)
+        self.assertEqual(original.static_value, restored.static_value)
+        self.assertEqual(len(original.pulses), len(restored.pulses))
+        self.assertEqual(len(original.pwls), len(restored.pwls))
+        self.assertEqual(original.info.full_name, restored.info.full_name)
+
+
+class TestSpiceValueParsing(unittest.TestCase):
+    """Test _parse_spice_value function"""
+    
+    def test_basic_numbers(self):
+        """Test basic numeric parsing"""
+        self.assertEqual(_parse_spice_value("100"), 100.0)
+        self.assertEqual(_parse_spice_value("1.5"), 1.5)
+        self.assertEqual(_parse_spice_value("-2.5"), -2.5)
+        self.assertEqual(_parse_spice_value("+3.0"), 3.0)
+    
+    def test_scientific_notation(self):
+        """Test scientific notation parsing"""
+        self.assertEqual(_parse_spice_value("1e-3"), 1e-3)
+        self.assertEqual(_parse_spice_value("2.5E+6"), 2.5e6)
+        self.assertEqual(_parse_spice_value("1e9"), 1e9)
+    
+    def test_unit_suffixes(self):
+        """Test SPICE unit suffix parsing"""
+        self.assertEqual(_parse_spice_value("1f"), 1e-15)
+        self.assertEqual(_parse_spice_value("1p"), 1e-12)
+        self.assertEqual(_parse_spice_value("1n"), 1e-9)
+        self.assertEqual(_parse_spice_value("1u"), 1e-6)
+        self.assertEqual(_parse_spice_value("1m"), 1e-3)
+        self.assertEqual(_parse_spice_value("1k"), 1e3)
+        self.assertEqual(_parse_spice_value("1meg"), 1e6)
+        self.assertEqual(_parse_spice_value("1g"), 1e9)
+        self.assertEqual(_parse_spice_value("1t"), 1e12)
+    
+    def test_combined_values(self):
+        """Test combined number and suffix"""
+        self.assertAlmostEqual(_parse_spice_value("2.5m"), 2.5e-3, places=10)
+        self.assertAlmostEqual(_parse_spice_value("100n"), 100e-9, places=15)
+        self.assertAlmostEqual(_parse_spice_value("4.7k"), 4700.0, places=5)
+
+
+class TestPulseParsing(unittest.TestCase):
+    """Test _parse_pulse function"""
+    
+    def test_parse_full_pulse(self):
+        """Test parsing complete pulse definition"""
+        line = "pulse(0 1m 10n 1n 2n 5n 20n)"
+        pulse = _parse_pulse(line)
+        
+        self.assertEqual(pulse.v1, 0.0)
+        self.assertAlmostEqual(pulse.v2, 1e-3, places=10)
+        self.assertAlmostEqual(pulse.delay, 10e-9, places=15)
+        self.assertAlmostEqual(pulse.rt, 1e-9, places=15)
+        self.assertAlmostEqual(pulse.ft, 2e-9, places=15)
+        self.assertAlmostEqual(pulse.width, 5e-9, places=15)
+        self.assertAlmostEqual(pulse.period, 20e-9, places=15)
+    
+    def test_parse_partial_pulse(self):
+        """Test parsing pulse with fewer parameters"""
+        line = "pulse(0 1)"
+        pulse = _parse_pulse(line)
+        
+        self.assertEqual(pulse.v1, 0.0)
+        self.assertEqual(pulse.v2, 1.0)
+        self.assertEqual(pulse.delay, 0.0)
+        self.assertEqual(pulse.period, 0.0)
+    
+    def test_parse_pulse_with_commas(self):
+        """Test parsing pulse with comma separators"""
+        line = "PULSE(0, 1e-3, 0, 1n, 1n, 5n, 10n)"
+        pulse = _parse_pulse(line)
+        
+        self.assertEqual(pulse.v1, 0.0)
+        self.assertAlmostEqual(pulse.v2, 1e-3, places=10)
+    
+    def test_invalid_pulse_returns_empty(self):
+        """Test that invalid pulse string returns empty Pulse"""
+        pulse = _parse_pulse("not a pulse")
+        self.assertEqual(pulse.v1, 0.0)
+        self.assertEqual(pulse.v2, 0.0)
+
+
+class TestPWLParsing(unittest.TestCase):
+    """Test _parse_pwl function"""
+    
+    def test_parse_pwl_basic(self):
+        """Test parsing basic PWL definition"""
+        line = "pwl(0 0 1n 1m 2n 0)"
+        pwl = _parse_pwl(line)
+        
+        self.assertEqual(len(pwl.points), 3)
+        self.assertEqual(pwl.points[0], (0.0, 0.0))
+        self.assertAlmostEqual(pwl.points[1][0], 1e-9, places=15)
+        self.assertAlmostEqual(pwl.points[1][1], 1e-3, places=10)
+    
+    def test_parse_pwl_with_commas(self):
+        """Test parsing PWL with comma separators"""
+        line = "PWL(0, 0, 1e-9, 0.001, 2e-9, 0)"
+        pwl = _parse_pwl(line)
+        
+        self.assertEqual(len(pwl.points), 3)
+    
+    def test_parse_pwl_sorted(self):
+        """Test that PWL points are sorted by time"""
+        line = "pwl(2 2 0 0 1 1)"
+        pwl = _parse_pwl(line)
+        
+        # Points should be sorted by time
+        self.assertEqual(pwl.points[0][0], 0.0)
+        self.assertEqual(pwl.points[1][0], 1.0)
+        self.assertEqual(pwl.points[2][0], 2.0)
+    
+    def test_invalid_pwl_returns_empty(self):
+        """Test that invalid PWL string returns empty PWL"""
+        pwl = _parse_pwl("not a pwl")
+        self.assertEqual(len(pwl.points), 0)
+
+
+class TestCurrentSourceLineParsing(unittest.TestCase):
+    """Test _parse_current_source_line function"""
+    
+    def test_parse_dc_only(self):
+        """Test parsing current source with DC value only"""
+        line = "I_inst n1 n2 1e-3"
+        cs = _parse_current_source_line(line)
+        
+        self.assertIsNotNone(cs)
+        self.assertEqual(cs.name, "I_inst")
+        self.assertEqual(cs.node1, "n1")
+        self.assertEqual(cs.node2, "n2")
+        self.assertAlmostEqual(cs.dc_value, 1e-3, places=10)
+    
+    def test_parse_dc_with_prefix(self):
+        """Test parsing current source with 'dc' prefix"""
+        line = "I_inst n1 n2 dc 2m"
+        cs = _parse_current_source_line(line)
+        
+        self.assertIsNotNone(cs)
+        self.assertAlmostEqual(cs.dc_value, 2e-3, places=10)
+    
+    def test_parse_with_static_value(self):
+        """Test parsing current source with static_value parameter"""
+        line = "I_inst n1 n2 1m static_value=5m"
+        cs = _parse_current_source_line(line)
+        
+        self.assertIsNotNone(cs)
+        self.assertAlmostEqual(cs.dc_value, 1e-3, places=10)
+        self.assertAlmostEqual(cs.static_value, 5e-3, places=10)
+    
+    def test_parse_with_pulse(self):
+        """Test parsing current source with pulse waveform"""
+        line = "I_inst n1 n2 0 pulse(0 1m 0 1n 1n 5n 10n)"
+        cs = _parse_current_source_line(line)
+        
+        self.assertIsNotNone(cs)
+        self.assertEqual(len(cs.pulses), 1)
+        self.assertAlmostEqual(cs.pulses[0].v2, 1e-3, places=10)
+    
+    def test_parse_with_pwl(self):
+        """Test parsing current source with PWL waveform"""
+        line = "I_inst n1 n2 0 pwl(0 0 1n 1m 2n 0)"
+        cs = _parse_current_source_line(line)
+        
+        self.assertIsNotNone(cs)
+        self.assertEqual(len(cs.pwls), 1)
+        self.assertEqual(len(cs.pwls[0].points), 3)
+    
+    def test_parse_with_pwl_parameters(self):
+        """Test parsing current source with PWL and period/delay"""
+        line = "I_inst n1 n2 0 pwl(0 0 1n 1m) pwl_period=10n pwl_delay=5n"
+        cs = _parse_current_source_line(line)
+        
+        self.assertIsNotNone(cs)
+        self.assertEqual(len(cs.pwls), 1)
+        self.assertAlmostEqual(cs.pwls[0].period, 10e-9, places=15)
+        self.assertAlmostEqual(cs.pwls[0].delay, 5e-9, places=15)
+    
+    def test_parse_complex_line(self):
+        """Test parsing complex current source with multiple waveforms"""
+        line = "I_core:cluster1:2000_2000:vdd:0 node1 0 dc 1m static_value=6m pulse(0 0.5m 0 1n 1n 5n 20n)"
+        cs = _parse_current_source_line(line)
+        
+        self.assertIsNotNone(cs)
+        self.assertEqual(cs.name, "I_core:cluster1:2000_2000:vdd:0")
+        self.assertAlmostEqual(cs.dc_value, 1e-3, places=10)
+        self.assertAlmostEqual(cs.static_value, 6e-3, places=10)
+        self.assertEqual(len(cs.pulses), 1)
+        self.assertIsNotNone(cs.info)
+    
+    def test_parse_invalid_line_returns_none(self):
+        """Test that invalid lines return None"""
+        self.assertIsNone(_parse_current_source_line(""))
+        self.assertIsNone(_parse_current_source_line("R1 n1 n2 100"))
+        self.assertIsNone(_parse_current_source_line("I_short n1"))  # Too few tokens
+    
+    def test_instance_info_extracted(self):
+        """Test that InstanceInfo is extracted from name"""
+        line = "i_U123/cell:VDD:vdd:VSS:0:5:3 node1 node2 1m"
+        cs = _parse_current_source_line(line)
+        
+        self.assertIsNotNone(cs)
+        self.assertIsNotNone(cs.info)
+        self.assertEqual(cs.info.instance_name, "U123/cell")
+        self.assertEqual(cs.info.vdd_net, "VDD")
+
+
+class TestInstanceSourcesIntegration(unittest.TestCase):
+    """Integration tests for instance_sources in parsed graph"""
+    
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests"""
+        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist_dir.exists():
+            raise unittest.SkipTest("Test netlist not found")
+        
+        cls.parser = NetlistParser(str(test_netlist_dir), validate=True)
+        cls.graph = cls.parser.parse()
+    
+    def test_instance_sources_populated(self):
+        """Test that instance_sources metadata is populated"""
+        inst_sources = self.graph.graph.get('instance_sources', {})
+        self.assertGreater(len(inst_sources), 0)
+    
+    def test_instance_sources_serialized(self):
+        """Test that instance_sources are serialized as dicts"""
+        inst_sources = self.graph.graph.get('instance_sources', {})
+        
+        for name, data in inst_sources.items():
+            self.assertIsInstance(data, dict)
+            self.assertIn('name', data)
+            self.assertIn('dc_value', data)
+            self.assertIn('node1', data)
+            self.assertIn('node2', data)
+    
+    def test_instance_sources_reconstructable(self):
+        """Test that CurrentSource objects can be reconstructed"""
+        inst_sources = self.graph.graph.get('instance_sources', {})
+        
+        for name, data in inst_sources.items():
+            cs = CurrentSource.from_dict(data)
+            self.assertEqual(cs.name, name)
+            self.assertIsNotNone(cs.node1)
+            self.assertIsNotNone(cs.node2)
+    
+    def test_instance_sources_match_isource_count(self):
+        """Test that instance_sources count matches I-type edges"""
+        inst_sources = self.graph.graph.get('instance_sources', {})
+        isource_edges = [(u, v, d) for u, v, d in self.graph.edges(data=True) 
+                        if d.get('type') == 'I']
+        
+        self.assertEqual(len(inst_sources), len(isource_edges))
+    
+    def test_waveform_statistics_in_stats(self):
+        """Test that waveform statistics are in graph stats"""
+        stats = self.graph.graph.get('stats', {})
+        
+        self.assertIn('instances_with_waveforms', stats)
+        self.assertIn('total_static_current_ma', stats)
+    
+    def test_total_static_current_positive(self):
+        """Test that total static current is computed"""
+        stats = self.graph.graph.get('stats', {})
+        total_current = stats.get('total_static_current_ma', 0.0)
+        
+        # Test netlist should have positive total current
+        self.assertGreater(total_current, 0.0)
+    
+    def test_backward_compat_instance_node_map(self):
+        """Test that instance_node_map is still populated for backward compat"""
+        inst_node_map = self.graph.graph.get('instance_node_map', {})
+        inst_sources = self.graph.graph.get('instance_sources', {})
+        
+        # Both should have same keys
+        self.assertEqual(set(inst_node_map.keys()), set(inst_sources.keys()))
 
 
 if __name__ == '__main__':
