@@ -131,6 +131,26 @@ graph = ensure_rustworkx_graph(graph)  # No-op if already Rustworkx
 - **PDNSolver**: Standalone DC solver (use if you don't need unified interface)
 - **PDNPlotter**: Layer-wise heatmap generation with advanced features
 
+**Current Source Data Structures (from instanceModels*.sp):**
+- `InstanceInfo`: Parsed instance name with net/pin/tile location info
+- `Pulse`: Pulse waveform with `evaluate(time)` and `get_dc()` methods
+- `PWL`: Piece-wise linear waveform with `evaluate(time)` and `get_dc()` methods
+- `CurrentSource`: Full current source with DC value, static_value, pulses, PWLs
+
+**Accessing Current Source Data:**
+```python
+# After parsing, instance_sources contains full waveform data
+graph = parser.parse()
+instance_sources = graph.graph.get('instance_sources', {})
+
+# Reconstruct CurrentSource objects from serialized data
+from pdn.pdn_parser import CurrentSource
+for name, data in instance_sources.items():
+    src = CurrentSource.from_dict(data)
+    static_ma = src.get_static_current()      # DC analysis
+    current_at_t = src.get_current_at_time(1e-9)  # Transient at 1ns
+```
+
 ### IRDrop Module (irdrop/) - Original Synthetic
 - `generate_power_grid()`: Creates K-layer resistor mesh with `NodeID` keys
 - `PowerGridModel`, `IRDropSolver`: Original classes (prefer `core/` unified versions)
@@ -369,6 +389,14 @@ I_name node1 node2 <current_mA>
 V_name node+ node- <voltage_V>
 X_inst subckt node1 node2 ...
 ```
+
+**Current source syntax in `instanceModels*.sp` (enhanced):**
+```spice
+I_name node+ node- <dc_mA> [static_value=<mA>] [pulse(v1,v2,delay,rt,ft,width,period)] [pwl(t1 v1 t2 v2 ...)]
+```
+- `static_value=`: Additional static current component
+- `pulse(...)`: Periodic pulse waveform (values in Amperes)
+- `pwl(...)`: Piece-wise linear waveform with optional `pwl_period=` and `pwl_delay=`
 
 **Node naming convention:** `<x>_<y>_<layer>` (e.g., `1000_2000_M1`)
 
