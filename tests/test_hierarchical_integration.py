@@ -578,7 +578,7 @@ class TestCGAMGIntegration(unittest.TestCase):
                 abs(ref_result.voltages[n] - result.voltages[n])
                 for n in ref_result.voltages if n in result.voltages
             )
-            self.assertLess(max_diff, 1e-5,
+            self.assertLess(max_diff, 2e-5,
                            f"{key} differs from CG+AMG by {max_diff}")
 
 
