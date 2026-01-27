@@ -747,5 +747,186 @@ class TestSyntheticGridTransient(unittest.TestCase):
         self.assertEqual(rc.C_uu.nnz, 0)
 
 
+class TestCapacitanceEffects(unittest.TestCase):
+    """Tests verifying capacitance effects are correctly modeled.
+    
+    These tests validate that:
+    1. Capacitance values are correctly reported in fF units
+    2. The transient solver correctly handles RC time constants
+    3. Capacitive smoothing reduces IR-drop compared to quasi-static
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+        self.transient_solver = TransientIRDropSolver(self.model, self.graph)
+        self.quasi_static_solver = DynamicIRDropSolver(self.model, self.graph)
+
+    def test_total_capacitance_value(self):
+        """Total capacitance should be reported in fF with correct value.
+        
+        netlist_test has 50 capacitors of 1000 fF each = 50000 fF total.
+        After nodal stamping (divide by 2), total_capacitance = 25000 fF.
+        """
+        total_cap = self.transient_solver.total_capacitance
+        
+        # Value should be in fF (not F or other units)
+        # Expected: ~25000 fF (50 caps * 1000 fF / 2 for nodal stamping)
+        self.assertGreater(total_cap, 1000)  # Should be thousands of fF, not tiny values
+        self.assertLess(total_cap, 1e9)  # Should not be in impossibly large range
+        
+        # More specific: should be around 25000 fF (allowing for numerical precision)
+        self.assertAlmostEqual(total_cap, 25000, delta=1000)
+
+    def test_capacitance_matrix_units_consistency(self):
+        """Verify G and C matrices have consistent units (mS and fF).
+        
+        For PDN netlists:
+        - G is in mS (from R in kOhm): G = 1/R_kOhm
+        - C is in fF (native PDN units)
+        - Time constant tau = R*C = kOhm * fF = ps
+        """
+        rc = self.transient_solver._ensure_rc_system()
+        
+        # G diagonal should be reasonable mS values (not tiny or huge)
+        G_diag_mean = rc.G_uu.diagonal().mean()
+        self.assertGreater(G_diag_mean, 1)  # At least 1 mS
+        self.assertLess(G_diag_mean, 1e10)  # Not unreasonably large
+        
+        # C diagonal should be reasonable fF values
+        C_diag_mean = rc.C_uu.diagonal().mean()
+        self.assertGreater(C_diag_mean, 1)  # At least 1 fF per node
+        self.assertLess(C_diag_mean, 1e9)  # Not unreasonably large
+
+    def test_transient_converges_to_quasi_static_at_large_dt(self):
+        """At large timesteps (dt >> tau), transient should match quasi-static.
+        
+        When the timestep is much larger than the RC time constant, 
+        capacitors respond essentially instantaneously, so transient
+        analysis should give the same steady-state result as quasi-static.
+        """
+        # Run quasi-static analysis
+        qs_result = self.quasi_static_solver.solve_quasi_static(
+            t_start=0, t_end=10e-9, n_points=11,
+            method='flat', verbose=False
+        )
+        
+        # Run transient with large timestep (1 ns >> tau which is ~ps)
+        trans_result = self.transient_solver.solve_transient(
+            t_start=0, t_end=10e-9, dt=1e-9,
+            method=IntegrationMethod.BACKWARD_EULER,
+            verbose=False
+        )
+        
+        # After initial transient, results should converge
+        # Compare IR-drop at later time points (skip t=0 due to initial condition)
+        qs_drops = qs_result.max_ir_drop_per_time[2:]  # Skip first 2 points
+        trans_drops = trans_result.max_ir_drop_per_time[2:]
+        
+        # Should be within 1% of each other at steady state
+        for qs_drop, trans_drop in zip(qs_drops, trans_drops):
+            if qs_drop > 0:
+                rel_diff = abs(qs_drop - trans_drop) / qs_drop
+                self.assertLess(rel_diff, 0.01, 
+                    f"Transient should converge to quasi-static: QS={qs_drop:.6f}, Trans={trans_drop:.6f}")
+
+    def test_capacitive_smoothing_at_small_dt(self):
+        """At small timesteps (dt ~ tau), capacitors should provide smoothing.
+        
+        When the timestep is comparable to or smaller than the RC time constant,
+        capacitors resist rapid voltage changes, resulting in lower peak IR-drop
+        compared to instantaneous (quasi-static) response.
+        """
+        # For this test, we need a very small timestep to see the effect
+        # since tau is in the ps range for this netlist
+        
+        # Run transient with decreasing timesteps
+        results = {}
+        for dt in [1e-9, 1e-10, 1e-11, 1e-12]:
+            result = self.transient_solver.solve_transient(
+                t_start=0, t_end=5*dt, dt=dt,
+                method=IntegrationMethod.BACKWARD_EULER,
+                verbose=False
+            )
+            # Get peak excluding t=0 (which has zero drop due to initial condition)
+            peak = np.max(result.max_ir_drop_per_time[1:]) if len(result.max_ir_drop_per_time) > 1 else 0
+            results[dt] = peak
+        
+        # With smaller timesteps, we should see more smoothing (lower peak IR-drop)
+        # Compare 1ns vs 1ps results
+        peak_1ns = results[1e-9]
+        peak_1ps = results[1e-12]
+        
+        # At 1ps timestep, capacitive smoothing should reduce the peak
+        # (by at least 10% compared to 1ns timestep)
+        if peak_1ns > 0:
+            smoothing_percent = (peak_1ns - peak_1ps) / peak_1ns * 100
+            self.assertGreater(smoothing_percent, 10,
+                f"Capacitive smoothing should reduce peak IR-drop: 1ns={peak_1ns*1000:.4f}mV, 1ps={peak_1ps*1000:.4f}mV")
+
+    def test_c_matrix_in_native_ff_units(self):
+        """C matrix should store values in native fF units (not converted to F).
+        
+        This ensures the RC time constant calculation is correct:
+        tau = R(kOhm) * C(fF) = ps
+        """
+        rc = self.transient_solver._ensure_rc_system()
+        
+        # The netlist has 50 caps of 1000 fF each
+        # C_full diagonal sum should be ~50000 fF (each cap appears once on diagonal)
+        C_diag_sum = rc.C_full.diagonal().sum()
+        
+        # If C were in Farads, the sum would be ~5e-11
+        # If C is in fF, the sum should be ~50000
+        self.assertGreater(C_diag_sum, 1000, 
+            "C matrix should be in fF units, not Farads")
+        self.assertLess(C_diag_sum, 1e6,
+            "C matrix values should be reasonable fF values")
+
+    def test_backward_euler_vs_trapezoidal_consistency(self):
+        """Both integration methods should give similar results.
+        
+        While Backward Euler and Trapezoidal have different numerical properties,
+        they should converge to similar results for well-resolved simulations.
+        """
+        dt = 1e-10  # 100 ps
+        
+        be_result = self.transient_solver.solve_transient(
+            t_start=0, t_end=10*dt, dt=dt,
+            method=IntegrationMethod.BACKWARD_EULER,
+            verbose=False
+        )
+        
+        trap_result = self.transient_solver.solve_transient(
+            t_start=0, t_end=10*dt, dt=dt,
+            method=IntegrationMethod.TRAPEZOIDAL,
+            verbose=False
+        )
+        
+        # Compare peak IR-drops (should be within 20% of each other)
+        be_peak = be_result.peak_ir_drop
+        trap_peak = trap_result.peak_ir_drop
+        
+        if be_peak > 0:
+            rel_diff = abs(be_peak - trap_peak) / be_peak
+            self.assertLess(rel_diff, 0.20,
+                f"BE and Trap should give similar results: BE={be_peak*1000:.4f}mV, Trap={trap_peak*1000:.4f}mV")
+
+
 if __name__ == '__main__':
     unittest.main()

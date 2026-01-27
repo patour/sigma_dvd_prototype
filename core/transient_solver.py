@@ -335,16 +335,21 @@ class TransientIRDropSolver:
         """Iterate over capacitive edges in the graph.
 
         Yields:
-            Tuples of (u, v, edge_info) for each capacitive edge.
+            Tuples of (u, v, capacitance) for each capacitive edge.
+            Capacitance is in native PDN units (fF) for unit consistency with
+            conductance (mS, from kOhm resistance). This ensures RC time constants
+            are properly scaled.
         """
         from .rx_graph import RustworkxMultiDiGraphWrapper
 
         if isinstance(self.model.graph, RustworkxMultiDiGraphWrapper):
             # PDN MultiDiGraph: iterate over all edges, filter C type
+            # Use raw capacitance value (fF) for unit consistency with G (mS)
             for u, v, k, data in self.model.graph.edges(keys=True, data=True):
                 if data.get('type') == 'C':
-                    edge_info = self.model._edge_extractor.get_info(data)
-                    yield u, v, edge_info
+                    # Get raw value in fF (don't convert to F)
+                    C_val = data.get('value', 0.0)
+                    yield u, v, C_val
         # Synthetic grids don't have capacitors
 
     def _build_rc_system(self) -> RCSystem:
@@ -414,11 +419,13 @@ class TransientIRDropSolver:
         G_full = sp.csr_matrix((g_data, (g_rows, g_cols)), shape=(n_nodes, n_nodes))
 
         # Build full C matrix
+        # Note: For PDN netlists, capacitance is kept in native fF units
+        # to match conductance in mS (from kOhm resistance). This ensures
+        # RC time constants are properly scaled (kOhm * fF = ns).
         c_data, c_rows, c_cols = [], [], []
         c_diag = np.zeros(n_nodes, dtype=float)
 
-        for u, v, edge_info in self._iter_capacitive_edges():
-            C_val = edge_info.capacitance
+        for u, v, C_val in self._iter_capacitive_edges():
             if C_val is None or C_val <= 0:
                 continue
 
@@ -614,15 +621,24 @@ class TransientIRDropSolver:
         temp_voltages: Dict[Any, List[float]] = {n: [] for n in track_set}
 
         # Build system matrix: A = G + C/dt (for BE) or A = G + 2C/dt (for Trap)
+        # Unit conversion for PDN netlists:
+        # - G is in mS (from R in kOhm)
+        # - C is in fF (native PDN unit)
+        # - Time constant tau = R*C = kOhm * fF = ps
+        # So dt must be in ps for unit consistency: dt_ps = dt_seconds * 1e12
         t0_factor = time_module.perf_counter()
+        
+        # Convert dt from seconds to picoseconds for PDN unit consistency
+        dt_scaled = dt * 1e12  # s -> ps
+        
         if method == IntegrationMethod.BACKWARD_EULER:
             # BE: (G + C/dt) * V(t+dt) = I(t+dt) + (C/dt) * V(t) - G_up * V_p
-            A = rc.G_uu + rc.C_uu / dt
-            C_coeff = 1.0 / dt
+            A = rc.G_uu + rc.C_uu / dt_scaled
+            C_coeff = 1.0 / dt_scaled
         else:
             # Trapezoidal: (G + 2C/dt) * V(t+dt) = 2*(I_avg) + (2C/dt - G) * V(t) - 2*G_up * V_p
-            A = rc.G_uu + 2.0 * rc.C_uu / dt
-            C_coeff = 2.0 / dt
+            A = rc.G_uu + 2.0 * rc.C_uu / dt_scaled
+            C_coeff = 2.0 / dt_scaled
 
         # Factor the matrix once
         lu = spla.factorized(A.tocsc())
@@ -664,12 +680,13 @@ class TransientIRDropSolver:
             else:
                 # Time step
                 if method == IntegrationMethod.BACKWARD_EULER:
-                    # rhs = I(t+dt) + (C/dt) * V(t) - G_up * V_p
+                    # BE: (G + C/dt) * V_{n+1} = I_{n+1} + (C/dt) * V_n - G_up * V_p
                     rhs = I_u + C_coeff * (rc.C_uu @ V_u) - G_up_Vp
                 else:
-                    # Trapezoidal: uses average of current
-                    # rhs = I(t+dt) + (2C/dt - G) * V(t) - G_up * V_p
-                    rhs = I_u + C_coeff * (rc.C_uu @ V_u) - (rc.G_uu @ V_u) - G_up_Vp
+                    # Trapezoidal (Crank-Nicolson):
+                    # (G + 2C/dt) * V_{n+1} = I_{n+1} + (2C/dt - G) * V_n - 2*G_up * V_p
+                    # Note: factor of 2 on G_up*V_p due to averaging G*V term
+                    rhs = I_u + C_coeff * (rc.C_uu @ V_u) - (rc.G_uu @ V_u) - 2.0 * G_up_Vp
 
                 V_u = lu(rhs)
 
@@ -796,9 +813,15 @@ class TransientIRDropSolver:
 
     @property
     def total_capacitance(self) -> float:
-        """Get total capacitance in the model (sum of diagonal)."""
+        """Get total capacitance in the model (in fF).
+        
+        Returns:
+            Total capacitance in femtofarads (fF).
+        """
         rc = self._ensure_rc_system()
-        return float(rc.C_full.diagonal().sum()) / 2.0  # Divide by 2 for nodal stamping
+        # Divide by 2 for nodal stamping (each cap contributes to 2 diagonal entries)
+        # C_full is already in fF (native PDN units)
+        return float(rc.C_full.diagonal().sum()) / 2.0
 
     @property
     def has_dynamic_sources(self) -> bool:
