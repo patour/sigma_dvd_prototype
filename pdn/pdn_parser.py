@@ -943,8 +943,12 @@ class GraphBuilder:
         return None
             
     def add_element(self, elem_type: str, node1: str, node2: str, 
-                   value: float, name: str, **attrs):
-        """Add circuit element as edge between two nodes"""
+                   value: float, name: str, **attrs) -> bool:
+        """Add circuit element as edge between two nodes.
+        
+        Returns:
+            True if element was added, False if filtered out by net_filter.
+        """
         # For package/main netlist elements (not in tiles), defer union-find processing
         # Tile elements have die nodes with explicit net types from .nd files
         if self.current_file_type in ['package', 'die'] and self.current_tile_id is None:
@@ -967,7 +971,7 @@ class GraphBuilder:
             node2_net_lower = self.node_net_map_lower.get(node2) or (node2_net.lower() if node2_net else None)
             # Include element if either node belongs to filtered net
             if node1_net_lower != self.net_filter and node2_net_lower != self.net_filter:
-                return  # Skip this element
+                return False  # Skip this element
         
         # Ensure nodes exist
         self.add_node(node1)
@@ -1026,6 +1030,7 @@ class GraphBuilder:
                         'inductors': 0,
                         'vsources': 0,
                         'isources': 0,
+                        'isources_with_waveforms': 0,
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
@@ -1038,6 +1043,7 @@ class GraphBuilder:
                         'inductors': 0,
                         'vsources': 0,
                         'isources': 0,
+                        'isources_with_waveforms': 0,
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
@@ -1050,6 +1056,7 @@ class GraphBuilder:
                         'inductors': 0,
                         'vsources': 0,
                         'isources': 0,
+                        'isources_with_waveforms': 0,
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
@@ -1089,6 +1096,7 @@ class GraphBuilder:
                         'inductors': 0,
                         'vsources': 0,
                         'isources': 0,
+                        'isources_with_waveforms': 0,
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
@@ -1101,6 +1109,7 @@ class GraphBuilder:
                         'inductors': 0,
                         'vsources': 0,
                         'isources': 0,
+                        'isources_with_waveforms': 0,
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
@@ -1113,6 +1122,7 @@ class GraphBuilder:
                         'inductors': 0,
                         'vsources': 0,
                         'isources': 0,
+                        'isources_with_waveforms': 0,
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
@@ -1145,11 +1155,17 @@ class GraphBuilder:
             elif elem_type == 'I':
                 net_stat['isources'] += 1
                 net_stat['total_current'] += abs(value)
+        
+        return True
             
     def add_grounded_element(self, elem_type: str, node: str, value: float, 
-                            name: str, **attrs):
-        """Add element connected to ground (node '0')"""
-        self.add_element(elem_type, node, '0', value, name, **attrs)
+                            name: str, **attrs) -> bool:
+        """Add element connected to ground (node '0').
+        
+        Returns:
+            True if element was added, False if filtered out by net_filter.
+        """
+        return self.add_element(elem_type, node, '0', value, name, **attrs)
         
     def mark_boundary_node(self, name: str):
         """Mark node as boundary node (needs stitching)"""
@@ -2254,18 +2270,28 @@ class NetlistParser:
             attrs['inst_y'] = int(coord_match.group(2))
         
         # Add element to graph
-        self.builder.add_element('I', node_pos, node_neg, static_current_ma, name, **attrs)
+        added = self.builder.add_element('I', node_pos, node_neg, static_current_ma, name, **attrs)
         
-        # Backward compatibility: instance_node_map
-        self.builder.instance_node_map[name] = [node_pos, node_neg]
-        
-        # Store full CurrentSource for time-domain analysis
-        self.builder.instance_sources[name] = isrc
-        
-        # Update statistics
-        if isrc.has_waveform_data():
-            self.builder.stats.instances_with_waveforms += 1
-        self.builder.stats.total_static_current_ma += abs(static_current_ma)
+        # Only store if element was actually added (not filtered by net_filter)
+        if added:
+            # Backward compatibility: instance_node_map
+            self.builder.instance_node_map[name] = [node_pos, node_neg]
+            
+            # Store full CurrentSource for time-domain analysis
+            self.builder.instance_sources[name] = isrc
+            
+            # Update statistics
+            if isrc.has_waveform_data():
+                self.builder.stats.instances_with_waveforms += 1
+                
+                # Update per-net waveform statistics
+                net_type = self.builder.node_net_map.get(node_pos) or self.builder.node_net_map.get(node_neg)
+                if net_type and net_type in self.builder.stats.net_stats:
+                    # Current sources from instanceModels are always 'die' category
+                    if 'die' in self.builder.stats.net_stats[net_type]:
+                        self.builder.stats.net_stats[net_type]['die']['isources_with_waveforms'] += 1
+                        
+            self.builder.stats.total_static_current_ma += abs(static_current_ma)
             
     def _parse_controlled_source(self, line: str, source_type: str):
         """Parse controlled sources (E/F/G/H)"""
@@ -2718,7 +2744,12 @@ class NetlistParser:
                     
                     if net_stat['isources'] > 0:
                         print(f"      Current Sources: {net_stat['isources']:,}")
+                        waveform_count = net_stat.get('isources_with_waveforms', 0)
+                        if waveform_count > 0:
+                            print(f"        With Waveforms: {waveform_count:,}")
+                        avg_i = net_stat['total_current'] / net_stat['isources']
                         print(f"        Total Current: {net_stat['total_current']:.3f} mA")
+                        print(f"        Average: {avg_i:.6f} mA")
         
         print("\n" + "="*70 + "\n")
         stats = self.builder.stats

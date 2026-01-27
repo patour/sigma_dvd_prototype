@@ -174,6 +174,58 @@ class TestGraphBuilder(unittest.TestCase):
         root1 = self.builder._uf_find("pkg1")
         root2 = self.builder._uf_find("pkg2")
         self.assertEqual(root1, root2)
+    
+    def test_net_filter_excludes_other_net_elements(self):
+        """Test that net_filter excludes elements from other nets"""
+        # Create builder with VDD filter
+        builder = GraphBuilder(net_filter='VDD')
+        
+        # Set up node-to-net mapping for both VDD and VSS nodes
+        builder.node_net_map = {
+            'vdd_node1': 'VDD',
+            'vdd_node2': 'VDD',
+            'vss_node1': 'VSS',
+            'vss_node2': 'VSS',
+        }
+        builder.node_net_map_lower = {k: v.lower() for k, v in builder.node_net_map.items()}
+        
+        # Set file type to 'instance' (not 'package') so filtering applies
+        builder.current_file_type = 'instance'
+        
+        # Add VDD resistor - should be added
+        added_vdd = builder.add_element('R', 'vdd_node1', 'vdd_node2', 0.1, 'R_VDD')
+        self.assertTrue(added_vdd, "VDD element should be added")
+        
+        # Add VSS resistor - should be filtered out
+        added_vss = builder.add_element('R', 'vss_node1', 'vss_node2', 0.1, 'R_VSS')
+        self.assertFalse(added_vss, "VSS element should be filtered out")
+        
+        # Verify only VDD resistor is in graph
+        self.assertEqual(builder.stats.resistors, 1)
+    
+    def test_net_filter_current_source_filtering(self):
+        """Test that net_filter filters current sources and instance_sources consistently"""
+        # Create builder with VDD filter
+        builder = GraphBuilder(net_filter='VDD')
+        
+        # Set up node-to-net mapping
+        builder.node_net_map = {
+            'vdd_node': 'VDD',
+            'vss_node': 'VSS',
+        }
+        builder.node_net_map_lower = {k: v.lower() for k, v in builder.node_net_map.items()}
+        builder.current_file_type = 'instance'
+        
+        # Add VDD current source - should be added
+        added_vdd = builder.add_element('I', 'vdd_node', '0', 1.0, 'I_VDD')
+        self.assertTrue(added_vdd, "VDD current source should be added")
+        
+        # Add VSS current source - should be filtered out
+        added_vss = builder.add_element('I', 'vss_node', '0', 1.0, 'I_VSS')
+        self.assertFalse(added_vss, "VSS current source should be filtered out")
+        
+        # Only VDD current source should be counted
+        self.assertEqual(builder.stats.isources, 1)
 
 
 class TestNetlistParser(unittest.TestCase):
@@ -308,6 +360,70 @@ class TestNetFiltering(unittest.TestCase):
         for net_name, nodes in net_conn.items():
             if net_name != 'VDD':
                 self.assertEqual(len(nodes), 0, f"Net {net_name} should have no nodes with VDD filter")
+    
+    def test_net_filter_instance_sources_match_edges(self):
+        """Test that instance_sources count matches I-type edges when net_filter is active"""
+        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist_dir.exists():
+            self.skipTest("Test netlist not found")
+        
+        parser = NetlistParser(str(test_netlist_dir), net_filter='VDD')
+        graph = parser.parse()
+        
+        # Get instance_sources (raw objects since store_instance_sources=False by default)
+        raw_sources = graph.graph.get('_instance_sources_objects', {})
+        
+        # Count I-type edges
+        isource_edges = [(u, v, d) for u, v, d in graph.edges(data=True) 
+                        if d.get('type') == 'I']
+        
+        # instance_sources should match I-type edge count
+        self.assertEqual(len(raw_sources), len(isource_edges),
+                        f"instance_sources count ({len(raw_sources)}) should match "
+                        f"I-type edge count ({len(isource_edges)}) when net_filter is active")
+    
+    def test_net_filter_instance_node_map_match_edges(self):
+        """Test that instance_node_map count matches I-type edges when net_filter is active"""
+        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist_dir.exists():
+            self.skipTest("Test netlist not found")
+        
+        parser = NetlistParser(str(test_netlist_dir), net_filter='VDD')
+        graph = parser.parse()
+        
+        # Get instance_node_map
+        inst_node_map = graph.graph.get('instance_node_map', {})
+        
+        # Count I-type edges
+        isource_edges = [(u, v, d) for u, v, d in graph.edges(data=True) 
+                        if d.get('type') == 'I']
+        
+        # instance_node_map should match I-type edge count
+        self.assertEqual(len(inst_node_map), len(isource_edges),
+                        f"instance_node_map count ({len(inst_node_map)}) should match "
+                        f"I-type edge count ({len(isource_edges)}) when net_filter is active")
+    
+    def test_net_filter_instance_sources_serialized_match_edges(self):
+        """Test that serialized instance_sources matches I-type edges when net_filter is active"""
+        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist_dir.exists():
+            self.skipTest("Test netlist not found")
+        
+        parser = NetlistParser(str(test_netlist_dir), net_filter='VDD', 
+                              store_instance_sources=True)
+        graph = parser.parse()
+        
+        # Get serialized instance_sources
+        inst_sources = graph.graph.get('instance_sources', {})
+        
+        # Count I-type edges
+        isource_edges = [(u, v, d) for u, v, d in graph.edges(data=True) 
+                        if d.get('type') == 'I']
+        
+        # instance_sources should match I-type edge count
+        self.assertEqual(len(inst_sources), len(isource_edges),
+                        f"serialized instance_sources count ({len(inst_sources)}) should match "
+                        f"I-type edge count ({len(isource_edges)}) when net_filter is active")
 
 
 class TestValueParsing(unittest.TestCase):
