@@ -900,31 +900,36 @@ class TestCapacitanceEffects(unittest.TestCase):
 
     def test_backward_euler_vs_trapezoidal_consistency(self):
         """Both integration methods should give similar results.
-        
+
         While Backward Euler and Trapezoidal have different numerical properties,
         they should converge to similar results for well-resolved simulations.
+
+        Note: For this netlist, the RC time constant tau ~ 0.6 ps. With dt >> tau,
+        trapezoidal can exhibit overshoot (expected behavior for stiff systems).
+        Using dt=5ps gives <1% difference; dt=10ps gives ~18% difference.
         """
-        dt = 1e-10  # 100 ps
-        
+        dt = 5e-12  # 5 ps - provides well-resolved behavior (dt ~ 8*tau)
+        t_end = 1e-9  # 1 ns total simulation
+
         be_result = self.transient_solver.solve_transient(
-            t_start=0, t_end=10*dt, dt=dt,
+            t_start=0, t_end=t_end, dt=dt,
             method=IntegrationMethod.BACKWARD_EULER,
             verbose=False
         )
-        
+
         trap_result = self.transient_solver.solve_transient(
-            t_start=0, t_end=10*dt, dt=dt,
+            t_start=0, t_end=t_end, dt=dt,
             method=IntegrationMethod.TRAPEZOIDAL,
             verbose=False
         )
-        
-        # Compare peak IR-drops (should be within 20% of each other)
+
+        # With dt=5ps, both methods should give nearly identical results (<5% diff)
         be_peak = be_result.peak_ir_drop
         trap_peak = trap_result.peak_ir_drop
-        
+
         if be_peak > 0:
             rel_diff = abs(be_peak - trap_peak) / be_peak
-            self.assertLess(rel_diff, 0.20,
+            self.assertLess(rel_diff, 0.05,
                 f"BE and Trap should give similar results: BE={be_peak*1000:.4f}mV, Trap={trap_peak*1000:.4f}mV")
 
 

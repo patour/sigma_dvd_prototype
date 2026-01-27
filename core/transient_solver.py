@@ -684,9 +684,9 @@ class TransientIRDropSolver:
                     rhs = I_u + C_coeff * (rc.C_uu @ V_u) - G_up_Vp
                 else:
                     # Trapezoidal (Crank-Nicolson):
-                    # (G + 2C/dt) * V_{n+1} = I_{n+1} + (2C/dt - G) * V_n - 2*G_up * V_p
-                    # Note: factor of 2 on G_up*V_p due to averaging G*V term
-                    rhs = I_u + C_coeff * (rc.C_uu @ V_u) - (rc.G_uu @ V_u) - 2.0 * G_up_Vp
+                    # (G + 2C/dt) * V_{n+1} = 2*I_{n+1} + (2C/dt - G) * V_n - 2*G_up * V_p
+                    # Note: All terms multiplied by 2 from (C/dt + G/2)*V = I + (C/dt - G/2)*V_n - G_up*V_p
+                    rhs = 2.0 * I_u + C_coeff * (rc.C_uu @ V_u) - (rc.G_uu @ V_u) - 2.0 * G_up_Vp
 
                 V_u = lu(rhs)
 
