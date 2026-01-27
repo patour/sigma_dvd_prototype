@@ -651,8 +651,28 @@ class TransientIRDropSolver:
         else:
             G_up_Vp = np.zeros(n_unknown)
 
-        # Initial condition: all unknown nodes at Vdd (steady state with no current)
-        V_u = np.full(n_unknown, vdd, dtype=float)
+        # Compute initial condition via DC solve at t_start
+        # This gives physically correct initial state rather than assuming Vdd
+        t0_dc = time_module.perf_counter()
+        currents_init = self._evaluate_currents_at_time(t_start)
+        
+        # Build initial current vector
+        I_u_init = np.zeros(n_unknown, dtype=float)
+        for node, curr in currents_init.items():
+            if node in rc.unknown_to_idx:
+                # Sink current is positive input, nodal equation uses negative
+                I_u_init[rc.unknown_to_idx[node]] += -float(curr)
+        
+        # DC solve: G_uu * V_u = I_u - G_up * V_p
+        # Factor G_uu for DC solve (could reuse if G_uu is same structure as A)
+        rhs_dc = I_u_init - G_up_Vp
+        lu_dc = spla.factorized(rc.G_uu.tocsc())
+        V_u = lu_dc(rhs_dc)
+        timings['dc_init'] = time_module.perf_counter() - t0_dc
+        
+        if verbose:
+            ir_drop_init = vdd - np.min(V_u)
+            print(f"  DC initial condition: max IR-drop = {ir_drop_init*1000:.3f} mV")
 
         # Time stepping
         t0_solve = time_module.perf_counter()
@@ -674,8 +694,8 @@ class TransientIRDropSolver:
                     I_u[rc.unknown_to_idx[node]] += -float(curr)
 
             if i == 0:
-                # For first step, just compute steady state with initial condition
-                # (or we could do DC solve, but we start from Vdd)
+                # First step: V_u already initialized via DC solve above
+                # No time stepping needed, just record the state
                 pass
             else:
                 # Time step
