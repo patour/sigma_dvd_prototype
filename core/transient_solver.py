@@ -676,15 +676,25 @@ class TransientIRDropSolver:
 
         # Time stepping
         t0_solve = time_module.perf_counter()
+        
+        # Timing accumulators for per-step operations
+        time_evaluate_currents = 0.0
+        time_rhs_solve = 0.0
+        time_statistics = 0.0
+        time_vsrc_current = 0.0
+        time_spatial_peaks = 0.0
+        time_tracked_waveforms = 0.0
 
         for i, t in enumerate(t_array):
             if verbose and i % max(1, n_steps // 10) == 0:
                 print(f"  Time step {i}/{n_steps} (t={t*1e9:.2f} ns)")
 
             # Evaluate currents
+            t0_eval = time_module.perf_counter()
             currents = self._evaluate_currents_at_time(t)
             total_current = sum(currents.values())
             total_current_per_time[i] = total_current
+            time_evaluate_currents += time_module.perf_counter() - t0_eval
 
             # Build current vector
             I_u = np.zeros(n_unknown, dtype=float)
@@ -708,7 +718,9 @@ class TransientIRDropSolver:
                     # Note: All terms multiplied by 2 from (C/dt + G/2)*V = I + (C/dt - G/2)*V_n - G_up*V_p
                     rhs = 2.0 * I_u + C_coeff * (rc.C_uu @ V_u) - (rc.G_uu @ V_u) - 2.0 * G_up_Vp
 
+                t0_rhs = time_module.perf_counter()
                 V_u = lu(rhs)
+                time_rhs_solve += time_module.perf_counter() - t0_rhs
 
             # Build voltage dict and compute IR-drop
             V_dict: Dict[Any, float] = {}
@@ -724,6 +736,7 @@ class TransientIRDropSolver:
                 ir_drop_dict[n] = vdd - v
 
             # Compute statistics
+            t0_stats = time_module.perf_counter()
             if ir_drop_dict:
                 max_drop = max(ir_drop_dict.values())
                 max_drop_node = max(ir_drop_dict, key=ir_drop_dict.get)
@@ -737,11 +750,15 @@ class TransientIRDropSolver:
                 global_peak_drop = max_drop
                 global_peak_time = t
                 global_peak_node = max_drop_node
+            time_statistics += time_module.perf_counter() - t0_stats
 
             # Compute vsrc current
+            t0_vsrc = time_module.perf_counter()
             total_vsrc_current_per_time[i] = self._compute_vsrc_current(V_dict)
+            time_vsrc_current += time_module.perf_counter() - t0_vsrc
 
             # Update spatial peaks
+            t0_spatial = time_module.perf_counter()
             for node, drop in ir_drop_dict.items():
                 if node not in peak_ir_drop_per_node or drop > peak_ir_drop_per_node[node]:
                     peak_ir_drop_per_node[node] = drop
@@ -751,15 +768,24 @@ class TransientIRDropSolver:
             for node, curr in currents.items():
                 if node not in peak_current_per_node or abs(curr) > abs(peak_current_per_node[node]):
                     peak_current_per_node[node] = curr
+            time_spatial_peaks += time_module.perf_counter() - t0_spatial
 
             # Store tracked waveforms
+            t0_track = time_module.perf_counter()
             for node in track_set:
                 if node in V_dict:
                     temp_voltages[node].append(V_dict[node])
                 else:
                     temp_voltages[node].append(vdd)
+            time_tracked_waveforms += time_module.perf_counter() - t0_track
 
-        timings['solve'] = time_module.perf_counter() - t0_solve
+        timings['time_stepping'] = time_module.perf_counter() - t0_solve
+        timings['solve'] = time_rhs_solve
+        timings['evaluate_currents'] = time_evaluate_currents
+        timings['statistics'] = time_statistics
+        timings['vsrc_current'] = time_vsrc_current
+        timings['spatial_peaks'] = time_spatial_peaks
+        timings['tracked_waveforms'] = time_tracked_waveforms
 
         # Determine worst nodes
         worst_nodes_list = sorted(
