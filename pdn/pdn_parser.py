@@ -368,10 +368,14 @@ class PWL:
 
         return total_area / self.period
     
+    def __reduce__(self):
+        """Custom pickle support - only serialize init fields, not _times_cache."""
+        return (PWL, (self.points, self.period, self.delay))
+
     def to_dict(self) -> Dict:
         """Serialize to dictionary."""
         return {'points': self.points, 'period': self.period, 'delay': self.delay}
-    
+
     @classmethod
     def from_dict(cls, d: Dict) -> 'PWL':
         """Reconstruct from dictionary."""
@@ -455,14 +459,6 @@ class CurrentSource:
             pwls=[PWL.from_dict(p) for p in d.get('pwls', [])],
             info=InstanceInfo.from_dict(d['info']) if d.get('info') else None
         )
-
-
-# Fix pickle module references: Ensure classes are pickled with the correct
-# module name even when this file is run as __main__. This prevents the
-# "Can't get attribute 'X' on <module '__main__'>" error when loading pickles.
-for _cls in (InstanceInfo, Pulse, PWL, CurrentSource):
-    _cls.__module__ = 'pdn.pdn_parser'
-del _cls
 
 
 # =============================================================================
@@ -2997,6 +2993,30 @@ Examples:
             print("Use .pkl format instead")
             sys.exit(1)
         elif output_path.suffix == '.pkl':
+            # Register pickle handlers to fix __main__ module references
+            # When run as __main__, dataclasses get __module__ = '__main__'
+            if __name__ == '__main__':
+                import copyreg
+                from dataclasses import fields
+                import pdn.pdn_parser as target_module
+
+                def make_reducer(cls_name):
+                    """Create reducer that uses class from pdn.pdn_parser module."""
+                    def reducer(obj):
+                        # Get the correct class from the module
+                        correct_cls = getattr(target_module, cls_name)
+                        # Only include fields with init=True (exclude _times_cache etc.)
+                        field_values = tuple(
+                            getattr(obj, f.name) for f in fields(obj) if f.init
+                        )
+                        # Return (class, args_tuple) for reconstruction
+                        return (correct_cls, field_values)
+                    return reducer
+
+                for cls_name in ('InstanceInfo', 'Pulse', 'PWL', 'CurrentSource'):
+                    cls = globals()[cls_name]
+                    copyreg.pickle(cls, make_reducer(cls_name))
+
             with open(output_path, 'wb') as f:
                 pickle.dump(graph, f)
             print(f"Graph saved to: {output_path}")
