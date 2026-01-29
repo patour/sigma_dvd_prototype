@@ -376,6 +376,7 @@ class DynamicIRDropSolver:
         verbose: bool = False,
         n_worst_nodes: int = 10,
         track_nodes: Optional[List[Any]] = None,
+        use_legacy: bool = False,
     ) -> QuasiStaticResult:
         """Quasi-static analysis via batch DC solves.
 
@@ -395,10 +396,270 @@ class DynamicIRDropSolver:
             verbose: Print progress
             n_worst_nodes: Track N worst-case nodes
             track_nodes: Nodes to store full waveforms for (None = worst nodes only)
+            use_legacy: If True, use legacy dict-based code path (for validation).
+                        If False (default), use optimized array-based operations.
 
         Returns:
             QuasiStaticResult with peak statistics and optional waveforms.
         """
+        if use_legacy:
+            return self._solve_quasi_static_legacy(
+                t_start, t_end, n_points, t_array, method, partition_layer,
+                top_k, weighting, verbose, n_worst_nodes, track_nodes
+            )
+        return self._solve_quasi_static_array(
+            t_start, t_end, n_points, t_array, method, partition_layer,
+            top_k, weighting, verbose, n_worst_nodes, track_nodes
+        )
+
+    def _solve_quasi_static_array(
+        self,
+        t_start: float,
+        t_end: float,
+        n_points: int,
+        t_array: Optional[np.ndarray],
+        method: str,
+        partition_layer: Optional[Union[str, int]],
+        top_k: int,
+        weighting: str,
+        verbose: bool,
+        n_worst_nodes: int,
+        track_nodes: Optional[List[Any]],
+    ) -> QuasiStaticResult:
+        """Optimized array-based quasi-static solve.
+
+        Uses numpy arrays instead of dicts for peak tracking and statistics.
+        """
+        timings: Dict[str, float] = {}
+        t0_total = time_module.perf_counter()
+
+        # Build time array
+        if t_array is None:
+            t_array = np.linspace(t_start, t_end, n_points)
+        n_steps = len(t_array)
+
+        vdd = self.model.vdd
+
+        # Prepare solver context
+        t0_prep = time_module.perf_counter()
+        if method == 'flat':
+            context = self._solver.prepare_flat()
+        elif method == 'hierarchical':
+            if partition_layer is None:
+                raise ValueError("partition_layer required for hierarchical method")
+            context = self._solver.prepare_hierarchical(
+                partition_layer=partition_layer,
+                top_k=top_k,
+                weighting=weighting,
+            )
+        else:
+            raise ValueError(f"Unknown method: {method}. Use 'flat' or 'hierarchical'.")
+        timings['prepare'] = time_module.perf_counter() - t0_prep
+
+        # Get unknown nodes from context for array-based operations
+        if method == 'flat':
+            reduced = context.reduced_system
+            unknown_nodes = reduced.unknown_nodes
+            unknown_to_idx = reduced.index_unknown
+        else:
+            # For hierarchical, we'll fall back to dict-based peak tracking
+            unknown_nodes = list(self.model.valid_nodes - set(self.model.pad_nodes) - {'0'})
+            unknown_to_idx = {n: i for i, n in enumerate(unknown_nodes)}
+
+        n_unknown = len(unknown_nodes)
+
+        # Pre-allocate summary arrays (per time step)
+        max_ir_drop_per_time = np.zeros(n_steps, dtype=np.float64)
+        total_current_per_time = np.zeros(n_steps, dtype=np.float64)
+        total_vsrc_current_per_time = np.zeros(n_steps, dtype=np.float64)
+
+        # Pre-allocate spatial peak arrays (per node)
+        peak_ir_drop_arr = np.full(n_unknown, -np.inf, dtype=np.float64)
+        peak_time_arr = np.zeros(n_unknown, dtype=np.float64)
+        peak_current_arr = np.zeros(n_unknown, dtype=np.float64)
+
+        # Global peak tracking
+        global_peak_drop = 0.0
+        global_peak_time = t_array[0]
+        global_peak_idx = 0
+
+        # Build tracked node index mapping
+        track_set = set(track_nodes) if track_nodes else set()
+        tracked_indices: List[int] = []
+        tracked_nodes_list: List[Any] = []
+        for node in track_set:
+            if node in unknown_to_idx:
+                tracked_indices.append(unknown_to_idx[node])
+                tracked_nodes_list.append(node)
+
+        # Pre-allocate tracked waveforms array
+        n_tracked = len(tracked_indices)
+        tracked_voltages_arr = np.zeros((n_tracked, n_steps), dtype=np.float64) if n_tracked > 0 else None
+        tracked_idx_arr = np.array(tracked_indices, dtype=np.int32) if n_tracked > 0 else None
+
+        # Time-stepping loop
+        t0_solve = time_module.perf_counter()
+        time_evaluate_currents = 0.0
+        time_dc_solve = 0.0
+        time_statistics = 0.0
+        time_vsrc_current = 0.0
+        time_spatial_peaks = 0.0
+        time_tracked_waveforms = 0.0
+
+        for i, t in enumerate(t_array):
+            if verbose and i % max(1, n_steps // 10) == 0:
+                print(f"  Time step {i}/{n_steps} (t={t*1e9:.2f} ns)")
+
+            # Evaluate currents at this time
+            t0_eval = time_module.perf_counter()
+            currents = self._evaluate_currents_at_time(t)
+            total_current = sum(currents.values())
+            total_current_per_time[i] = total_current
+            time_evaluate_currents += time_module.perf_counter() - t0_eval
+
+            # Solve DC
+            t0_dc = time_module.perf_counter()
+            if method == 'flat':
+                result = self._solver.solve_prepared(currents, context)
+            else:
+                result = self._solver.solve_hierarchical_prepared(currents, context)
+
+            voltages = result.voltages
+            ir_drop = result.ir_drop
+            time_dc_solve += time_module.perf_counter() - t0_dc
+
+            # Compute max IR-drop at this time (array-based)
+            t0_stats = time_module.perf_counter()
+            if ir_drop:
+                # Build IR-drop array from result dict
+                ir_drop_arr = np.zeros(n_unknown, dtype=np.float64)
+                for node, drop in ir_drop.items():
+                    if node in unknown_to_idx:
+                        ir_drop_arr[unknown_to_idx[node]] = drop
+
+                max_drop = ir_drop_arr.max()
+                max_drop_idx = ir_drop_arr.argmax()
+                max_ir_drop_per_time[i] = max_drop
+
+                if max_drop > global_peak_drop:
+                    global_peak_drop = max_drop
+                    global_peak_time = t
+                    global_peak_idx = max_drop_idx
+            else:
+                max_drop = 0.0
+                ir_drop_arr = np.zeros(n_unknown, dtype=np.float64)
+                max_ir_drop_per_time[i] = 0.0
+            time_statistics += time_module.perf_counter() - t0_stats
+
+            # Compute vsrc current
+            t0_vsrc = time_module.perf_counter()
+            total_vsrc_current_per_time[i] = self._compute_vsrc_current(voltages)
+            time_vsrc_current += time_module.perf_counter() - t0_vsrc
+
+            # Update spatial peak tracking (vectorized)
+            t0_spatial = time_module.perf_counter()
+            update_mask = ir_drop_arr > peak_ir_drop_arr
+            peak_ir_drop_arr[update_mask] = ir_drop_arr[update_mask]
+            peak_time_arr[update_mask] = t
+
+            # Update peak current per node
+            for node, curr in currents.items():
+                if node in unknown_to_idx:
+                    idx = unknown_to_idx[node]
+                    if abs(curr) > abs(peak_current_arr[idx]):
+                        peak_current_arr[idx] = curr
+            time_spatial_peaks += time_module.perf_counter() - t0_spatial
+
+            # Store tracked waveforms (vectorized gather)
+            t0_track = time_module.perf_counter()
+            if tracked_voltages_arr is not None:
+                for local_idx, node in enumerate(tracked_nodes_list):
+                    tracked_voltages_arr[local_idx, i] = voltages.get(node, vdd)
+            time_tracked_waveforms += time_module.perf_counter() - t0_track
+
+        timings['time_stepping'] = time_module.perf_counter() - t0_solve
+        timings['solve'] = time_dc_solve
+        timings['evaluate_currents'] = time_evaluate_currents
+        timings['statistics'] = time_statistics
+        timings['vsrc_current'] = time_vsrc_current
+        timings['spatial_peaks'] = time_spatial_peaks
+        timings['tracked_waveforms'] = time_tracked_waveforms
+
+        # Convert arrays to dicts for result construction
+        t0_convert = time_module.perf_counter()
+
+        # Global peak node
+        global_peak_node = unknown_nodes[global_peak_idx] if n_unknown > 0 else None
+
+        # Build node_max_drops for worst nodes
+        node_max_drops: Dict[Any, Tuple[float, float]] = {}
+        for idx, node in enumerate(unknown_nodes):
+            if peak_ir_drop_arr[idx] > -np.inf:
+                node_max_drops[node] = (peak_ir_drop_arr[idx], peak_time_arr[idx])
+
+        worst_nodes_list = sorted(
+            node_max_drops.items(),
+            key=lambda x: x[1][0],
+            reverse=True
+        )[:n_worst_nodes]
+        worst_nodes = [(node, drop, time_val) for node, (drop, time_val) in worst_nodes_list]
+
+        # Build peak_ir_drop_per_node dict
+        peak_ir_drop_per_node: Dict[Any, float] = {}
+        for idx, node in enumerate(unknown_nodes):
+            peak_ir_drop_per_node[node] = peak_ir_drop_arr[idx]
+        for node in self.model.pad_nodes:
+            peak_ir_drop_per_node[node] = 0.0
+
+        # Build peak_current_per_node dict
+        peak_current_per_node: Dict[Any, float] = {}
+        for idx, node in enumerate(unknown_nodes):
+            if peak_current_arr[idx] != 0:
+                peak_current_per_node[node] = peak_current_arr[idx]
+
+        # Build tracked waveform dicts
+        tracked_waveforms: Dict[Any, np.ndarray] = {}
+        tracked_ir_drop: Dict[Any, np.ndarray] = {}
+        if tracked_voltages_arr is not None:
+            for local_idx, node in enumerate(tracked_nodes_list):
+                tracked_waveforms[node] = tracked_voltages_arr[local_idx, :].copy()
+                tracked_ir_drop[node] = vdd - tracked_waveforms[node]
+
+        timings['convert_results'] = time_module.perf_counter() - t0_convert
+        timings['total'] = time_module.perf_counter() - t0_total
+
+        return QuasiStaticResult(
+            t_array=t_array,
+            peak_ir_drop=global_peak_drop,
+            peak_ir_drop_time=global_peak_time,
+            peak_ir_drop_node=global_peak_node,
+            worst_nodes=worst_nodes,
+            nominal_voltage=vdd,
+            timings=timings,
+            tracked_waveforms=tracked_waveforms,
+            tracked_ir_drop=tracked_ir_drop,
+            max_ir_drop_per_time=max_ir_drop_per_time,
+            total_current_per_time=total_current_per_time,
+            total_vsrc_current_per_time=total_vsrc_current_per_time,
+            peak_ir_drop_per_node=peak_ir_drop_per_node,
+            peak_current_per_node=peak_current_per_node,
+        )
+
+    def _solve_quasi_static_legacy(
+        self,
+        t_start: float,
+        t_end: float,
+        n_points: int,
+        t_array: Optional[np.ndarray],
+        method: str,
+        partition_layer: Optional[Union[str, int]],
+        top_k: int,
+        weighting: str,
+        verbose: bool,
+        n_worst_nodes: int,
+        track_nodes: Optional[List[Any]],
+    ) -> QuasiStaticResult:
+        """Legacy dict-based quasi-static solve (for validation)."""
         timings: Dict[str, float] = {}
         t0_total = time_module.perf_counter()
 
@@ -540,17 +801,9 @@ class DynamicIRDropSolver:
             key=lambda x: x[1][0],
             reverse=True
         )[:n_worst_nodes]
-        worst_nodes = [(node, drop, time) for node, (drop, time) in worst_nodes_list]
+        worst_nodes = [(node, drop, time_val) for node, (drop, time_val) in worst_nodes_list]
 
         # Build final waveform storage
-        # Include user-requested track_nodes plus worst nodes
-        final_track_set = set(track_set)
-        for node, _, _ in worst_nodes:
-            final_track_set.add(node)
-
-        # If user didn't specify track_nodes and we have worst nodes, we need
-        # to re-run to get their waveforms (or just accept we don't have them)
-        # For simplicity, we'll only have waveforms for nodes that were tracked
         tracked_waveforms: Dict[Any, np.ndarray] = {}
         tracked_ir_drop: Dict[Any, np.ndarray] = {}
 

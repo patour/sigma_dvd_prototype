@@ -421,9 +421,11 @@ class VectorizedCurrentSources:
         return result
 
     def _evaluate_pwls(self, t: float) -> np.ndarray:
-        """Evaluate all PWLs at time t.
+        """Evaluate all PWLs at time t using grouped vectorization.
 
-        Uses numpy searchsorted for O(log N) lookup per PWL.
+        Groups PWLs by point count and batch-processes each group with
+        vectorized searchsorted and interpolation. Falls back to scalar
+        loop for singleton groups.
 
         Args:
             t: Time in seconds
@@ -431,39 +433,113 @@ class VectorizedCurrentSources:
         Returns:
             Array of PWL values (n_pwls,)
         """
+        if self.n_pwls == 0:
+            return np.zeros(0, dtype=np.float64)
+
         result = np.zeros(self.n_pwls, dtype=np.float64)
 
-        for i in range(self.n_pwls):
-            offset = self.pwl_offset[i]
-            count = self.pwl_count[i]
+        # Build PWL groups by count (cached on first call)
+        if not hasattr(self, '_pwl_groups') or self._pwl_groups is None:
+            self._build_pwl_groups()
+
+        # Process each group
+        for count, group_indices in self._pwl_groups.items():
             if count == 0:
                 continue
 
-            times = self.pwl_times[offset:offset + count]
-            values = self.pwl_values[offset:offset + count]
+            n_group = len(group_indices)
+            if n_group == 0:
+                continue
 
-            # Adjust time for delay and periodicity
-            t_adj = t - self.pwl_delay[i]
-            if self.pwl_period[i] > 0 and t_adj >= 0:
-                t_adj = t_adj % self.pwl_period[i]
+            # Get group data
+            group_idx = np.array(group_indices, dtype=np.int32)
+            offsets = self.pwl_offset[group_idx]
+            delays = self.pwl_delay[group_idx]
+            periods = self.pwl_period[group_idx]
 
-            # Boundary conditions
-            if t_adj <= times[0]:
-                result[i] = values[0]
-            elif t_adj >= times[-1]:
-                # Periodic: wrap to first value; non-periodic: hold last value
-                result[i] = values[0] if self.pwl_period[i] > 0 else values[-1]
+            # Adjust time for delay and periodicity (vectorized)
+            t_adj = np.full(n_group, t, dtype=np.float64) - delays
+            periodic_mask = (periods > 0) & (t_adj >= 0)
+            t_adj[periodic_mask] = t_adj[periodic_mask] % periods[periodic_mask]
+
+            if n_group >= 4:
+                # Batch process: reshape packed data into 2D arrays
+                # times_2d[i, j] = time point j for PWL i in group
+                times_2d = np.zeros((n_group, count), dtype=np.float64)
+                values_2d = np.zeros((n_group, count), dtype=np.float64)
+
+                for local_i, offset in enumerate(offsets):
+                    times_2d[local_i, :] = self.pwl_times[offset:offset + count]
+                    values_2d[local_i, :] = self.pwl_values[offset:offset + count]
+
+                # Vectorized boundary conditions
+                first_times = times_2d[:, 0]
+                last_times = times_2d[:, -1]
+                first_values = values_2d[:, 0]
+                last_values = values_2d[:, -1]
+
+                # Masks for boundary cases
+                before_mask = t_adj <= first_times
+                after_mask = t_adj >= last_times
+                interp_mask = ~before_mask & ~after_mask
+
+                # Handle before first point
+                result[group_idx[before_mask]] = first_values[before_mask]
+
+                # Handle after last point
+                after_idx = np.where(after_mask)[0]
+                if len(after_idx) > 0:
+                    # Periodic: wrap to first; non-periodic: hold last
+                    for local_i in after_idx:
+                        if periods[local_i] > 0:
+                            result[group_idx[local_i]] = first_values[local_i]
+                        else:
+                            result[group_idx[local_i]] = last_values[local_i]
+
+                # Handle interpolation cases
+                interp_idx = np.where(interp_mask)[0]
+                if len(interp_idx) > 0:
+                    for local_i in interp_idx:
+                        t_val = t_adj[local_i]
+                        times_row = times_2d[local_i]
+                        values_row = values_2d[local_i]
+                        idx = np.searchsorted(times_row, t_val, side='right') - 1
+                        t1, t2 = times_row[idx], times_row[idx + 1]
+                        v1, v2 = values_row[idx], values_row[idx + 1]
+                        if t2 != t1:
+                            result[group_idx[local_i]] = v1 + (v2 - v1) * (t_val - t1) / (t2 - t1)
+                        else:
+                            result[group_idx[local_i]] = v1
             else:
-                # Binary search and interpolate
-                idx = np.searchsorted(times, t_adj, side='right') - 1
-                t1, t2 = times[idx], times[idx + 1]
-                v1, v2 = values[idx], values[idx + 1]
-                if t2 != t1:
-                    result[i] = v1 + (v2 - v1) * (t_adj - t1) / (t2 - t1)
-                else:
-                    result[i] = v1
+                # Small group: use scalar loop
+                for local_i, global_i in enumerate(group_idx):
+                    offset = offsets[local_i]
+                    times = self.pwl_times[offset:offset + count]
+                    values = self.pwl_values[offset:offset + count]
+                    t_val = t_adj[local_i]
+
+                    if t_val <= times[0]:
+                        result[global_i] = values[0]
+                    elif t_val >= times[-1]:
+                        result[global_i] = values[0] if periods[local_i] > 0 else values[-1]
+                    else:
+                        idx = np.searchsorted(times, t_val, side='right') - 1
+                        t1, t2 = times[idx], times[idx + 1]
+                        v1, v2 = values[idx], values[idx + 1]
+                        if t2 != t1:
+                            result[global_i] = v1 + (v2 - v1) * (t_val - t1) / (t2 - t1)
+                        else:
+                            result[global_i] = v1
 
         return result
+
+    def _build_pwl_groups(self) -> None:
+        """Build groups of PWLs by point count for batch processing."""
+        from collections import defaultdict
+        self._pwl_groups: Dict[int, List[int]] = defaultdict(list)
+        for i in range(self.n_pwls):
+            count = self.pwl_count[i]
+            self._pwl_groups[count].append(i)
 
     def get_statistics(self) -> Dict[str, Any]:
         """Return statistics about the vectorized sources."""
@@ -476,3 +552,76 @@ class VectorizedCurrentSources:
             'memory_bytes': self.memory_bytes(),
             'memory_mb': self.memory_bytes() / 1e6,
         }
+
+    def evaluate_to_rhs_array(
+        self,
+        t: float,
+        rhs: np.ndarray,
+        source_to_unknown: np.ndarray,
+        valid_mask: np.ndarray,
+    ) -> Tuple[float, np.ndarray]:
+        """Evaluate currents and write directly to RHS array.
+
+        This is the most efficient method for time-stepping loops - avoids
+        creating intermediate dicts and uses vectorized scatter operations.
+
+        Args:
+            t: Time in seconds
+            rhs: Pre-allocated RHS array (n_unknown,) to write to. Will be modified in-place.
+            source_to_unknown: Mapping from source node indices to unknown indices.
+                               Shape (n_nodes,), value -1 indicates node is not unknown.
+            valid_mask: Boolean mask where source_to_unknown >= 0. Shape (n_nodes,).
+
+        Returns:
+            Tuple of (total_current, currents_array) where:
+            - total_current: Sum of all source currents for statistics
+            - currents_array: Full currents array (n_nodes,) for reuse (e.g., peak tracking)
+        """
+        # Evaluate all sources to get currents array
+        currents = self.evaluate_at_time(t)
+
+        # Compute total current for statistics
+        total_current = currents.sum()
+
+        # Get valid (non-zero, unknown) currents
+        # Filter to nodes that are in the unknown set
+        valid_currents = currents[valid_mask]
+        valid_unknown_idx = source_to_unknown[valid_mask]
+
+        # Scatter-add negative currents to RHS (sink current convention: I_u = -current,
+        # see "Current Sign Convention" in the core solver documentation)
+        # Use np.add.at for accumulation at duplicate indices
+        if len(valid_currents) > 0:
+            np.add.at(rhs, valid_unknown_idx, -valid_currents)
+
+        return total_current, currents
+
+    def build_source_to_unknown_map(
+        self,
+        unknown_to_idx: Dict[Any, int],
+        idx_to_node: List[Any],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Build mapping from source node indices to unknown indices.
+
+        This should be called once at solver initialization to create the
+        mapping arrays used by evaluate_to_rhs_array().
+
+        Args:
+            unknown_to_idx: Dict mapping unknown node -> index in reduced system
+            idx_to_node: List mapping node index -> node (from edge_cache.idx_to_node)
+
+        Returns:
+            Tuple of (source_to_unknown, valid_mask) where:
+            - source_to_unknown: int32 array (n_nodes,), -1 for non-unknown nodes
+            - valid_mask: bool array (n_nodes,), True where source_to_unknown >= 0
+        """
+        source_to_unknown = np.full(self.n_nodes, -1, dtype=np.int32)
+
+        for node_idx in range(self.n_nodes):
+            node = idx_to_node[node_idx]
+            if node in unknown_to_idx:
+                source_to_unknown[node_idx] = unknown_to_idx[node]
+
+        valid_mask = source_to_unknown >= 0
+
+        return source_to_unknown, valid_mask
