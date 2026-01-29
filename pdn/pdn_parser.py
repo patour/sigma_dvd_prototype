@@ -457,6 +457,14 @@ class CurrentSource:
         )
 
 
+# Fix pickle module references: Ensure classes are pickled with the correct
+# module name even when this file is run as __main__. This prevents the
+# "Can't get attribute 'X' on <module '__main__'>" error when loading pickles.
+for _cls in (InstanceInfo, Pulse, PWL, CurrentSource):
+    _cls.__module__ = 'pdn.pdn_parser'
+del _cls
+
+
 # =============================================================================
 # Instance Current Source Parsing Helpers
 # =============================================================================
