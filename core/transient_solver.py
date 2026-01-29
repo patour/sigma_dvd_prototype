@@ -15,9 +15,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import scipy.sparse as sp
-import scipy.sparse.linalg as spla
 
 from .unified_model import UnifiedPowerGridModel, GridSource
+from .unified_solver import _factor_conductance_matrix
 from .edge_adapter import ElementType
 from .vectorized_sources import VectorizedCurrentSources
 
@@ -692,7 +692,7 @@ class TransientIRDropSolver:
             A = rc.G_uu + 2.0 * rc.C_uu / dt_scaled
             C_coeff = 2.0 / dt_scaled
 
-        lu = spla.factorized(A.tocsc())
+        lu = _factor_conductance_matrix(A)
         timings['factor'] = time_module.perf_counter() - t0_factor
 
         # Pad voltage contribution (constant)
@@ -718,8 +718,8 @@ class TransientIRDropSolver:
                     I_u_init[rc.unknown_to_idx[node]] -= float(curr)
 
         rhs_dc = I_u_init - G_up_Vp
-        lu_dc = spla.factorized(rc.G_uu.tocsc())
-        V_u = lu_dc(rhs_dc)
+        lu_dc = _factor_conductance_matrix(rc.G_uu)
+        V_u = lu_dc.solve(rhs_dc)
         timings['dc_init'] = time_module.perf_counter() - t0_dc
 
         if verbose:
