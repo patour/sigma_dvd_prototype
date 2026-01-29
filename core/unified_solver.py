@@ -19,8 +19,181 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import scipy
+import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 from packaging import version as pkg_version
+
+# Optional high-performance Cholesky factorization via sksparse/cholmod
+try:
+    from sksparse.cholmod import cholesky as cholmod_cholesky
+    HAS_CHOLMOD = True
+except ImportError:
+    HAS_CHOLMOD = False
+    cholmod_cholesky = None
+
+# Module-level setting to enable/disable cholmod globally
+# None = auto-detect (use cholmod if available)
+# True = force cholmod (raises ImportError if unavailable)
+# False = force splu (SuperLU)
+_USE_CHOLMOD: Optional[bool] = None
+
+# Cholmod factorization mode: 'auto', 'simplicial', or 'supernodal'
+# - 'auto': CHOLMOD chooses based on matrix structure (default)
+# - 'simplicial': Better for very sparse matrices or when doing many updates
+# - 'supernodal': Better for dense factors (uses BLAS for efficiency)
+_CHOLMOD_MODE: str = 'auto'
+
+# Cholmod ordering method: 'default', 'natural', 'amd', 'metis', 'nesdis', 'colamd', 'best'
+# - 'default': CHOLMOD's default ordering strategy
+# - 'natural': No permutation (use original ordering)
+# - 'amd': Approximate Minimum Degree
+# - 'metis': METIS nested dissection (requires METIS)
+# - 'nesdis': CHOLMOD's nested dissection
+# - 'colamd': Column AMD
+# - 'best': Try several methods and pick the best
+_CHOLMOD_ORDERING: str = 'default'
+
+# Cholmod index type: None, True, or False
+# - None: Auto-detect based on matrix size (default)
+# - True: Force 64-bit (long) indices
+# - False: Force 32-bit (int) indices
+_CHOLMOD_USE_LONG: Optional[bool] = None
+
+
+def set_use_cholmod(value: Optional[bool]) -> None:
+    """Set the global cholmod usage setting.
+    
+    Args:
+        value: If True, use cholmod (Cholesky) for all matrix factorizations.
+               If False, use splu (SuperLU).
+               If None, auto-detect (use cholmod if available).
+               
+    Raises:
+        ImportError: If value=True but sksparse.cholmod is not installed.
+        
+    Example:
+        from core.unified_solver import set_use_cholmod, HAS_CHOLMOD
+        
+        # Force splu even if cholmod is available
+        set_use_cholmod(False)
+        
+        # Use cholmod if available (default behavior)
+        set_use_cholmod(None)
+        
+        # Force cholmod (error if not installed)
+        if HAS_CHOLMOD:
+            set_use_cholmod(True)
+    """
+    global _USE_CHOLMOD
+    if value is True and not HAS_CHOLMOD:
+        raise ImportError(
+            "Cannot enable cholmod: sksparse.cholmod is not installed. "
+            "Install with: pip install scikit-sparse"
+        )
+    _USE_CHOLMOD = value
+
+
+def get_use_cholmod() -> Optional[bool]:
+    """Get the current global cholmod usage setting.
+    
+    Returns:
+        True if cholmod is forced, False if splu is forced,
+        None if auto-detecting (use cholmod if available).
+    """
+    return _USE_CHOLMOD
+
+
+def set_cholmod_mode(mode: str) -> None:
+    """Set the cholmod factorization mode.
+    
+    Args:
+        mode: One of 'auto', 'simplicial', or 'supernodal'.
+              - 'auto': CHOLMOD chooses based on matrix structure (default)
+              - 'simplicial': Better for very sparse matrices or updates
+              - 'supernodal': Better for dense factors (uses BLAS)
+              
+    Raises:
+        ValueError: If mode is not one of the valid options.
+    """
+    global _CHOLMOD_MODE
+    valid_modes = ('auto', 'simplicial', 'supernodal')
+    if mode not in valid_modes:
+        raise ValueError(f"Invalid cholmod mode '{mode}'. Must be one of: {valid_modes}")
+    _CHOLMOD_MODE = mode
+
+
+def get_cholmod_mode() -> str:
+    """Get the current cholmod factorization mode.
+    
+    Returns:
+        Current mode: 'auto', 'simplicial', or 'supernodal'.
+    """
+    return _CHOLMOD_MODE
+
+
+def set_cholmod_ordering(ordering: str) -> None:
+    """Set the cholmod fill-reducing ordering method.
+    
+    Args:
+        ordering: One of 'default', 'natural', 'amd', 'metis', 'nesdis', 'colamd', 'best'.
+                  - 'default': CHOLMOD's default ordering strategy
+                  - 'natural': No permutation (original ordering)
+                  - 'amd': Approximate Minimum Degree
+                  - 'metis': METIS nested dissection (requires METIS library)
+                  - 'nesdis': CHOLMOD's nested dissection
+                  - 'colamd': Column AMD
+                  - 'best': Try several methods, pick best
+                  
+    Raises:
+        ValueError: If ordering is not one of the valid options.
+    """
+    global _CHOLMOD_ORDERING
+    valid_orderings = ('default', 'natural', 'amd', 'metis', 'nesdis', 'colamd', 'best')
+    if ordering not in valid_orderings:
+        raise ValueError(f"Invalid cholmod ordering '{ordering}'. Must be one of: {valid_orderings}")
+    _CHOLMOD_ORDERING = ordering
+
+
+def get_cholmod_ordering() -> str:
+    """Get the current cholmod fill-reducing ordering method.
+    
+    Returns:
+        Current ordering method.
+    """
+    return _CHOLMOD_ORDERING
+
+
+def set_cholmod_use_long(value: Optional[bool]) -> None:
+    """Set the cholmod index type (32-bit or 64-bit).
+    
+    Args:
+        value: If True, force 64-bit (long) indices.
+               If False, force 32-bit (int) indices.
+               If None (default), auto-detect based on matrix size.
+    """
+    global _CHOLMOD_USE_LONG
+    _CHOLMOD_USE_LONG = value
+
+
+def get_cholmod_use_long() -> Optional[bool]:
+    """Get the current cholmod index type setting.
+    
+    Returns:
+        True if 64-bit indices forced, False if 32-bit forced,
+        None if auto-detecting.
+    """
+    return _CHOLMOD_USE_LONG
+
+
+def get_active_backend() -> str:
+    """Get the name of the currently active factorization backend.
+    
+    Returns:
+        'cholmod' if cholmod will be used, 'splu' otherwise.
+    """
+    if _USE_CHOLMOD is None:
+        return 'cholmod' if HAS_CHOLMOD else 'splu'
+    return 'cholmod' if _USE_CHOLMOD else 'splu'
 
 from .solver_results import (
     UnifiedSolveResult,
@@ -79,6 +252,138 @@ def _get_tol_kwargs(tol: float, atol: float = 0.0) -> dict:
         return {"tol": tol}
 
 
+class SparseFactorAdapter:
+    """Unified interface for sparse matrix factorization backends.
+    
+    Wraps either sksparse.cholmod Cholesky factor or scipy splu factor
+    to provide a consistent `.solve(rhs)` interface.
+    
+    Attributes:
+        backend: String indicating which backend is used ('cholmod' or 'splu')
+    """
+    
+    def __init__(self, factor: Any, backend: str):
+        """Initialize adapter with a factorization object.
+        
+        Args:
+            factor: Either a cholmod Factor or scipy SuperLU object
+            backend: 'cholmod' or 'splu'
+        """
+        self._factor = factor
+        self._backend = backend
+    
+    @property
+    def backend(self) -> str:
+        """Return the backend name ('cholmod' or 'splu')."""
+        return self._backend
+    
+    def solve(self, rhs: np.ndarray) -> np.ndarray:
+        """Solve the linear system using the cached factorization.
+        
+        Args:
+            rhs: Right-hand side vector
+            
+        Returns:
+            Solution vector x such that A @ x = rhs
+        """
+        if self._backend == 'cholmod':
+            # cholmod Factor uses solve_A for Ax=b (as opposed to solve for LDL'x=b)
+            return self._factor.solve_A(rhs)
+        else:
+            # scipy SuperLU uses solve()
+            return self._factor.solve(rhs)
+    
+    def __call__(self, rhs: np.ndarray) -> np.ndarray:
+        """Allow using the adapter as a callable (for backward compatibility)."""
+        return self.solve(rhs)
+
+
+def _factor_conductance_matrix(
+    matrix: sp.spmatrix,
+    verbose: bool = False,
+    use_cholmod: Optional[bool] = None,
+) -> SparseFactorAdapter:
+    """Factor a conductance matrix using the best available backend.
+    
+    Uses sksparse.cholmod for Cholesky factorization if available,
+    otherwise falls back to scipy.sparse.linalg.splu.
+    
+    The conductance matrix must be symmetric positive definite (SPD).
+    In debug mode, symmetry is verified before factorization.
+    
+    Args:
+        matrix: Sparse conductance matrix (will be converted to CSC if needed)
+        verbose: If True, print which backend is being used and timing info
+        use_cholmod: If True, force cholmod (raises if unavailable).
+                     If False, force splu. If None (default), use the global
+                     setting from set_use_cholmod().
+    
+    Returns:
+        SparseFactorAdapter wrapping the factorization
+        
+    Raises:
+        ImportError: If use_cholmod=True but sksparse not installed
+        ValueError: If matrix is not symmetric (in debug mode)
+    """
+    import time
+    
+    # Auto-convert to CSC format (required by both backends)
+    t_csc_start = time.perf_counter()
+    if not sp.isspmatrix_csc(matrix):
+        matrix = matrix.tocsc()
+    t_csc_end = time.perf_counter()
+    csc_time_ms = (t_csc_end - t_csc_start) * 1000
+    
+    # Debug-mode symmetry check
+    if __debug__:
+        # Use Frobenius norm of (A - A^T) for symmetry check
+        diff = matrix - matrix.T
+        sym_err = sp.linalg.norm(diff, 'fro')
+        mat_norm = sp.linalg.norm(matrix, 'fro')
+        if mat_norm > 0:
+            rel_err = sym_err / mat_norm
+            assert rel_err < 1e-10, (
+                f"Conductance matrix is not symmetric: "
+                f"||A - A^T|| / ||A|| = {rel_err:.2e}"
+            )
+    
+    # Determine which backend to use (local override > global setting > auto-detect)
+    if use_cholmod is None:
+        use_cholmod = _USE_CHOLMOD  # Use global setting
+    if use_cholmod is None:
+        use_cholmod = HAS_CHOLMOD  # Auto-detect
+    elif use_cholmod and not HAS_CHOLMOD:
+        raise ImportError(
+            "sksparse.cholmod requested but not available. "
+            "Install with: pip install scikit-sparse"
+        )
+    
+    t_factor_start = time.perf_counter()
+    if use_cholmod:
+        factor = cholmod_cholesky(
+            matrix,
+            mode=_CHOLMOD_MODE,
+            ordering_method=_CHOLMOD_ORDERING,
+            use_long=_CHOLMOD_USE_LONG,
+        )
+        backend = 'cholmod'
+        use_long_str = 'auto' if _CHOLMOD_USE_LONG is None else ('64-bit' if _CHOLMOD_USE_LONG else '32-bit')
+        backend_info = f"cholmod(mode={_CHOLMOD_MODE}, ordering={_CHOLMOD_ORDERING}, idx={use_long_str})"
+    else:
+        factor = spla.splu(matrix)
+        backend = 'splu'
+        backend_info = 'splu'
+    t_factor_end = time.perf_counter()
+    factor_time_ms = (t_factor_end - t_factor_start) * 1000
+    
+    if verbose:
+        print(f"Matrix factorization ({backend_info}): "
+              f"CSC conversion {csc_time_ms:.2f} ms, "
+              f"factorization {factor_time_ms:.2f} ms")
+    
+    return SparseFactorAdapter(factor, backend)
+
+
 # Re-export for backward compatibility
 __all__ = [
     'UnifiedIRDropSolver',
@@ -89,6 +394,18 @@ __all__ = [
     'BottomGridTile',
     'TileSolveResult',
     'TiledBottomGridResult',
+    'HAS_CHOLMOD',
+    'SparseFactorAdapter',
+    '_factor_conductance_matrix',
+    'set_use_cholmod',
+    'get_use_cholmod',
+    'get_active_backend',
+    'set_cholmod_mode',
+    'get_cholmod_mode',
+    'set_cholmod_ordering',
+    'get_cholmod_ordering',
+    'set_cholmod_use_long',
+    'get_cholmod_use_long',
 ]
 
 
@@ -109,15 +426,25 @@ class UnifiedIRDropSolver:
 
         # Hierarchical solve
         hier_result = solver.solve_hierarchical(load_currents, partition_layer=2)
+        
+        # To use cholmod backend globally (if sksparse installed):
+        from core.unified_solver import set_use_cholmod
+        set_use_cholmod(True)  # or False to force splu, or None for auto
     """
 
-    def __init__(self, model: UnifiedPowerGridModel):
+    def __init__(self, model: UnifiedPowerGridModel, verbose: bool = False):
         """Initialize solver with a unified model.
 
         Args:
             model: UnifiedPowerGridModel instance
+            verbose: If True, print timing info for matrix factorization.
+                     Also sets verbose on the model if not already set.
         """
         self.model = model
+        self._verbose = verbose
+        # Propagate verbose to model if requested
+        if verbose and not model._verbose:
+            model._verbose = True
         self._aggregator = CurrentAggregator(model)
         self._tile_manager = TileManager(model)
 

@@ -94,10 +94,18 @@ class BlockMatrixSystem:
         """Number of interior nodes."""
         return len(self.interior_nodes)
 
-    def factor_interior(self) -> None:
-        """Pre-compute LU factorization of G_ii for fast solves."""
+    def factor_interior(self, verbose: bool = False) -> None:
+        """Pre-compute factorization of G_ii for fast solves.
+        
+        Uses cholmod if available, otherwise falls back to splu.
+        
+        Args:
+            verbose: If True, print which backend is being used
+        """
         if self.n_interior > 0:
-            self.lu_ii = spla.factorized(self.G_ii.tocsc())
+            from .unified_solver import _factor_conductance_matrix
+            factor = _factor_conductance_matrix(self.G_ii, verbose=verbose)
+            self.lu_ii = factor.solve
         else:
             self.lu_ii = lambda x: np.array([])
 

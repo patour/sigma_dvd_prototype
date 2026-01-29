@@ -15,6 +15,13 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
+# Import factorization helper (lazy import to avoid circular dependency)
+# We use a function to get this at runtime
+def _get_factor_func():
+    """Lazy import of _factor_conductance_matrix to avoid circular import."""
+    from .unified_solver import _factor_conductance_matrix
+    return _factor_conductance_matrix
+
 from .node_adapter import NodeInfoExtractor, UnifiedNodeInfo, LayerID
 from .edge_adapter import EdgeInfoExtractor, ElementType
 from .rx_graph import RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper
@@ -113,6 +120,7 @@ class UnifiedPowerGridModel:
         net_name: Optional[str] = None,
         resistance_unit_kohm: bool = False,
         lazy_factor: bool = True,
+        verbose: bool = False,
     ):
         """Initialize unified power grid model.
 
@@ -126,6 +134,7 @@ class UnifiedPowerGridModel:
             lazy_factor: If True (default), defer LU factorization until first solve.
                         This significantly improves model creation time when using
                         hierarchical solvers which build their own systems.
+            verbose: If True, print timing info for matrix factorization.
         """
         self.graph = graph
         self.pad_nodes = list(pad_nodes)
@@ -133,6 +142,7 @@ class UnifiedPowerGridModel:
         self.source = source
         self.net_name = net_name
         self.resistance_unit_kohm = resistance_unit_kohm
+        self._verbose = verbose
 
         # Initialize adapters
         self._node_extractor = NodeInfoExtractor(graph)
@@ -677,7 +687,8 @@ class UnifiedPowerGridModel:
         if skip_lu:
             lu = None
         else:
-            lu = spla.factorized(G_uu.tocsc())
+            factor_func = _get_factor_func()
+            lu = factor_func(G_uu, verbose=self._verbose)
         
         return UnifiedReducedSystem(
             node_order=nodes,
@@ -859,7 +870,8 @@ class UnifiedPowerGridModel:
             G_up = G_mat[np.ix_(u_idx, p_idx)].tocsr() if p_idx else sp.csr_matrix((len(u_idx), 0))
 
             # Factorize for fast solves
-            lu = spla.factorized(G_uu.tocsc())
+            factor_func = _get_factor_func()
+            lu = factor_func(G_uu, verbose=self._verbose)
 
         self._reduced = UnifiedReducedSystem(
             node_order=nodes,
@@ -1262,7 +1274,8 @@ class UnifiedPowerGridModel:
         G_uu = G_mat[np.ix_(u_idx, u_idx)].tocsr()
         G_ud = G_mat[np.ix_(u_idx, d_idx)].tocsr() if d_idx else sp.csr_matrix((len(u_idx), 0))
 
-        lu = spla.factorized(G_uu.tocsc())
+        factor_func = _get_factor_func()
+        lu = factor_func(G_uu, verbose=self._verbose)
 
         return UnifiedReducedSystem(
             node_order=nodes,

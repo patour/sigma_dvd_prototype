@@ -240,8 +240,9 @@ def solve_single_tile(
 
     # Solve G_uu * V_u = rhs
     try:
-        lu = spla.splu(G_uu.tocsc())
-        V_u = lu.solve(rhs)
+        from .unified_solver import _factor_conductance_matrix
+        factor = _factor_conductance_matrix(G_uu)
+        V_u = factor.solve(rhs)
     except Exception:
         # Fallback: use iterative solver
         V_u, info = spla.cg(G_uu, rhs, **_get_tol_kwargs(1e-10))

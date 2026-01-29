@@ -20,6 +20,17 @@ from .unified_solver import (
     TiledBottomGridResult,
     TileBounds,
     BottomGridTile,
+    # Cholmod backend control
+    HAS_CHOLMOD,
+    set_use_cholmod,
+    get_use_cholmod,
+    get_active_backend,
+    set_cholmod_mode,
+    get_cholmod_mode,
+    set_cholmod_ordering,
+    get_cholmod_ordering,
+    set_cholmod_use_long,
+    get_cholmod_use_long,
 )
 from .solver_results import (
     FlatSolverContext,
@@ -91,6 +102,17 @@ __all__ = [
     "TiledBottomGridResult",
     "TileBounds",
     "BottomGridTile",
+    # Cholmod backend control
+    "HAS_CHOLMOD",
+    "set_use_cholmod",
+    "get_use_cholmod",
+    "get_active_backend",
+    "set_cholmod_mode",
+    "get_cholmod_mode",
+    "set_cholmod_ordering",
+    "get_cholmod_ordering",
+    "set_cholmod_use_long",
+    "get_cholmod_use_long",
     # Solver contexts for batch solving
     "FlatSolverContext",
     "HierarchicalSolverContext",
