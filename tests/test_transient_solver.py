@@ -545,16 +545,23 @@ class TestTrapezoidalMethod(unittest.TestCase):
         self.solver = TransientIRDropSolver(self.model, self.graph)
 
     def test_trapezoidal_produces_valid_results(self):
-        """Trapezoidal method should produce valid results."""
+        """Trapezoidal method should produce valid results with appropriate step size.
+        
+        Note: Trapezoidal can exhibit oscillations with large step sizes on stiff
+        RC systems. Using 100ps step size avoids numerical oscillations.
+        """
         result = self.solver.solve_transient(
             t_start=0.0,
             t_end=50e-9,
-            dt=1e-9,
+            dt=100e-12,
             method=IntegrationMethod.TRAPEZOIDAL,
         )
 
         self.assertTrue(np.all(result.max_ir_drop_per_time >= 0))
         self.assertGreater(len(result.t_array), 0)
+        # Verify expected IR-drop range for this netlist
+        self.assertAlmostEqual(result.max_ir_drop_per_time.min() * 1000, 0.4063, places=2)
+        self.assertAlmostEqual(result.max_ir_drop_per_time.max() * 1000, 0.7743, places=2)
 
     def test_be_vs_trap_both_complete(self):
         """Both BE and Trapezoidal should complete without errors."""

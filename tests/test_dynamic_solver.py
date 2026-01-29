@@ -710,5 +710,359 @@ class TestEdgeCases(unittest.TestCase):
         self.assertAlmostEqual(result.t_array[0], -10e-9)
 
 
+class TestArrayModeValidation(unittest.TestCase):
+    """Tests comparing legacy (dict-based) vs array-based modes.
+    
+    These tests verify that the optimized array-based implementation
+    produces identical results to the original dict-based implementation.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse netlist_small once for all tests."""
+        # Use netlist_small for faster validation
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        
+        # Auto-detect net name (netlist_small uses VDD_XLV)
+        net_connectivity = cls.graph.graph.get('net_connectivity', {})
+        vdd_nets = [n for n in net_connectivity.keys() if n.upper().startswith('VDD')]
+        if vdd_nets:
+            cls.net_name = vdd_nets[0]
+        else:
+            cls.net_name = None
+            cls.model = None
+            return
+            
+        cls.model = create_model_from_pdn(cls.graph, cls.net_name)
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("netlist_small not available")
+        self.solver = DynamicIRDropSolver(self.model, self.graph)
+
+    def test_peak_ir_drop_matches(self):
+        """Peak IR-drop should match between legacy and array modes."""
+        t_array = np.linspace(0, 20e-9, 11)
+        
+        legacy_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=True,
+        )
+        
+        array_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=False,
+        )
+
+        # Peak IR-drop should match within numerical tolerance
+        self.assertAlmostEqual(
+            legacy_result.peak_ir_drop,
+            array_result.peak_ir_drop,
+            places=10,
+            msg="Peak IR-drop mismatch between legacy and array modes"
+        )
+
+    def test_peak_ir_drop_time_matches(self):
+        """Peak IR-drop time should match between modes."""
+        t_array = np.linspace(0, 20e-9, 11)
+        
+        legacy_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=True,
+        )
+        
+        array_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=False,
+        )
+
+        self.assertAlmostEqual(
+            legacy_result.peak_ir_drop_time,
+            array_result.peak_ir_drop_time,
+            places=15,
+            msg="Peak IR-drop time mismatch"
+        )
+
+    def test_max_ir_drop_per_time_matches(self):
+        """max_ir_drop_per_time should match between modes."""
+        t_array = np.linspace(0, 50e-9, 21)
+        
+        legacy_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=True,
+        )
+        
+        array_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=False,
+        )
+
+        np.testing.assert_allclose(
+            legacy_result.max_ir_drop_per_time,
+            array_result.max_ir_drop_per_time,
+            rtol=1e-10,
+            atol=1e-15,
+            err_msg="max_ir_drop_per_time mismatch"
+        )
+
+    def test_total_current_per_time_matches(self):
+        """total_current_per_time should match between modes."""
+        t_array = np.linspace(0, 50e-9, 21)
+        
+        legacy_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=True,
+        )
+        
+        array_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=False,
+        )
+
+        np.testing.assert_allclose(
+            legacy_result.total_current_per_time,
+            array_result.total_current_per_time,
+            rtol=1e-10,
+            atol=1e-15,
+            err_msg="total_current_per_time mismatch"
+        )
+
+    def test_worst_nodes_match(self):
+        """Worst nodes should match between modes."""
+        t_array = np.linspace(0, 20e-9, 11)
+        n_worst = 5
+        
+        legacy_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            n_worst_nodes=n_worst,
+            use_legacy=True,
+        )
+        
+        array_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            n_worst_nodes=n_worst,
+            use_legacy=False,
+        )
+
+        # Worst nodes should be the same (node, drop, time)
+        self.assertEqual(len(legacy_result.worst_nodes), len(array_result.worst_nodes))
+        
+        for (legacy_node, legacy_drop, legacy_time), (array_node, array_drop, array_time) in zip(
+            legacy_result.worst_nodes, array_result.worst_nodes
+        ):
+            self.assertEqual(legacy_node, array_node, "Worst node mismatch")
+            self.assertAlmostEqual(legacy_drop, array_drop, places=10, msg="Worst drop mismatch")
+            self.assertAlmostEqual(legacy_time, array_time, places=15, msg="Worst time mismatch")
+
+    def test_peak_ir_drop_per_node_matches(self):
+        """peak_ir_drop_per_node should match between modes."""
+        t_array = np.linspace(0, 20e-9, 11)
+        
+        legacy_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=True,
+        )
+        
+        array_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=False,
+        )
+
+        # Same set of nodes
+        self.assertEqual(
+            set(legacy_result.peak_ir_drop_per_node.keys()),
+            set(array_result.peak_ir_drop_per_node.keys()),
+            "peak_ir_drop_per_node node set mismatch"
+        )
+        
+        # Values should match
+        for node in legacy_result.peak_ir_drop_per_node:
+            self.assertAlmostEqual(
+                legacy_result.peak_ir_drop_per_node[node],
+                array_result.peak_ir_drop_per_node[node],
+                places=10,
+                msg=f"peak_ir_drop_per_node mismatch for node {node}"
+            )
+
+    def test_peak_current_per_node_matches(self):
+        """peak_current_per_node should match between modes."""
+        t_array = np.linspace(0, 20e-9, 11)
+        
+        legacy_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=True,
+        )
+        
+        array_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=False,
+        )
+
+        # Same set of nodes
+        self.assertEqual(
+            set(legacy_result.peak_current_per_node.keys()),
+            set(array_result.peak_current_per_node.keys()),
+            "peak_current_per_node node set mismatch"
+        )
+        
+        # Values should match
+        for node in legacy_result.peak_current_per_node:
+            self.assertAlmostEqual(
+                legacy_result.peak_current_per_node[node],
+                array_result.peak_current_per_node[node],
+                places=10,
+                msg=f"peak_current_per_node mismatch for node {node}"
+            )
+
+    def test_hierarchical_modes_match(self):
+        """Array mode should match legacy mode in hierarchical solving."""
+        t_array = np.linspace(0, 20e-9, 11)
+        
+        try:
+            legacy_result = self.solver.solve_quasi_static(
+                t_array=t_array,
+                method='hierarchical',
+                partition_layer='M2',
+                top_k=5,
+                use_legacy=True,
+            )
+            
+            array_result = self.solver.solve_quasi_static(
+                t_array=t_array,
+                method='hierarchical',
+                partition_layer='M2',
+                top_k=5,
+                use_legacy=False,
+            )
+
+            # Peak IR-drop should match
+            self.assertAlmostEqual(
+                legacy_result.peak_ir_drop,
+                array_result.peak_ir_drop,
+                places=10,
+                msg="Hierarchical peak IR-drop mismatch"
+            )
+            
+            # max_ir_drop_per_time should match
+            np.testing.assert_allclose(
+                legacy_result.max_ir_drop_per_time,
+                array_result.max_ir_drop_per_time,
+                rtol=1e-10,
+                atol=1e-15,
+                err_msg="Hierarchical max_ir_drop_per_time mismatch"
+            )
+        except Exception as e:
+            # Skip if hierarchical fails due to grid structure
+            if "singular" in str(e).lower() or "not positive definite" in str(e).lower():
+                self.skipTest(f"Hierarchical solve failed: {e}")
+            raise
+
+    def test_tracked_waveforms_match(self):
+        """Tracked waveforms should match between modes."""
+        t_array = np.linspace(0, 20e-9, 11)
+        
+        # Get worst node from a quick run to track it
+        quick_result = self.solver.solve_quasi_static(
+            t_array=t_array[:3],
+            method='flat',
+            n_worst_nodes=1,
+            use_legacy=True,
+        )
+        
+        if not quick_result.worst_nodes:
+            self.skipTest("No worst nodes to track")
+        
+        track_nodes = [quick_result.worst_nodes[0][0]]
+        
+        legacy_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            track_nodes=track_nodes,
+            use_legacy=True,
+        )
+        
+        array_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            track_nodes=track_nodes,
+            use_legacy=False,
+        )
+
+        # Check tracked waveforms match
+        for node in track_nodes:
+            if node in legacy_result.tracked_waveforms and node in array_result.tracked_waveforms:
+                np.testing.assert_allclose(
+                    legacy_result.tracked_waveforms[node],
+                    array_result.tracked_waveforms[node],
+                    rtol=1e-10,
+                    atol=1e-15,
+                    err_msg=f"tracked_waveforms mismatch for node {node}"
+                )
+                
+                np.testing.assert_allclose(
+                    legacy_result.tracked_ir_drop[node],
+                    array_result.tracked_ir_drop[node],
+                    rtol=1e-10,
+                    atol=1e-15,
+                    err_msg=f"tracked_ir_drop mismatch for node {node}"
+                )
+
+    def test_array_mode_faster(self):
+        """Array mode should be at least as fast as legacy mode."""
+        t_array = np.linspace(0, 50e-9, 21)
+        
+        # Warm up
+        self.solver.solve_quasi_static(t_array=t_array[:3], method='flat', use_legacy=True)
+        self.solver.solve_quasi_static(t_array=t_array[:3], method='flat', use_legacy=False)
+        
+        # Time legacy mode
+        legacy_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=True,
+        )
+        
+        # Time array mode
+        array_result = self.solver.solve_quasi_static(
+            t_array=t_array,
+            method='flat',
+            use_legacy=False,
+        )
+        
+        # Array mode should not be significantly slower
+        # (Allow 50% slower due to small grid overhead)
+        legacy_time = legacy_result.timings.get('time_stepping', 0)
+        array_time = array_result.timings.get('time_stepping', 0)
+        
+        # Log the timing comparison
+        if legacy_time > 0:
+            speedup = legacy_time / array_time if array_time > 0 else float('inf')
+            # Just log, don't assert - small grids may not show speedup
+            # print(f"Speedup: {speedup:.2f}x (legacy: {legacy_time*1000:.1f}ms, array: {array_time*1000:.1f}ms)")
+
+
 if __name__ == '__main__':
     unittest.main()

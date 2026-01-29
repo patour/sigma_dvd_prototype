@@ -105,8 +105,12 @@ class TestEndToEndPDNWorkflow(unittest.TestCase):
         """Test tracking specific nodes across time."""
         solver = DynamicIRDropSolver(self.model, self.graph)
 
-        # Get some valid nodes to track
-        valid_nodes = list(self.model.valid_nodes)[:5]
+        # Get some valid non-pad nodes to track (pad nodes have constant Vdd)
+        pad_set = set(self.model.pad_nodes)
+        valid_nodes = [n for n in self.model.valid_nodes if n not in pad_set]
+        if not valid_nodes:
+            self.skipTest("No non-pad nodes available to track in this PDN model")
+        valid_nodes = valid_nodes[:5]
 
         result = solver.solve_quasi_static(
             t_start=0.0,
