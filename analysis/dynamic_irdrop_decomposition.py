@@ -804,6 +804,71 @@ def generate_plots(
 
 
 # =============================================================================
+# Graph Loading (with pkl cache support)
+# =============================================================================
+
+def load_pdn_graph(
+    netlist_dir: str,
+    use_cache: bool = True,
+    verbose: bool = False,
+) -> Tuple[Any, float]:
+    """Load PDN graph from pickle cache or parse from netlist.
+
+    Automatically detects and converts NetworkX graphs to Rustworkx format
+    for compatibility with the current solver infrastructure.
+
+    Args:
+        netlist_dir: Path to PDN netlist directory
+        use_cache: If True, load from pdn_graph.pkl if available
+        verbose: Print progress
+
+    Returns:
+        Tuple of (graph, load_time_seconds)
+    """
+    import pickle
+    from pathlib import Path
+    from pdn.pdn_parser import NetlistParser
+    from core.graph_converter import detect_graph_type, ensure_rustworkx_graph
+
+    netlist_path = Path(netlist_dir)
+    pkl_path = netlist_path / 'pdn_graph.pkl'
+
+    t0 = time_module.perf_counter()
+
+    if use_cache and pkl_path.exists():
+        if verbose:
+            print(f"Loading cached graph from {pkl_path}...")
+        with open(pkl_path, 'rb') as f:
+            graph = pickle.load(f)
+
+        # Detect graph type and convert if needed
+        graph_type = detect_graph_type(graph)
+        if verbose:
+            print(f"  Graph type: {graph_type}")
+
+        if graph_type == 'networkx':
+            if verbose:
+                print("  Converting NetworkX graph to Rustworkx format...")
+            graph = ensure_rustworkx_graph(graph, verbose=False)
+            if verbose:
+                print("  Conversion complete!")
+
+        if verbose:
+            print(f"  Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}")
+    else:
+        if verbose:
+            if use_cache:
+                print(f"No cached graph found, parsing netlist: {netlist_dir}")
+            else:
+                print(f"Parsing netlist: {netlist_dir}")
+        parser = NetlistParser(netlist_dir)
+        graph = parser.parse()
+
+    load_time = time_module.perf_counter() - t0
+    return graph, load_time
+
+
+# =============================================================================
 # Main Analysis Function
 # =============================================================================
 
@@ -817,6 +882,7 @@ def analyze_dynamic_irdrop_decomposition(
     window_percent: float = 10.0,
     integration_method: str = 'trap',
     instances: Optional[List[str]] = None,
+    use_cache: bool = True,
     verbose: bool = False,
 ) -> DecompositionResult:
     """Analyze dynamic IR-drop and decompose into near/far contributions.
@@ -831,6 +897,7 @@ def analyze_dynamic_irdrop_decomposition(
         window_percent: Window size as percentage of design dimensions
         integration_method: 'trap' (Trapezoidal) or 'be' (Backward Euler)
         instances: Optional list of instance/node names to analyze (skips initial transient)
+        use_cache: If True, load from pdn_graph.pkl if available (default True)
         verbose: Print progress
 
     Returns:
@@ -839,18 +906,13 @@ def analyze_dynamic_irdrop_decomposition(
     timings: Dict[str, float] = {}
     t0_total = time_module.perf_counter()
 
-    # Import PDN parser and core modules
-    from pdn.pdn_parser import NetlistParser
+    # Import core modules
     from core import create_model_from_pdn
     from core.transient_solver import TransientIRDropSolver, IntegrationMethod
 
-    # Parse netlist
-    t0_parse = time_module.perf_counter()
-    if verbose:
-        print(f"Parsing netlist: {netlist_dir}")
-    parser = NetlistParser(netlist_dir)
-    graph = parser.parse()
-    timings['parse'] = time_module.perf_counter() - t0_parse
+    # Load graph (from cache or parse)
+    graph, load_time = load_pdn_graph(netlist_dir, use_cache=use_cache, verbose=verbose)
+    timings['parse'] = load_time
 
     # Create model
     t0_model = time_module.perf_counter()
@@ -1104,6 +1166,13 @@ def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> 
         'use_long': args.cholmod_use_long if args.cholmod_use_long is not None else solver_config.get('use_long'),
     }
 
+    # Cache configuration (--no-cache CLI flag overrides config)
+    # Default is True (use cache), --no-cache sets it to False
+    if args.no_cache:
+        result['use_cache'] = False
+    else:
+        result['use_cache'] = config.get('use_cache', True)
+
     # Output configuration
     output_config = config.get('output', {})
     result['output'] = args.output or output_config.get('json_file')
@@ -1160,6 +1229,10 @@ Examples:
     parser.add_argument('--instances', type=str, help='Comma-separated list of instance/node names')
     parser.add_argument('--instances-file', type=str, help='File with instance/node names (one per line)')
 
+    # Cache control
+    parser.add_argument('--no-cache', action='store_true',
+                        help='Force re-parsing netlist (ignore pdn_graph.pkl cache)')
+
     # Solver backend
     parser.add_argument('--backend', choices=['auto', 'splu', 'cholmod'], help='Solver backend')
     parser.add_argument('--cholmod-ordering', type=str, help='CHOLMOD ordering method')
@@ -1208,6 +1281,7 @@ Examples:
         window_percent=merged['window_percent'],
         integration_method=merged['integration_method'],
         instances=merged['instances'],
+        use_cache=merged['use_cache'],
         verbose=merged['verbose'],
     )
 
