@@ -1,0 +1,27 @@
+# Dynamic IR-Drop Decomposition Analysis Configuration
+# Usage: python -m analysis.dynamic_irdrop_decomposition --config analysis/config_netlist_small.yaml
+
+netlist_dir: pdn/netlist_small
+net: VDD_XLV
+
+time:
+  start: 0ns
+  end: 1ns
+  dt: 10ps
+
+analysis:
+  top_k: 2
+  window_percent: 5.0
+  integration: trap  # 'trap' (Trapezoidal) or 'be' (Backward Euler)
+
+solver:
+  backend: cholmod    # 'auto', 'splu', or 'cholmod'
+  ordering: amd       # 'amd', 'metis', 'nesdis', 'colamd', 'natural', or 'best'
+  mode: simplicial    # 'auto', 'simplicial', or 'supernodal'
+  # use_long: false   # Use 64-bit indices for large matrices
+
+output:
+  # json_file: results.json
+  # plot: true
+  # plot_dir: ./plots
+  verbose: true

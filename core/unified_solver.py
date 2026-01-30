@@ -279,19 +279,28 @@ class SparseFactorAdapter:
     
     def solve(self, rhs: np.ndarray) -> np.ndarray:
         """Solve the linear system using the cached factorization.
-        
+
+        Supports both vector (1D) and matrix (2D) right-hand sides for efficient
+        multi-RHS solving in transient analysis.
+
         Args:
-            rhs: Right-hand side vector
-            
+            rhs: Right-hand side vector (n,) or matrix (n, k) for k right-hand sides
+
         Returns:
-            Solution vector x such that A @ x = rhs
+            Solution vector x (n,) or matrix (n, k) such that A @ x = rhs
         """
         if self._backend == 'cholmod':
             # cholmod Factor uses solve_A for Ax=b (as opposed to solve for LDL'x=b)
+            # solve_A natively supports matrix RHS
             return self._factor.solve_A(rhs)
         else:
             # scipy SuperLU uses solve()
-            return self._factor.solve(rhs)
+            # For matrix RHS, solve column by column
+            if rhs.ndim == 1:
+                return self._factor.solve(rhs)
+            else:
+                # Multi-RHS: solve each column
+                return np.column_stack([self._factor.solve(rhs[:, i]) for i in range(rhs.shape[1])])
     
     def __call__(self, rhs: np.ndarray) -> np.ndarray:
         """Allow using the adapter as a callable (for backward compatibility)."""
