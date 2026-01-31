@@ -1187,27 +1187,29 @@ class TransientIRDropSolver:
             if verbose and i % max(1, n_steps // 10) == 0:
                 print(f"  Time step {i}/{n_steps} (t={t*1e9:.2f} ns)")
 
-            # Evaluate all source currents at this time (un-masked)
-            all_currents = self._vec_sources.evaluate_at_time(t)
+            # Evaluate per-source currents at this time
+            # We need per-source currents (not per-node aggregated) for masking
+            per_source_currents = self._vec_sources.evaluate_per_source_at_time(t)
 
             # Build multi-RHS current vector by applying masks
             I_u_multi.fill(0.0)
             for m in range(n_masks):
                 mask = source_masks[m]
-                # Apply mask to get masked currents
-                masked_currents = np.where(mask, all_currents[self._vec_sources.source_node_idx], 0.0)
+                # Apply mask to get masked per-source currents
+                masked_currents = np.where(mask, per_source_currents, 0.0)
 
-                # Compute total current for this mask
+                # Compute total current for this mask (sum of per-source currents)
                 total_current = masked_currents.sum()
                 total_current_per_time_all[m, i] = total_current
 
-                # Aggregate to unknown nodes
+                # Aggregate masked per-source currents to unknown nodes
+                # Use np.add.at for proper accumulation when multiple sources share a node
                 for src_idx in range(self._vec_sources.n_sources):
                     if mask[src_idx]:
                         node_idx = self._vec_sources.source_node_idx[src_idx]
                         if valid_source_mask[node_idx]:
                             unknown_idx = source_to_unknown[node_idx]
-                            I_u_multi[unknown_idx, m] -= all_currents[node_idx]
+                            I_u_multi[unknown_idx, m] -= per_source_currents[src_idx]
 
             # Time step (skip for i=0, already have DC initial condition)
             if i > 0:
@@ -1342,16 +1344,16 @@ class TransientIRDropSolver:
         if self._vec_sources is None:
             return 0.0
 
-        # Evaluate all sources
-        all_currents = self._vec_sources.evaluate_at_time(t)
+        # Evaluate per-source currents (not aggregated per-node)
+        per_source_currents = self._vec_sources.evaluate_per_source_at_time(t)
 
         # Apply mask at source level
         total = 0.0
         for src_idx in range(self._vec_sources.n_sources):
             if mask[src_idx]:
-                node_idx = self._vec_sources.source_node_idx[src_idx]
-                current = all_currents[node_idx]
+                current = per_source_currents[src_idx]
                 total += current
+                node_idx = self._vec_sources.source_node_idx[src_idx]
                 if valid_mask[node_idx]:
                     unknown_idx = source_to_unknown[node_idx]
                     rhs[unknown_idx] -= current

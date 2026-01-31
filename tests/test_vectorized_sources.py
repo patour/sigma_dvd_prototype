@@ -241,23 +241,10 @@ class TestPulseEvaluation(unittest.TestCase):
                 'node1': 'N1',
                 'dc_value': 0.0,
                 'pulses': [{
-        t = 11e-9  # midpoint of rise
-        delay = self.sources['I_pulse']['pulses'][0]['delay']
-        rt = self.sources['I_pulse']['pulses'][0]['rt']
-        v1 = self.sources['I_pulse']['pulses'][0]['v1']
-        v2 = self.sources['I_pulse']['pulses'][0]['v2']
-        currents = self.vec.evaluate_at_time(t)
-        # At t=11ns: t_rel = 11-10 = 1ns, rise_frac = 1/2 = 0.5
-        t_rel = t - delay
-        rise_frac = t_rel / rt
-        expected = v1 + (v2 - v1) * rise_frac
-        # value = 0 + (10-0)*0.5 = 5.0
-        self.assertAlmostEqual(
-            currents[self.node_to_idx['N1']],
-            expected,
-            places=5,
-            msg=f"Unexpected value during rise: rise_frac={rise_frac}",
-        )
+                    'v1': 0.0,
+                    'v2': 10.0,  # 10 mA peak
+                    'delay': 10e-9,  # 10 ns delay
+                    'rt': 2e-9,  # 2 ns rise
                     'ft': 2e-9,  # 2 ns fall
                     'width': 6e-9,  # 6 ns width
                     'period': 50e-9,  # 50 ns period
@@ -673,6 +660,309 @@ class TestEdgeCases(unittest.TestCase):
         # At t=15ns: during low
         currents = vec.evaluate_at_time(15e-9)
         self.assertAlmostEqual(currents[node_to_idx['N1']], 0.0)
+
+
+class TestSourceIndexTracking(unittest.TestCase):
+    """Tests for pulse_source_idx and pwl_source_idx tracking."""
+
+    def test_pulse_source_idx_populated(self):
+        """pulse_source_idx should track which source each pulse belongs to."""
+        sources = {
+            'I_src0': {
+                'node1': 'N1', 'dc_value': 0.0,
+                'pulses': [{'v1': 0.0, 'v2': 1.0, 'delay': 0.0, 'rt': 1e-9,
+                            'ft': 1e-9, 'width': 5e-9, 'period': 20e-9}],
+                'pwls': [],
+            },
+            'I_src1': {
+                'node1': 'N2', 'dc_value': 0.0,
+                'pulses': [
+                    {'v1': 0.0, 'v2': 2.0, 'delay': 0.0, 'rt': 1e-9,
+                     'ft': 1e-9, 'width': 5e-9, 'period': 20e-9},
+                    {'v1': 0.0, 'v2': 3.0, 'delay': 10e-9, 'rt': 1e-9,
+                     'ft': 1e-9, 'width': 5e-9, 'period': 20e-9},
+                ],
+                'pwls': [],
+            },
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        self.assertEqual(vec.n_pulses, 3)
+        self.assertEqual(len(vec.pulse_source_idx), 3)
+        # First pulse belongs to source 0, next two to source 1
+        self.assertEqual(vec.pulse_source_idx[0], 0)
+        self.assertEqual(vec.pulse_source_idx[1], 1)
+        self.assertEqual(vec.pulse_source_idx[2], 1)
+
+    def test_pwl_source_idx_populated(self):
+        """pwl_source_idx should track which source each PWL belongs to."""
+        sources = {
+            'I_src0': {
+                'node1': 'N1', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 0.0,
+                          'points': [(0.0, 1.0), (10e-9, 2.0)]}],
+            },
+            'I_src1': {
+                'node1': 'N2', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [
+                    {'delay': 0.0, 'period': 0.0,
+                     'points': [(0.0, 3.0), (10e-9, 4.0)]},
+                    {'delay': 5e-9, 'period': 20e-9,
+                     'points': [(0.0, 0.0), (10e-9, 5.0)]},
+                ],
+            },
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        self.assertEqual(vec.n_pwls, 3)
+        self.assertEqual(len(vec.pwl_source_idx), 3)
+        # First PWL belongs to source 0, next two to source 1
+        self.assertEqual(vec.pwl_source_idx[0], 0)
+        self.assertEqual(vec.pwl_source_idx[1], 1)
+        self.assertEqual(vec.pwl_source_idx[2], 1)
+
+
+class TestEvaluatePerSourceAtTime(unittest.TestCase):
+    """Tests for evaluate_per_source_at_time method.
+
+    This method is critical for correct masking when multiple sources
+    share the same node. Unlike evaluate_at_time (which aggregates by node),
+    this returns currents indexed by source.
+    """
+
+    def test_dc_only_per_source(self):
+        """DC sources should return per-source values."""
+        sources = {
+            'I1': {'node1': 'N1', 'dc_value': 1.0, 'pulses': [], 'pwls': []},
+            'I2': {'node1': 'N2', 'dc_value': 2.0, 'pulses': [], 'pwls': []},
+            'I3': {'node1': 'N1', 'dc_value': 3.0, 'pulses': [], 'pwls': []},
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        per_source = vec.evaluate_per_source_at_time(0.0)
+
+        self.assertEqual(len(per_source), 3)
+        self.assertAlmostEqual(per_source[0], 1.0)
+        self.assertAlmostEqual(per_source[1], 2.0)
+        self.assertAlmostEqual(per_source[2], 3.0)
+
+    def test_per_source_vs_per_node_with_shared_node(self):
+        """Per-source should differ from per-node when sources share a node."""
+        # Two sources on the same node
+        sources = {
+            'I1': {'node1': 'N1', 'dc_value': 1.0, 'pulses': [], 'pwls': []},
+            'I2': {'node1': 'N1', 'dc_value': 2.0, 'pulses': [], 'pwls': []},
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        per_source = vec.evaluate_per_source_at_time(0.0)
+        per_node = vec.evaluate_at_time(0.0)
+
+        # Per-source: [1.0, 2.0]
+        self.assertEqual(len(per_source), 2)
+        self.assertAlmostEqual(per_source[0], 1.0)
+        self.assertAlmostEqual(per_source[1], 2.0)
+
+        # Per-node: N1 = 1.0 + 2.0 = 3.0
+        self.assertAlmostEqual(per_node[node_to_idx['N1']], 3.0)
+
+    def test_per_source_with_pulses(self):
+        """Per-source should correctly add pulse contributions per source."""
+        sources = {
+            'I1': {
+                'node1': 'N1', 'dc_value': 1.0,
+                'pulses': [{'v1': 0.0, 'v2': 5.0, 'delay': 0.0, 'rt': 0.0,
+                            'ft': 0.0, 'width': 10e-9, 'period': 20e-9}],
+                'pwls': [],
+            },
+            'I2': {
+                'node1': 'N1', 'dc_value': 2.0,  # Same node as I1
+                'pulses': [],
+                'pwls': [],
+            },
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        # At t=5ns (during pulse high): I1 = 1.0 + 5.0 = 6.0, I2 = 2.0
+        per_source = vec.evaluate_per_source_at_time(5e-9)
+        self.assertAlmostEqual(per_source[0], 6.0)  # DC + pulse
+        self.assertAlmostEqual(per_source[1], 2.0)  # DC only
+
+        # Per-node should aggregate: N1 = 6.0 + 2.0 = 8.0
+        per_node = vec.evaluate_at_time(5e-9)
+        self.assertAlmostEqual(per_node[node_to_idx['N1']], 8.0)
+
+    def test_per_source_with_pwls(self):
+        """Per-source should correctly add PWL contributions per source."""
+        sources = {
+            'I1': {
+                'node1': 'N1', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 0.0,
+                          'points': [(0.0, 0.0), (10e-9, 4.0)]}],
+            },
+            'I2': {
+                'node1': 'N1', 'dc_value': 1.0, 'pulses': [],  # Same node
+                'pwls': [],
+            },
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        # At t=5ns: I1 PWL = 2.0 (interpolated), I2 = 1.0 DC
+        per_source = vec.evaluate_per_source_at_time(5e-9)
+        self.assertAlmostEqual(per_source[0], 2.0)
+        self.assertAlmostEqual(per_source[1], 1.0)
+
+    def test_per_source_empty_returns_empty(self):
+        """Empty sources should return empty array."""
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            {}, node_to_idx, n_nodes
+        )
+
+        per_source = vec.evaluate_per_source_at_time(0.0)
+        self.assertEqual(len(per_source), 0)
+
+    def test_masking_per_source_vs_per_node(self):
+        """Demonstrate correct masking using per-source vs incorrect per-node.
+
+        This test validates the bug fix: when multiple sources share a node,
+        masking should be applied per-source, not per-node.
+        """
+        # Two sources on the same node with different currents
+        sources = {
+            'I_near': {'node1': 'N1', 'dc_value': 3.0, 'pulses': [], 'pwls': []},
+            'I_far': {'node1': 'N1', 'dc_value': 7.0, 'pulses': [], 'pwls': []},
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        # Mask: only include first source (near)
+        mask = np.array([True, False])
+
+        # CORRECT: Per-source masking
+        per_source = vec.evaluate_per_source_at_time(0.0)
+        masked_per_source = np.where(mask, per_source, 0.0)
+        correct_total = masked_per_source.sum()
+
+        # The masked total should be 3.0 (only I_near)
+        self.assertAlmostEqual(correct_total, 3.0)
+
+        # INCORRECT (old bug): If we masked at node level
+        per_node = vec.evaluate_at_time(0.0)  # N1 = 10.0
+        # This would incorrectly include/exclude the entire node
+        # rather than individual sources
+
+
+class TestSharedNodeMasking(unittest.TestCase):
+    """Tests for correct masking behavior when multiple sources share a node.
+
+    These tests specifically validate the bug fix where masking must be
+    applied per-source (not per-node) when multiple sources inject current
+    into the same node.
+    """
+
+    def test_three_sources_same_node_selective_mask(self):
+        """Selective masking of sources on same node should work correctly."""
+        sources = {
+            'I_a': {'node1': 'N1', 'dc_value': 1.0, 'pulses': [], 'pwls': []},
+            'I_b': {'node1': 'N1', 'dc_value': 2.0, 'pulses': [], 'pwls': []},
+            'I_c': {'node1': 'N1', 'dc_value': 4.0, 'pulses': [], 'pwls': []},
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        per_source = vec.evaluate_per_source_at_time(0.0)
+
+        # Mask only sources 0 and 2 (I_a and I_c)
+        mask = np.array([True, False, True])
+        masked = np.where(mask, per_source, 0.0)
+
+        # Should get 1.0 + 4.0 = 5.0
+        self.assertAlmostEqual(masked.sum(), 5.0)
+
+        # With different mask (only I_b)
+        mask2 = np.array([False, True, False])
+        masked2 = np.where(mask2, per_source, 0.0)
+        self.assertAlmostEqual(masked2.sum(), 2.0)
+
+    def test_mixed_nodes_selective_mask(self):
+        """Masking should work correctly with mixed shared/unique nodes."""
+        sources = {
+            'I_n1_a': {'node1': 'N1', 'dc_value': 1.0, 'pulses': [], 'pwls': []},
+            'I_n1_b': {'node1': 'N1', 'dc_value': 2.0, 'pulses': [], 'pwls': []},
+            'I_n2': {'node1': 'N2', 'dc_value': 10.0, 'pulses': [], 'pwls': []},
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        per_source = vec.evaluate_per_source_at_time(0.0)
+
+        # Mask first and third sources (I_n1_a and I_n2)
+        mask = np.array([True, False, True])
+        masked = np.where(mask, per_source, 0.0)
+
+        # Should get 1.0 + 10.0 = 11.0 (not 3.0 + 10.0 = 13.0)
+        self.assertAlmostEqual(masked.sum(), 11.0)
+
+    def test_pulse_sources_shared_node_masking(self):
+        """Masking pulse sources on shared node should be independent."""
+        sources = {
+            'I_pulse_a': {
+                'node1': 'N1', 'dc_value': 0.0,
+                'pulses': [{'v1': 0.0, 'v2': 5.0, 'delay': 0.0, 'rt': 0.0,
+                            'ft': 0.0, 'width': 10e-9, 'period': 20e-9}],
+                'pwls': [],
+            },
+            'I_pulse_b': {
+                'node1': 'N1', 'dc_value': 0.0,  # Same node!
+                'pulses': [{'v1': 0.0, 'v2': 3.0, 'delay': 0.0, 'rt': 0.0,
+                            'ft': 0.0, 'width': 10e-9, 'period': 20e-9}],
+                'pwls': [],
+            },
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        # At t=5ns both pulses are high
+        per_source = vec.evaluate_per_source_at_time(5e-9)
+        self.assertAlmostEqual(per_source[0], 5.0)
+        self.assertAlmostEqual(per_source[1], 3.0)
+
+        # Mask only first source
+        mask = np.array([True, False])
+        masked = np.where(mask, per_source, 0.0)
+        self.assertAlmostEqual(masked.sum(), 5.0)
+
+        # Mask only second source
+        mask2 = np.array([False, True])
+        masked2 = np.where(mask2, per_source, 0.0)
+        self.assertAlmostEqual(masked2.sum(), 3.0)
 
 
 if __name__ == '__main__':

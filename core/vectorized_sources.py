@@ -43,7 +43,9 @@ class VectorizedCurrentSources:
         source_node_idx: Node index for each source
 
         pulse_*: Columnar arrays for all pulse waveforms
+        pulse_source_idx: Source index for each pulse (for masking)
         pwl_*: Packed arrays for all PWL waveforms
+        pwl_source_idx: Source index for each PWL (for masking)
     """
 
     # Node mapping (reference to model's mapping, not owned)
@@ -58,6 +60,7 @@ class VectorizedCurrentSources:
     # Pulse data - columnar storage (n_pulses,)
     n_pulses: int = 0
     pulse_node_idx: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
+    pulse_source_idx: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
     pulse_v1: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     pulse_v2: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     pulse_delay: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
@@ -70,6 +73,7 @@ class VectorizedCurrentSources:
     n_pwls: int = 0
     n_pwl_points: int = 0
     pwl_node_idx: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
+    pwl_source_idx: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
     pwl_period: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     pwl_delay: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     pwl_offset: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
@@ -101,16 +105,17 @@ class VectorizedCurrentSources:
         source_node_list: List[int] = []
 
         pulse_data: Dict[str, List] = {
-            'node_idx': [], 'v1': [], 'v2': [], 'delay': [],
+            'node_idx': [], 'source_idx': [], 'v1': [], 'v2': [], 'delay': [],
             'rt': [], 'ft': [], 'width': [], 'period': []
         }
 
         pwl_meta: Dict[str, List] = {
-            'node_idx': [], 'period': [], 'delay': [], 'offset': [], 'count': []
+            'node_idx': [], 'source_idx': [], 'period': [], 'delay': [], 'offset': [], 'count': []
         }
         pwl_times_list: List[float] = []
         pwl_values_list: List[float] = []
 
+        source_idx = 0
         for name, src in sources.items():
             node = src.node1
             if node not in node_to_idx:
@@ -120,9 +125,10 @@ class VectorizedCurrentSources:
             dc_list.append(src.dc_value)
             source_node_list.append(node_idx)
 
-            # Collect pulses
+            # Collect pulses (track source index for masking)
             for pulse in src.pulses:
                 pulse_data['node_idx'].append(node_idx)
+                pulse_data['source_idx'].append(source_idx)
                 pulse_data['v1'].append(pulse.v1)
                 pulse_data['v2'].append(pulse.v2)
                 pulse_data['delay'].append(pulse.delay)
@@ -131,9 +137,10 @@ class VectorizedCurrentSources:
                 pulse_data['width'].append(pulse.width)
                 pulse_data['period'].append(pulse.period)
 
-            # Collect PWLs (packed format)
+            # Collect PWLs (packed format, track source index for masking)
             for pwl in src.pwls:
                 pwl_meta['node_idx'].append(node_idx)
+                pwl_meta['source_idx'].append(source_idx)
                 pwl_meta['period'].append(pwl.period)
                 pwl_meta['delay'].append(pwl.delay)
                 pwl_meta['offset'].append(len(pwl_times_list))
@@ -142,6 +149,8 @@ class VectorizedCurrentSources:
                     pwl_times_list.append(t)
                     pwl_values_list.append(v)
 
+            source_idx += 1
+
         # Convert to numpy arrays
         obj.n_sources = len(dc_list)
         obj.dc_values = np.array(dc_list, dtype=np.float64)
@@ -149,6 +158,7 @@ class VectorizedCurrentSources:
 
         obj.n_pulses = len(pulse_data['node_idx'])
         obj.pulse_node_idx = np.array(pulse_data['node_idx'], dtype=np.int32)
+        obj.pulse_source_idx = np.array(pulse_data['source_idx'], dtype=np.int32)
         obj.pulse_v1 = np.array(pulse_data['v1'], dtype=np.float64)
         obj.pulse_v2 = np.array(pulse_data['v2'], dtype=np.float64)
         obj.pulse_delay = np.array(pulse_data['delay'], dtype=np.float64)
@@ -160,6 +170,7 @@ class VectorizedCurrentSources:
         obj.n_pwls = len(pwl_meta['node_idx'])
         obj.n_pwl_points = len(pwl_times_list)
         obj.pwl_node_idx = np.array(pwl_meta['node_idx'], dtype=np.int32)
+        obj.pwl_source_idx = np.array(pwl_meta['source_idx'], dtype=np.int32)
         obj.pwl_period = np.array(pwl_meta['period'], dtype=np.float64)
         obj.pwl_delay = np.array(pwl_meta['delay'], dtype=np.float64)
         obj.pwl_offset = np.array(pwl_meta['offset'], dtype=np.int32)
@@ -235,17 +246,18 @@ class VectorizedCurrentSources:
         source_node_list: List[int] = []
 
         pulse_data: Dict[str, List] = {
-            'node_idx': [], 'v1': [], 'v2': [], 'delay': [],
+            'node_idx': [], 'source_idx': [], 'v1': [], 'v2': [], 'delay': [],
             'rt': [], 'ft': [], 'width': [], 'period': []
         }
 
         pwl_meta: Dict[str, List] = {
-            'node_idx': [], 'period': [], 'delay': [], 'offset': [], 'count': []
+            'node_idx': [], 'source_idx': [], 'period': [], 'delay': [], 'offset': [], 'count': []
         }
         pwl_times_list: List[float] = []
         pwl_values_list: List[float] = []
 
         # Parse directly from serialized format
+        source_idx = 0
         for name, data in instance_sources.items():
             node1 = data.get('node1', '')
             if node1 not in node_to_idx:
@@ -256,9 +268,10 @@ class VectorizedCurrentSources:
             dc_list.append(data.get('dc_value', 0.0))
             source_node_list.append(node_idx)
 
-            # Parse pulses directly from dict
+            # Parse pulses directly from dict (track source index for masking)
             for pulse_dict in data.get('pulses', []):
                 pulse_data['node_idx'].append(node_idx)
+                pulse_data['source_idx'].append(source_idx)
                 pulse_data['v1'].append(pulse_dict.get('v1', 0.0))
                 pulse_data['v2'].append(pulse_dict.get('v2', 0.0))
                 pulse_data['delay'].append(pulse_dict.get('delay', 0.0))
@@ -267,10 +280,11 @@ class VectorizedCurrentSources:
                 pulse_data['width'].append(pulse_dict.get('width', 0.0))
                 pulse_data['period'].append(pulse_dict.get('period', 0.0))
 
-            # Parse PWLs directly from dict (packed format)
+            # Parse PWLs directly from dict (packed format, track source index for masking)
             for pwl_dict in data.get('pwls', []):
                 points = pwl_dict.get('points', [])
                 pwl_meta['node_idx'].append(node_idx)
+                pwl_meta['source_idx'].append(source_idx)
                 pwl_meta['period'].append(pwl_dict.get('period', 0.0))
                 pwl_meta['delay'].append(pwl_dict.get('delay', 0.0))
                 pwl_meta['offset'].append(len(pwl_times_list))
@@ -279,6 +293,8 @@ class VectorizedCurrentSources:
                     pwl_times_list.append(t)
                     pwl_values_list.append(v)
 
+            source_idx += 1
+
         # Convert to numpy arrays
         obj.n_sources = len(dc_list)
         obj.dc_values = np.array(dc_list, dtype=np.float64)
@@ -286,6 +302,7 @@ class VectorizedCurrentSources:
 
         obj.n_pulses = len(pulse_data['node_idx'])
         obj.pulse_node_idx = np.array(pulse_data['node_idx'], dtype=np.int32)
+        obj.pulse_source_idx = np.array(pulse_data['source_idx'], dtype=np.int32)
         obj.pulse_v1 = np.array(pulse_data['v1'], dtype=np.float64)
         obj.pulse_v2 = np.array(pulse_data['v2'], dtype=np.float64)
         obj.pulse_delay = np.array(pulse_data['delay'], dtype=np.float64)
@@ -297,6 +314,7 @@ class VectorizedCurrentSources:
         obj.n_pwls = len(pwl_meta['node_idx'])
         obj.n_pwl_points = len(pwl_times_list)
         obj.pwl_node_idx = np.array(pwl_meta['node_idx'], dtype=np.int32)
+        obj.pwl_source_idx = np.array(pwl_meta['source_idx'], dtype=np.int32)
         obj.pwl_period = np.array(pwl_meta['period'], dtype=np.float64)
         obj.pwl_delay = np.array(pwl_meta['delay'], dtype=np.float64)
         obj.pwl_offset = np.array(pwl_meta['offset'], dtype=np.int32)
@@ -310,10 +328,10 @@ class VectorizedCurrentSources:
         """Total memory usage in bytes."""
         arrays = [
             self.dc_values, self.source_node_idx,
-            self.pulse_node_idx, self.pulse_v1, self.pulse_v2,
+            self.pulse_node_idx, self.pulse_source_idx, self.pulse_v1, self.pulse_v2,
             self.pulse_delay, self.pulse_rt, self.pulse_ft,
             self.pulse_width, self.pulse_period,
-            self.pwl_node_idx, self.pwl_period, self.pwl_delay,
+            self.pwl_node_idx, self.pwl_source_idx, self.pwl_period, self.pwl_delay,
             self.pwl_offset, self.pwl_count, self.pwl_times, self.pwl_values
         ]
         return sum(arr.nbytes for arr in arrays)
@@ -344,6 +362,38 @@ class VectorizedCurrentSources:
             np.add.at(currents, self.pwl_node_idx, pwl_values)
 
         return currents
+
+    def evaluate_per_source_at_time(self, t: float) -> np.ndarray:
+        """Evaluate per-source currents at time t (for masking operations).
+
+        Unlike evaluate_at_time which aggregates currents by node, this returns
+        the current for each source individually. This is required for
+        solve_transient_multi_rhs where masks are applied per-source.
+
+        Args:
+            t: Time in seconds
+
+        Returns:
+            np.ndarray of shape (n_sources,) with current for each source (mA).
+            Includes DC value plus any pulse/PWL contributions for that source.
+        """
+        if self.n_sources == 0:
+            return np.array([], dtype=np.float64)
+
+        # Start with DC values (one per source)
+        per_source = self.dc_values.copy()
+
+        # Add pulse contributions (accumulate to the source each pulse belongs to)
+        if self.n_pulses > 0:
+            pulse_values = self._evaluate_pulses(t)
+            np.add.at(per_source, self.pulse_source_idx, pulse_values)
+
+        # Add PWL contributions (accumulate to the source each PWL belongs to)
+        if self.n_pwls > 0:
+            pwl_values = self._evaluate_pwls(t)
+            np.add.at(per_source, self.pwl_source_idx, pwl_values)
+
+        return per_source
 
     def evaluate_at_time_as_dict(
         self,

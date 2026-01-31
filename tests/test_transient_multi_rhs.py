@@ -533,5 +533,291 @@ class TestCurrentTracking(TestTransientMultiRHSBase):
             )
 
 
+class TestSharedNodeSourceMasking(unittest.TestCase):
+    """Test that shared-node sources are correctly masked at the source level.
+
+    This test validates the bug fix for per-source masking: before the fix,
+    solve_transient_multi_rhs would produce incorrect results when multiple
+    sources shared a node because it was masking at the node level (after
+    aggregation) instead of at the source level (before aggregation).
+
+    The test creates synthetic current sources with multiple sources on the
+    same node, then verifies that solve_transient() and solve_transient_multi_rhs()
+    (with an all-True mask) produce identical results.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        """Create a synthetic test scenario with shared-node sources."""
+        from pdn.pdn_parser import CurrentSource, Pulse, PWL
+
+        # Build a minimal PDN graph with shared-node current sources
+        if USE_SMALL_NETLIST:
+            test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+            net_name = 'VDD_XLV'
+        else:
+            test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+            net_name = 'VDD'
+
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, net_name)
+
+        # Get existing current sources to find valid nodes
+        graph_dict = cls.graph.graph if hasattr(cls.graph, 'graph') else cls.graph._attrs
+        original_sources = graph_dict.get('_instance_sources_objects', {})
+
+        if not original_sources:
+            cls.graph = None
+            cls.model = None
+            return
+
+        # Find a valid node that has a current source
+        shared_node = None
+        for name, src in original_sources.items():
+            node = getattr(src, 'node1', None)
+            if node and node != '0':
+                shared_node = node
+                break
+
+        if shared_node is None:
+            cls.graph = None
+            cls.model = None
+            return
+
+        cls.shared_node = shared_node
+
+        # Create synthetic sources with multiple sources on the same node
+        # Include DC, pulse, and PWL to exercise all code paths
+        synthetic_sources = {}
+
+        # Source 1: DC only on shared node
+        src1 = CurrentSource(
+            name='I_shared_dc1',
+            node1=shared_node,
+            node2='0',
+            dc_value=0.5,  # 0.5 mA
+        )
+        synthetic_sources['I_shared_dc1'] = src1
+
+        # Source 2: DC + pulse on same shared node
+        pulse = Pulse(
+            v1=0.0,
+            v2=1.0,  # 1 mA peak
+            delay=2e-9,
+            rt=0.5e-9,
+            ft=0.5e-9,
+            width=3e-9,
+            period=10e-9,
+        )
+        src2 = CurrentSource(
+            name='I_shared_pulse',
+            node1=shared_node,
+            node2='0',
+            dc_value=0.2,
+            pulses=[pulse],
+        )
+        synthetic_sources['I_shared_pulse'] = src2
+
+        # Source 3: PWL on same shared node
+        pwl = PWL(
+            delay=0.0,
+            period=0.0,  # Non-periodic
+            points=[(0.0, 0.0), (3e-9, 0.8), (6e-9, 0.3), (10e-9, 0.3)],
+        )
+        src3 = CurrentSource(
+            name='I_shared_pwl',
+            node1=shared_node,
+            node2='0',
+            dc_value=0.0,
+            pwls=[pwl],
+        )
+        synthetic_sources['I_shared_pwl'] = src3
+
+        # Replace original sources with synthetic sources
+        graph_dict['_instance_sources_objects'] = synthetic_sources
+
+        cls.n_sources = len(synthetic_sources)
+        cls.source_names = list(synthetic_sources.keys())
+        cls.track_node = shared_node
+
+    def setUp(self):
+        """Skip if test setup failed."""
+        if self.model is None:
+            self.skipTest("Test setup failed - no valid sources or nodes")
+        # Use vectorize_threshold=0 to force vectorization
+        self.solver = TransientIRDropSolver(self.model, self.graph, vectorize_threshold=0)
+
+    def test_shared_node_sources_match_standard_solve(self):
+        """All-True mask in multi_rhs should match standard solve_transient().
+
+        This is the key test for the bug fix: before the fix, when multiple
+        sources shared a node, the multi_rhs solver would incorrectly mask
+        at the node level (after aggregation), producing different results
+        from the standard solver. After the fix, both should be identical.
+        """
+        t_start, t_end, dt = 0.0, 8e-9, 0.5e-9
+        track_nodes = [self.track_node]
+
+        # Standard solve (unaffected by the bug)
+        result_std = self.solver.solve_transient(
+            t_start=t_start,
+            t_end=t_end,
+            dt=dt,
+            method=IntegrationMethod.BACKWARD_EULER,
+            track_nodes=track_nodes,
+        )
+
+        # Multi-RHS with all-True mask (this was buggy before the fix)
+        mask_all = np.ones(self.n_sources, dtype=bool)
+        results_multi = self.solver.solve_transient_multi_rhs(
+            t_start=t_start,
+            t_end=t_end,
+            dt=dt,
+            source_masks=mask_all[np.newaxis, :],  # (1, n_sources)
+            method=IntegrationMethod.BACKWARD_EULER,
+            track_nodes=track_nodes,
+        )
+
+        self.assertEqual(len(results_multi), 1)
+        result_multi = results_multi[0]
+
+        # Compare peak IR-drop - should be identical
+        self.assertAlmostEqual(
+            result_std.peak_ir_drop,
+            result_multi.peak_ir_drop,
+            places=10,
+            msg=f"Peak IR-drop mismatch: std={result_std.peak_ir_drop*1000:.6f}mV, "
+                f"multi={result_multi.peak_ir_drop*1000:.6f}mV"
+        )
+
+        # Compare max_ir_drop_per_time arrays
+        np.testing.assert_allclose(
+            result_std.max_ir_drop_per_time,
+            result_multi.max_ir_drop_per_time,
+            rtol=1e-10,
+            err_msg="max_ir_drop_per_time should be identical"
+        )
+
+        # Compare total current per time
+        np.testing.assert_allclose(
+            result_std.total_current_per_time,
+            result_multi.total_current_per_time,
+            rtol=1e-10,
+            err_msg="total_current_per_time should be identical"
+        )
+
+        # Compare tracked waveforms for the shared node
+        if self.track_node in result_std.tracked_ir_drop:
+            np.testing.assert_allclose(
+                result_std.tracked_ir_drop[self.track_node],
+                result_multi.tracked_ir_drop[self.track_node],
+                rtol=1e-10,
+                err_msg=f"Tracked IR-drop for shared node {self.track_node} should match"
+            )
+
+    def test_selective_mask_excludes_sources_correctly(self):
+        """Masking out some sources on a shared node should reduce IR-drop.
+
+        When we mask out some sources on a shared node, the IR-drop should
+        decrease (since less current is being drawn). This validates that
+        masking is applied per-source, not per-node.
+        """
+        t_start, t_end, dt = 0.0, 8e-9, 0.5e-9
+
+        # All sources mask
+        mask_all = np.ones(self.n_sources, dtype=bool)
+
+        # Only first source mask
+        mask_first_only = np.zeros(self.n_sources, dtype=bool)
+        mask_first_only[0] = True
+
+        source_masks = np.stack([mask_all, mask_first_only])
+
+        results = self.solver.solve_transient_multi_rhs(
+            t_start=t_start,
+            t_end=t_end,
+            dt=dt,
+            source_masks=source_masks,
+            method=IntegrationMethod.BACKWARD_EULER,
+        )
+
+        result_all = results[0]
+        result_first = results[1]
+
+        # With only one source (instead of three on the same node),
+        # the IR-drop should be smaller
+        self.assertLess(
+            result_first.peak_ir_drop,
+            result_all.peak_ir_drop,
+            msg=f"Single source should have lower IR-drop than all sources: "
+                f"first={result_first.peak_ir_drop*1000:.4f}mV, "
+                f"all={result_all.peak_ir_drop*1000:.4f}mV"
+        )
+
+        # Total current should also be lower
+        for i in range(len(result_all.t_array)):
+            self.assertLessEqual(
+                abs(result_first.total_current_per_time[i]),
+                abs(result_all.total_current_per_time[i]) + 1e-10,
+                f"Single source should have <= current at t[{i}]"
+            )
+
+    def test_superposition_with_shared_nodes(self):
+        """Verify superposition holds when sources share a node.
+
+        For a linear system, V_total = V_src1 + V_src2 + V_src3.
+        This validates that masking is correctly applied to each source
+        independently, even when they share a node.
+        """
+        t_start, t_end, dt = 0.0, 8e-9, 0.5e-9
+        track_nodes = [self.track_node]
+
+        # Create individual masks for each source
+        masks = []
+        for i in range(self.n_sources):
+            mask = np.zeros(self.n_sources, dtype=bool)
+            mask[i] = True
+            masks.append(mask)
+
+        # Add all-sources mask
+        mask_all = np.ones(self.n_sources, dtype=bool)
+        masks.append(mask_all)
+
+        source_masks = np.stack(masks)
+
+        results = self.solver.solve_transient_multi_rhs(
+            t_start=t_start,
+            t_end=t_end,
+            dt=dt,
+            source_masks=source_masks,
+            method=IntegrationMethod.BACKWARD_EULER,
+            track_nodes=track_nodes,
+        )
+
+        # Results: [src0_only, src1_only, src2_only, all_sources]
+        result_all = results[-1]
+
+        # Sum of individual source contributions
+        summed_ir_drop = np.zeros_like(result_all.tracked_ir_drop[self.track_node])
+        for i in range(self.n_sources):
+            if self.track_node in results[i].tracked_ir_drop:
+                summed_ir_drop += results[i].tracked_ir_drop[self.track_node]
+
+        # Verify superposition: sum of individuals ≈ all together
+        np.testing.assert_allclose(
+            summed_ir_drop,
+            result_all.tracked_ir_drop[self.track_node],
+            rtol=1e-8,
+            err_msg="Superposition should hold: sum of individual sources = all sources"
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
