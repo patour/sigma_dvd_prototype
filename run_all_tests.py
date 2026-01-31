@@ -19,6 +19,9 @@ suite = unittest.TestSuite()
 
 # Load specific test modules, excluding integration tests
 test_modules = [
+    'tests.test_batch_solving',
+    'tests.test_coupled_hierarchical_solver',
+    'tests.test_dynamic_solver',
     'tests.test_hierarchical_solver',
     'tests.test_irdrop',
     'tests.test_partitioner',
@@ -26,9 +29,12 @@ test_modules = [
     'tests.test_pdn_plotter',
     'tests.test_pdn_solver',
     'tests.test_regional_solver',
-    'tests.test_unified_core',
-    'tests.test_dynamic_solver',
+    'tests.test_rx_algorithms',
+    'tests.test_rx_graph',
+    'tests.test_transient_multi_rhs',
     'tests.test_transient_solver',
+    'tests.test_unified_core',
+    'tests.test_vectorized_sources',
 ]
 
 for module in test_modules:
