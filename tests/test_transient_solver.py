@@ -940,5 +940,364 @@ class TestCapacitanceEffects(unittest.TestCase):
                 f"BE and Trap should give similar results: BE={be_peak*1000:.4f}mV, Trap={trap_peak*1000:.4f}mV")
 
 
+class TestMultiRHSSolver(unittest.TestCase):
+    """Tests for solve_transient_multi_rhs with multiple current source masks."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+        # Use vectorize_threshold=0 to force vectorized mode
+        self.solver = TransientIRDropSolver(self.model, self.graph, vectorize_threshold=0)
+
+    def test_multi_rhs_requires_vectorized_sources(self):
+        """solve_transient_multi_rhs should require vectorized current sources."""
+        # Create solver without vectorized sources
+        solver_no_vec = TransientIRDropSolver(self.model, self.graph, vectorize_threshold=-1)
+
+        n_sources = 17  # Known size for test netlist
+        masks = np.ones((1, n_sources), dtype=bool)
+
+        with self.assertRaises(RuntimeError):
+            solver_no_vec.solve_transient_multi_rhs(
+                t_start=0, t_end=1e-9, dt=1e-9,
+                source_masks=masks
+            )
+
+    def test_multi_rhs_validates_mask_shape(self):
+        """solve_transient_multi_rhs should validate mask shape."""
+        # Wrong number of sources in mask
+        wrong_masks = np.ones((2, 5), dtype=bool)  # Wrong n_sources
+
+        with self.assertRaises(ValueError):
+            self.solver.solve_transient_multi_rhs(
+                t_start=0, t_end=1e-9, dt=1e-9,
+                source_masks=wrong_masks
+            )
+
+    def test_multi_rhs_returns_list_of_results(self):
+        """solve_transient_multi_rhs should return one result per mask."""
+        n_sources = self.solver._vec_sources.n_sources
+        masks = np.stack([
+            np.ones(n_sources, dtype=bool),
+            np.zeros(n_sources, dtype=bool),
+            np.array([i % 2 == 0 for i in range(n_sources)], dtype=bool),
+        ])
+
+        results = self.solver.solve_transient_multi_rhs(
+            t_start=0, t_end=5e-9, dt=1e-9,
+            source_masks=masks
+        )
+
+        self.assertEqual(len(results), 3)
+        for result in results:
+            self.assertIsInstance(result, TransientResult)
+
+    def test_multi_rhs_all_sources_mask(self):
+        """All-sources mask should match single-RHS solve."""
+        n_sources = self.solver._vec_sources.n_sources
+        all_mask = np.ones((1, n_sources), dtype=bool)
+
+        multi_results = self.solver.solve_transient_multi_rhs(
+            t_start=0, t_end=10e-9, dt=1e-9,
+            source_masks=all_mask,
+            method=IntegrationMethod.TRAPEZOIDAL
+        )
+
+        single_result = self.solver.solve_transient(
+            t_start=0, t_end=10e-9, dt=1e-9,
+            method=IntegrationMethod.TRAPEZOIDAL
+        )
+
+        # Peak IR-drop should match
+        self.assertAlmostEqual(
+            multi_results[0].peak_ir_drop,
+            single_result.peak_ir_drop,
+            places=10,
+            msg="Multi-RHS with all sources should match single-RHS"
+        )
+
+        # Max IR-drop per time should match
+        np.testing.assert_allclose(
+            multi_results[0].max_ir_drop_per_time,
+            single_result.max_ir_drop_per_time,
+            rtol=1e-10,
+            err_msg="Max IR-drop per time should match"
+        )
+
+    def test_multi_rhs_zero_sources_mask(self):
+        """Zero-sources mask should give zero IR-drop."""
+        n_sources = self.solver._vec_sources.n_sources
+        zero_mask = np.zeros((1, n_sources), dtype=bool)
+
+        results = self.solver.solve_transient_multi_rhs(
+            t_start=0, t_end=5e-9, dt=1e-9,
+            source_masks=zero_mask
+        )
+
+        # With no current sources, IR-drop should be zero (within floating point tolerance)
+        self.assertAlmostEqual(results[0].peak_ir_drop, 0.0, places=10)
+        np.testing.assert_allclose(
+            results[0].max_ir_drop_per_time,
+            np.zeros_like(results[0].max_ir_drop_per_time),
+            atol=1e-12  # Allow for floating point rounding errors
+        )
+
+    def test_multi_rhs_linearity(self):
+        """IR-drop should be linear: total ≈ subset1 + subset2 (superposition).
+
+        Superposition holds for individual node voltages/IR-drops, not for
+        max() across nodes. So we test linearity on tracked node waveforms.
+        """
+        n_sources = self.solver._vec_sources.n_sources
+
+        # Split sources into two disjoint sets
+        mask_all = np.ones(n_sources, dtype=bool)
+        mask_even = np.array([i % 2 == 0 for i in range(n_sources)], dtype=bool)
+        mask_odd = ~mask_even
+
+        masks = np.stack([mask_all, mask_even, mask_odd])
+
+        # Track a specific node to verify linearity
+        rc = self.solver._ensure_rc_system()
+        track_node = rc.unknown_nodes[0]
+
+        results = self.solver.solve_transient_multi_rhs(
+            t_start=0, t_end=10e-9, dt=1e-9,
+            source_masks=masks,
+            method=IntegrationMethod.TRAPEZOIDAL,
+            track_nodes=[track_node]
+        )
+
+        result_all, result_even, result_odd = results
+
+        # By superposition: IR_all[node] ≈ IR_even[node] + IR_odd[node]
+        ir_all = result_all.tracked_ir_drop[track_node]
+        ir_even = result_even.tracked_ir_drop[track_node]
+        ir_odd = result_odd.tracked_ir_drop[track_node]
+
+        np.testing.assert_allclose(
+            ir_all,
+            ir_even + ir_odd,
+            rtol=1e-8,
+            err_msg="Linearity violated: node IR-drop should equal sum of disjoint subsets"
+        )
+
+        # Also verify total current linearity
+        np.testing.assert_allclose(
+            result_all.total_current_per_time,
+            result_even.total_current_per_time + result_odd.total_current_per_time,
+            rtol=1e-10,
+            err_msg="Total current linearity violated"
+        )
+
+    def test_multi_rhs_timing_keys(self):
+        """solve_transient_multi_rhs should include all timing keys."""
+        n_sources = self.solver._vec_sources.n_sources
+        masks = np.ones((1, n_sources), dtype=bool)
+
+        results = self.solver.solve_transient_multi_rhs(
+            t_start=0, t_end=5e-9, dt=1e-9,
+            source_masks=masks
+        )
+
+        expected_keys = {
+            'build_rc', 'build_map', 'factor', 'dc_init',
+            'time_stepping', 'solve', 'evaluate_currents', 'statistics',
+            'vsrc_current', 'spatial_peaks', 'tracked_waveforms',
+            'convert_results', 'total'
+        }
+
+        actual_keys = set(results[0].timings.keys())
+        self.assertEqual(actual_keys, expected_keys,
+            f"Missing timing keys: {expected_keys - actual_keys}")
+
+    def test_multi_rhs_tracked_waveforms(self):
+        """Tracked waveforms should be stored correctly for multi-RHS."""
+        n_sources = self.solver._vec_sources.n_sources
+        masks = np.stack([
+            np.ones(n_sources, dtype=bool),
+            np.array([i % 2 == 0 for i in range(n_sources)], dtype=bool),
+        ])
+
+        # Get a valid node to track
+        rc = self.solver._ensure_rc_system()
+        track_node = rc.unknown_nodes[0]
+
+        results = self.solver.solve_transient_multi_rhs(
+            t_start=0, t_end=5e-9, dt=1e-9,
+            source_masks=masks,
+            track_nodes=[track_node]
+        )
+
+        # Both results should have tracked waveforms
+        for result in results:
+            self.assertIn(track_node, result.tracked_waveforms)
+            self.assertIn(track_node, result.tracked_ir_drop)
+            self.assertEqual(len(result.tracked_waveforms[track_node]), len(result.t_array))
+
+    def test_multi_rhs_total_current_tracking(self):
+        """Total current per time should be tracked correctly for each mask."""
+        n_sources = self.solver._vec_sources.n_sources
+        mask_all = np.ones(n_sources, dtype=bool)
+        mask_half = np.array([i < n_sources // 2 for i in range(n_sources)], dtype=bool)
+
+        masks = np.stack([mask_all, mask_half])
+
+        results = self.solver.solve_transient_multi_rhs(
+            t_start=0, t_end=5e-9, dt=1e-9,
+            source_masks=masks
+        )
+
+        # All-sources should have >= half-sources current at each time
+        for i in range(len(results[0].t_array)):
+            self.assertGreaterEqual(
+                results[0].total_current_per_time[i],
+                results[1].total_current_per_time[i] - 1e-10,
+                msg=f"Total current for all sources should be >= half sources at t={results[0].t_array[i]}"
+            )
+
+
+class TestVectorizedSourcesMultiRHS(unittest.TestCase):
+    """Tests for vectorized source methods used by multi-RHS solver."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+        self.solver = TransientIRDropSolver(self.model, self.graph, vectorize_threshold=0)
+
+    def test_build_source_to_unknown_direct_from_dict(self):
+        """build_source_to_unknown_direct_from_dict should create valid mappings."""
+        rc = self.solver._ensure_rc_system()
+        vec_sources = self.solver._vec_sources
+
+        source_to_unknown_direct, valid_sources = vec_sources.build_source_to_unknown_direct_from_dict(
+            rc.unknown_to_idx,
+            self.model.edge_cache.idx_to_node,
+        )
+
+        # Should have n_sources entries
+        self.assertEqual(len(source_to_unknown_direct), vec_sources.n_sources)
+        self.assertEqual(len(valid_sources), vec_sources.n_sources)
+
+        # Valid sources should map to valid unknown indices
+        n_unknown = len(rc.unknown_nodes)
+        for i in range(vec_sources.n_sources):
+            if valid_sources[i]:
+                self.assertGreaterEqual(source_to_unknown_direct[i], 0)
+                self.assertLess(source_to_unknown_direct[i], n_unknown)
+            else:
+                self.assertEqual(source_to_unknown_direct[i], -1)
+
+    def test_evaluate_to_multi_rhs_correctness(self):
+        """evaluate_to_multi_rhs should produce correct aggregated currents."""
+        rc = self.solver._ensure_rc_system()
+        vec_sources = self.solver._vec_sources
+        n_unknown = len(rc.unknown_nodes)
+
+        # Build direct mapping
+        source_to_unknown_direct, valid_sources = vec_sources.build_source_to_unknown_direct_from_dict(
+            rc.unknown_to_idx,
+            self.model.edge_cache.idx_to_node,
+        )
+
+        # Create test masks
+        n_sources = vec_sources.n_sources
+        masks = np.stack([
+            np.ones(n_sources, dtype=bool),
+            np.zeros(n_sources, dtype=bool),
+        ])
+
+        # Evaluate
+        rhs_multi = np.zeros((n_unknown, 2), dtype=np.float64)
+        total_currents = vec_sources.evaluate_to_multi_rhs(
+            t=0.0, rhs_multi=rhs_multi, source_masks=masks,
+            source_to_unknown_direct=source_to_unknown_direct,
+            valid_sources=valid_sources
+        )
+
+        # All-sources should have non-zero RHS, zero-sources should have zero RHS
+        self.assertGreater(np.abs(rhs_multi[:, 0]).sum(), 0,
+            "All-sources mask should produce non-zero RHS")
+        np.testing.assert_allclose(rhs_multi[:, 1], 0,
+            err_msg="Zero-sources mask should produce zero RHS")
+
+        # Total current for zero mask should be zero
+        self.assertEqual(total_currents[1], 0.0)
+
+    def test_evaluate_to_multi_rhs_matches_evaluate_to_rhs_array(self):
+        """Multi-RHS with single all-ones mask should match single-RHS evaluation."""
+        rc = self.solver._ensure_rc_system()
+        vec_sources = self.solver._vec_sources
+        n_unknown = len(rc.unknown_nodes)
+
+        # Build node-level mapping for single-RHS
+        source_to_unknown, valid_mask = vec_sources.build_source_to_unknown_map(
+            rc.unknown_to_idx,
+            self.model.edge_cache.idx_to_node,
+        )
+
+        # Build direct mapping for multi-RHS
+        source_to_unknown_direct, valid_sources = vec_sources.build_source_to_unknown_direct_from_dict(
+            rc.unknown_to_idx,
+            self.model.edge_cache.idx_to_node,
+        )
+
+        # Single-RHS evaluation
+        rhs_single = np.zeros(n_unknown, dtype=np.float64)
+        total_single, _ = vec_sources.evaluate_to_rhs_array(
+            t=5e-9, rhs=rhs_single,
+            source_to_unknown=source_to_unknown,
+            valid_mask=valid_mask
+        )
+
+        # Multi-RHS evaluation with all-ones mask
+        n_sources = vec_sources.n_sources
+        masks = np.ones((1, n_sources), dtype=bool)
+        rhs_multi = np.zeros((n_unknown, 1), dtype=np.float64)
+        total_multi = vec_sources.evaluate_to_multi_rhs(
+            t=5e-9, rhs_multi=rhs_multi, source_masks=masks,
+            source_to_unknown_direct=source_to_unknown_direct,
+            valid_sources=valid_sources
+        )
+
+        # Results should match
+        np.testing.assert_allclose(
+            rhs_multi[:, 0], rhs_single,
+            rtol=1e-10,
+            err_msg="Multi-RHS should match single-RHS for all-ones mask"
+        )
+        self.assertAlmostEqual(total_multi[0], total_single, places=10)
+
+
 if __name__ == '__main__':
     unittest.main()

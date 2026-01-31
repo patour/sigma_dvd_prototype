@@ -965,5 +965,216 @@ class TestSharedNodeMasking(unittest.TestCase):
         self.assertAlmostEqual(masked2.sum(), 3.0)
 
 
+class TestEvaluateToMultiRHS(unittest.TestCase):
+    """Tests for VectorizedCurrentSources.evaluate_to_multi_rhs.
+
+    These tests construct VectorizedCurrentSources with controlled DC values
+    and node mappings, then verify the vectorized aggregation correctly handles:
+    - Multiple sources mapping to the same unknown node
+    - Masked source selection
+    - Edge cases (empty masks, invalid sources)
+    """
+
+    def _make_vec_sources(self, dc_values, source_node_idx, n_nodes):
+        """Helper to create VectorizedCurrentSources with DC values only."""
+        return VectorizedCurrentSources(
+            n_nodes=n_nodes,
+            node_to_idx=None,
+            n_sources=len(dc_values),
+            dc_values=np.array(dc_values, dtype=np.float64),
+            source_node_idx=np.array(source_node_idx, dtype=np.int32),
+        )
+
+    def test_multiple_sources_same_node(self):
+        """Multiple sources at same node should be summed correctly."""
+        # 4 sources: sources 0,1 at node 0; sources 2,3 at node 1
+        vec_sources = self._make_vec_sources(
+            dc_values=[1.0, 2.0, 3.0, 4.0],
+            source_node_idx=[0, 0, 1, 1],
+            n_nodes=2
+        )
+
+        # Direct mapping: all sources map to valid unknown indices
+        source_to_unknown_direct = np.array([0, 0, 1, 1], dtype=np.int32)
+        valid_sources = np.ones(4, dtype=bool)
+
+        # All sources active
+        masks = np.ones((1, 4), dtype=bool)
+        rhs = np.zeros((2, 1), dtype=np.float64)
+
+        total_currents = vec_sources.evaluate_to_multi_rhs(
+            t=0.0, rhs_multi=rhs, source_masks=masks,
+            source_to_unknown_direct=source_to_unknown_direct,
+            valid_sources=valid_sources
+        )
+
+        # Node 0: -(1.0 + 2.0) = -3.0
+        # Node 1: -(3.0 + 4.0) = -7.0
+        np.testing.assert_allclose(rhs[:, 0], [-3.0, -7.0])
+        self.assertAlmostEqual(total_currents[0], 10.0)
+
+    def test_masked_sources_excluded(self):
+        """Masked sources should be correctly excluded from aggregation."""
+        vec_sources = self._make_vec_sources(
+            dc_values=[1.0, 2.0, 3.0, 4.0],
+            source_node_idx=[0, 0, 1, 1],
+            n_nodes=2
+        )
+
+        source_to_unknown_direct = np.array([0, 0, 1, 1], dtype=np.int32)
+        valid_sources = np.ones(4, dtype=bool)
+
+        # Only even-indexed sources active (0 and 2)
+        masks = np.array([[True, False, True, False]])
+        rhs = np.zeros((2, 1), dtype=np.float64)
+
+        total_currents = vec_sources.evaluate_to_multi_rhs(
+            t=0.0, rhs_multi=rhs, source_masks=masks,
+            source_to_unknown_direct=source_to_unknown_direct,
+            valid_sources=valid_sources
+        )
+
+        # Node 0: -(1.0) = -1.0 (only source 0)
+        # Node 1: -(3.0) = -3.0 (only source 2)
+        np.testing.assert_allclose(rhs[:, 0], [-1.0, -3.0])
+        self.assertAlmostEqual(total_currents[0], 4.0)  # 1.0 + 3.0
+
+    def test_invalid_sources_excluded(self):
+        """Sources not mapping to unknown nodes should be excluded from RHS."""
+        vec_sources = self._make_vec_sources(
+            dc_values=[1.0, 2.0, 3.0, 4.0],
+            source_node_idx=[0, 0, 1, 1],
+            n_nodes=2
+        )
+
+        # Sources 1,3 don't map to unknown nodes (e.g., they're at pad nodes)
+        source_to_unknown_direct = np.array([0, -1, 1, -1], dtype=np.int32)
+        valid_sources = source_to_unknown_direct >= 0
+
+        masks = np.ones((1, 4), dtype=bool)
+        rhs = np.zeros((2, 1), dtype=np.float64)
+
+        total_currents = vec_sources.evaluate_to_multi_rhs(
+            t=0.0, rhs_multi=rhs, source_masks=masks,
+            source_to_unknown_direct=source_to_unknown_direct,
+            valid_sources=valid_sources
+        )
+
+        # Only sources 0 and 2 contribute to RHS
+        np.testing.assert_allclose(rhs[:, 0], [-1.0, -3.0])
+        # But total_currents includes all sources
+        self.assertAlmostEqual(total_currents[0], 10.0)
+
+    def test_empty_mask_produces_zero_rhs(self):
+        """Empty mask should produce zero RHS but zero total current."""
+        vec_sources = self._make_vec_sources(
+            dc_values=[1.0, 2.0, 3.0, 4.0],
+            source_node_idx=[0, 0, 1, 1],
+            n_nodes=2
+        )
+
+        source_to_unknown_direct = np.array([0, 0, 1, 1], dtype=np.int32)
+        valid_sources = np.ones(4, dtype=bool)
+
+        masks = np.zeros((1, 4), dtype=bool)  # No sources active
+        rhs = np.zeros((2, 1), dtype=np.float64)
+
+        total_currents = vec_sources.evaluate_to_multi_rhs(
+            t=0.0, rhs_multi=rhs, source_masks=masks,
+            source_to_unknown_direct=source_to_unknown_direct,
+            valid_sources=valid_sources
+        )
+
+        np.testing.assert_allclose(rhs[:, 0], [0.0, 0.0])
+        self.assertAlmostEqual(total_currents[0], 0.0)
+
+    def test_multiple_masks_independent(self):
+        """Multiple masks should produce independent RHS vectors."""
+        vec_sources = self._make_vec_sources(
+            dc_values=[1.0, 2.0, 3.0, 4.0],
+            source_node_idx=[0, 0, 1, 1],
+            n_nodes=2
+        )
+
+        source_to_unknown_direct = np.array([0, 0, 1, 1], dtype=np.int32)
+        valid_sources = np.ones(4, dtype=bool)
+
+        # Three different masks: all, even, odd
+        masks = np.array([
+            [True, True, True, True],    # all
+            [True, False, True, False],  # even
+            [False, True, False, True],  # odd
+        ])
+        rhs = np.zeros((2, 3), dtype=np.float64)
+
+        total_currents = vec_sources.evaluate_to_multi_rhs(
+            t=0.0, rhs_multi=rhs, source_masks=masks,
+            source_to_unknown_direct=source_to_unknown_direct,
+            valid_sources=valid_sources
+        )
+
+        # Mask 0 (all): Node 0 = -(1+2) = -3, Node 1 = -(3+4) = -7
+        np.testing.assert_allclose(rhs[:, 0], [-3.0, -7.0])
+        # Mask 1 (even): Node 0 = -1, Node 1 = -3
+        np.testing.assert_allclose(rhs[:, 1], [-1.0, -3.0])
+        # Mask 2 (odd): Node 0 = -2, Node 1 = -4
+        np.testing.assert_allclose(rhs[:, 2], [-2.0, -4.0])
+
+        # Verify linearity: all = even + odd
+        np.testing.assert_allclose(rhs[:, 0], rhs[:, 1] + rhs[:, 2])
+
+        # Total currents should also be additive
+        np.testing.assert_allclose(total_currents, [10.0, 4.0, 6.0])
+
+    def test_gaps_in_unknown_indices(self):
+        """Sources with gaps in unknown indices should aggregate correctly."""
+        vec_sources = self._make_vec_sources(
+            dc_values=[1.0, 2.0],
+            source_node_idx=[0, 4],  # Gap in node indices
+            n_nodes=5
+        )
+
+        # Direct mapping with gap
+        source_to_unknown_direct = np.array([0, 4], dtype=np.int32)
+        valid_sources = np.ones(2, dtype=bool)
+
+        masks = np.ones((1, 2), dtype=bool)
+        rhs = np.zeros((5, 1), dtype=np.float64)
+
+        vec_sources.evaluate_to_multi_rhs(
+            t=0.0, rhs_multi=rhs, source_masks=masks,
+            source_to_unknown_direct=source_to_unknown_direct,
+            valid_sources=valid_sources
+        )
+
+        # Only nodes 0 and 4 should have values
+        expected = np.array([-1.0, 0.0, 0.0, 0.0, -2.0])
+        np.testing.assert_allclose(rhs[:, 0], expected)
+
+    def test_no_valid_sources(self):
+        """All sources invalid should produce zero RHS."""
+        vec_sources = self._make_vec_sources(
+            dc_values=[1.0, 2.0],
+            source_node_idx=[0, 1],
+            n_nodes=2
+        )
+
+        # All sources map to pads (invalid)
+        source_to_unknown_direct = np.array([-1, -1], dtype=np.int32)
+        valid_sources = np.zeros(2, dtype=bool)
+
+        masks = np.ones((1, 2), dtype=bool)
+        rhs = np.zeros((2, 1), dtype=np.float64)
+
+        total_currents = vec_sources.evaluate_to_multi_rhs(
+            t=0.0, rhs_multi=rhs, source_masks=masks,
+            source_to_unknown_direct=source_to_unknown_direct,
+            valid_sources=valid_sources
+        )
+
+        np.testing.assert_allclose(rhs[:, 0], [0.0, 0.0])
+        self.assertAlmostEqual(total_currents[0], 3.0)  # Total still counted
+
+
 if __name__ == '__main__':
     unittest.main()

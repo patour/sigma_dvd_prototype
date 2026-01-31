@@ -675,3 +675,129 @@ class VectorizedCurrentSources:
         valid_mask = source_to_unknown >= 0
 
         return source_to_unknown, valid_mask
+
+    def build_source_to_unknown_direct(
+        self,
+        source_to_unknown: np.ndarray,
+        valid_mask: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Build direct source-to-unknown mapping for multi-RHS operations.
+
+        Unlike build_source_to_unknown_map which maps node indices to unknown indices,
+        this maps source indices directly to unknown indices, enabling efficient
+        vectorized aggregation in solve_transient_multi_rhs.
+
+        Args:
+            source_to_unknown: Node-level mapping from build_source_to_unknown_map
+            valid_mask: Node-level validity mask from build_source_to_unknown_map
+
+        Returns:
+            Tuple of (source_to_unknown_direct, valid_sources) where:
+            - source_to_unknown_direct: int32 array (n_sources,), -1 if source's node is not unknown
+            - valid_sources: bool array (n_sources,), True where source maps to a valid unknown node
+        """
+        # Map each source directly to its unknown node index
+        source_node_indices = self.source_node_idx
+        source_to_unknown_direct = source_to_unknown[source_node_indices]
+        valid_sources = valid_mask[source_node_indices]
+
+        return source_to_unknown_direct, valid_sources
+
+    def build_source_to_unknown_direct_from_dict(
+        self,
+        unknown_to_idx: Dict[Any, int],
+        idx_to_node: List[Any],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Build direct source-to-unknown mapping without intermediate node mapping.
+
+        This is the efficient method for solve_transient_multi_rhs - builds the
+        source -> unknown mapping directly without creating the intermediate
+        node -> unknown mapping.
+
+        Args:
+            unknown_to_idx: Dict mapping unknown node -> index in reduced system
+            idx_to_node: List mapping node index -> node (from edge_cache.idx_to_node)
+
+        Returns:
+            Tuple of (source_to_unknown_direct, valid_sources) where:
+            - source_to_unknown_direct: int32 array (n_sources,), -1 if source's node is not unknown
+            - valid_sources: bool array (n_sources,), True where source maps to a valid unknown node
+        """
+        n_sources = self.n_sources
+        source_to_unknown_direct = np.full(n_sources, -1, dtype=np.int32)
+
+        for src_idx in range(n_sources):
+            node_idx = self.source_node_idx[src_idx]
+            node = idx_to_node[node_idx]
+            if node in unknown_to_idx:
+                source_to_unknown_direct[src_idx] = unknown_to_idx[node]
+
+        valid_sources = source_to_unknown_direct >= 0
+
+        return source_to_unknown_direct, valid_sources
+
+    def evaluate_to_multi_rhs(
+        self,
+        t: float,
+        rhs_multi: np.ndarray,
+        source_masks: np.ndarray,
+        source_to_unknown_direct: np.ndarray,
+        valid_sources: np.ndarray,
+    ) -> np.ndarray:
+        """Evaluate currents for multiple RHS vectors with source masks.
+
+        This is the efficient vectorized method for solve_transient_multi_rhs.
+        Evaluates per-source currents once, then aggregates to each RHS using
+        vectorized operations.
+
+        Args:
+            t: Time in seconds
+            rhs_multi: Pre-allocated RHS array (n_unknown, n_masks) to write to.
+                       Will be modified in-place.
+            source_masks: Boolean mask (n_masks, n_sources) indicating which
+                          sources are active for each mask.
+            source_to_unknown_direct: Direct source->unknown mapping from
+                                      build_source_to_unknown_direct.
+            valid_sources: Boolean mask from build_source_to_unknown_direct.
+
+        Returns:
+            total_currents: Array (n_masks,) with total current for each mask.
+        """
+        n_masks = source_masks.shape[0]
+        n_unknown = rhs_multi.shape[0]
+
+        # Evaluate per-source currents once
+        per_source_currents = self.evaluate_per_source_at_time(t)
+
+        # Compute total currents per mask (fully vectorized)
+        # source_masks: (n_masks, n_sources), per_source_currents: (n_sources,)
+        total_currents = (source_masks * per_source_currents).sum(axis=1)
+
+        # Pre-filter to valid sources (those that map to unknown nodes)
+        valid_idx = np.where(valid_sources)[0]
+        if len(valid_idx) == 0:
+            return total_currents
+
+        valid_unknown_idx = source_to_unknown_direct[valid_idx]
+        valid_currents = per_source_currents[valid_idx]
+
+        # Get masks for valid sources only: (n_masks, n_valid_sources)
+        valid_masks = source_masks[:, valid_idx]
+
+        # Compute masked currents for all masks: (n_masks, n_valid_sources)
+        masked_currents_all = valid_masks * valid_currents  # broadcasts
+
+        # Aggregate using bincount for each mask (more efficient than add.at in loop)
+        # bincount is O(n_valid) per mask, avoiding repeated indexing
+        for m in range(n_masks):
+            masked_currents = masked_currents_all[m]
+            # Use bincount for fast aggregation
+            if masked_currents.any():
+                aggregated = np.bincount(
+                    valid_unknown_idx,
+                    weights=-masked_currents,
+                    minlength=n_unknown
+                )
+                rhs_multi[:, m] += aggregated
+
+        return total_currents

@@ -949,7 +949,7 @@ def analyze_dynamic_irdrop_decomposition(
         print(f"Grid bounds: {grid_bounds}")
 
     # Create solver (use vectorize_threshold=0 to enable solve_transient_multi_rhs)
-    solver = TransientIRDropSolver(model, graph, vectorize_threshold=0)
+    solver = TransientIRDropSolver(model, graph, vectorize_threshold=0, clear_graph_metadata=True)
 
     # Build source name list and index mapping
     source_names = list(current_sources.keys())
@@ -1057,7 +1057,7 @@ def analyze_dynamic_irdrop_decomposition(
             source_masks=source_masks,
             method=method_enum,
             track_nodes=[node],
-            verbose=False,
+            verbose=verbose,
         )
         result_full, result_near, result_far = results
 

@@ -692,7 +692,7 @@ class TransientIRDropSolver:
             A = rc.G_uu + 2.0 * rc.C_uu / dt_scaled
             C_coeff = 2.0 / dt_scaled
 
-        lu = _factor_conductance_matrix(A)
+        lu = _factor_conductance_matrix(A, verbose=verbose)
         timings['factor'] = time_module.perf_counter() - t0_factor
 
         # Pad voltage contribution (constant)
@@ -1090,9 +1090,9 @@ class TransientIRDropSolver:
                 for _ in range(n_masks)
             ]
 
-        # Build source-to-unknown mapping
+        # Build direct source-to-unknown mapping for vectorized multi-RHS
         t0_map = time_module.perf_counter()
-        source_to_unknown, valid_source_mask = self._vec_sources.build_source_to_unknown_map(
+        source_to_unknown_direct, valid_sources = self._vec_sources.build_source_to_unknown_direct_from_dict(
             rc.unknown_to_idx,
             self.model.edge_cache.idx_to_node,
         )
@@ -1110,7 +1110,7 @@ class TransientIRDropSolver:
             A = rc.G_uu + 2.0 * rc.C_uu / dt_scaled
             C_coeff = 2.0 / dt_scaled
 
-        lu = _factor_conductance_matrix(A)
+        lu = _factor_conductance_matrix(A, verbose=verbose)
         timings['factor'] = time_module.perf_counter() - t0_factor
 
         # Pad voltage contribution (constant)
@@ -1161,14 +1161,15 @@ class TransientIRDropSolver:
         t0_dc = time_module.perf_counter()
         lu_dc = _factor_conductance_matrix(rc.G_uu)
 
+        # Use vectorized multi-RHS evaluation for DC init
+        I_u_init_multi = np.zeros((n_unknown, n_masks), dtype=np.float64)
+        self._vec_sources.evaluate_to_multi_rhs(
+            t_start, I_u_init_multi, source_masks,
+            source_to_unknown_direct, valid_sources
+        )
+
         for m in range(n_masks):
-            I_u_init = np.zeros(n_unknown, dtype=np.float64)
-            # Evaluate currents with mask
-            currents_init = self._evaluate_masked_currents_to_rhs(
-                t_start, I_u_init, source_masks[m],
-                source_to_unknown, valid_source_mask
-            )
-            rhs_dc = I_u_init - G_up_Vp
+            rhs_dc = I_u_init_multi[:, m] - G_up_Vp
             V_u_all[m] = lu_dc.solve(rhs_dc)
 
         timings['dc_init'] = time_module.perf_counter() - t0_dc
@@ -1182,34 +1183,26 @@ class TransientIRDropSolver:
 
         # Time stepping
         t0_solve = time_module.perf_counter()
+        time_evaluate_currents = 0.0
+        time_rhs_solve = 0.0
+        time_statistics = 0.0
+        time_vsrc_current = 0.0
+        time_spatial_peaks = 0.0
+        time_tracked_waveforms = 0.0
 
         for i, t in enumerate(t_array):
             if verbose and i % max(1, n_steps // 10) == 0:
                 print(f"  Time step {i}/{n_steps} (t={t*1e9:.2f} ns)")
 
-            # Evaluate per-source currents at this time
-            # We need per-source currents (not per-node aggregated) for masking
-            per_source_currents = self._vec_sources.evaluate_per_source_at_time(t)
-
-            # Build multi-RHS current vector by applying masks
+            # Evaluate currents for all masks using vectorized method
+            t0_eval = time_module.perf_counter()
             I_u_multi.fill(0.0)
-            for m in range(n_masks):
-                mask = source_masks[m]
-                # Apply mask to get masked per-source currents
-                masked_currents = np.where(mask, per_source_currents, 0.0)
-
-                # Compute total current for this mask (sum of per-source currents)
-                total_current = masked_currents.sum()
-                total_current_per_time_all[m, i] = total_current
-
-                # Aggregate masked per-source currents to unknown nodes
-                # Use np.add.at for proper accumulation when multiple sources share a node
-                for src_idx in range(self._vec_sources.n_sources):
-                    if mask[src_idx]:
-                        node_idx = self._vec_sources.source_node_idx[src_idx]
-                        if valid_source_mask[node_idx]:
-                            unknown_idx = source_to_unknown[node_idx]
-                            I_u_multi[unknown_idx, m] -= per_source_currents[src_idx]
+            total_currents = self._vec_sources.evaluate_to_multi_rhs(
+                t, I_u_multi, source_masks,
+                source_to_unknown_direct, valid_sources
+            )
+            total_current_per_time_all[:, i] = total_currents
+            time_evaluate_currents += time_module.perf_counter() - t0_eval
 
             # Time step (skip for i=0, already have DC initial condition)
             if i > 0:
@@ -1226,10 +1219,13 @@ class TransientIRDropSolver:
                                  - G_Vold - 2.0 * G_up_Vp[:, np.newaxis])
 
                 # Solve for all masks at once: lu.solve handles multi-RHS
+                t0_rhs = time_module.perf_counter()
                 V_u_all_new = lu.solve(rhs_multi)  # (n_unknown, n_masks)
                 V_u_all = V_u_all_new.T  # Transpose back to (n_masks, n_unknown)
+                time_rhs_solve += time_module.perf_counter() - t0_rhs
 
             # Compute statistics for each mask
+            t0_stats = time_module.perf_counter()
             for m in range(n_masks):
                 V_u = V_u_all[m]
 
@@ -1243,13 +1239,20 @@ class TransientIRDropSolver:
                     global_peak_drop[m] = max_drop
                     global_peak_time[m] = t
                     global_peak_idx[m] = max_drop_idx
+            time_statistics += time_module.perf_counter() - t0_stats
 
-                # Update spatial peaks
+            # Update spatial peaks
+            t0_spatial = time_module.perf_counter()
+            for m in range(n_masks):
                 update_mask = ir_drop_arr > peak_ir_drop_all[m]
                 peak_ir_drop_all[m, update_mask] = ir_drop_arr[update_mask]
                 peak_time_all[m, update_mask] = t
+            time_spatial_peaks += time_module.perf_counter() - t0_spatial
 
-                # Vsrc current
+            # Vsrc current
+            t0_vsrc = time_module.perf_counter()
+            for m in range(n_masks):
+                V_u = V_u_all[m]
                 vsrc_current = 0.0
                 for other_node, g, sign in self._pad_edges:
                     if other_node in rc.unknown_to_idx:
@@ -1258,17 +1261,26 @@ class TransientIRDropSolver:
                         v_other = vdd
                     vsrc_current += sign * g * (vdd - v_other)
                 total_vsrc_current_per_time_all[m, i] = vsrc_current
+            time_vsrc_current += time_module.perf_counter() - t0_vsrc
 
             # Store tracked waveforms for all masks
+            t0_track = time_module.perf_counter()
             if tracked_voltages_all is not None:
                 for m in range(n_masks):
                     tracked_voltages_all[m, :, i] = V_u_all[m, tracked_idx_arr]
+            time_tracked_waveforms += time_module.perf_counter() - t0_track
 
         timings['time_stepping'] = time_module.perf_counter() - t0_solve
-        timings['total'] = time_module.perf_counter() - t0_total
+        timings['solve'] = time_rhs_solve
+        timings['evaluate_currents'] = time_evaluate_currents
+        timings['statistics'] = time_statistics
+        timings['vsrc_current'] = time_vsrc_current
+        timings['spatial_peaks'] = time_spatial_peaks
+        timings['tracked_waveforms'] = time_tracked_waveforms
 
-        # Build results for each mask
-        results = []
+        # Build intermediate data for each mask (for timing)
+        t0_convert = time_module.perf_counter()
+        result_data = []
         for m in range(n_masks):
             # Global peak node
             global_peak_node = rc.unknown_nodes[global_peak_idx[m]]
@@ -1301,21 +1313,36 @@ class TransientIRDropSolver:
                     tracked_waveforms[node] = tracked_voltages_all[m, local_idx, :].copy()
                     tracked_ir_drop[node] = vdd - tracked_waveforms[node]
 
+            result_data.append({
+                'global_peak_node': global_peak_node,
+                'worst_nodes': worst_nodes,
+                'peak_ir_drop_per_node': peak_ir_drop_per_node,
+                'tracked_waveforms': tracked_waveforms,
+                'tracked_ir_drop': tracked_ir_drop,
+            })
+
+        timings['convert_results'] = time_module.perf_counter() - t0_convert
+        timings['total'] = time_module.perf_counter() - t0_total
+
+        # Build TransientResult objects with complete timings
+        results = []
+        for m in range(n_masks):
+            data = result_data[m]
             results.append(TransientResult(
                 t_array=t_array,
                 peak_ir_drop=global_peak_drop[m],
                 peak_ir_drop_time=global_peak_time[m],
-                peak_ir_drop_node=global_peak_node,
-                worst_nodes=worst_nodes,
+                peak_ir_drop_node=data['global_peak_node'],
+                worst_nodes=data['worst_nodes'],
                 nominal_voltage=vdd,
                 integration_method=method,
                 timings=timings.copy(),
-                tracked_waveforms=tracked_waveforms,
-                tracked_ir_drop=tracked_ir_drop,
+                tracked_waveforms=data['tracked_waveforms'],
+                tracked_ir_drop=data['tracked_ir_drop'],
                 max_ir_drop_per_time=max_ir_drop_per_time_all[m].copy(),
                 total_current_per_time=total_current_per_time_all[m].copy(),
                 total_vsrc_current_per_time=total_vsrc_current_per_time_all[m].copy(),
-                peak_ir_drop_per_node=peak_ir_drop_per_node,
+                peak_ir_drop_per_node=data['peak_ir_drop_per_node'],
                 peak_current_per_node={},  # Not tracked in multi-RHS mode
             ))
 
