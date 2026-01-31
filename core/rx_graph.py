@@ -562,6 +562,69 @@ class RustworkxMultiDiGraphWrapper:
 
         return self._graph.add_edge(u_idx, v_idx, attrs)
 
+    def add_nodes_from(self, nodes_with_attrs: Iterable[Tuple[Any, Dict]]) -> List[int]:
+        """
+        Bulk add nodes with attributes.
+
+        More efficient than calling add_node() repeatedly for large batches,
+        as it minimizes Python overhead.
+
+        Args:
+            nodes_with_attrs: Iterable of (node_name, attrs_dict) tuples
+
+        Returns:
+            List of rustworkx indices for added/updated nodes
+        """
+        indices = []
+        for node, attrs in nodes_with_attrs:
+            if node not in self._node_to_idx:
+                idx = self._graph.add_node(node)
+                self._node_to_idx[node] = idx
+                self._idx_to_node[idx] = node
+                self._node_attrs[node] = dict(attrs)
+                indices.append(idx)
+            else:
+                # Merge attributes for existing node
+                self._node_attrs[node].update(attrs)
+                indices.append(self._node_to_idx[node])
+        return indices
+
+    def add_edges_from(self, edges: Iterable[Tuple[Any, Any, Dict]]) -> List[int]:
+        """
+        Bulk add edges with attributes.
+
+        More efficient than calling add_edge() repeatedly for large batches.
+        Nodes are automatically created if they don't exist.
+
+        Args:
+            edges: Iterable of (u, v, attrs_dict) tuples
+
+        Returns:
+            List of rustworkx edge indices for added edges
+        """
+        indices = []
+        for u, v, attrs in edges:
+            # Ensure nodes exist
+            if u not in self._node_to_idx:
+                u_idx = self._graph.add_node(u)
+                self._node_to_idx[u] = u_idx
+                self._idx_to_node[u_idx] = u
+                self._node_attrs[u] = {}
+            else:
+                u_idx = self._node_to_idx[u]
+
+            if v not in self._node_to_idx:
+                v_idx = self._graph.add_node(v)
+                self._node_to_idx[v] = v_idx
+                self._idx_to_node[v_idx] = v
+                self._node_attrs[v] = {}
+            else:
+                v_idx = self._node_to_idx[v]
+
+            edge_idx = self._graph.add_edge(u_idx, v_idx, attrs)
+            indices.append(edge_idx)
+        return indices
+
     def remove_edge(self, u: Any, v: Any, key: Optional[int] = None) -> None:
         """Remove edge from u to v.
 

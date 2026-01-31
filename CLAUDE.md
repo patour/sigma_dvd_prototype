@@ -133,9 +133,10 @@ graph = ensure_rustworkx_graph(graph)  # No-op if already Rustworkx
 ```
 
 ### PDN Module (pdn/)
-- **NetlistParser**: Parses SPICE-like tile-based netlists with gzip support
+- **NetlistParser**: Parses SPICE-like tile-based netlists with gzip support (parallel parsing available)
 - **PDNSolver**: Standalone DC solver (use if you don't need unified interface)
 - **PDNPlotter**: Layer-wise heatmap generation with advanced features
+- **parallel_parser.py**: Worker functions and data classes for parallel tile parsing
 
 **Current Source Data Structures (from instanceModels*.sp):**
 - `InstanceInfo`: Parsed instance name with net/pin/tile location info
@@ -167,6 +168,23 @@ The default `store_instance_sources=False` avoids serializing CurrentSource obje
 Both modes support pickle. The difference is portability:
 - `store_instance_sources=False` (default): Pickle works but requires `pdn.pdn_parser` module when loading
 - `store_instance_sources=True`: Pickle is portable (no module dependency), better for long-term storage/sharing
+
+**Parallel Parsing (for large netlists with many tiles):**
+```python
+# Enable parallel parsing for ~6-8x speedup on 100+ tiles
+parser = NetlistParser('./netlist_dir', parallel=True, n_workers=8)
+graph = parser.parse()
+
+# With net filter and custom chunk size
+parser = NetlistParser('./netlist_dir', parallel=True, n_workers=4,
+                       net_filter='VDD', chunk_size=10000)
+```
+
+Parallel parsing uses `multiprocessing.Pool` with:
+- Memory-mapped file access for plain text files (gzip fallback for compressed)
+- Chunk-based processing within large tiles
+- Bulk graph operations for efficient merge phase
+- Full equivalence with sequential parsing (same graph output)
 
 ### IRDrop Module (irdrop/) - Original Synthetic
 - `generate_power_grid()`: Creates K-layer resistor mesh with `NodeID` keys
@@ -455,7 +473,7 @@ DynamicPlotter.plot_node_waveforms(
 
 ## Testing
 
-**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`, `test_dynamic_solver.py`, `test_transient_solver.py`, `test_dynamic_integration.py`
+**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`, `test_dynamic_solver.py`, `test_transient_solver.py`, `test_dynamic_integration.py`, `test_parallel_parser.py`
 
 **Test fixtures:** `tests/fixtures.py` provides factory functions for edge case testing scenarios.
 

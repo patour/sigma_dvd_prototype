@@ -1,0 +1,121 @@
+* Package model for multi-tile PDN
+* Includes voltage source, package R/L/C, and bump connections
+
+* ========== Voltage source ==========
+V_VDD VDD_vrm 0 0.75
+R_vrm VDD_vrm VDD_pkg 0.001
+
+* ========== Package decoupling ==========
+C_pkg_decap VDD_pkg 0 10e-9
+
+* ========== Bump connections ==========
+* Bump 0 at corner (0,0)
+R_pkg_conn_0 VDD_pkg pkg_bump_0 0
+L_bump_0 pkg_bump_0 pkg_bump_0_l 0.05e-9
+R_bump_0 pkg_bump_0_l 0_0_M3 0.02
+C_bump_0 pkg_bump_0 0 50e-15
+* Bump 1 at corner (2,0)
+R_pkg_conn_1 VDD_pkg pkg_bump_1 0
+L_bump_1 pkg_bump_1 pkg_bump_1_l 0.05e-9
+R_bump_1 pkg_bump_1_l 2900_0_M3 0.02
+C_bump_1 pkg_bump_1 0 50e-15
+* Bump 2 at corner (0,2)
+R_pkg_conn_2 VDD_pkg pkg_bump_2 0
+L_bump_2 pkg_bump_2 pkg_bump_2_l 0.05e-9
+R_bump_2 pkg_bump_2_l 0_2900_M3 0.02
+C_bump_2 pkg_bump_2 0 50e-15
+* Bump 3 at corner (2,2)
+R_pkg_conn_3 VDD_pkg pkg_bump_3 0
+L_bump_3 pkg_bump_3 pkg_bump_3_l 0.05e-9
+R_bump_3 pkg_bump_3_l 2900_2900_M3 0.02
+C_bump_3 pkg_bump_3 0 50e-15
+
+* Edge bumps
+R_pkg_conn_4 VDD_pkg pkg_bump_4 0
+L_bump_4 pkg_bump_4 pkg_bump_4_l 0.08e-9
+R_bump_4 pkg_bump_4_l 300_2900_M3 0.03
+C_bump_4 pkg_bump_4 0 30e-15
+R_pkg_conn_5 VDD_pkg pkg_bump_5 0
+L_bump_5 pkg_bump_5 pkg_bump_5_l 0.08e-9
+R_bump_5 pkg_bump_5_l 600_2900_M3 0.03
+C_bump_5 pkg_bump_5 0 30e-15
+R_pkg_conn_6 VDD_pkg pkg_bump_6 0
+L_bump_6 pkg_bump_6 pkg_bump_6_l 0.08e-9
+R_bump_6 pkg_bump_6_l 1300_2900_M3 0.03
+C_bump_6 pkg_bump_6 0 30e-15
+R_pkg_conn_7 VDD_pkg pkg_bump_7 0
+L_bump_7 pkg_bump_7 pkg_bump_7_l 0.08e-9
+R_bump_7 pkg_bump_7_l 1600_2900_M3 0.03
+C_bump_7 pkg_bump_7 0 30e-15
+R_pkg_conn_8 VDD_pkg pkg_bump_8 0
+L_bump_8 pkg_bump_8 pkg_bump_8_l 0.08e-9
+R_bump_8 pkg_bump_8_l 2300_2900_M3 0.03
+C_bump_8 pkg_bump_8 0 30e-15
+R_pkg_conn_9 VDD_pkg pkg_bump_9 0
+L_bump_9 pkg_bump_9 pkg_bump_9_l 0.08e-9
+R_bump_9 pkg_bump_9_l 2600_2900_M3 0.03
+C_bump_9 pkg_bump_9 0 30e-15
+R_pkg_conn_10 VDD_pkg pkg_bump_10 0
+L_bump_10 pkg_bump_10 pkg_bump_10_l 0.08e-9
+R_bump_10 pkg_bump_10_l 300_0_M3 0.03
+C_bump_10 pkg_bump_10 0 30e-15
+R_pkg_conn_11 VDD_pkg pkg_bump_11 0
+L_bump_11 pkg_bump_11 pkg_bump_11_l 0.08e-9
+R_bump_11 pkg_bump_11_l 600_0_M3 0.03
+C_bump_11 pkg_bump_11 0 30e-15
+R_pkg_conn_12 VDD_pkg pkg_bump_12 0
+L_bump_12 pkg_bump_12 pkg_bump_12_l 0.08e-9
+R_bump_12 pkg_bump_12_l 1300_0_M3 0.03
+C_bump_12 pkg_bump_12 0 30e-15
+R_pkg_conn_13 VDD_pkg pkg_bump_13 0
+L_bump_13 pkg_bump_13 pkg_bump_13_l 0.08e-9
+R_bump_13 pkg_bump_13_l 1600_0_M3 0.03
+C_bump_13 pkg_bump_13 0 30e-15
+R_pkg_conn_14 VDD_pkg pkg_bump_14 0
+L_bump_14 pkg_bump_14 pkg_bump_14_l 0.08e-9
+R_bump_14 pkg_bump_14_l 2300_0_M3 0.03
+C_bump_14 pkg_bump_14 0 30e-15
+R_pkg_conn_15 VDD_pkg pkg_bump_15 0
+L_bump_15 pkg_bump_15 pkg_bump_15_l 0.08e-9
+R_bump_15 pkg_bump_15_l 2600_0_M3 0.03
+C_bump_15 pkg_bump_15 0 30e-15
+
+* Center bumps (interior)
+R_pkg_conn_16 VDD_pkg pkg_bump_16 0
+L_bump_16 pkg_bump_16 pkg_bump_16_l 0.06e-9
+R_bump_16 pkg_bump_16_l 1200_1200_M3 0.025
+C_bump_16 pkg_bump_16 0 40e-15
+R_pkg_conn_17 VDD_pkg pkg_bump_17 0
+L_bump_17 pkg_bump_17 pkg_bump_17_l 0.06e-9
+R_bump_17 pkg_bump_17_l 1200_1500_M3 0.025
+C_bump_17 pkg_bump_17 0 40e-15
+R_pkg_conn_18 VDD_pkg pkg_bump_18 0
+L_bump_18 pkg_bump_18 pkg_bump_18_l 0.06e-9
+R_bump_18 pkg_bump_18_l 1200_1800_M3 0.025
+C_bump_18 pkg_bump_18 0 40e-15
+R_pkg_conn_19 VDD_pkg pkg_bump_19 0
+L_bump_19 pkg_bump_19 pkg_bump_19_l 0.06e-9
+R_bump_19 pkg_bump_19_l 1500_1200_M3 0.025
+C_bump_19 pkg_bump_19 0 40e-15
+R_pkg_conn_20 VDD_pkg pkg_bump_20 0
+L_bump_20 pkg_bump_20 pkg_bump_20_l 0.06e-9
+R_bump_20 pkg_bump_20_l 1500_1500_M3 0.025
+C_bump_20 pkg_bump_20 0 40e-15
+R_pkg_conn_21 VDD_pkg pkg_bump_21 0
+L_bump_21 pkg_bump_21 pkg_bump_21_l 0.06e-9
+R_bump_21 pkg_bump_21_l 1500_1800_M3 0.025
+C_bump_21 pkg_bump_21 0 40e-15
+R_pkg_conn_22 VDD_pkg pkg_bump_22 0
+L_bump_22 pkg_bump_22 pkg_bump_22_l 0.06e-9
+R_bump_22 pkg_bump_22_l 1800_1200_M3 0.025
+C_bump_22 pkg_bump_22 0 40e-15
+R_pkg_conn_23 VDD_pkg pkg_bump_23 0
+L_bump_23 pkg_bump_23 pkg_bump_23_l 0.06e-9
+R_bump_23 pkg_bump_23_l 1800_1500_M3 0.025
+C_bump_23 pkg_bump_23 0 40e-15
+R_pkg_conn_24 VDD_pkg pkg_bump_24 0
+L_bump_24 pkg_bump_24 pkg_bump_24_l 0.06e-9
+R_bump_24 pkg_bump_24_l 1800_1800_M3 0.025
+C_bump_24 pkg_bump_24 0 40e-15
+
+* Total bumps: 25

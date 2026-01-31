@@ -1311,7 +1311,9 @@ class NetlistParser:
     def __init__(self, netlist_dir: str, validate: bool = False, strict: bool = False,
                  net_filter: Optional[str] = None, verbose: bool = False,
                  vsrc_resistor_pattern: str = 'rs', vsrc_depth_limit: int = 3,
-                 store_instance_sources: bool = False):
+                 store_instance_sources: bool = False,
+                 parallel: bool = False, n_workers: Optional[int] = None,
+                 chunk_size: int = 10000):
         """
         Initialize PDN netlist parser.
 
@@ -1327,6 +1329,9 @@ class NetlistParser:
                                    (needed for pickling). If False (default), store raw
                                    CurrentSource objects for memory efficiency (~60% savings
                                    for large netlists with 1M+ sources).
+            parallel: Enable parallel tile parsing using multiprocessing (default: False)
+            n_workers: Number of parallel workers (default: min(cpu_count, 16))
+            chunk_size: Lines per chunk for file reading in parallel mode (default: 10000)
         """
         self.netlist_dir = Path(netlist_dir)
         self.validate = validate
@@ -1335,6 +1340,11 @@ class NetlistParser:
         self.vsrc_resistor_pattern = vsrc_resistor_pattern
         self.vsrc_depth_limit = vsrc_depth_limit
         self.store_instance_sources = store_instance_sources
+
+        # Parallel parsing configuration
+        self.parallel = parallel
+        self.n_workers = n_workers or min(os.cpu_count() or 4, 16)
+        self.chunk_size = chunk_size
 
         # Setup logging
         log_level = logging.DEBUG if verbose else logging.INFO
@@ -1917,27 +1927,34 @@ class NetlistParser:
         """Parse all queued tile files with progress bar"""
         if not self.tile_queue:
             return
-            
-        self.logger.info(f"Parsing {len(self.tile_queue)} tile files...")
-        
+
+        if self.parallel and len(self.tile_queue) > 1:
+            self._parse_tiles_parallel()
+        else:
+            self._parse_tiles_sequential()
+
+    def _parse_tiles_sequential(self):
+        """Parse tiles sequentially (original implementation)"""
+        self.logger.info(f"Parsing {len(self.tile_queue)} tile files (sequential)...")
+
         with tqdm(total=len(self.tile_queue), desc="Parsing tiles") as pbar:
             for x, y, filepath in self.tile_queue:
                 pbar.set_description(f"Parsing tile {x}_{y}")
-                
+
                 try:
                     self.builder.current_tile_id = (x, y)
-                    
+
                     # Load corresponding .nd file for node-to-net mapping
                     nd_filepath = Path(filepath).parent / f"tile_{x}_{y}.nd"
                     if not nd_filepath.exists():
                         # Try with .gz extension
                         nd_filepath = Path(filepath).parent / f"tile_{x}_{y}.nd.gz"
-                    
+
                     self.logger.debug(f"Loading node map from {nd_filepath}")
                     tile_node_map = self._load_node_net_map(str(nd_filepath))
                     self.builder.node_net_map.update(tile_node_map)
                     self.logger.debug(f"Loaded {len(tile_node_map)} node mappings for tile {x}_{y}")
-                    
+
                     # Now parse the tile netlist
                     self._parse_file(filepath)
                     self.builder.stats.tiles_parsed += 1
@@ -1950,23 +1967,229 @@ class NetlistParser:
                         self.logger.warning(msg)
                 finally:
                     pbar.update(1)
-                    
+
         self.builder.current_tile_id = None
+
+    def _parse_tiles_parallel(self):
+        """Parse tiles in parallel using multiprocessing.Pool"""
+        import multiprocessing
+        from concurrent.futures import ThreadPoolExecutor
+        from pdn.parallel_parser import (
+            _parse_tile_worker, TileParseResult,
+            _build_tile_worker_args
+        )
+
+        self.logger.info(f"Parsing {len(self.tile_queue)} tile files (parallel, {self.n_workers} workers)...")
+
+        # Build worker arguments
+        net_filter_lower = self.net_filter.lower() if self.net_filter else None
+        worker_args = _build_tile_worker_args(
+            self.tile_queue,
+            self.netlist_dir,
+            net_filter_lower,
+            self.chunk_size,
+            {'strict': self.strict}
+        )
+
+        # Execute in parallel using multiprocessing Pool
+        results: List[TileParseResult] = []
+        with multiprocessing.Pool(processes=self.n_workers) as pool:
+            with tqdm(total=len(worker_args), desc="Parsing tiles") as pbar:
+                for result in pool.imap_unordered(_parse_tile_worker, worker_args):
+                    results.append(result)
+                    pbar.update(1)
+                    pbar.set_description(f"Parsed tile {result.tile_id}")
+
+                    # Log any errors
+                    for error in result.errors:
+                        if self.strict:
+                            raise RuntimeError(error)
+                        self.logger.warning(error)
+                    for warning in result.warnings:
+                        self.logger.warning(warning)
+
+        # Merge results into builder
+        self._merge_tile_results_parallel(results)
+
+    def _merge_tile_results_parallel(self, results: List):
+        """Merge tile results using bulk graph operations."""
+        from concurrent.futures import ThreadPoolExecutor
+        from pdn.parallel_parser import TileParseResult
+
+        self.logger.info(f"Merging {len(results)} tile results...")
+
+        # Phase 1: Collect all data from results
+        all_nodes = []  # [(name, attrs), ...]
+        all_edges = []  # [(u, v, attrs), ...]
+        all_node_net_map = {}
+        all_node_net_map_lower = {}
+        total_stats = defaultdict(int)
+
+        for result in results:
+            # Update node-net mappings
+            all_node_net_map.update(result.node_net_map)
+            for node, net in result.node_net_map.items():
+                all_node_net_map_lower[node] = net.lower()
+
+            # Collect nodes
+            for node_name, node_attrs in result.nodes.items():
+                # Add net type from the mapping
+                net_type = result.node_net_map.get(node_name)
+                if net_type:
+                    node_attrs['net_type'] = net_type
+                all_nodes.append((node_name, node_attrs))
+
+            # Collect edges
+            for node1, node2, elem_type, value, name, attrs in result.edges:
+                edge_attrs = {
+                    'type': elem_type,
+                    'value': value,
+                    'elem_name': name,
+                    'tile_id': result.tile_id,
+                    **attrs
+                }
+                all_edges.append((node1, node2, edge_attrs))
+                total_stats[elem_type] += 1
+
+            # Track boundary nodes
+            for boundary_node in result.boundary_nodes:
+                self.builder.boundary_nodes.add(boundary_node)
+
+            # Accumulate statistics
+            self.builder.stats.tiles_parsed += 1
+            if result.errors:
+                self.builder.stats.tiles_failed += 1
+
+        # Phase 2: Update builder state
+        self.builder.node_net_map.update(all_node_net_map)
+        self.builder.node_net_map_lower.update(all_node_net_map_lower)
+
+        # Phase 3: Bulk insert into graph
+        self.logger.info(f"Bulk inserting {len(all_nodes)} nodes, {len(all_edges)} edges...")
+
+        # Add nodes with attributes
+        for node_name, node_attrs in all_nodes:
+            if node_name not in self.builder.graph:
+                # Determine if this is a package node
+                is_package_node = (node_name not in self.builder.node_net_map and
+                                   node_name != '0')
+                full_attrs = {
+                    'name': node_name,
+                    'x': None, 'y': None, 'layer': None,
+                    'is_boundary': node_name in self.builder.boundary_nodes,
+                    'is_package': is_package_node,
+                    'is_vsrc_node': False,
+                    'voltage': None,
+                    **node_attrs
+                }
+                self.builder.graph.add_node(node_name, **full_attrs)
+                # Extract coordinates
+                self.builder._extract_coordinates(node_name)
+            else:
+                # Update existing node
+                self.builder.graph.nodes_dict[node_name].update(node_attrs)
+
+        # Add edges with attributes
+        edge_indices = self.builder.graph.add_edges_from(all_edges)
+
+        # Update global statistics
+        self.builder.stats.resistors += total_stats.get('R', 0)
+        self.builder.stats.capacitors += total_stats.get('C', 0)
+        self.builder.stats.inductors += total_stats.get('L', 0)
+        self.builder.stats.vsources += total_stats.get('V', 0)
+        self.builder.stats.isources += total_stats.get('I', 0)
+        self.builder.stats.elements_total += sum(total_stats.values())
+
+        # Track voltage source edge indices
+        for i, (u, v, attrs) in enumerate(all_edges):
+            if attrs.get('type') == 'V':
+                self.builder.vsrc_edge_indices.append(edge_indices[i])
+
+        # Update per-net statistics
+        self._update_parallel_net_statistics(all_edges, all_node_net_map)
+
+        self.logger.info(f"Tile merge complete: {self.builder.stats.tiles_parsed} tiles, "
+                        f"{len(all_edges)} elements")
+
+    def _update_parallel_net_statistics(self, edges: List, node_net_map: Dict):
+        """Update per-net statistics from parallel parsing results."""
+        for node1, node2, attrs in edges:
+            elem_type = attrs.get('type')
+            value = attrs.get('value', 0.0)
+            net_type = attrs.get('net_type')
+
+            if not net_type:
+                net_type = node_net_map.get(node1) or node_net_map.get(node2)
+
+            if net_type:
+                if net_type not in self.builder.stats.net_stats:
+                    self.builder.stats.net_stats[net_type] = {
+                        'die': {
+                            'nodes': set(), 'resistors': 0, 'capacitors': 0,
+                            'inductors': 0, 'vsources': 0, 'isources': 0,
+                            'isources_with_waveforms': 0, 'total_resistance': 0.0,
+                            'total_capacitance': 0.0, 'total_inductance': 0.0,
+                            'total_current': 0.0
+                        },
+                        'package': {
+                            'nodes': set(), 'resistors': 0, 'capacitors': 0,
+                            'inductors': 0, 'vsources': 0, 'isources': 0,
+                            'isources_with_waveforms': 0, 'total_resistance': 0.0,
+                            'total_capacitance': 0.0, 'total_inductance': 0.0,
+                            'total_current': 0.0
+                        },
+                        'unmapped': {
+                            'nodes': set(), 'resistors': 0, 'capacitors': 0,
+                            'inductors': 0, 'vsources': 0, 'isources': 0,
+                            'isources_with_waveforms': 0, 'total_resistance': 0.0,
+                            'total_capacitance': 0.0, 'total_inductance': 0.0,
+                            'total_current': 0.0
+                        }
+                    }
+
+                # Tiles are always 'die' category
+                net_stat = self.builder.stats.net_stats[net_type]['die']
+                if node1 != '0':
+                    net_stat['nodes'].add(node1)
+                if node2 != '0':
+                    net_stat['nodes'].add(node2)
+
+                if elem_type == 'R':
+                    net_stat['resistors'] += 1
+                    net_stat['total_resistance'] += value
+                elif elem_type == 'C':
+                    net_stat['capacitors'] += 1
+                    net_stat['total_capacitance'] += value
+                elif elem_type == 'L':
+                    net_stat['inductors'] += 1
+                    net_stat['total_inductance'] += value
+                elif elem_type == 'V':
+                    net_stat['vsources'] += 1
+                elif elem_type == 'I':
+                    net_stat['isources'] += 1
+                    net_stat['total_current'] += abs(value)
         
     def _parse_instance_models(self):
         """Parse instance model files (current sources)"""
         if not self.instance_queue:
             return
-            
-        self.logger.info(f"Parsing {len(self.instance_queue)} instance model files...")
-        
+
+        if self.parallel and len(self.instance_queue) > 1:
+            self._parse_instance_models_parallel()
+        else:
+            self._parse_instance_models_sequential()
+
+    def _parse_instance_models_sequential(self):
+        """Parse instance models sequentially (original implementation)"""
+        self.logger.info(f"Parsing {len(self.instance_queue)} instance model files (sequential)...")
+
         old_file_type = self.builder.current_file_type
         self.builder.current_file_type = 'instance'
-        
+
         with tqdm(total=len(self.instance_queue), desc="Parsing instance models") as pbar:
             for x, y, filepath in self.instance_queue:
                 pbar.set_description(f"Parsing instances {x}_{y}")
-                
+
                 try:
                     self.builder.current_tile_id = (x, y)
                     self._parse_file(filepath)
@@ -1978,9 +2201,117 @@ class NetlistParser:
                         self.logger.warning(msg)
                 finally:
                     pbar.update(1)
-                    
+
         self.builder.current_file_type = old_file_type
         self.builder.current_tile_id = None
+
+    def _parse_instance_models_parallel(self):
+        """Parse instance models in parallel using multiprocessing.Pool"""
+        import multiprocessing
+        from pdn.parallel_parser import (
+            _parse_instance_worker, InstanceParseResult,
+            _build_instance_worker_args
+        )
+
+        self.logger.info(f"Parsing {len(self.instance_queue)} instance model files (parallel, {self.n_workers} workers)...")
+
+        # Build worker arguments
+        net_filter_lower = self.net_filter.lower() if self.net_filter else None
+        worker_args = _build_instance_worker_args(
+            self.instance_queue,
+            net_filter_lower,
+            self.chunk_size,
+            {'strict': self.strict}
+        )
+
+        # Execute in parallel using multiprocessing Pool
+        results: List[InstanceParseResult] = []
+        with multiprocessing.Pool(processes=self.n_workers) as pool:
+            with tqdm(total=len(worker_args), desc="Parsing instance models") as pbar:
+                for result in pool.imap_unordered(_parse_instance_worker, worker_args):
+                    results.append(result)
+                    pbar.update(1)
+                    pbar.set_description(f"Parsed instances {result.tile_id}")
+
+                    # Log any warnings
+                    for warning in result.warnings:
+                        self.logger.warning(warning)
+
+        # Merge results
+        self._merge_instance_results_parallel(results)
+
+    def _merge_instance_results_parallel(self, results: List):
+        """Merge instance model results from parallel parsing."""
+        from pdn.parallel_parser import InstanceParseResult
+
+        self.logger.info(f"Merging {len(results)} instance model results...")
+
+        total_instances = 0
+        total_with_waveforms = 0
+        total_static_current = 0.0
+
+        for result in results:
+            # Add current sources to builder
+            for name, isrc_dict in result.current_sources.items():
+                # Reconstruct CurrentSource object
+                isrc = CurrentSource.from_dict(isrc_dict)
+                nodes = result.instance_node_map.get(name, ['', ''])
+                node_pos, node_neg = nodes[0], nodes[1]
+
+                # Check net filter
+                if self.net_filter:
+                    node_pos_net = self.builder.node_net_map_lower.get(node_pos)
+                    node_neg_net = self.builder.node_net_map_lower.get(node_neg)
+                    if node_pos_net != self.net_filter.lower() and node_neg_net != self.net_filter.lower():
+                        continue
+
+                # Store in builder
+                self.builder.instance_node_map[name] = nodes
+                self.builder.instance_sources[name] = isrc
+
+                # Add edge to graph if nodes exist
+                if node_pos in self.builder.graph or node_neg in self.builder.graph:
+                    static_current_ma = isrc.get_static_current()
+                    attrs = {
+                        'type': 'I',
+                        'value': static_current_ma,
+                        'elem_name': name,
+                        'tile_id': result.tile_id,
+                        'dc': static_current_ma,
+                        'has_waveform': isrc.has_waveform_data(),
+                        'net_type': self.builder.node_net_map.get(node_pos) or self.builder.node_net_map.get(node_neg)
+                    }
+
+                    # Ensure nodes exist
+                    self.builder.add_node(node_pos)
+                    self.builder.add_node(node_neg)
+                    self.builder.graph.add_edge(node_pos, node_neg, **attrs)
+
+                    self.builder.stats.isources += 1
+                    self.builder.stats.elements_total += 1
+
+                    if isrc.has_waveform_data():
+                        total_with_waveforms += 1
+
+                        # Update per-net waveform statistics
+                        net_type = self.builder.node_net_map.get(node_pos) or self.builder.node_net_map.get(node_neg)
+                        if net_type and net_type in self.builder.stats.net_stats:
+                            if 'die' in self.builder.stats.net_stats[net_type]:
+                                self.builder.stats.net_stats[net_type]['die']['isources_with_waveforms'] += 1
+
+                    total_static_current += abs(static_current_ma)
+
+                total_instances += 1
+
+            # Accumulate statistics
+            total_with_waveforms += result.stats.get('with_waveforms', 0) - total_with_waveforms
+            total_static_current += result.stats.get('total_static_current_ma', 0.0) - total_static_current
+
+        self.builder.stats.instances_with_waveforms = total_with_waveforms
+        self.builder.stats.total_static_current_ma = total_static_current
+
+        self.logger.info(f"Instance merge complete: {total_instances} current sources, "
+                        f"{total_with_waveforms} with waveforms")
         
     def _parse_resistor(self, line: str):
         """Parse resistor: R<name> <node1> <node2> <value> OR r <node1> <node2> <value>"""
@@ -2936,7 +3267,15 @@ Examples:
                        help='Resistor name pattern for voltage source identification (default: rs)')
     parser.add_argument('--vsrc-depth-limit', type=int, default=3,
                        help='Depth limit for voltage source node propagation (default: 3)')
-    
+
+    # Parallel parsing options
+    parser.add_argument('--parallel', action='store_true',
+                       help='Enable parallel tile parsing using multiprocessing')
+    parser.add_argument('--n-workers', type=int, default=None,
+                       help='Number of parallel workers (default: min(cpu_count, 16))')
+    parser.add_argument('--chunk-size', type=int, default=10000,
+                       help='Lines per chunk for parallel file reading (default: 10000)')
+
     # Plotting options
     parser.add_argument('--plot-layer', type=str,
                        help='Plot specific layer (e.g., "5", "M1")')
@@ -2964,7 +3303,10 @@ Examples:
                 net_filter=args.net,
                 verbose=args.verbose,
                 vsrc_resistor_pattern=args.vsrc_resistor_pattern,
-                vsrc_depth_limit=args.vsrc_depth_limit
+                vsrc_depth_limit=args.vsrc_depth_limit,
+                parallel=args.parallel,
+                n_workers=args.n_workers,
+                chunk_size=args.chunk_size
             )
             profiled_parse = profile(netlist_parser.parse)
             graph = profiled_parse()
@@ -2980,7 +3322,10 @@ Examples:
             net_filter=args.net,
             verbose=args.verbose,
             vsrc_resistor_pattern=args.vsrc_resistor_pattern,
-            vsrc_depth_limit=args.vsrc_depth_limit
+            vsrc_depth_limit=args.vsrc_depth_limit,
+            parallel=args.parallel,
+            n_workers=args.n_workers,
+            chunk_size=args.chunk_size
         )
         graph = netlist_parser.parse()
     
