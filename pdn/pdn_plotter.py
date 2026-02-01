@@ -47,6 +47,7 @@ class PDNPlotter:
         self.graph = graph
         self.net_connectivity = net_connectivity
         self.logger = logger or logging.getLogger(__name__)
+        self._orientation_cache = {}  # Cache: (net_name, layer_id) -> orientation
     
     def _detect_net_type(self, net_name: str) -> str:
         """
@@ -143,6 +144,8 @@ class PDNPlotter:
         """
         Detect predominant routing orientation of a layer by analyzing resistor edges.
         
+        OPTIMIZED: Samples only up to 1000 nodes to determine orientation quickly.
+        
         Args:
             net_name: Net name
             layer_id: Layer identifier
@@ -152,23 +155,44 @@ class PDNPlotter:
         Returns:
             'H' for horizontal, 'V' for vertical, 'MIXED' for no clear orientation
         """
-        # Check manual override first
+        # Check manual override FIRST (takes precedence over cache)
         if layer_id in layer_orientations:
             override = layer_orientations[layer_id].upper()
             if override in ['H', 'V', 'SQUARE', 'MIXED']:
                 return override
         
+        # Check cache (only if no manual override)
+        cache_key = (net_name, layer_id)
+        if cache_key in self._orientation_cache:
+            return self._orientation_cache[cache_key]
+        
         horizontal_edges = 0
         vertical_edges = 0
         diagonal_edges = 0
         
-        # Analyze all resistor edges in this layer
-        for node in net_nodes_set:
-            if node == '0':
-                continue
-            
+        # OPTIMIZATION: Sample only up to MAX_SAMPLE_NODES nodes for orientation detection
+        # This is sufficient to determine routing direction without checking all edges
+        MAX_SAMPLE_NODES = 1000
+        MAX_EDGES_TO_CHECK = 5000  # Stop early if we have enough evidence
+        
+        nodes_sampled = 0
+        edges_checked = 0
+        
+        # Filter nodes on this layer first
+        layer_nodes = [n for n in net_nodes_set 
+                      if n != '0' and self.graph.nodes_dict.get(n, {}).get('layer') == layer_id]
+        
+        # Sample evenly across the node list
+        if len(layer_nodes) > MAX_SAMPLE_NODES:
+            import random
+            sample_nodes = random.sample(layer_nodes, MAX_SAMPLE_NODES)
+        else:
+            sample_nodes = layer_nodes
+        
+        # Analyze sampled resistor edges
+        for node in sample_nodes:
             node_data = self.graph.nodes_dict.get(node)
-            if not node_data or node_data.get('layer') != layer_id:
+            if not node_data:
                 continue
             
             x1 = node_data.get('x')
@@ -176,8 +200,18 @@ class PDNPlotter:
             if x1 is None or y1 is None:
                 continue
             
-            # Check edges from this node
+            nodes_sampled += 1
+            
+            # Check edges from this node (limit to avoid get_edge_data overhead)
+            neighbor_count = 0
             for neighbor in self.graph.neighbors(node):
+                if edges_checked >= MAX_EDGES_TO_CHECK:
+                    break
+                
+                neighbor_count += 1
+                if neighbor_count > 10:  # Max 10 neighbors per node
+                    break
+                
                 if neighbor not in net_nodes_set or neighbor == '0':
                     continue
                 
@@ -185,19 +219,14 @@ class PDNPlotter:
                 if not neighbor_data or neighbor_data.get('layer') != layer_id:
                     continue
                 
-                # Check if there's a resistor edge
-                edge_data = self.graph.get_edge_data(node, neighbor)
-                if not edge_data:
-                    continue
-                
-                has_resistor = any(d.get('type') == 'R' for d in edge_data.values())
-                if not has_resistor:
-                    continue
-                
                 x2 = neighbor_data.get('x')
                 y2 = neighbor_data.get('y')
                 if x2 is None or y2 is None:
                     continue
+                
+                # Assume same-layer neighbor edge is a resistor (skip expensive get_edge_data)
+                # This is safe because vias connect different layers
+                edges_checked += 1
                 
                 # Calculate direction
                 dx = abs(x2 - x1)
@@ -216,27 +245,35 @@ class PDNPlotter:
                         vertical_edges += 1
                     else:
                         diagonal_edges += 1
+            
+            if edges_checked >= MAX_EDGES_TO_CHECK:
+                break
         
         total_edges = horizontal_edges + vertical_edges + diagonal_edges
         
         if total_edges == 0:
-            self.logger.debug(f"    Layer {layer_id}: No edges found, defaulting to MIXED")
-            return 'MIXED'
-        
-        h_ratio = horizontal_edges / total_edges
-        v_ratio = vertical_edges / total_edges
-        
-        self.logger.debug(f"    Layer {layer_id}: H={horizontal_edges} ({h_ratio*100:.1f}%), "
-                         f"V={vertical_edges} ({v_ratio*100:.1f}%), "
-                         f"Diag={diagonal_edges} ({diagonal_edges/total_edges*100:.1f}%)")
-        
-        # Determine orientation (70% threshold)
-        if h_ratio >= 0.70:
-            return 'H'
-        elif v_ratio >= 0.70:
-            return 'V'
+            self.logger.debug(f"    Layer {layer_id}: No edges found in {nodes_sampled} sampled nodes, defaulting to MIXED")
+            result = 'MIXED'
         else:
-            return 'MIXED'
+            h_ratio = horizontal_edges / total_edges
+            v_ratio = vertical_edges / total_edges
+            
+            self.logger.debug(f"    Layer {layer_id}: Sampled {nodes_sampled} nodes, {edges_checked} edges - "
+                             f"H={horizontal_edges} ({h_ratio*100:.1f}%), "
+                             f"V={vertical_edges} ({v_ratio*100:.1f}%), "
+                             f"Diag={diagonal_edges} ({diagonal_edges/total_edges*100:.1f}%)")
+            
+            # Determine orientation (70% threshold)
+            if h_ratio >= 0.70:
+                result = 'H'
+            elif v_ratio >= 0.70:
+                result = 'V'
+            else:
+                result = 'MIXED'
+        
+        # Cache result
+        self._orientation_cache[cache_key] = result
+        return result
     
     def _calculate_anisotropic_bins(self, orientation: str, x_min: float, x_max: float,
                                      y_min: float, y_max: float, num_nodes: int,

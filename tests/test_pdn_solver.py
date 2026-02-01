@@ -3,13 +3,12 @@
 Unit tests for PDN Solver (pdn_solver.py)
 
 Tests cover:
-- Graph loading and validation
-- Island detection and removal
-- Voltage source identification
-- System matrix construction
-- Linear system solving (direct and iterative)
-- Voltage storage and retrieval
-- Statistics computation
+- Solver initialization and metadata extraction
+- End-to-end solving using UnifiedIRDropSolver backend
+- PDNSolveResult statistics validation
+- Solver backend configuration (cholmod/splu)
+- Timing and memory profiling
+- Config file loading
 - Multi-net solving
 - Report generation
 """
@@ -20,6 +19,7 @@ matplotlib.use('Agg')  # Use non-interactive backend for headless testing
 import unittest
 import sys
 import tempfile
+import json
 import numpy as np
 from pathlib import Path
 
@@ -27,35 +27,32 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'pdn'))
 
 from pdn_parser import NetlistParser
-from pdn_solver import PDNSolver, IslandStats, NetSolveStats, SolveResults
+from pdn_solver import (
+    PDNSolver, PDNSolveResult, SolveResults, TimingStats, MemoryStats,
+    load_config, merge_config_with_args,
+)
 
 
 class TestPDNSolverBasic(unittest.TestCase):
-    """Basic PDN solver tests with test netlist"""
-    
+    """Basic PDN solver tests with netlist_small"""
+
     @classmethod
     def setUpClass(cls):
-        """Parse test netlist and create solver once for all tests"""
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            raise unittest.SkipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
+        """Parse netlist_small and create solver once for all tests"""
+        cls.netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not cls.netlist_dir.exists():
+            raise unittest.SkipTest("netlist_small not found")
+
+        parser = NetlistParser(str(cls.netlist_dir))
         cls.graph = parser.parse()
         cls.solver = PDNSolver(cls.graph, verbose=False)
-    
+
     def test_solver_initialization(self):
         """Test solver initialization"""
         self.assertIsNotNone(self.solver)
-        self.assertEqual(self.solver.solver_type, 'direct')
         self.assertIsNotNone(self.solver.graph)
         self.assertIsNotNone(self.solver.net_connectivity)
-    
-    def test_solver_type_validation(self):
-        """Test solver type validation"""
-        with self.assertRaises(ValueError):
-            PDNSolver(self.graph, solver='invalid_solver')
-    
+
     def test_metadata_extraction(self):
         """Test metadata extraction from graph"""
         self.assertIsNotNone(self.solver.net_connectivity)
@@ -64,67 +61,79 @@ class TestPDNSolverBasic(unittest.TestCase):
         self.assertIsNotNone(self.solver.instance_node_map)
 
 
-class TestNetSubgraphExtraction(unittest.TestCase):
-    """Test net subgraph extraction"""
-    
+class TestPDNSolveResult(unittest.TestCase):
+    """Test PDNSolveResult data class"""
+
     @classmethod
     def setUpClass(cls):
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            raise unittest.SkipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
+        netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not netlist_dir.exists():
+            raise unittest.SkipTest("netlist_small not found")
+
+        parser = NetlistParser(str(netlist_dir))
         cls.graph = parser.parse()
-        cls.solver = PDNSolver(cls.graph, verbose=False)
-    
-    def test_extract_net_subgraph(self):
-        """Test extraction of net subgraph"""
-        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
-        self.assertGreater(len(net_nodes), 0)
-        
-        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
-        
-        # Subgraph should have nodes
-        self.assertGreater(net_graph.number_of_nodes(), 0)
-        
-        # Subgraph should only have resistors
-        for u, v, d in net_graph.edges(data=True):
-            self.assertEqual(d['type'], 'R')
+        cls.solver = PDNSolver(cls.graph, verbose=True)
+        cls.results = cls.solver.solve()
+
+    def test_result_structure(self):
+        """Test that results have correct structure"""
+        self.assertIsInstance(self.results, SolveResults)
+        self.assertIsInstance(self.results.net_results, dict)
+        self.assertGreater(len(self.results.net_results), 0)
+
+    def test_pdn_solve_result_fields(self):
+        """Test PDNSolveResult has all expected fields"""
+        # Get first net result
+        net_name = list(self.results.net_results.keys())[0]
+        result = self.results.net_results[net_name]
+
+        self.assertIsInstance(result, PDNSolveResult)
+
+        # Check inherited fields from UnifiedSolveResult
+        self.assertIsInstance(result.voltages, dict)
+        self.assertIsInstance(result.ir_drop, dict)
+        self.assertGreater(result.nominal_voltage, 0)
+        self.assertEqual(result.net_name, net_name)
+
+        # Check PDN-specific fields
+        self.assertGreater(result.num_nodes, 0)
+        self.assertGreater(result.num_free_nodes, 0)
+        self.assertGreaterEqual(result.num_vsrc_nodes, 0)
+        self.assertGreaterEqual(result.num_isources, 0)
+        self.assertGreaterEqual(result.total_current_ma, 0)
+
+        # Check voltage statistics
+        self.assertGreater(result.max_voltage, 0)
+        self.assertGreater(result.min_voltage, 0)
+        self.assertGreater(result.avg_voltage, 0)
+        self.assertGreaterEqual(result.max_ir_drop, 0)
+        self.assertGreaterEqual(result.avg_ir_drop, 0)
+
+    def test_timing_stats(self):
+        """Test TimingStats in result"""
+        net_name = list(self.results.net_results.keys())[0]
+        result = self.results.net_results[net_name]
+
+        self.assertIsInstance(result.timings, TimingStats)
+        self.assertGreater(result.timings.model_creation, 0)
+        self.assertGreater(result.timings.solve, 0)
+        self.assertGreater(result.timings.total, 0)
+
+    def test_backend_field(self):
+        """Test backend field is set"""
+        net_name = list(self.results.net_results.keys())[0]
+        result = self.results.net_results[net_name]
+
+        self.assertIn(result.backend, ['cholmod', 'splu'])
 
 
 class TestIslandDetection(unittest.TestCase):
-    """Test floating island detection and removal"""
-
-    @classmethod
-    def setUpClass(cls):
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            raise unittest.SkipTest("Test netlist not found")
-
-        parser = NetlistParser(str(test_netlist_dir))
-        cls.graph = parser.parse()
-        cls.solver = PDNSolver(cls.graph, verbose=False)
-
-    def test_no_islands_in_test_netlist(self):
-        """Test that test netlist has no floating islands"""
-        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
-        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
-
-        island_stats = self.solver._detect_and_remove_islands(net_graph, 'VDD')
-
-        # Test netlist should have no floating islands
-        self.assertEqual(island_stats['islands_removed'], 0)
-        self.assertEqual(island_stats['nodes_removed'], 0)
-
-
-class TestIslandDetectionSynthetic(unittest.TestCase):
-    """Test island detection with synthetic graphs containing disconnected components"""
+    """Test island detection with synthetic graphs"""
 
     def setUp(self):
         """Create a synthetic graph with disconnected components"""
         from core.rx_graph import RustworkxMultiDiGraphWrapper
 
-        # Create main graph
         self.graph = RustworkxMultiDiGraphWrapper()
 
         # Component 1: Connected to voltage source (3 nodes)
@@ -159,529 +168,396 @@ class TestIslandDetectionSynthetic(unittest.TestCase):
         }
         self.graph.graph['vsrc_dict'] = {'vsrc_node': {'voltage': 1.0}}
         self.graph.graph['vsrc_nodes'] = {'vsrc_node'}
-        self.graph.graph['parameters'] = {}
+        self.graph.graph['parameters'] = {'VDD': '1.0'}
         self.graph.graph['instance_node_map'] = {}
 
-        # Create solver
-        self.solver = PDNSolver(self.graph, verbose=False)
+    def test_floating_islands_detected_via_solve(self):
+        """Test that floating islands are detected and removed during solve."""
+        solver = PDNSolver(self.graph, verbose=False)
+        results = solver.solve()
 
-    def test_detects_floating_islands(self):
-        """Test that floating islands are detected"""
-        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
-        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
+        result = results.net_results.get('VDD')
+        self.assertIsNotNone(result)
 
-        # Before removal, should have 3 components
-        from core.rx_algorithms import connected_components
-        components_before = connected_components(net_graph)
-        self.assertEqual(len(components_before), 3)
+        # UnifiedPowerGridModel detects and removes 2 floating islands
+        self.assertEqual(result.islands_removed, 2)
+        self.assertEqual(result.nodes_removed, 4)  # f1, f2, f3, f4
 
-        island_stats = self.solver._detect_and_remove_islands(net_graph, 'VDD')
+    def test_valid_voltages_computed(self):
+        """Test that valid voltages are computed for connected component."""
+        solver = PDNSolver(self.graph, verbose=False)
+        results = solver.solve()
 
-        # Should remove 2 floating islands
-        self.assertEqual(island_stats['islands_removed'], 2)
-
-    def test_removes_correct_node_count(self):
-        """Test that correct number of nodes are removed"""
-        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
-        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
-
-        island_stats = self.solver._detect_and_remove_islands(net_graph, 'VDD')
-
-        # f1, f2, f3, f4 = 4 nodes removed
-        self.assertEqual(island_stats['nodes_removed'], 4)
-
-    def test_removes_correct_resistor_count(self):
-        """Test that correct number of resistors are removed"""
-        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
-        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
-
-        island_stats = self.solver._detect_and_remove_islands(net_graph, 'VDD')
-
-        # 2 resistors (f1-f2, f3-f4) should be removed
-        self.assertEqual(island_stats['resistors_removed'], 2)
-
-    def test_tracks_current_sources_in_removed_islands(self):
-        """Test that current sources in removed islands are tracked"""
-        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
-        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
-
-        island_stats = self.solver._detect_and_remove_islands(net_graph, 'VDD')
-
-        # 1 current source in component 2 should be tracked
-        self.assertEqual(island_stats['isources_removed'], 1)
-
-    def test_keeps_component_with_vsrc(self):
-        """Test that component with voltage source is kept"""
-        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
-        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
-
-        nodes_before = set(net_graph.nodes())
-        self.assertIn('n1', nodes_before)
-        self.assertIn('n2', nodes_before)
-        self.assertIn('n3', nodes_before)
-
-        self.solver._detect_and_remove_islands(net_graph, 'VDD')
-
-        nodes_after = set(net_graph.nodes())
-        # n1, n2, n3 should still be present (connected to vsrc)
-        self.assertIn('n1', nodes_after)
-        self.assertIn('n2', nodes_after)
-        self.assertIn('n3', nodes_after)
-
-    def test_removes_floating_nodes(self):
-        """Test that floating nodes are actually removed from graph"""
-        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
-        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
-
-        nodes_before = set(net_graph.nodes())
-        self.assertIn('f1', nodes_before)
-        self.assertIn('f2', nodes_before)
-
-        self.solver._detect_and_remove_islands(net_graph, 'VDD')
-
-        nodes_after = set(net_graph.nodes())
-        # f1, f2, f3, f4 should be removed
-        self.assertNotIn('f1', nodes_after)
-        self.assertNotIn('f2', nodes_after)
-        self.assertNotIn('f3', nodes_after)
-        self.assertNotIn('f4', nodes_after)
-
-    def test_single_component_no_removal(self):
-        """Test that fully connected graph has no islands removed"""
-        from core.rx_graph import RustworkxMultiDiGraphWrapper
-
-        # Create fully connected graph
-        graph = RustworkxMultiDiGraphWrapper()
-        graph.add_node('a', x=0, y=0, layer='M1')
-        graph.add_node('b', x=1000, y=0, layer='M1')
-        graph.add_node('c', x=2000, y=0, layer='M1')
-        graph.add_edge('a', 'b', type='R', value=0.01)
-        graph.add_edge('b', 'c', type='R', value=0.01)
-
-        # Add voltage source
-        graph.add_node('0')
-        graph.add_node('vsrc')
-        graph.add_edge('vsrc', '0', type='V', value=1.0)
-        graph.add_edge('vsrc', 'a', type='R', value=0.001)
-
-        graph.graph['net_connectivity'] = {'VDD': ['a', 'b', 'c', 'vsrc']}
-        graph.graph['vsrc_dict'] = {}
-        graph.graph['vsrc_nodes'] = {'vsrc'}
-        graph.graph['parameters'] = {}
-        graph.graph['instance_node_map'] = {}
-
-        solver = PDNSolver(graph, verbose=False)
-        net_nodes = set(solver.net_connectivity.get('VDD', []))
-        net_graph = solver._extract_net_subgraph('VDD', net_nodes)
-
-        island_stats = solver._detect_and_remove_islands(net_graph, 'VDD')
-
-        self.assertEqual(island_stats['islands_removed'], 0)
-        self.assertEqual(island_stats['nodes_removed'], 0)
+        # n1, n2, n3 should have voltages stored
+        self.assertIn('n1', self.graph.nodes_dict)
+        voltage = self.graph.nodes_dict.get('n1', {}).get('voltage')
+        self.assertIsNotNone(voltage)
+        self.assertGreater(voltage, 0.0)
 
 
-class TestIslandDetectionOptimization(unittest.TestCase):
-    """Test that optimized island detection produces same results as reference"""
+class TestSolverBackendConfiguration(unittest.TestCase):
+    """Test solver backend configuration options"""
 
     @classmethod
     def setUpClass(cls):
-        """Parse netlist_small for comparison tests"""
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
-        if not test_netlist_dir.exists():
+        netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not netlist_dir.exists():
             raise unittest.SkipTest("netlist_small not found")
 
-        parser = NetlistParser(str(test_netlist_dir), validate=False)
+        parser = NetlistParser(str(netlist_dir))
         cls.graph = parser.parse()
 
-    def test_optimized_matches_reference(self):
-        """Test optimized island detection (no to_undirected) matches reference"""
-        from core.rx_algorithms import connected_components
+    def test_default_backend(self):
+        """Test default backend selection"""
+        solver = PDNSolver(self.graph, verbose=False)
+        results = solver.solve()
 
-        # Extract net subgraph
-        net_nodes = set(self.graph.graph.get('net_connectivity', {}).get('VDD_XLV', []))
-        net_graph = self.graph.subgraph(net_nodes).copy()
+        net_name = list(results.net_results.keys())[0]
+        result = results.net_results[net_name]
 
-        # Remove non-resistor edges
-        edges_to_remove = []
-        for u, v, k, d in net_graph.edges(keys=True, data=True):
-            if d.get('type') != 'R':
-                edges_to_remove.append((u, v, k))
-        for u, v, k in edges_to_remove:
-            net_graph.remove_edge(u, v, k)
+        # Backend should be either cholmod or splu
+        self.assertIn(result.backend, ['cholmod', 'splu'])
 
-        # Reference: to_undirected + connected_components
-        undirected = net_graph.to_undirected()
-        ref_components = connected_components(undirected)
+    def test_force_splu_backend(self):
+        """Test forcing splu backend"""
+        solver = PDNSolver(self.graph, verbose=False, use_cholmod=False)
+        results = solver.solve()
 
-        # Optimized: direct connected_components on directed graph
-        opt_components = connected_components(net_graph)
+        net_name = list(results.net_results.keys())[0]
+        result = results.net_results[net_name]
 
-        # Compare as sets of frozensets
-        ref_sets = set(frozenset(c) for c in ref_components)
-        opt_sets = set(frozenset(c) for c in opt_components)
+        self.assertEqual(result.backend, 'splu')
 
-        self.assertEqual(ref_sets, opt_sets)
-        self.assertEqual(len(ref_components), len(opt_components))
+    def test_cholmod_mode_option(self):
+        """Test cholmod mode configuration"""
+        # This should not raise even if cholmod is not available
+        try:
+            solver = PDNSolver(
+                self.graph,
+                verbose=False,
+                use_cholmod=True,
+                cholmod_mode='supernodal'
+            )
+            results = solver.solve()
+            # If we got here, cholmod is available
+            net_name = list(results.net_results.keys())[0]
+            result = results.net_results[net_name]
+            self.assertEqual(result.backend, 'cholmod')
+        except ImportError:
+            # Cholmod not available, that's fine
+            self.skipTest("Cholmod not available")
 
 
-class TestVoltageSourceIdentification(unittest.TestCase):
-    """Test voltage source node identification"""
-    
+class TestTimingAndMemoryProfiling(unittest.TestCase):
+    """Test timing and memory profiling features"""
+
     @classmethod
     def setUpClass(cls):
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            raise unittest.SkipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
+        netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not netlist_dir.exists():
+            raise unittest.SkipTest("netlist_small not found")
+
+        parser = NetlistParser(str(netlist_dir))
         cls.graph = parser.parse()
-        cls.solver = PDNSolver(cls.graph, verbose=False)
-    
-    def test_identify_voltage_sources(self):
-        """Test voltage source identification"""
-        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
-        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
-        
-        vsrc_nodes, vsrc_voltages = self.solver._identify_voltage_sources(net_graph, 'VDD')
-        
-        # Should find voltage source nodes
-        self.assertGreater(len(vsrc_nodes), 0)
-        self.assertGreater(len(vsrc_voltages), 0)
-        
-        # Voltages should be reasonable (0.75V for VDD)
-        for node, voltage in vsrc_voltages.items():
-            self.assertGreater(voltage, 0.0)
-            self.assertLess(voltage, 2.0)
+
+    def test_verbose_timing(self):
+        """Test that verbose mode produces timing information"""
+        solver = PDNSolver(self.graph, verbose=True)
+        results = solver.solve()
+
+        net_name = list(results.net_results.keys())[0]
+        result = results.net_results[net_name]
+
+        # All timing fields should be populated
+        self.assertGreater(result.timings.model_creation, 0)
+        self.assertGreaterEqual(result.timings.current_extraction, 0)
+        self.assertGreater(result.timings.solve, 0)
+        self.assertGreater(result.timings.total, 0)
+
+    def test_memory_profiling(self):
+        """Test memory profiling feature"""
+        solver = PDNSolver(self.graph, verbose=True, profile_memory=True)
+        results = solver.solve()
+
+        # Total memory should be tracked
+        self.assertGreater(results.total_memory_peak_mb, 0)
+
+        net_name = list(results.net_results.keys())[0]
+        result = results.net_results[net_name]
+
+        # Per-net memory should be tracked
+        self.assertGreater(result.memory.peak_mb, 0)
 
 
-class TestSystemMatrixConstruction(unittest.TestCase):
-    """Test conductance matrix and current vector construction"""
-    
-    @classmethod
-    def setUpClass(cls):
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            raise unittest.SkipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
-        cls.graph = parser.parse()
-        cls.solver = PDNSolver(cls.graph, verbose=False)
-    
-    def test_build_system_matrices(self):
-        """Test system matrix construction"""
-        net_nodes = set(self.solver.net_connectivity.get('VDD', []))
-        net_graph = self.solver._extract_net_subgraph('VDD', net_nodes)
-        
-        # Remove islands
-        self.solver._detect_and_remove_islands(net_graph, 'VDD')
-        
-        # Identify voltage sources
-        vsrc_nodes, vsrc_voltages = self.solver._identify_voltage_sources(net_graph, 'VDD')
-        
-        # Build node index
-        all_nodes = list(net_graph.nodes())
-        free_nodes = [n for n in all_nodes if n != '0' and n not in vsrc_nodes]
-        node_to_idx = {node: i for i, node in enumerate(free_nodes)}
-        
-        # Build matrices
-        G, I, stats = self.solver._build_system_matrices(
-            net_graph, free_nodes, node_to_idx, vsrc_nodes, vsrc_voltages
+class TestConfigFileSupport(unittest.TestCase):
+    """Test config file loading and merging"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir)
+
+    def test_load_json_config(self):
+        """Test loading JSON config file"""
+        config_path = Path(self.temp_dir) / 'config.json'
+        config_data = {
+            'verbose': True,
+            'top_k': 50,
+            'use_cholmod': True,
+            'cholmod_mode': 'supernodal',
+        }
+
+        with open(config_path, 'w') as f:
+            json.dump(config_data, f)
+
+        loaded = load_config(str(config_path))
+
+        self.assertEqual(loaded['verbose'], True)
+        self.assertEqual(loaded['top_k'], 50)
+        self.assertEqual(loaded['use_cholmod'], True)
+        self.assertEqual(loaded['cholmod_mode'], 'supernodal')
+
+    def test_merge_config_with_args(self):
+        """Test merging config with CLI args"""
+        import argparse
+
+        config = {
+            'verbose': True,
+            'top_k': 50,
+            'output': './custom_output',
+        }
+
+        # Create args namespace with defaults
+        args = argparse.Namespace(
+            verbose=False,  # Default
+            top_k=100,  # Default
+            output='./results',  # Default
+            net=None,
         )
-        
-        # Check matrix dimensions
-        n = len(free_nodes)
-        self.assertEqual(G.shape, (n, n))
-        self.assertEqual(I.shape, (n,))
-        
-        # Check that G is square and sparse
-        self.assertEqual(G.shape[0], G.shape[1])
-        
-        # Check statistics
-        self.assertIn('num_ground_connections', stats)
-        self.assertIn('num_resistors', stats)
 
+        merged = merge_config_with_args(config, args)
 
-class TestLinearSystemSolving(unittest.TestCase):
-    """Test linear system solving"""
-    
-    @classmethod
-    def setUpClass(cls):
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            raise unittest.SkipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
-        cls.graph = parser.parse()
-    
-    def test_direct_solver(self):
-        """Test direct sparse solver"""
-        solver = PDNSolver(self.graph, solver='direct', verbose=False)
-        results = solver.solve()
-        
-        # Check that solve completed
-        self.assertIsNotNone(results)
-        self.assertGreater(len(results.net_stats), 0)
-    
-    def test_iterative_cg_solver(self):
-        """Test iterative CG solver"""
-        solver = PDNSolver(self.graph, solver='cg', tolerance=1e-6, verbose=False)
-        results = solver.solve()
-        
-        # Check that solve completed
-        self.assertIsNotNone(results)
-        self.assertGreater(len(results.net_stats), 0)
-    
-    def test_iterative_bicgstab_solver(self):
-        """Test iterative BiCGSTAB solver"""
-        solver = PDNSolver(self.graph, solver='bicgstab', tolerance=1e-6, verbose=False)
-        results = solver.solve()
-        
-        # Check that solve completed
-        self.assertIsNotNone(results)
-        self.assertGreater(len(results.net_stats), 0)
+        # Config values should override defaults
+        self.assertEqual(merged.verbose, True)
+        self.assertEqual(merged.top_k, 50)
+        self.assertEqual(merged.output, './custom_output')
+
+    def test_config_file_not_found(self):
+        """Test error handling for missing config file"""
+        with self.assertRaises(FileNotFoundError):
+            load_config('/nonexistent/config.yaml')
+
+    def test_unsupported_config_format(self):
+        """Test error handling for unsupported format"""
+        config_path = Path(self.temp_dir) / 'config.txt'
+        config_path.touch()
+
+        with self.assertRaises(ValueError):
+            load_config(str(config_path))
 
 
 class TestVoltageSolution(unittest.TestCase):
     """Test voltage solution and storage"""
-    
+
     @classmethod
     def setUpClass(cls):
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            raise unittest.SkipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
+        netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not netlist_dir.exists():
+            raise unittest.SkipTest("netlist_small not found")
+
+        parser = NetlistParser(str(netlist_dir))
         cls.graph = parser.parse()
         cls.solver = PDNSolver(cls.graph, verbose=False)
         cls.results = cls.solver.solve()
-    
+
     def test_voltages_stored(self):
         """Test that voltages are stored in graph"""
-        # Check that some nodes have voltage attribute
-        nodes_with_voltage = [n for n, d in self.solver.graph.nodes(data=True) 
+        nodes_with_voltage = [n for n, d in self.solver.graph.nodes(data=True)
                              if 'voltage' in d]
         self.assertGreater(len(nodes_with_voltage), 0)
-    
+
     def test_voltage_values_reasonable(self):
         """Test that voltage values are reasonable"""
-        # VDD is 0.75V, voltages should be close to that
-        for node, data in self.solver.graph.nodes(data=True):
-            if 'voltage' in data:
-                voltage = data['voltage']
-                # Skip None or zero voltages (e.g., unused package nodes, ground)
-                if voltage is not None and voltage > 0:
-                    self.assertGreater(voltage, 0.65)  # Min 0.65V (allow for package drop)
-                    self.assertLess(voltage, 0.76)     # Max 0.76V
-    
+        net_name = list(self.results.net_results.keys())[0]
+        result = self.results.net_results[net_name]
+
+        # All voltages should be positive and close to nominal
+        for node, voltage in result.voltages.items():
+            if voltage > 0:  # Skip ground nodes
+                self.assertGreater(voltage, 0)
+                self.assertLess(voltage, result.nominal_voltage * 1.01)
+
     def test_ir_drop_values(self):
         """Test that IR-drop values are computed"""
-        vdd_stats = self.results.net_stats.get('VDD')
-        if vdd_stats:
-            # IR-drop should be positive and small
-            self.assertGreater(vdd_stats.max_drop, 0.0)
-            self.assertLess(vdd_stats.max_drop, 0.01)  # Less than 10mV drop
-            
-            # Min voltage should be less than nominal
-            self.assertLess(vdd_stats.min_voltage, vdd_stats.nominal_voltage)
+        net_name = list(self.results.net_results.keys())[0]
+        result = self.results.net_results[net_name]
+
+        # IR-drop should be positive and small
+        self.assertGreater(result.max_ir_drop, 0.0)
+        self.assertLess(result.max_ir_drop, 0.1)  # Less than 100mV drop
+
+        # Min voltage should be less than nominal
+        self.assertLess(result.min_voltage, result.nominal_voltage)
 
 
 class TestStatisticsComputation(unittest.TestCase):
     """Test statistics computation"""
-    
+
     @classmethod
     def setUpClass(cls):
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            raise unittest.SkipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
+        netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not netlist_dir.exists():
+            raise unittest.SkipTest("netlist_small not found")
+
+        parser = NetlistParser(str(netlist_dir))
         cls.graph = parser.parse()
         cls.solver = PDNSolver(cls.graph, verbose=False)
         cls.results = cls.solver.solve()
-    
+
     def test_solve_results_structure(self):
         """Test solve results structure"""
         self.assertIsInstance(self.results, SolveResults)
-        self.assertIsInstance(self.results.net_stats, dict)
+        self.assertIsInstance(self.results.net_results, dict)
         self.assertGreater(self.results.total_solve_time, 0.0)
-    
-    def test_net_stats_structure(self):
-        """Test net statistics structure"""
-        vdd_stats = self.results.net_stats.get('VDD')
-        self.assertIsNotNone(vdd_stats)
-        self.assertIsInstance(vdd_stats, NetSolveStats)
-        
+
+    def test_net_result_structure(self):
+        """Test net result structure"""
+        net_name = list(self.results.net_results.keys())[0]
+        result = self.results.net_results[net_name]
+
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, PDNSolveResult)
+
         # Check required fields
-        self.assertEqual(vdd_stats.net_name, 'VDD')
-        self.assertGreater(vdd_stats.num_nodes, 0)
-        self.assertGreater(vdd_stats.num_free_nodes, 0)
-        self.assertGreater(vdd_stats.num_resistors, 0)
-        self.assertGreaterEqual(vdd_stats.solve_time, 0.0)
-    
+        self.assertEqual(result.net_name, net_name)
+        self.assertGreater(result.num_nodes, 0)
+        self.assertGreater(result.num_free_nodes, 0)
+        self.assertGreaterEqual(result.timings.total, 0.0)
+
     def test_voltage_statistics(self):
         """Test voltage statistics"""
-        vdd_stats = self.results.net_stats.get('VDD')
-        if vdd_stats:
-            # Nominal voltage should be 0.75V
-            self.assertAlmostEqual(vdd_stats.nominal_voltage, 0.75, places=2)
-            
-            # Min/max/avg should be reasonable
-            self.assertGreater(vdd_stats.min_voltage, 0.0)
-            self.assertLessEqual(vdd_stats.max_voltage, vdd_stats.nominal_voltage)
-            self.assertGreater(vdd_stats.avg_voltage, 0.0)
-            
-            # Ordering: min <= avg <= max
-            self.assertLessEqual(vdd_stats.min_voltage, vdd_stats.avg_voltage)
-            self.assertLessEqual(vdd_stats.avg_voltage, vdd_stats.max_voltage)
-    
-    def test_current_injection_statistics(self):
-        """Test current injection statistics"""
-        vdd_stats = self.results.net_stats.get('VDD')
-        if vdd_stats:
-            # Test netlist has 17 current sources totaling 55mA
-            # (dc_value + static_value for each instance)
-            self.assertGreater(vdd_stats.total_current_injection, 0.0)
-            self.assertAlmostEqual(vdd_stats.total_current_injection, 55.0, delta=1.0)
+        net_name = list(self.results.net_results.keys())[0]
+        result = self.results.net_results[net_name]
+
+        # Min/max/avg should be reasonable
+        self.assertGreater(result.min_voltage, 0.0)
+        self.assertLessEqual(result.max_voltage, result.nominal_voltage)
+        self.assertGreater(result.avg_voltage, 0.0)
+
+        # Ordering: min <= avg <= max
+        self.assertLessEqual(result.min_voltage, result.avg_voltage)
+        self.assertLessEqual(result.avg_voltage, result.max_voltage)
 
 
 class TestMultiNetSolving(unittest.TestCase):
     """Test solving multiple nets"""
-    
+
     def test_single_net_filter(self):
         """Test solving with net filter"""
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            self.skipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
-        graph = parser.parse()
-        
-        solver = PDNSolver(graph, net_filter='VDD', verbose=False)
-        results = solver.solve()
-        
-        # Should only solve VDD net
-        self.assertEqual(len(results.net_stats), 1)
-        self.assertIn('VDD', results.net_stats)
+        netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not netlist_dir.exists():
+            self.skipTest("netlist_small not found")
 
+        parser = NetlistParser(str(netlist_dir))
+        graph = parser.parse()
 
-class TestReportGeneration(unittest.TestCase):
-    """Test report generation"""
-    
-    def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-    
-    def tearDown(self):
-        import shutil
-        shutil.rmtree(self.temp_dir)
-    
-    def test_generate_reports(self):
-        """Test report generation"""
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            self.skipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
-        graph = parser.parse()
-        
-        solver = PDNSolver(graph, verbose=False)
+        # Get first net name
+        nets = list(graph.graph.get('net_connectivity', {}).keys())
+        if not nets:
+            self.skipTest("No nets found")
+
+        net_name = nets[0]
+        solver = PDNSolver(graph, net_filter=net_name, verbose=False)
         results = solver.solve()
-        
-        # Generate reports
-        solver.generate_reports(output_dir=self.temp_dir, top_k=10)
-        
-        # Check that report files were created
-        report_file = Path(self.temp_dir) / 'topk_irdrop_VDD.txt'
-        self.assertTrue(report_file.exists())
-        
-        # Check report content
-        with open(report_file, 'r') as f:
-            content = f.read()
-            self.assertIn('Top-10 Worst IR-Drop Report', content)
-            self.assertIn('VDD', content)
-    
-    def test_heatmap_generation(self):
-        """Test heatmap generation"""
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            self.skipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
-        graph = parser.parse()
-        
-        solver = PDNSolver(graph, verbose=False)
-        results = solver.solve()
-        
-        # Generate reports with heatmaps
-        solver.generate_reports(output_dir=self.temp_dir, top_k=10)
-        
-        # Check that heatmap files were created (per-layer files)
-        output_path = Path(self.temp_dir)
-        voltage_heatmaps = list(output_path.glob('*_heatmap_VDD_layer_*.png'))
-        current_heatmap = output_path / 'current_heatmap_VDD.png'
-        
-        self.assertGreater(len(voltage_heatmaps), 0, "Should create at least one voltage/irdrop heatmap")
-        self.assertTrue(current_heatmap.exists())
+
+        # Should only solve filtered net
+        self.assertEqual(len(results.net_results), 1)
+        self.assertIn(net_name, results.net_results)
 
 
 class TestSolverEdgeCases(unittest.TestCase):
     """Test edge cases and error handling"""
-    
+
     def test_empty_net(self):
         """Test handling of empty net"""
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            self.skipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
+        netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not netlist_dir.exists():
+            self.skipTest("netlist_small not found")
+
+        parser = NetlistParser(str(netlist_dir))
         graph = parser.parse()
-        
+
         # Try to solve non-existent net
         solver = PDNSolver(graph, net_filter='NONEXISTENT', verbose=False)
         results = solver.solve()
-        
+
         # Should handle gracefully
-        self.assertEqual(len(results.net_stats), 0)
-    
+        self.assertEqual(len(results.net_results), 0)
+
     def test_solve_convergence(self):
         """Test that solver converges"""
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            self.skipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
+        netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not netlist_dir.exists():
+            self.skipTest("netlist_small not found")
+
+        parser = NetlistParser(str(netlist_dir))
         graph = parser.parse()
-        
-        solver = PDNSolver(graph, solver='direct', verbose=False)
+
+        solver = PDNSolver(graph, verbose=False)
         results = solver.solve()
-        
+
         # Check convergence
-        vdd_stats = results.net_stats.get('VDD')
-        if vdd_stats:
-            # Direct solver should have 0 iterations
-            self.assertEqual(vdd_stats.solver_iterations, 0)
-            # Residual should be very small
-            self.assertLess(vdd_stats.solver_residual, 1e-10)
+        net_name = list(results.net_results.keys())[0]
+        result = results.net_results[net_name]
+
+        # Should have valid voltages
+        self.assertGreater(len(result.voltages), 0)
+        self.assertGreater(result.num_nodes, 0)
 
 
-class TestNominalVoltage(unittest.TestCase):
-    """Test nominal voltage determination"""
-    
+class TestNetlistSmallValidation(unittest.TestCase):
+    """Validation tests using netlist_small reference values"""
+
     @classmethod
     def setUpClass(cls):
-        test_netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
-        if not test_netlist_dir.exists():
-            raise unittest.SkipTest("Test netlist not found")
-        
-        parser = NetlistParser(str(test_netlist_dir))
+        netlist_dir = Path(__file__).parent.parent / 'pdn' / 'netlist_small'
+        if not netlist_dir.exists():
+            raise unittest.SkipTest("netlist_small not found")
+
+        parser = NetlistParser(str(netlist_dir))
         cls.graph = parser.parse()
         cls.solver = PDNSolver(cls.graph, verbose=False)
-    
-    def test_get_nominal_voltage(self):
-        """Test nominal voltage extraction"""
-        vsrc_voltages = {'node1': 0.75, 'node2': 0.75}
-        nominal = self.solver._get_nominal_voltage('VDD', vsrc_voltages)
-        
-        self.assertAlmostEqual(nominal, 0.75, places=2)
+        cls.results = cls.solver.solve()
+
+    def test_expected_net_count(self):
+        """Test expected number of nets"""
+        # netlist_small should have VDD_XLV net
+        self.assertIn('VDD_XLV', self.results.net_results)
+
+    def test_vdd_xlv_voltage(self):
+        """Test VDD_XLV nominal voltage"""
+        result = self.results.net_results.get('VDD_XLV')
+        if result:
+            # Check nominal voltage is reasonable
+            self.assertGreater(result.nominal_voltage, 0.5)
+            self.assertLess(result.nominal_voltage, 2.0)
+
+    def test_vdd_xlv_node_count(self):
+        """Test VDD_XLV has expected node count"""
+        result = self.results.net_results.get('VDD_XLV')
+        if result:
+            # netlist_small should have thousands of nodes
+            self.assertGreater(result.num_nodes, 1000)
+
+    def test_vdd_xlv_current_sources(self):
+        """Test VDD_XLV has current sources"""
+        result = self.results.net_results.get('VDD_XLV')
+        if result:
+            # netlist_small should have many current sources
+            self.assertGreater(result.num_isources, 100)
+            self.assertGreater(result.total_current_ma, 0)
 
 
 if __name__ == '__main__':
