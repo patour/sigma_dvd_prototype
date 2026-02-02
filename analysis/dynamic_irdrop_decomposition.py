@@ -203,7 +203,12 @@ class InstanceDecomposition:
     attribution_efficiency: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dictionary."""
+        """Convert to JSON-serializable dictionary.
+
+        Note: Waveform arrays (t_array, ir_drop_total, ir_drop_near, ir_drop_far)
+        are NOT included to keep JSON files compact. Use the dataclass attributes
+        directly for plotting or detailed analysis.
+        """
         result = {
             'instance_name': self.instance_name,
             'node': self.node,
@@ -226,12 +231,6 @@ class InstanceDecomposition:
             'far_fraction_at_peak_percent': self.far_fraction_at_peak,
             'avg_near_fraction_percent': self.avg_near_fraction,
             'avg_far_fraction_percent': self.avg_far_fraction,
-            'waveforms': {
-                't_ns': (self.t_array * 1e9).tolist(),
-                'total_mV': (self.ir_drop_total * 1000).tolist(),
-                'near_mV': (self.ir_drop_near * 1000).tolist(),
-                'far_mV': (self.ir_drop_far * 1000).tolist(),
-            },
         }
         # Add aggressor data if present
         if self.top_aggressors:
@@ -259,12 +258,16 @@ class DecompositionResult:
     worst_instances: List[InstanceDecomposition]
     timings: Dict[str, float] = field(default_factory=dict)
     peak_ir_drop_per_node: Dict[str, float] = field(default_factory=dict)  # node -> peak IR-drop (V)
+    total_current_waveform: np.ndarray = field(default_factory=lambda: np.array([]))  # Design-wide total current (mA)
+    t_array: np.ndarray = field(default_factory=lambda: np.array([]))  # Time array for total current plot
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to JSON-serializable dictionary.
 
-        Note: peak_ir_drop_per_node is not included to avoid very large JSON files.
-        Use the peak_ir_drop_per_node attribute directly if needed.
+        Note: Large arrays are NOT included to keep JSON files compact:
+        - peak_ir_drop_per_node: Use attribute directly for heatmaps
+        - total_current_waveform, t_array: Use attributes directly for plotting
+        - Per-instance waveforms: Use InstanceDecomposition attributes directly
         """
         return {
             'netlist_dir': self.netlist_dir,
@@ -283,6 +286,8 @@ class DecompositionResult:
                 'max_mV': max(self.peak_ir_drop_per_node.values()) * 1000 if self.peak_ir_drop_per_node else 0,
                 'min_mV': min(self.peak_ir_drop_per_node.values()) * 1000 if self.peak_ir_drop_per_node else 0,
             } if self.peak_ir_drop_per_node else None,
+            # Note: total_current_waveform and t_array are NOT serialized to keep JSON compact.
+            # Use the dataclass attributes directly for plotting.
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -691,69 +696,98 @@ def compute_decomposition_stats(
 # Output Formatting
 # =============================================================================
 
-def print_results(result: DecompositionResult) -> None:
-    """Print results to console in formatted table."""
-    print("=" * 80)
-    print("DYNAMIC IR-DROP DECOMPOSITION ANALYSIS RESULTS")
-    print("=" * 80)
-    print(f"Netlist: {result.netlist_dir}")
-    print(f"Net: {result.net_name}")
-    print(f"Method: {result.method} ({result.integration_method.upper()})")
-    print(f"Time range: {result.t_start_ns:.2f} ns - {result.t_end_ns:.2f} ns (dt={result.dt_ns:.2f} ns)")
-    print(f"Window size: {result.window_percent:.1f}% of design")
-    print(f"Grid bounds: ({result.grid_bounds[0]:.0f}, {result.grid_bounds[1]:.0f}) x "
-          f"({result.grid_bounds[2]:.0f}, {result.grid_bounds[3]:.0f})")
-    print()
+class Logger:
+    """Simple logger that writes to stdout and optionally to a file."""
 
-    print(f"TOP-{len(result.worst_instances)} WORST INSTANCES WITH NEAR/FAR DECOMPOSITION")
-    print("=" * 80)
-    print(f"{'Rank':<5} {'Instance':<30} {'Peak(mV)':<10} {'Near(mV)':<10} {'Far(mV)':<10} {'Near%':<7} {'Far%':<7}")
-    print("-" * 80)
+    def __init__(self, log_file: Optional[str] = None):
+        self.log_file = None
+        if log_file:
+            self.log_file = open(log_file, 'w')
+
+    def log(self, msg: str = '') -> None:
+        """Write message to stdout and log file."""
+        print(msg)
+        if self.log_file:
+            self.log_file.write(msg + '\n')
+
+    def close(self) -> None:
+        """Close log file if open."""
+        if self.log_file:
+            self.log_file.close()
+            self.log_file = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+def print_results(result: DecompositionResult, logger: Optional[Logger] = None) -> None:
+    """Print results to console and optionally to log file."""
+    log = logger.log if logger else print
+
+    log("=" * 80)
+    log("DYNAMIC IR-DROP DECOMPOSITION ANALYSIS RESULTS")
+    log("=" * 80)
+    log(f"Netlist: {result.netlist_dir}")
+    log(f"Net: {result.net_name}")
+    log(f"Method: {result.method} ({result.integration_method.upper()})")
+    log(f"Time range: {result.t_start_ns:.2f} ns - {result.t_end_ns:.2f} ns (dt={result.dt_ns:.2f} ns)")
+    log(f"Window size: {result.window_percent:.1f}% of design")
+    log(f"Grid bounds: ({result.grid_bounds[0]:.0f}, {result.grid_bounds[1]:.0f}) x "
+        f"({result.grid_bounds[2]:.0f}, {result.grid_bounds[3]:.0f})")
+    log()
+
+    log(f"TOP-{len(result.worst_instances)} WORST INSTANCES WITH NEAR/FAR DECOMPOSITION")
+    log("=" * 80)
+    log(f"{'Rank':<5} {'Instance':<30} {'Peak(mV)':<10} {'Near(mV)':<10} {'Far(mV)':<10} {'Near%':<7} {'Far%':<7}")
+    log("-" * 80)
 
     for i, inst in enumerate(result.worst_instances, 1):
         inst_short = inst.instance_name[:28] + ".." if len(inst.instance_name) > 30 else inst.instance_name
-        print(f"{i:<5} {inst_short:<30} {inst.peak_total_mV:<10.3f} {inst.peak_near_mV:<10.3f} "
-              f"{inst.peak_far_mV:<10.3f} {inst.near_fraction_at_peak:<7.1f} {inst.far_fraction_at_peak:<7.1f}")
+        log(f"{i:<5} {inst_short:<30} {inst.peak_total_mV:<10.3f} {inst.peak_near_mV:<10.3f} "
+            f"{inst.peak_far_mV:<10.3f} {inst.near_fraction_at_peak:<7.1f} {inst.far_fraction_at_peak:<7.1f}")
 
-    print()
+    log()
 
     # Summary statistics
     if result.worst_instances:
         avg_near_pct = np.mean([inst.near_fraction_at_peak for inst in result.worst_instances])
         avg_far_pct = np.mean([inst.far_fraction_at_peak for inst in result.worst_instances])
-        print(f"Average near contribution: {avg_near_pct:.1f}%")
-        print(f"Average far contribution: {avg_far_pct:.1f}%")
+        log(f"Average near contribution: {avg_near_pct:.1f}%")
+        log(f"Average far contribution: {avg_far_pct:.1f}%")
 
     # Print aggressor analysis if available
     has_aggressors = any(inst.top_aggressors for inst in result.worst_instances)
     if has_aggressors:
-        print()
-        print("=" * 80)
-        print("TOP AGGRESSORS WITHIN NEAR-WINDOW (per victim)")
-        print("=" * 80)
+        log()
+        log("=" * 80)
+        log("TOP AGGRESSORS WITHIN NEAR-WINDOW (per victim)")
+        log("=" * 80)
 
         for i, inst in enumerate(result.worst_instances, 1):
             if not inst.top_aggressors:
                 continue
 
-            print()
-            print(f"VICTIM #{i}: {inst.instance_name}")
-            print(f"  Peak IR-drop: {inst.peak_total_mV:.3f} mV at t={inst.peak_time_ns:.2f} ns")
-            print(f"  Self contribution: {inst.self_contribution_mV:.3f} mV ({inst.self_contribution_pct:.1f}%)")
-            print(f"  Attribution efficiency: {inst.attribution_efficiency:.1%}")
-            print()
-            print(f"  {'Rank':<5} {'Node':<25} {'Contrib(mV)':<12} {'%':<8} {'Distance(um)':<12}")
-            print(f"  {'-'*62}")
+            log()
+            log(f"VICTIM #{i}: {inst.instance_name}")
+            log(f"  Peak IR-drop: {inst.peak_total_mV:.3f} mV at t={inst.peak_time_ns:.2f} ns")
+            log(f"  Self contribution: {inst.self_contribution_mV:.3f} mV ({inst.self_contribution_pct:.1f}%)")
+            log(f"  Attribution efficiency: {inst.attribution_efficiency:.1%}")
+            log()
+            log(f"  {'Rank':<5} {'Node':<25} {'Contrib(mV)':<12} {'%':<8} {'Distance(um)':<12}")
+            log(f"  {'-'*62}")
 
             for j, agg in enumerate(inst.top_aggressors, 1):
                 node_short = agg.node[:23] + ".." if len(agg.node) > 25 else agg.node
-                print(f"  {j:<5} {node_short:<25} {agg.contribution_mV:<12.3f} "
-                      f"{agg.contribution_pct:<8.1f} {agg.distance_um:<12.1f}")
+                log(f"  {j:<5} {node_short:<25} {agg.contribution_mV:<12.3f} "
+                    f"{agg.contribution_pct:<8.1f} {agg.distance_um:<12.1f}")
 
-    print()
-    print("Timing breakdown:")
+    log()
+    log("Timing breakdown:")
     for key, val in result.timings.items():
-        print(f"  {key}: {val:.3f} s")
+        log(f"  {key}: {val:.3f} s")
 
 
 # =============================================================================
@@ -770,12 +804,10 @@ def generate_plots(
     """Generate analysis plots.
 
     Creates:
-    1. Bar chart: Near vs Far contributions for all worst instances
-    2. Waveform plots: Time-domain decomposition for each worst instance
-    3. Spatial map: Worst instance locations with their analysis windows
-    4. Pie chart: Average near/far breakdown
-    5. Aggressor contribution bar plots (per victim)
-    6. Peak IR-drop stripe heatmaps (if peak_ir_drop_per_node available)
+    1. Design-wide total current plot
+    2. Waveform plots: Time-domain decomposition with total current for each worst instance
+    3. Aggressor contribution bar plots (per victim)
+    4. Peak IR-drop stripe heatmaps (if peak_ir_drop_per_node available)
 
     Args:
         result: DecompositionResult with analysis data
@@ -789,59 +821,73 @@ def generate_plots(
         if not show:
             matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-        import matplotlib.patches as patches
     except ImportError:
         print("Warning: matplotlib not available, skipping plots")
         return
 
     os.makedirs(plot_dir, exist_ok=True)
 
-    # 1. Bar chart: Near vs Far contributions
-    fig, ax = plt.subplots(figsize=(12, 6))
-    n_inst = len(result.worst_instances)
-    x = np.arange(n_inst)
-    width = 0.35
+    # 1. Design-wide total current plot
+    if len(result.total_current_waveform) > 0 and len(result.t_array) > 0:
+        fig, ax = plt.subplots(figsize=(10, 5))
 
-    near_drops = [inst.peak_near_mV for inst in result.worst_instances]
-    far_drops = [inst.peak_far_mV for inst in result.worst_instances]
-    labels = [f"#{i+1}\n{inst.instance_name[:15]}..." if len(inst.instance_name) > 15
-              else f"#{i+1}\n{inst.instance_name}"
-              for i, inst in enumerate(result.worst_instances)]
+        t_ns = result.t_array * 1e9
+        current_mA = result.total_current_waveform
 
-    bars_near = ax.bar(x - width/2, near_drops, width, label='Near', color='royalblue')
-    bars_far = ax.bar(x + width/2, far_drops, width, label='Far', color='coral')
+        ax.plot(t_ns, current_mA, 'b-', linewidth=1.5)
 
-    ax.set_xlabel('Instance')
-    ax.set_ylabel('Peak IR-Drop (mV)')
-    ax.set_title(f'Near vs Far IR-Drop Contributions ({result.net_name})')
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=8)
-    ax.legend()
-    ax.grid(axis='y', alpha=0.3)
+        # Mark peak current time
+        peak_idx = np.argmax(current_mA)
+        peak_time = t_ns[peak_idx]
+        peak_current = current_mA[peak_idx]
+        ax.axvline(peak_time, color='red', linestyle='--', alpha=0.7,
+                   label=f'Peak: {peak_current:.2f} mA @ {peak_time:.2f} ns')
+        ax.plot(peak_time, peak_current, 'ro', markersize=8)
 
-    plt.tight_layout()
-    plt.savefig(os.path.join(plot_dir, 'near_far_comparison.png'), dpi=150)
-    if show:
-        plt.show()
-    plt.close()
+        ax.set_xlabel('Time (ns)')
+        ax.set_ylabel('Total Current (mA)')
+        ax.set_title(f'Design-Wide Total Current ({result.net_name})')
+        ax.legend(loc='upper right')
+        ax.grid(alpha=0.3)
 
-    # 2. Waveform plots for each instance
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, 'total_current.png'), dpi=150)
+        if show:
+            plt.show()
+        plt.close()
+
+    # 2. Waveform plots for each instance (with total current on secondary y-axis)
     for i, inst in enumerate(result.worst_instances):
         fig, ax = plt.subplots(figsize=(10, 5))
 
         t_ns = inst.t_array * 1e9
-        ax.plot(t_ns, inst.ir_drop_total * 1000, 'k-', linewidth=2, label='Total')
+
+        # Left y-axis: IR-drop waveforms
+        ax.plot(t_ns, inst.ir_drop_total * 1000, 'k-', linewidth=2, label='Total IR-drop')
         ax.plot(t_ns, inst.ir_drop_near * 1000, 'b-', linewidth=1.5, label='Near')
         ax.plot(t_ns, inst.ir_drop_far * 1000, 'r-', linewidth=1.5, label='Far')
-
-        ax.axvline(inst.peak_time_ns, color='gray', linestyle='--', alpha=0.5, label=f'Peak @ {inst.peak_time_ns:.2f} ns')
+        ax.axvline(inst.peak_time_ns, color='gray', linestyle='--', alpha=0.5,
+                   label=f'Peak @ {inst.peak_time_ns:.2f} ns')
 
         ax.set_xlabel('Time (ns)')
         ax.set_ylabel('IR-Drop (mV)')
         ax.set_title(f'IR-Drop Decomposition: {inst.instance_name[:40]}\n'
                      f'Peak: {inst.peak_total_mV:.3f} mV = {inst.peak_near_mV:.3f} (near) + {inst.peak_far_mV:.3f} (far)')
-        ax.legend(loc='upper right')
         ax.grid(alpha=0.3)
+
+        # Right y-axis: Total current (from design-wide waveform)
+        if len(result.total_current_waveform) > 0 and len(result.t_array) == len(inst.t_array):
+            ax2 = ax.twinx()
+            ax2.plot(t_ns, result.total_current_waveform, 'g--', linewidth=1.5, alpha=0.7, label='Total Current')
+            ax2.set_ylabel('Total Current (mA)', color='green')
+            ax2.tick_params(axis='y', labelcolor='green')
+
+            # Combine legends from both axes
+            lines1, labels1 = ax.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=8)
+        else:
+            ax.legend(loc='upper right')
 
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, f'waveform_{i+1}.png'), dpi=150)
@@ -849,63 +895,7 @@ def generate_plots(
             plt.show()
         plt.close()
 
-    # 3. Spatial map with windows
-    fig, ax = plt.subplots(figsize=(10, 8))
-
-    # Draw grid bounds
-    x_min, x_max, y_min, y_max = result.grid_bounds
-    ax.set_xlim(x_min - (x_max - x_min) * 0.05, x_max + (x_max - x_min) * 0.05)
-    ax.set_ylim(y_min - (y_max - y_min) * 0.05, y_max + (y_max - y_min) * 0.05)
-
-    # Draw analysis windows
-    colors = plt.cm.tab10(np.linspace(0, 1, len(result.worst_instances)))
-    for i, inst in enumerate(result.worst_instances):
-        wx_min, wx_max, wy_min, wy_max = inst.window_bounds
-        rect = patches.Rectangle(
-            (wx_min, wy_min), wx_max - wx_min, wy_max - wy_min,
-            linewidth=2, edgecolor=colors[i], facecolor=colors[i], alpha=0.2
-        )
-        ax.add_patch(rect)
-
-        # Mark instance location
-        ax.plot(inst.x, inst.y, 'o', markersize=10, color=colors[i],
-                label=f'#{i+1}: {inst.peak_total_mV:.2f} mV')
-
-    ax.set_xlabel('X coordinate')
-    ax.set_ylabel('Y coordinate')
-    ax.set_title(f'Worst Instance Locations with Analysis Windows\n{result.net_name}')
-    ax.legend(loc='upper right', fontsize=8)
-    ax.set_aspect('equal', adjustable='box')
-    ax.grid(alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(plot_dir, 'spatial_map.png'), dpi=150)
-    if show:
-        plt.show()
-    plt.close()
-
-    # 4. Pie chart: Average near/far breakdown
-    fig, ax = plt.subplots(figsize=(8, 8))
-
-    avg_near = np.mean([inst.near_fraction_at_peak for inst in result.worst_instances])
-    avg_far = np.mean([inst.far_fraction_at_peak for inst in result.worst_instances])
-
-    sizes = [avg_near, avg_far]
-    labels = [f'Near\n{avg_near:.1f}%', f'Far\n{avg_far:.1f}%']
-    colors_pie = ['royalblue', 'coral']
-    explode = (0.05, 0.05)
-
-    ax.pie(sizes, explode=explode, labels=labels, colors=colors_pie,
-           autopct='', startangle=90)
-    ax.set_title(f'Average Near/Far Contribution at Peak\n(Window = {result.window_percent}% of design)')
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(plot_dir, 'pie_chart.png'), dpi=150)
-    if show:
-        plt.show()
-    plt.close()
-
-    # 5. Aggressor contribution bar plots (per victim, sorted by distance)
+    # 3. Aggressor contribution bar plots (per victim, sorted by distance)
     from matplotlib.colors import Normalize
     from matplotlib.cm import ScalarMappable
 
@@ -943,9 +933,14 @@ def generate_plots(
 
         ax.set_xlabel('Distance to Victim (um)')
         ax.set_ylabel('Contribution (mV)')
+
+        # Enhanced title with more context
+        total_agg_contrib = sum(agg.contribution_mV for agg in inst.top_aggressors)
         ax.set_title(f'Aggressor Contributions vs Distance\n'
-                     f'Victim #{i+1}: {inst.instance_name[:40]}\n'
-                     f'Peak IR-drop: {inst.peak_total_mV:.3f} mV')
+                     f'Victim #{i+1}: {inst.instance_name[:40]} (Node: {inst.node})\n'
+                     f'Peak IR-drop: {inst.peak_total_mV:.3f} mV | '
+                     f'Self: {inst.self_contribution_mV:.3f} mV | '
+                     f'Aggressors: {total_agg_contrib:.3f} mV')
         ax.grid(axis='y', alpha=0.3)
 
         # Add a color bar legend for distance
@@ -961,7 +956,7 @@ def generate_plots(
             plt.show()
         plt.close()
 
-    # 6. Peak IR-drop stripe heatmaps (if peak_ir_drop_per_node available)
+    # 4. Peak IR-drop stripe heatmaps (if peak_ir_drop_per_node available)
     if result.peak_ir_drop_per_node:
         from analysis.stripe_heatmap import plot_stripe_heatmap
 
@@ -1178,6 +1173,10 @@ def analyze_dynamic_irdrop_decomposition(
     name_to_idx = {name: i for i, name in enumerate(source_names)}
     n_sources = len(source_names)
 
+    # Variables for total current waveform (populated from initial transient or first decomposition)
+    total_current_waveform: np.ndarray = np.array([])
+    result_t_array: np.ndarray = np.array([])
+
     # Determine worst instances
     if instances:
         # User provided list - skip initial analysis
@@ -1249,6 +1248,10 @@ def analyze_dynamic_irdrop_decomposition(
         # Preserve peak IR-drop per node for heatmap generation
         peak_ir_drop_per_node = dict(initial_result.peak_ir_drop_per_node)
 
+        # Capture total current waveform from initial transient
+        total_current_waveform = np.array(initial_result.total_current_per_time)
+        result_t_array = initial_result.t_array.copy()
+
         # Free initial transient result - no longer needed (~80 MB)
         del initial_result, results
 
@@ -1296,6 +1299,12 @@ def analyze_dynamic_irdrop_decomposition(
             len(near_names), len(far_names),
         )
         decompositions.append(decomp)
+
+        # Capture total current from first decomposition if not already set
+        # (handles case where instances are pre-defined and initial transient is skipped)
+        if len(total_current_waveform) == 0:
+            total_current_waveform = np.array(result_full.total_current_per_time)
+            result_t_array = result_full.t_array.copy()
 
         # Free TransientResult objects - waveforms already extracted (~80 MB per instance)
         del results, result_full, result_near, result_far
@@ -1379,6 +1388,8 @@ def analyze_dynamic_irdrop_decomposition(
         worst_instances=decompositions,
         timings=timings,
         peak_ir_drop_per_node=peak_ir_drop_per_node,
+        total_current_waveform=total_current_waveform,
+        t_array=result_t_array,
     )
 
 
@@ -1475,9 +1486,8 @@ def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> 
 
     # Output configuration
     output_config = config.get('output', {})
-    result['output'] = args.output or output_config.get('json_file')
-    result['plot'] = args.plot or output_config.get('plot', False)
-    result['plot_dir'] = args.plot_dir or output_config.get('plot_dir', './plots')
+    result['output_dir'] = args.output_dir or output_config.get('output_dir', './irdrop_decomp_results')
+    result['no_plot'] = args.no_plot if args.no_plot else output_config.get('no_plot', False)
     result['verbose'] = args.verbose or output_config.get('verbose', False)
 
     # Heatmap layers
@@ -1554,9 +1564,9 @@ Examples:
     parser.add_argument('--cholmod-use-long', action='store_true', help='Use 64-bit indices for CHOLMOD')
 
     # Output
-    parser.add_argument('--output', '-o', type=str, help='Output JSON file path')
-    parser.add_argument('--plot', action='store_true', help='Generate plots')
-    parser.add_argument('--plot-dir', type=str, help='Directory for plots')
+    parser.add_argument('--output-dir', '-o', type=str,
+                        help='Output directory for results (default: ./irdrop_decomp_results)')
+    parser.add_argument('--no-plot', action='store_true', help='Skip plot generation')
     parser.add_argument('--heatmap-layers', type=str,
                         help='Comma-separated list of layers for heatmaps (e.g., "M1,M2")')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
@@ -1578,53 +1588,71 @@ Examples:
     # Configure solver backend
     configure_solver_backend(merged['solver'])
 
-    # Run analysis
-    if merged['verbose']:
-        print("Starting dynamic IR-drop decomposition analysis...")
-        print(f"  Netlist: {merged['netlist_dir']}")
-        print(f"  Net: {merged['net']}")
-        print(f"  Time: {merged['t_start']*1e9:.2f} ns to {merged['t_end']*1e9:.2f} ns, dt={merged['dt']*1e9:.3f} ns")
-        print(f"  Window: {merged['window_percent']}%")
-        if merged['aggressor_top_k'] > 0:
-            print(f"  Aggressor analysis: top-{merged['aggressor_top_k']} per victim ({merged['adjoint_method']} method)")
-        print()
+    # Create output directory
+    output_dir = merged['output_dir']
+    os.makedirs(output_dir, exist_ok=True)
 
-    result = analyze_dynamic_irdrop_decomposition(
-        netlist_dir=merged['netlist_dir'],
-        net=merged['net'],
-        t_start=merged['t_start'],
-        t_end=merged['t_end'],
-        dt=merged['dt'],
-        top_k=merged['top_k'],
-        window_percent=merged['window_percent'],
-        integration_method=merged['integration_method'],
-        instances=merged['instances'],
-        use_cache=merged['use_cache'],
-        verbose=merged['verbose'],
-        aggressor_top_k=merged['aggressor_top_k'],
-        adjoint_method=merged['adjoint_method'],
-        adjoint_memory_window=merged['adjoint_memory_window'],
-    )
+    # Define output paths
+    log_file = os.path.join(output_dir, 'analysis.log')
+    json_file = os.path.join(output_dir, 'results.json')
 
-    # Print results
-    print_results(result)
+    # Create logger
+    logger = Logger(log_file)
 
-    # Save JSON
-    if merged['output']:
-        result.save_json(merged['output'])
-        print(f"\nResults saved to: {merged['output']}")
+    try:
+        # Run analysis
+        if merged['verbose']:
+            logger.log("Starting dynamic IR-drop decomposition analysis...")
+            logger.log(f"  Netlist: {merged['netlist_dir']}")
+            logger.log(f"  Net: {merged['net']}")
+            logger.log(f"  Time: {merged['t_start']*1e9:.2f} ns to {merged['t_end']*1e9:.2f} ns, dt={merged['dt']*1e9:.3f} ns")
+            logger.log(f"  Window: {merged['window_percent']}%")
+            if merged['aggressor_top_k'] > 0:
+                logger.log(f"  Aggressor analysis: top-{merged['aggressor_top_k']} per victim ({merged['adjoint_method']} method)")
+            logger.log(f"  Output dir: {output_dir}")
+            logger.log()
 
-    # Generate plots
-    if merged['plot']:
-        generate_plots(
-            result,
-            merged['plot_dir'],
-            show=False,
-            heatmap_layers=merged.get('heatmap_layers'),
+        result = analyze_dynamic_irdrop_decomposition(
+            netlist_dir=merged['netlist_dir'],
+            net=merged['net'],
+            t_start=merged['t_start'],
+            t_end=merged['t_end'],
+            dt=merged['dt'],
+            top_k=merged['top_k'],
+            window_percent=merged['window_percent'],
+            integration_method=merged['integration_method'],
+            instances=merged['instances'],
+            use_cache=merged['use_cache'],
             verbose=merged['verbose'],
+            aggressor_top_k=merged['aggressor_top_k'],
+            adjoint_method=merged['adjoint_method'],
+            adjoint_memory_window=merged['adjoint_memory_window'],
         )
 
-    return result
+        # Print results
+        print_results(result, logger)
+
+        # Save JSON
+        result.save_json(json_file)
+        logger.log(f"\nResults saved to: {json_file}")
+
+        # Generate plots
+        if not merged['no_plot']:
+            plot_dir = os.path.join(output_dir, 'plots')
+            generate_plots(
+                result,
+                plot_dir,
+                show=False,
+                heatmap_layers=merged.get('heatmap_layers'),
+                verbose=merged['verbose'],
+            )
+
+        logger.log(f"Log saved to: {log_file}")
+
+        return result
+
+    finally:
+        logger.close()
 
 
 if __name__ == '__main__':
