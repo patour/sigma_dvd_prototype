@@ -805,7 +805,9 @@ def generate_plots(
     plot_dir: str,
     show: bool = False,
     heatmap_layers: Optional[List[str]] = None,
+    max_stripes: int = 500,
     verbose: bool = False,
+    graph: Optional[Any] = None,
 ) -> None:
     """Generate analysis plots.
 
@@ -820,6 +822,7 @@ def generate_plots(
         plot_dir: Directory to save plots
         show: If True, display plots interactively
         heatmap_layers: Optional list of layers to generate heatmaps for (None = all)
+        max_stripes: Maximum stripes for heatmap (default 500)
         verbose: Print progress
     """
     try:
@@ -868,10 +871,16 @@ def generate_plots(
 
         t_ns = inst.t_array * 1e9
 
+        # Zoom window: 1ns centered on peak time
+        ZOOM_WINDOW_NS = 1.0
+        half_window = ZOOM_WINDOW_NS / 2
+        t_min = max(t_ns[0], inst.peak_time_ns - half_window)
+        t_max = min(t_ns[-1], inst.peak_time_ns + half_window)
+
         # Left y-axis: IR-drop waveforms
-        ax.plot(t_ns, inst.ir_drop_total * 1000, 'k-', linewidth=2, label='Total IR-drop')
-        ax.plot(t_ns, inst.ir_drop_near * 1000, 'b-', linewidth=1.5, label='Near')
-        ax.plot(t_ns, inst.ir_drop_far * 1000, 'r-', linewidth=1.5, label='Far')
+        ax.plot(t_ns, inst.ir_drop_total * 1000, 'k-', linewidth=1.2, label='Total IR-drop')
+        ax.plot(t_ns, inst.ir_drop_near * 1000, 'b-', linewidth=0.8, label='Near')
+        ax.plot(t_ns, inst.ir_drop_far * 1000, 'r-', linewidth=0.8, label='Far')
         ax.axvline(inst.peak_time_ns, color='gray', linestyle='--', alpha=0.5,
                    label=f'Peak @ {inst.peak_time_ns:.2f} ns')
 
@@ -880,11 +889,12 @@ def generate_plots(
         ax.set_title(f'IR-Drop Decomposition: {truncate_name(inst.instance_name)}\n'
                      f'Peak: {inst.peak_total_mV:.3f} mV = {inst.peak_near_mV:.3f} (near) + {inst.peak_far_mV:.3f} (far)')
         ax.grid(alpha=0.3)
+        ax.set_xlim(t_min, t_max)
 
         # Right y-axis: Total current (from design-wide waveform)
         if len(result.total_current_waveform) > 0 and len(result.t_array) == len(inst.t_array):
             ax2 = ax.twinx()
-            ax2.plot(t_ns, result.total_current_waveform, 'g--', linewidth=1.5, alpha=0.7, label='Total Current')
+            ax2.plot(t_ns, result.total_current_waveform, 'g--', linewidth=0.8, alpha=0.7, label='Total Current')
             ax2.set_ylabel('Total Current (mA)', color='green')
             ax2.tick_params(axis='y', labelcolor='green')
 
@@ -896,7 +906,7 @@ def generate_plots(
             ax.legend(loc='upper right')
 
         plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, f'waveform_{i+1}.png'), dpi=150)
+        plt.savefig(os.path.join(plot_dir, f'waveform_{i+1}.png'), dpi=300)
         if show:
             plt.show()
         plt.close()
@@ -905,37 +915,75 @@ def generate_plots(
     from matplotlib.colors import Normalize
     from matplotlib.cm import ScalarMappable
 
+    # Adaptive thresholds for plot readability
+    LABEL_ALL_THRESHOLD = 20      # Show all labels if ≤ this many aggressors
+    TARGET_LABELS = 15            # Target number of x-axis labels when crowded
+    ANNOTATE_THRESHOLD = 20       # Annotate all bars if ≤ this many aggressors
+    TOP_N_ANNOTATE = 10           # Number of top contributors to annotate when crowded
+    EDGE_LINE_THRESHOLD = 50      # Remove bar edges if > this many aggressors
+
     for i, inst in enumerate(result.worst_instances):
         if not inst.top_aggressors:
             continue
 
-        fig, ax = plt.subplots(figsize=(12, 6))
-
         # Sort aggressors by distance
         sorted_aggressors = sorted(inst.top_aggressors, key=lambda a: a.distance_um)
+        n_aggressors = len(sorted_aggressors)
         distances = [agg.distance_um for agg in sorted_aggressors]
         contributions = [agg.contribution_mV for agg in sorted_aggressors]
 
+        # Adaptive figure width based on number of aggressors
+        fig_width = max(12, min(24, 12 + (n_aggressors - 20) * 0.1))
+        fig, ax = plt.subplots(figsize=(fig_width, 6))
+
         # Create bar positions and labels
-        x_pos = np.arange(len(sorted_aggressors))
+        x_pos = np.arange(n_aggressors)
         cmap = matplotlib.colormaps.get_cmap('viridis')
-        bar_colors = cmap(np.linspace(0.2, 0.8, len(sorted_aggressors)))
+        bar_colors = cmap(np.linspace(0.2, 0.8, n_aggressors))
 
-        bars = ax.bar(x_pos, contributions, color=bar_colors, edgecolor='black', linewidth=0.5)
+        # Adaptive bar edge styling
+        edge_color = 'black' if n_aggressors <= EDGE_LINE_THRESHOLD else 'none'
+        edge_width = 0.5 if n_aggressors <= EDGE_LINE_THRESHOLD else 0
 
-        # Add value labels on bars
-        for bar, contrib in zip(bars, contributions):
-            height = bar.get_height()
-            ax.annotate(f'{contrib:.2f}',
-                       xy=(bar.get_x() + bar.get_width() / 2, height),
-                       xytext=(0, 3),
-                       textcoords="offset points",
-                       ha='center', va='bottom', fontsize=8)
+        bars = ax.bar(x_pos, contributions, color=bar_colors,
+                      edgecolor=edge_color, linewidth=edge_width)
 
-        # Create x-axis labels with distance
-        x_labels = [f'{d:.0f}' for d in distances]
-        ax.set_xticks(x_pos)
-        ax.set_xticklabels(x_labels, fontsize=9)
+        # Adaptive value annotations - only annotate top contributors when crowded
+        if n_aggressors <= ANNOTATE_THRESHOLD:
+            # Annotate all bars
+            for bar, contrib in zip(bars, contributions):
+                height = bar.get_height()
+                ax.annotate(f'{contrib:.2f}',
+                           xy=(bar.get_x() + bar.get_width() / 2, height),
+                           xytext=(0, 3),
+                           textcoords="offset points",
+                           ha='center', va='bottom', fontsize=8)
+        else:
+            # Only annotate top N contributors by magnitude
+            contrib_array = np.array(contributions)
+            top_indices = set(np.argsort(contrib_array)[-TOP_N_ANNOTATE:])
+            for idx, (bar, contrib) in enumerate(zip(bars, contributions)):
+                if idx in top_indices:
+                    height = bar.get_height()
+                    ax.annotate(f'{contrib:.2f}',
+                               xy=(bar.get_x() + bar.get_width() / 2, height),
+                               xytext=(0, 2),
+                               textcoords="offset points",
+                               ha='center', va='bottom', fontsize=7, rotation=45)
+
+        # Adaptive x-axis labels
+        if n_aggressors <= LABEL_ALL_THRESHOLD:
+            # Show all labels
+            x_labels = [f'{d:.0f}' for d in distances]
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(x_labels, fontsize=9)
+        else:
+            # Show subset of labels to avoid overlap
+            label_stride = max(1, n_aggressors // TARGET_LABELS)
+            visible_ticks = x_pos[::label_stride]
+            visible_labels = [f'{distances[j]:.0f}' for j in range(0, n_aggressors, label_stride)]
+            ax.set_xticks(visible_ticks)
+            ax.set_xticklabels(visible_labels, fontsize=8, rotation=45, ha='right')
 
         ax.set_xlabel('Distance to Victim (um)')
         ax.set_ylabel('Contribution (mV)')
@@ -995,6 +1043,7 @@ def generate_plots(
             node_values=result.peak_ir_drop_per_node,
             layers=heatmap_layers,
             plot_dir=plot_dir,
+            max_stripes=max_stripes,
             title_prefix='Peak IR-Drop',
             value_label='Peak IR-Drop (mV)',
             value_scale=1000.0,  # V to mV
@@ -1002,6 +1051,7 @@ def generate_plots(
             windows=windows,
             show=show,
             verbose=verbose,
+            graph=graph,
         )
 
     print(f"Plots saved to: {plot_dir}")
@@ -1091,7 +1141,7 @@ def analyze_dynamic_irdrop_decomposition(
     aggressor_top_k: int = 0,
     adjoint_method: str = 'dynamic',
     adjoint_memory_window: int = 20,
-) -> DecompositionResult:
+) -> Tuple[DecompositionResult, Any]:
     """Analyze dynamic IR-drop and decompose into near/far contributions.
 
     Args:
@@ -1111,7 +1161,7 @@ def analyze_dynamic_irdrop_decomposition(
         adjoint_memory_window: Number of time steps for dynamic adjoint memory
 
     Returns:
-        DecompositionResult with analysis data.
+        Tuple of (DecompositionResult, graph) where graph is the PDN graph for plotting.
     """
     # Force Backward Euler when aggressor analysis is enabled
     # (dynamic adjoint uses BE internally for consistency)
@@ -1381,21 +1431,24 @@ def analyze_dynamic_irdrop_decomposition(
         timings['adjoint_analysis'] = time_module.perf_counter() - t0_adjoint
     timings['total'] = time_module.perf_counter() - t0_total
 
-    return DecompositionResult(
-        netlist_dir=netlist_dir,
-        net_name=net,
-        method='transient',
-        integration_method=integration_method,
-        t_start_ns=t_start * 1e9,
-        t_end_ns=t_end * 1e9,
-        dt_ns=dt * 1e9,
-        window_percent=window_percent,
-        grid_bounds=grid_bounds,
-        worst_instances=decompositions,
-        timings=timings,
-        peak_ir_drop_per_node=peak_ir_drop_per_node,
-        total_current_waveform=total_current_waveform,
-        t_array=result_t_array,
+    return (
+        DecompositionResult(
+            netlist_dir=netlist_dir,
+            net_name=net,
+            method='transient',
+            integration_method=integration_method,
+            t_start_ns=t_start * 1e9,
+            t_end_ns=t_end * 1e9,
+            dt_ns=dt * 1e9,
+            window_percent=window_percent,
+            grid_bounds=grid_bounds,
+            worst_instances=decompositions,
+            timings=timings,
+            peak_ir_drop_per_node=peak_ir_drop_per_node,
+            total_current_waveform=total_current_waveform,
+            t_array=result_t_array,
+        ),
+        graph,
     )
 
 
@@ -1502,6 +1555,9 @@ def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> 
     else:
         result['heatmap_layers'] = output_config.get('heatmap_layers')
 
+    # Max stripes for heatmap
+    result['max_stripes'] = args.max_stripes if args.max_stripes != 500 else output_config.get('max_stripes', 500)
+
     return result
 
 
@@ -1575,6 +1631,8 @@ Examples:
     parser.add_argument('--no-plot', action='store_true', help='Skip plot generation')
     parser.add_argument('--heatmap-layers', type=str,
                         help='Comma-separated list of layers for heatmaps (e.g., "M1,M2")')
+    parser.add_argument('--max-stripes', type=int, default=500,
+                        help='Maximum stripes for heatmap (default: 500)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
@@ -1618,7 +1676,7 @@ Examples:
             logger.log(f"  Output dir: {output_dir}")
             logger.log()
 
-        result = analyze_dynamic_irdrop_decomposition(
+        result, graph = analyze_dynamic_irdrop_decomposition(
             netlist_dir=merged['netlist_dir'],
             net=merged['net'],
             t_start=merged['t_start'],
@@ -1650,7 +1708,9 @@ Examples:
                 plot_dir,
                 show=False,
                 heatmap_layers=merged.get('heatmap_layers'),
+                max_stripes=merged.get('max_stripes', 500),
                 verbose=merged['verbose'],
+                graph=graph,
             )
 
         logger.log(f"Log saved to: {log_file}")

@@ -104,14 +104,160 @@ def extract_node_data_vectorized(
 # Orientation Detection
 # =============================================================================
 
-def detect_orientation_from_coords(xs: np.ndarray, ys: np.ndarray) -> str:
+def detect_orientation_from_edges(
+    graph,
+    layer_nodes: List[str],
+    layer: str,
+    max_edges: int = 5000,
+    threshold: float = 0.70,
+) -> str:
+    """Detect H/V/MIXED orientation from resistor edge angles.
+
+    Samples resistor edges between nodes on the same layer and classifies
+    by angle. This is more accurate than coordinate-based detection as it
+    reflects actual routing direction.
+
+    Args:
+        graph: PDN graph (rustworkx or networkx)
+        layer_nodes: List of node names on this layer
+        layer: Layer identifier for filtering
+        max_edges: Maximum edges to sample (default 5000)
+        threshold: Fraction threshold for H/V classification (default 0.70)
+
+    Returns:
+        'H' for horizontal, 'V' for vertical, 'MIXED' for no clear orientation
+    """
+    if graph is None or len(layer_nodes) < 2:
+        return 'MIXED'
+
+    # Get nodes_dict for coordinate lookup
+    if hasattr(graph, 'nodes_dict'):
+        nodes_dict = graph.nodes_dict
+    elif hasattr(graph, 'nodes'):
+        # NetworkX graph
+        nodes_dict = dict(graph.nodes(data=True))
+    else:
+        return 'MIXED'
+
+    # Sample nodes if too many
+    import random
+    max_sample_nodes = min(1000, len(layer_nodes))
+    if len(layer_nodes) > max_sample_nodes:
+        sample_nodes = random.sample(layer_nodes, max_sample_nodes)
+    else:
+        sample_nodes = layer_nodes
+
+    layer_nodes_set = set(layer_nodes)
+
+    horizontal_edges = 0
+    vertical_edges = 0
+    diagonal_edges = 0
+    edges_checked = 0
+
+    # Get neighbor function based on graph type
+    if hasattr(graph, 'neighbors'):
+        get_neighbors = graph.neighbors
+    elif hasattr(graph, 'adj'):
+        get_neighbors = lambda n: graph.adj[n].keys()
+    else:
+        return 'MIXED'
+
+    for node in sample_nodes:
+        if edges_checked >= max_edges:
+            break
+
+        node_data = nodes_dict.get(node)
+        if not node_data:
+            continue
+
+        x1 = node_data.get('x')
+        y1 = node_data.get('y')
+        if x1 is None or y1 is None:
+            continue
+
+        # Check neighbors
+        try:
+            neighbors = list(get_neighbors(node))
+        except (KeyError, TypeError):
+            continue
+
+        neighbor_count = 0
+        for neighbor in neighbors:
+            if edges_checked >= max_edges:
+                break
+
+            neighbor_count += 1
+            if neighbor_count > 10:  # Max 10 neighbors per node
+                break
+
+            if neighbor not in layer_nodes_set:
+                continue
+
+            neighbor_data = nodes_dict.get(neighbor)
+            if not neighbor_data:
+                continue
+
+            # Check if neighbor is on same layer
+            neighbor_layer = neighbor_data.get('layer')
+            if neighbor_layer != layer:
+                continue
+
+            x2 = neighbor_data.get('x')
+            y2 = neighbor_data.get('y')
+            if x2 is None or y2 is None:
+                continue
+
+            edges_checked += 1
+
+            # Calculate direction
+            dx = abs(x2 - x1)
+            dy = abs(y2 - y1)
+
+            if dx == 0 and dy == 0:
+                continue
+
+            # Classify edge direction (±15° tolerance)
+            # tan(15°) ≈ 0.27, tan(75°) ≈ 3.73
+            angle_ratio = dy / (dx + 1e-9)
+
+            if angle_ratio < 0.27:  # Near horizontal
+                horizontal_edges += 1
+            elif angle_ratio > 3.73:  # Near vertical
+                vertical_edges += 1
+            else:
+                diagonal_edges += 1
+
+    total_edges = horizontal_edges + vertical_edges + diagonal_edges
+
+    if total_edges == 0:
+        return 'MIXED'
+
+    h_ratio = horizontal_edges / total_edges
+    v_ratio = vertical_edges / total_edges
+
+    if h_ratio >= threshold:
+        return 'H'
+    elif v_ratio >= threshold:
+        return 'V'
+    else:
+        return 'MIXED'
+
+
+def detect_orientation_from_coords(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    threshold: float = 2.0,
+) -> str:
     """Detect H/V/MIXED orientation from coordinate distribution.
 
     Uses coordinate variance ratio to determine predominant routing direction.
+    The threshold was lowered from 3.0 to 2.0 to correctly classify layers
+    with moderate aspect ratios (2x-5x) which are common in real PDN designs.
 
     Args:
         xs: X coordinates array
         ys: Y coordinates array
+        threshold: Ratio threshold for classification (default 2.0)
 
     Returns:
         'H' for horizontal, 'V' for vertical, 'MIXED' for no clear orientation
@@ -119,16 +265,42 @@ def detect_orientation_from_coords(xs: np.ndarray, ys: np.ndarray) -> str:
     if len(xs) < 2:
         return 'MIXED'
 
-    # Use unique coordinate counts as a proxy for routing direction
-    x_unique = len(np.unique(np.round(xs, 1)))
-    y_unique = len(np.unique(np.round(ys, 1)))
+    # Use scale-aware rounding: round to 0.1% of coordinate range
+    # This clusters nodes that are "close" relative to design scale
+    # (absolute 0.1 rounding fails for million-scale coordinates)
+    x_range = xs.max() - xs.min()
+    y_range = ys.max() - ys.min()
 
+    # Avoid division by zero for degenerate cases
+    x_bin = max(1.0, x_range * 0.001)  # 0.1% of range
+    y_bin = max(1.0, y_range * 0.001)
+
+    # Round to nearest bin
+    x_binned = np.floor(xs / x_bin)
+    y_binned = np.floor(ys / y_bin)
+
+    x_unique = len(np.unique(x_binned))
+    y_unique = len(np.unique(y_binned))
+
+    # Primary: unique count ratio
     # High X variance with low Y variance = horizontal routing
-    if x_unique > y_unique * 3:
+    if x_unique > y_unique * threshold:
         return 'H'
     # High Y variance with low X variance = vertical routing
-    elif y_unique > x_unique * 3:
+    elif y_unique > x_unique * threshold:
         return 'V'
+
+    # Secondary: coordinate range ratio (fallback for edge cases)
+    x_range = xs.max() - xs.min()
+    y_range = ys.max() - ys.min()
+    if x_range > 0 and y_range > 0:
+        range_ratio = x_range / y_range
+        # Use 1.5x stricter threshold for range fallback
+        if range_ratio > threshold * 1.5:
+            return 'H'
+        elif range_ratio < 1.0 / (threshold * 1.5):
+            return 'V'
+
     return 'MIXED'
 
 
@@ -258,6 +430,7 @@ def aggregate_stripe_bins(
     orientation: str,
     bin_size: Optional[int] = None,
     aggregation: str = 'max',
+    target_bins: int = 500,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Aggregate values within a stripe into bins.
 
@@ -271,6 +444,7 @@ def aggregate_stripe_bins(
         orientation: 'H' or 'V'
         bin_size: Physical bin size. None = auto-calculate
         aggregation: 'max', 'min', or 'sum'
+        target_bins: Target resolution per stripe when auto-calculating (default 500)
 
     Returns:
         (bin_edges, bin_values) arrays
@@ -286,13 +460,20 @@ def aggregate_stripe_bins(
     if coord_range == 0:
         coord_range = 1.0
 
+    # Cap bin count to avoid memory issues (increased from 10000)
+    max_bins = 100000
+
     # Calculate bin size
     if bin_size is None:
-        # Auto-calculate based on node count
-        bin_size = max(1, int(coord_range / max(10, np.sqrt(len(values)))))
+        n_nodes = len(values)
+        if n_nodes > 1000:
+            # Large stripe: use target_bins for consistent resolution
+            bin_size = max(1, int(coord_range / target_bins))
+        else:
+            # Small stripe: original sqrt-based formula
+            bin_size = max(1, int(coord_range / max(10, np.sqrt(n_nodes))))
 
-    # Cap bin count to avoid memory issues
-    max_bins = 10000
+    # Cap bin count (increased limit)
     if coord_range / bin_size > max_bins:
         bin_size = int(coord_range / max_bins)
 
@@ -335,7 +516,7 @@ def aggregate_fast_imshow(
     ys: np.ndarray,
     values: np.ndarray,
     orientation: str,
-    max_bins: int = 1000,
+    max_bins: int = 2000,
     aggregation: str = 'max',
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Fast aggregation returning 2D grid for imshow.
@@ -347,7 +528,7 @@ def aggregate_fast_imshow(
         ys: Y coordinates array
         values: Values array
         orientation: 'H' or 'V'
-        max_bins: Maximum bins per dimension
+        max_bins: Maximum bins per dimension (default 2000, increased from 1000)
         aggregation: 'max', 'min', or 'sum' (scipy calls it 'mean' for sum)
 
     Returns:
@@ -361,19 +542,51 @@ def aggregate_fast_imshow(
     x_min, x_max = xs.min(), xs.max()
     y_min, y_max = ys.min(), ys.max()
 
-    # Adjust bin counts based on orientation
+    # Adjust bin counts based on orientation using physical bin sizing
     n_nodes = len(values)
-    base_bins = max(10, int(np.sqrt(n_nodes)))
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+
+    # Base bin size from physical dimensions (like pdn_plotter.py)
+    avg_range = (x_range + y_range) / 2
+    base_bin_size = max(1.0, avg_range / np.sqrt(n_nodes))
 
     if orientation == 'H':
-        n_x = min(max_bins, base_bins * 2)
-        n_y = min(50, max(5, base_bins // 4))
+        # Horizontal: finer bins along X (routing dir), coarser along Y
+        bin_size_x = base_bin_size / 2  # More resolution along routing
+        bin_size_y = base_bin_size * 2  # Less resolution perpendicular
+        n_x = max(50, min(max_bins, int(x_range / bin_size_x)))
+        n_y = max(20, min(200, int(y_range / bin_size_y)))
     elif orientation == 'V':
-        n_x = min(50, max(5, base_bins // 4))
-        n_y = min(max_bins, base_bins * 2)
+        # Vertical: coarser bins along X, finer along Y (routing dir)
+        bin_size_x = base_bin_size * 2  # Less resolution perpendicular
+        bin_size_y = base_bin_size / 2  # More resolution along routing
+        n_x = max(20, min(200, int(x_range / bin_size_x)))
+        n_y = max(50, min(max_bins, int(y_range / bin_size_y)))
     else:
-        n_x = min(max_bins, base_bins)
-        n_y = min(max_bins, base_bins)
+        # MIXED: detect dominant stripe direction from data
+        # Count approximate unique positions using binning at fine resolution
+        n_unique_x = len(np.unique(np.round(xs / (x_range / max_bins))))
+        n_unique_y = len(np.unique(np.round(ys / (y_range / max_bins))))
+
+        # Physical bin counts as baseline
+        phys_n_x = int(x_range / base_bin_size)
+        phys_n_y = int(y_range / base_bin_size)
+
+        # Use stripe-aware binning only when data shows clear stripe pattern
+        # (many positions in one direction, few in other, AND both have reasonable counts)
+        if n_unique_y >= 50 and n_unique_x > n_unique_y * 2:
+            # Dense data with vertical stripe pattern - use unique X count
+            n_x = max(50, min(max_bins, n_unique_x))
+            n_y = max(50, min(max_bins, phys_n_y))
+        elif n_unique_x >= 50 and n_unique_y > n_unique_x * 2:
+            # Dense data with horizontal stripe pattern - use unique Y count
+            n_y = max(50, min(max_bins, n_unique_y))
+            n_x = max(50, min(max_bins, phys_n_x))
+        else:
+            # Sparse or truly mixed data - use uniform physical bin sizing
+            n_x = max(50, min(max_bins, phys_n_x))
+            n_y = max(50, min(max_bins, phys_n_y))
 
     # Map aggregation to scipy statistic
     stat_map = {'max': 'max', 'min': 'min', 'sum': 'sum'}
@@ -394,8 +607,9 @@ def plot_stripe_heatmap(
     node_values: Dict[str, float],
     layers: Optional[List[str]] = None,
     plot_dir: str = './plots',
-    max_stripes: int = 50,
+    max_stripes: int = 500,
     stripe_bin_size: Optional[int] = None,
+    target_bins_per_stripe: int = 500,
     cmap: str = 'RdYlGn_r',
     title_prefix: str = 'Peak IR-Drop',
     value_label: str = 'Peak IR-Drop (mV)',
@@ -404,21 +618,24 @@ def plot_stripe_heatmap(
     markers: Optional[List[Tuple[float, float, str]]] = None,
     windows: Optional[List[Tuple[float, float, float, float, str]]] = None,
     show: bool = False,
-    use_imshow_threshold: int = 100000,
+    use_imshow_threshold: int = 500000,
+    orientation_threshold: float = 2.0,
     verbose: bool = False,
+    graph: Optional[Any] = None,
 ) -> None:
     """Generate stripe-mode heatmaps with optional markers and windows.
 
     Creates one PNG per layer with stripe-based visualization optimized
-    for routing-aware display. For layers with >100K nodes, falls back
+    for routing-aware display. For layers with >500K nodes, falls back
     to faster imshow-based rendering.
 
     Args:
         node_values: Dict mapping node name to value (e.g., peak IR-drop in V)
         layers: Optional list of layers to plot (None = all detected)
         plot_dir: Output directory
-        max_stripes: Max stripes before consolidation
+        max_stripes: Max stripes before consolidation (default 500, was 50)
         stripe_bin_size: Bin size along stripe (None = auto)
+        target_bins_per_stripe: Target bins per stripe when auto-sizing (default 500)
         cmap: Colormap name
         title_prefix: Title prefix for each plot
         value_label: Colorbar label
@@ -427,8 +644,10 @@ def plot_stripe_heatmap(
         markers: List of (x, y, layer) for marker overlay
         windows: List of (x_min, x_max, y_min, y_max, layer) for window overlay
         show: Display plots interactively
-        use_imshow_threshold: Use imshow for layers with more nodes
+        use_imshow_threshold: Use imshow for layers with more nodes (default 500000, was 100000)
+        orientation_threshold: Ratio threshold for H/V detection (default 2.0, used as fallback)
         verbose: Print progress
+        graph: Optional PDN graph for edge-based orientation detection (recommended)
     """
     try:
         import matplotlib
@@ -493,11 +712,19 @@ def plot_stripe_heatmap(
         if n_nodes == 0:
             continue
 
-        # Detect orientation
-        orientation = detect_orientation_from_coords(layer_xs, layer_ys)
-
-        if verbose:
-            print(f"  Orientation: {orientation}, Nodes: {n_nodes}")
+        # Detect orientation - prefer edge-based when graph is available
+        if graph is not None:
+            layer_node_names = nodes[mask].tolist()
+            orientation = detect_orientation_from_edges(
+                graph, layer_node_names, layer, max_edges=5000, threshold=0.70
+            )
+            if verbose:
+                print(f"  Orientation: {orientation} (edge-based), Nodes: {n_nodes}")
+        else:
+            # Fallback to coordinate-based detection
+            orientation = detect_orientation_from_coords(layer_xs, layer_ys, orientation_threshold)
+            if verbose:
+                print(f"  Orientation: {orientation} (coord-based), Nodes: {n_nodes}")
 
         # Create figure
         fig, ax = plt.subplots(figsize=(10, 8))
@@ -522,6 +749,7 @@ def plot_stripe_heatmap(
                     origin='lower',
                     aspect='auto',
                     cmap=cmap,
+                    interpolation='bilinear',
                 )
             except ImportError:
                 # Fallback to simple scatter if scipy not available
@@ -554,7 +782,8 @@ def plot_stripe_heatmap(
                     continue
 
                 bins, bin_values = aggregate_stripe_bins(
-                    s_xs, s_ys, s_vals, orientation, stripe_bin_size, aggregation
+                    s_xs, s_ys, s_vals, orientation, stripe_bin_size, aggregation,
+                    target_bins=target_bins_per_stripe,
                 )
 
                 valid_vals = bin_values[~np.isnan(bin_values)]

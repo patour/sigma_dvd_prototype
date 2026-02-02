@@ -111,6 +111,62 @@ class TestOrientationDetection(unittest.TestCase):
         orientation = detect_orientation_from_coords(xs, ys)
         self.assertEqual(orientation, "MIXED")
 
+    def test_moderate_aspect_ratio_horizontal(self):
+        """Test moderate aspect ratio (2x-3x) classifies as horizontal.
+
+        With the lowered threshold (2.0 from 3.0), layers with moderate
+        aspect ratios should now be correctly classified instead of MIXED.
+        """
+        # 5 unique X values, 2 unique Y values -> ~2.5x ratio
+        xs = np.array([100, 200, 300, 400, 500, 100, 200, 300, 400, 500])
+        ys = np.array([100, 100, 100, 100, 100, 200, 200, 200, 200, 200])
+        orientation = detect_orientation_from_coords(xs, ys)
+        self.assertEqual(orientation, "H")
+
+    def test_moderate_aspect_ratio_vertical(self):
+        """Test moderate aspect ratio (2x-3x) classifies as vertical."""
+        # 2 unique X values, 5 unique Y values -> ~2.5x ratio
+        xs = np.array([100, 100, 100, 100, 100, 200, 200, 200, 200, 200])
+        ys = np.array([100, 200, 300, 400, 500, 100, 200, 300, 400, 500])
+        orientation = detect_orientation_from_coords(xs, ys)
+        self.assertEqual(orientation, "V")
+
+    def test_custom_threshold_higher(self):
+        """Test with higher threshold (3.0) - should return MIXED for 2.5x ratio."""
+        # 5 unique X values, 2 unique Y values -> ~2.5x ratio
+        xs = np.array([100, 200, 300, 400, 500, 100, 200, 300, 400, 500])
+        ys = np.array([100, 100, 100, 100, 100, 200, 200, 200, 200, 200])
+        # With threshold=3.0, 2.5x ratio should be MIXED
+        orientation = detect_orientation_from_coords(xs, ys, threshold=3.0)
+        self.assertEqual(orientation, "MIXED")
+
+    def test_custom_threshold_lower(self):
+        """Test with lower threshold (1.5) - should return H for 1.8x ratio."""
+        # 9 unique X values, 5 unique Y values -> ~1.8x ratio
+        xs = np.array([100, 200, 300, 400, 500, 600, 700, 800, 900] * 5)
+        ys = np.array([100] * 9 + [200] * 9 + [300] * 9 + [400] * 9 + [500] * 9)
+        # With threshold=1.5, 1.8x ratio should be H
+        orientation = detect_orientation_from_coords(xs, ys, threshold=1.5)
+        self.assertEqual(orientation, "H")
+
+    def test_range_fallback_horizontal(self):
+        """Test range ratio fallback for horizontal case."""
+        # Same unique counts but very wide X range
+        xs = np.array([0, 10000])  # Wide X range
+        ys = np.array([0, 100])    # Narrow Y range
+        # Unique counts are equal (2 each), but range ratio is 100:1
+        # Should fall back to range-based detection
+        orientation = detect_orientation_from_coords(xs, ys)
+        self.assertEqual(orientation, "H")
+
+    def test_range_fallback_vertical(self):
+        """Test range ratio fallback for vertical case."""
+        # Same unique counts but very tall Y range
+        xs = np.array([0, 100])    # Narrow X range
+        ys = np.array([0, 10000])  # Wide Y range
+        orientation = detect_orientation_from_coords(xs, ys)
+        self.assertEqual(orientation, "V")
+
 
 class TestStripeGrouping(unittest.TestCase):
     """Tests for stripe grouping."""
@@ -211,6 +267,48 @@ class TestBinAggregation(unittest.TestCase):
         total = sum(v for v in bin_values if v > 0)
         self.assertEqual(total, 5)
 
+    def test_target_bins_parameter(self):
+        """Test that target_bins parameter affects bin size for large stripes."""
+        # Create a large stripe (>1000 nodes)
+        n_nodes = 2000
+        xs = np.linspace(0, 10000, n_nodes)
+        ys = np.full(n_nodes, 100)
+        values = np.random.uniform(0, 1, n_nodes)
+
+        # With target_bins=100, should get ~100 bins
+        bins_100, _ = aggregate_stripe_bins(
+            xs, ys, values, "H", bin_size=None, aggregation="max", target_bins=100
+        )
+
+        # With target_bins=500, should get ~500 bins
+        bins_500, _ = aggregate_stripe_bins(
+            xs, ys, values, "H", bin_size=None, aggregation="max", target_bins=500
+        )
+
+        # More target_bins should result in more actual bins
+        self.assertGreater(len(bins_500), len(bins_100))
+
+    def test_target_bins_small_stripe(self):
+        """Test that target_bins doesn't affect small stripes (<1000 nodes)."""
+        # Create a small stripe
+        n_nodes = 100
+        xs = np.linspace(0, 1000, n_nodes)
+        ys = np.full(n_nodes, 100)
+        values = np.random.uniform(0, 1, n_nodes)
+
+        # For small stripes, target_bins should be ignored (uses sqrt formula)
+        bins_100, _ = aggregate_stripe_bins(
+            xs, ys, values, "H", bin_size=None, aggregation="max", target_bins=100
+        )
+
+        bins_500, _ = aggregate_stripe_bins(
+            xs, ys, values, "H", bin_size=None, aggregation="max", target_bins=500
+        )
+
+        # For small stripes, bin count should be similar regardless of target_bins
+        # (within a factor of 2 since both use sqrt formula)
+        self.assertEqual(len(bins_100), len(bins_500))
+
 
 class TestPlotting(unittest.TestCase):
     """Tests for heatmap plotting."""
@@ -307,6 +405,71 @@ class TestPlotting(unittest.TestCase):
                 node_values=node_values,
                 layers=["M1"],
                 plot_dir=tmpdir,
+                show=False,
+                verbose=False,
+            )
+
+            expected_file = os.path.join(tmpdir, "peak_ir-drop_heatmap_M1.png")
+            self.assertTrue(os.path.exists(expected_file))
+
+    def test_plot_with_custom_orientation_threshold(self):
+        """Test heatmap with custom orientation_threshold parameter."""
+        # Create data with moderate aspect ratio (~2.5x)
+        node_values = {}
+        for x in range(0, 500, 100):  # 5 unique X
+            for y in range(0, 200, 100):  # 2 unique Y
+                node_values[f"{x}_{y}_M1"] = np.random.uniform(0.001, 0.01)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # With threshold=2.0, should detect as horizontal
+            plot_stripe_heatmap(
+                node_values=node_values,
+                layers=["M1"],
+                plot_dir=tmpdir,
+                orientation_threshold=2.0,
+                show=False,
+                verbose=False,
+            )
+
+            expected_file = os.path.join(tmpdir, "peak_ir-drop_heatmap_M1.png")
+            self.assertTrue(os.path.exists(expected_file))
+
+    def test_plot_with_custom_target_bins(self):
+        """Test heatmap with custom target_bins_per_stripe parameter."""
+        # Create horizontal layer data
+        node_values = {}
+        for x in range(0, 1000, 10):  # 100 unique X
+            for y in range(0, 100, 50):  # 2 unique Y
+                node_values[f"{x}_{y}_M1"] = np.random.uniform(0.001, 0.01)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plot_stripe_heatmap(
+                node_values=node_values,
+                layers=["M1"],
+                plot_dir=tmpdir,
+                target_bins_per_stripe=100,
+                show=False,
+                verbose=False,
+            )
+
+            expected_file = os.path.join(tmpdir, "peak_ir-drop_heatmap_M1.png")
+            self.assertTrue(os.path.exists(expected_file))
+
+    def test_plot_with_high_max_stripes(self):
+        """Test heatmap with high max_stripes (new default 500)."""
+        # Create horizontal layer with many stripes
+        node_values = {}
+        for x in range(0, 1000, 10):
+            for y in range(0, 1000, 10):  # 100 unique Y values
+                node_values[f"{x}_{y}_M1"] = np.random.uniform(0.001, 0.01)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Use max_stripes=500 (new default)
+            plot_stripe_heatmap(
+                node_values=node_values,
+                layers=["M1"],
+                plot_dir=tmpdir,
+                max_stripes=500,
                 show=False,
                 verbose=False,
             )
