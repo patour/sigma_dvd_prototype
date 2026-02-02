@@ -258,9 +258,14 @@ class DecompositionResult:
     grid_bounds: Tuple[float, float, float, float]  # (x_min, x_max, y_min, y_max)
     worst_instances: List[InstanceDecomposition]
     timings: Dict[str, float] = field(default_factory=dict)
+    peak_ir_drop_per_node: Dict[str, float] = field(default_factory=dict)  # node -> peak IR-drop (V)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dictionary."""
+        """Convert to JSON-serializable dictionary.
+
+        Note: peak_ir_drop_per_node is not included to avoid very large JSON files.
+        Use the peak_ir_drop_per_node attribute directly if needed.
+        """
         return {
             'netlist_dir': self.netlist_dir,
             'net_name': self.net_name,
@@ -273,6 +278,11 @@ class DecompositionResult:
             'grid_bounds': list(self.grid_bounds),
             'worst_instances': [inst.to_dict() for inst in self.worst_instances],
             'timings': self.timings,
+            'peak_ir_drop_stats': {
+                'n_nodes': len(self.peak_ir_drop_per_node),
+                'max_mV': max(self.peak_ir_drop_per_node.values()) * 1000 if self.peak_ir_drop_per_node else 0,
+                'min_mV': min(self.peak_ir_drop_per_node.values()) * 1000 if self.peak_ir_drop_per_node else 0,
+            } if self.peak_ir_drop_per_node else None,
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -754,18 +764,25 @@ def generate_plots(
     result: DecompositionResult,
     plot_dir: str,
     show: bool = False,
+    heatmap_layers: Optional[List[str]] = None,
+    verbose: bool = False,
 ) -> None:
     """Generate analysis plots.
 
     Creates:
     1. Bar chart: Near vs Far contributions for all worst instances
     2. Waveform plots: Time-domain decomposition for each worst instance
-    3. Spatial map: Worst instance locations with their analysis windows (if matplotlib available)
+    3. Spatial map: Worst instance locations with their analysis windows
+    4. Pie chart: Average near/far breakdown
+    5. Aggressor contribution bar plots (per victim)
+    6. Peak IR-drop stripe heatmaps (if peak_ir_drop_per_node available)
 
     Args:
         result: DecompositionResult with analysis data
         plot_dir: Directory to save plots
         show: If True, display plots interactively
+        heatmap_layers: Optional list of layers to generate heatmaps for (None = all)
+        verbose: Print progress
     """
     try:
         import matplotlib
@@ -944,6 +961,48 @@ def generate_plots(
             plt.show()
         plt.close()
 
+    # 6. Peak IR-drop stripe heatmaps (if peak_ir_drop_per_node available)
+    if result.peak_ir_drop_per_node:
+        from analysis.stripe_heatmap import plot_stripe_heatmap
+
+        # Helper function to extract layer from node name
+        def extract_layer_from_node(node: str) -> Optional[str]:
+            parts = str(node).split('_')
+            if len(parts) >= 3:
+                return parts[2]
+            return None
+
+        # Build markers from worst instances
+        markers = []
+        for inst in result.worst_instances:
+            layer = extract_layer_from_node(inst.node)
+            if layer:
+                markers.append((inst.x, inst.y, layer))
+
+        # Build windows from worst instances
+        windows = []
+        for inst in result.worst_instances:
+            layer = extract_layer_from_node(inst.node)
+            if layer and inst.window_bounds:
+                x_min, x_max, y_min, y_max = inst.window_bounds
+                windows.append((x_min, x_max, y_min, y_max, layer))
+
+        if verbose:
+            print(f"Generating peak IR-drop heatmaps...")
+
+        plot_stripe_heatmap(
+            node_values=result.peak_ir_drop_per_node,
+            layers=heatmap_layers,
+            plot_dir=plot_dir,
+            title_prefix='Peak IR-Drop',
+            value_label='Peak IR-Drop (mV)',
+            value_scale=1000.0,  # V to mV
+            markers=markers,
+            windows=windows,
+            show=show,
+            verbose=verbose,
+        )
+
     print(f"Plots saved to: {plot_dir}")
 
 
@@ -1060,6 +1119,7 @@ def analyze_dynamic_irdrop_decomposition(
             print("Note: Forcing Backward Euler integration for adjoint consistency")
         integration_method = 'be'
     timings: Dict[str, float] = {}
+    peak_ir_drop_per_node: Dict[str, float] = {}  # Will be populated from initial transient
     t0_total = time_module.perf_counter()
 
     # Import core modules
@@ -1185,6 +1245,9 @@ def analyze_dynamic_irdrop_decomposition(
 
         if verbose:
             print(f"Found {len(worst_instances)} spatially-separated worst instances")
+
+        # Preserve peak IR-drop per node for heatmap generation
+        peak_ir_drop_per_node = dict(initial_result.peak_ir_drop_per_node)
 
         # Free initial transient result - no longer needed (~80 MB)
         del initial_result, results
@@ -1315,6 +1378,7 @@ def analyze_dynamic_irdrop_decomposition(
         grid_bounds=grid_bounds,
         worst_instances=decompositions,
         timings=timings,
+        peak_ir_drop_per_node=peak_ir_drop_per_node,
     )
 
 
@@ -1416,6 +1480,12 @@ def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> 
     result['plot_dir'] = args.plot_dir or output_config.get('plot_dir', './plots')
     result['verbose'] = args.verbose or output_config.get('verbose', False)
 
+    # Heatmap layers
+    if args.heatmap_layers:
+        result['heatmap_layers'] = [s.strip() for s in args.heatmap_layers.split(',')]
+    else:
+        result['heatmap_layers'] = output_config.get('heatmap_layers')
+
     return result
 
 
@@ -1487,6 +1557,8 @@ Examples:
     parser.add_argument('--output', '-o', type=str, help='Output JSON file path')
     parser.add_argument('--plot', action='store_true', help='Generate plots')
     parser.add_argument('--plot-dir', type=str, help='Directory for plots')
+    parser.add_argument('--heatmap-layers', type=str,
+                        help='Comma-separated list of layers for heatmaps (e.g., "M1,M2")')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
@@ -1544,7 +1616,13 @@ Examples:
 
     # Generate plots
     if merged['plot']:
-        generate_plots(result, merged['plot_dir'], show=False)
+        generate_plots(
+            result,
+            merged['plot_dir'],
+            show=False,
+            heatmap_layers=merged.get('heatmap_layers'),
+            verbose=merged['verbose'],
+        )
 
     return result
 

@@ -33,6 +33,7 @@ test_modules = [
     'tests.test_regional_solver',
     'tests.test_rx_algorithms',
     'tests.test_rx_graph',
+    'tests.test_stripe_heatmap',
     'tests.test_transient_multi_rhs',
     'tests.test_transient_solver',
     'tests.test_unified_core',

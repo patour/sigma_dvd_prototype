@@ -11,9 +11,18 @@ from .dynamic_irdrop_decomposition import (
     parse_time_value,
 )
 
+from .stripe_heatmap import (
+    plot_stripe_heatmap,
+    parse_node_info,
+    detect_orientation_from_coords,
+)
+
 __all__ = [
     'analyze_dynamic_irdrop_decomposition',
     'InstanceDecomposition',
     'DecompositionResult',
     'parse_time_value',
+    'plot_stripe_heatmap',
+    'parse_node_info',
+    'detect_orientation_from_coords',
 ]
