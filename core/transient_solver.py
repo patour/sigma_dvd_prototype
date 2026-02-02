@@ -102,9 +102,11 @@ class RCSystem:
 
     Contains the conductance (G) and capacitance (C) matrices for the
     reduced system (after eliminating pad nodes via Schur complement).
+
+    Note: G_full and C_full are no longer stored to save memory (~160 MB
+    for large grids). Instead, we store scalar summary values for the
+    properties that depended on them.
     """
-    G_full: sp.csr_matrix          # Full conductance matrix (all nodes except ground)
-    C_full: sp.csr_matrix          # Full capacitance matrix (all nodes except ground)
     G_uu: sp.csr_matrix            # Reduced G (unknown nodes only)
     G_up: sp.csr_matrix            # G cross-terms (unknown to pad)
     C_uu: sp.csr_matrix            # Reduced C (unknown nodes only)
@@ -115,6 +117,9 @@ class RCSystem:
     pad_nodes: List[Any]           # Pad (Dirichlet) nodes
     n_nodes: int                   # Total nodes (excluding ground)
     n_unknown: int                 # Number of unknown nodes
+    # Scalar summaries (replacing G_full/C_full for property access)
+    has_capacitance: bool          # True if any capacitive elements exist
+    total_capacitance_fF: float    # Total capacitance in fF
 
 
 class TransientIRDropSolver:
@@ -167,6 +172,12 @@ class TransientIRDropSolver:
 
         # RC system (lazy initialization)
         self._rc_system: Optional[RCSystem] = None
+
+        # Cached LU factorization for sharing with adjoint solver
+        # Caches the transient system matrix factorization: A = G_uu + C_uu/dt
+        self._cached_lu: Optional[Any] = None
+        self._cached_lu_dt: Optional[float] = None
+        self._cached_lu_method: Optional[IntegrationMethod] = None
 
         # Track data source format
         self._has_raw_objects = False  # True if graph has raw CurrentSource objects
@@ -462,6 +473,12 @@ class TransientIRDropSolver:
 
         C_full = sp.csr_matrix((c_data, (c_rows, c_cols)), shape=(n_nodes, n_nodes))
 
+        # Compute scalar summaries before extracting reduced matrices
+        # (we delete G_full/C_full after extraction to save memory)
+        has_capacitance = C_full.nnz > 0
+        # Total capacitance: sum of diagonal / 2 (each cap contributes to 2 diag entries)
+        total_capacitance_fF = float(C_full.diagonal().sum()) / 2.0
+
         # Build reduced matrices (unknown nodes only)
         # Partition into unknown and pad indices
         u_indices = np.array([node_to_idx[n] for n in unknown_nodes], dtype=int)
@@ -480,9 +497,11 @@ class TransientIRDropSolver:
             G_up = sp.csr_matrix((0, n_pads))
             C_uu = sp.csr_matrix((0, 0))
 
+        # G_full and C_full are no longer needed - let them go out of scope
+        # to free ~160 MB for large grids
+        del G_full, C_full
+
         return RCSystem(
-            G_full=G_full,
-            C_full=C_full,
             G_uu=G_uu,
             G_up=G_up,
             C_uu=C_uu,
@@ -493,6 +512,8 @@ class TransientIRDropSolver:
             pad_nodes=pad_nodes,
             n_nodes=n_nodes,
             n_unknown=n_unknown,
+            has_capacitance=has_capacitance,
+            total_capacitance_fF=total_capacitance_fF,
         )
 
     def _ensure_rc_system(self) -> RCSystem:
@@ -695,6 +716,11 @@ class TransientIRDropSolver:
         lu = _factor_conductance_matrix(A, verbose=verbose)
         timings['factor'] = time_module.perf_counter() - t0_factor
 
+        # Cache factorization for sharing with adjoint solver
+        self._cached_lu = lu
+        self._cached_lu_dt = dt
+        self._cached_lu_method = method
+
         # Pad voltage contribution (constant)
         V_p = np.full(len(rc.pad_nodes), vdd, dtype=float)
         if rc.G_up.shape[1] > 0:
@@ -720,6 +746,7 @@ class TransientIRDropSolver:
         rhs_dc = I_u_init - G_up_Vp
         lu_dc = _factor_conductance_matrix(rc.G_uu)
         V_u = lu_dc.solve(rhs_dc)
+        del lu_dc  # Free DC factorization immediately (~200-500 MB)
         timings['dc_init'] = time_module.perf_counter() - t0_dc
 
         if verbose:
@@ -968,19 +995,17 @@ class TransientIRDropSolver:
     def has_capacitance(self) -> bool:
         """Check if the model has any capacitive elements."""
         rc = self._ensure_rc_system()
-        return rc.C_full.nnz > 0
+        return rc.has_capacitance
 
     @property
     def total_capacitance(self) -> float:
         """Get total capacitance in the model (in fF).
-        
+
         Returns:
             Total capacitance in femtofarads (fF).
         """
         rc = self._ensure_rc_system()
-        # Divide by 2 for nodal stamping (each cap contributes to 2 diagonal entries)
-        # C_full is already in fF (native PDN units)
-        return float(rc.C_full.diagonal().sum()) / 2.0
+        return rc.total_capacitance_fF
 
     @property
     def has_dynamic_sources(self) -> bool:
@@ -1117,6 +1142,12 @@ class TransientIRDropSolver:
         lu = _factor_conductance_matrix(A, verbose=verbose)
         timings['factor'] = time_module.perf_counter() - t0_factor
 
+        # Cache factorization for sharing with adjoint solver
+        # This avoids redundant factorization when adjoint analysis follows transient
+        self._cached_lu = lu
+        self._cached_lu_dt = dt
+        self._cached_lu_method = method
+
         # Pad voltage contribution (constant)
         V_p = np.full(len(rc.pad_nodes), vdd, dtype=float)
         if rc.G_up.shape[1] > 0:
@@ -1182,6 +1213,7 @@ class TransientIRDropSolver:
             for m in range(n_masks):
                 rhs_dc = I_u_init_multi[:, m] - G_up_Vp
                 V_u_all[m] = lu_dc.solve(rhs_dc)
+            del lu_dc  # Free DC factorization immediately (~200-500 MB)
 
         timings['dc_init'] = time_module.perf_counter() - t0_dc
 

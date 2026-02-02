@@ -1186,6 +1186,9 @@ def analyze_dynamic_irdrop_decomposition(
         if verbose:
             print(f"Found {len(worst_instances)} spatially-separated worst instances")
 
+        # Free initial transient result - no longer needed (~80 MB)
+        del initial_result, results
+
     # Decomposition analysis for each worst instance
     decompositions: List[InstanceDecomposition] = []
     t0_decomp = time_module.perf_counter()
@@ -1230,6 +1233,9 @@ def analyze_dynamic_irdrop_decomposition(
             len(near_names), len(far_names),
         )
         decompositions.append(decomp)
+
+        # Free TransientResult objects - waveforms already extracted (~80 MB per instance)
+        del results, result_full, result_near, result_far
 
     timings['decomposition'] = time_module.perf_counter() - t0_decomp
 

@@ -1354,14 +1354,12 @@ class TestNonStiffSystemWithScaledRC(unittest.TestCase):
         rc_orig = trans._ensure_rc_system()
 
         # Scale G matrices (reducing conductance = increasing resistance)
-        G_full_scaled = rc_orig.G_full * g_scale_factor
         G_uu_scaled = rc_orig.G_uu * g_scale_factor
         G_up_scaled = rc_orig.G_up * g_scale_factor
 
         # Create new RCSystem with scaled G
+        # Note: G_full/C_full are no longer stored (memory optimization)
         rc_scaled = RCSystem(
-            G_full=G_full_scaled.tocsr(),
-            C_full=rc_orig.C_full,
             G_uu=G_uu_scaled.tocsr(),
             G_up=G_up_scaled.tocsr(),
             C_uu=rc_orig.C_uu,
@@ -1372,6 +1370,8 @@ class TestNonStiffSystemWithScaledRC(unittest.TestCase):
             pad_nodes=rc_orig.pad_nodes,
             n_nodes=rc_orig.n_nodes,
             n_unknown=rc_orig.n_unknown,
+            has_capacitance=rc_orig.has_capacitance,
+            total_capacitance_fF=rc_orig.total_capacitance_fF,
         )
 
         return rc_scaled
@@ -2218,13 +2218,11 @@ class TestDCInitialCondition(unittest.TestCase):
         g_scale = tau_orig / target_tau if tau_orig > 0 else 1e-5
 
         # Create scaled RC system
-        G_full_scaled = rc_orig.G_full * g_scale
+        # Note: G_full/C_full are no longer stored (memory optimization)
         G_uu_scaled = rc_orig.G_uu * g_scale
         G_up_scaled = rc_orig.G_up * g_scale
 
         rc_scaled = RCSystem(
-            G_full=G_full_scaled.tocsr(),
-            C_full=rc_orig.C_full,
             G_uu=G_uu_scaled.tocsr(),
             G_up=G_up_scaled.tocsr(),
             C_uu=rc_orig.C_uu,
@@ -2235,6 +2233,8 @@ class TestDCInitialCondition(unittest.TestCase):
             pad_nodes=rc_orig.pad_nodes,
             n_nodes=rc_orig.n_nodes,
             n_unknown=rc_orig.n_unknown,
+            has_capacitance=rc_orig.has_capacitance,
+            total_capacitance_fF=rc_orig.total_capacitance_fF,
         )
 
         trans._rc_system = rc_scaled
@@ -2417,13 +2417,11 @@ class TestDCInitialCondition(unittest.TestCase):
         g_scale = tau_orig / target_tau if tau_orig > 0 else 1e-5
 
         # Create scaled RC system
-        G_full_scaled = rc_orig.G_full * g_scale
+        # Note: G_full/C_full are no longer stored (memory optimization)
         G_uu_scaled = rc_orig.G_uu * g_scale
         G_up_scaled = rc_orig.G_up * g_scale
 
         rc_scaled = RCSystem(
-            G_full=G_full_scaled.tocsr(),
-            C_full=rc_orig.C_full,
             G_uu=G_uu_scaled.tocsr(),
             G_up=G_up_scaled.tocsr(),
             C_uu=rc_orig.C_uu,
@@ -2434,6 +2432,8 @@ class TestDCInitialCondition(unittest.TestCase):
             pad_nodes=rc_orig.pad_nodes,
             n_nodes=rc_orig.n_nodes,
             n_unknown=rc_orig.n_unknown,
+            has_capacitance=rc_orig.has_capacitance,
+            total_capacitance_fF=rc_orig.total_capacitance_fF,
         )
 
         trans._rc_system = rc_scaled

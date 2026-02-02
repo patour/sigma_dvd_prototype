@@ -81,27 +81,27 @@ class TestRCSystemBuilding(unittest.TestCase):
         self.assertEqual(len(rc.node_order), rc.n_nodes)
 
     def test_g_matrix_symmetric(self):
-        """Conductance matrix should be symmetric."""
+        """Reduced conductance matrix (G_uu) should be symmetric."""
         rc = self.solver._ensure_rc_system()
-        G_dense = rc.G_full.toarray()
+        G_dense = rc.G_uu.toarray()
         np.testing.assert_array_almost_equal(G_dense, G_dense.T)
 
     def test_g_matrix_positive_diagonal(self):
-        """Conductance matrix diagonal should be positive."""
+        """Reduced conductance matrix diagonal should be positive."""
         rc = self.solver._ensure_rc_system()
-        diag = rc.G_full.diagonal()
+        diag = rc.G_uu.diagonal()
         self.assertTrue(np.all(diag > 0))
 
     def test_c_matrix_symmetric(self):
-        """Capacitance matrix should be symmetric."""
+        """Reduced capacitance matrix (C_uu) should be symmetric."""
         rc = self.solver._ensure_rc_system()
-        C_dense = rc.C_full.toarray()
+        C_dense = rc.C_uu.toarray()
         np.testing.assert_array_almost_equal(C_dense, C_dense.T)
 
     def test_c_matrix_nonnegative_diagonal(self):
-        """Capacitance matrix diagonal should be non-negative."""
+        """Reduced capacitance matrix diagonal should be non-negative."""
         rc = self.solver._ensure_rc_system()
-        diag = rc.C_full.diagonal()
+        diag = rc.C_uu.diagonal()
         self.assertTrue(np.all(diag >= 0))
 
 
@@ -205,7 +205,8 @@ class TestTransientWithPDN(unittest.TestCase):
     def test_capacitance_matrix_built(self):
         """Capacitance matrix should be non-empty for PDN."""
         rc = self.solver._ensure_rc_system()
-        self.assertGreater(rc.C_full.nnz, 0)
+        self.assertTrue(rc.has_capacitance)
+        self.assertGreater(rc.C_uu.nnz, 0)
 
 
 class TestTransientVsQuasiStatic(unittest.TestCase):
@@ -750,7 +751,7 @@ class TestSyntheticGridTransient(unittest.TestCase):
         rc = self.solver._ensure_rc_system()
 
         # C matrix should be all zeros
-        self.assertEqual(rc.C_full.nnz, 0)
+        self.assertFalse(rc.has_capacitance)
         self.assertEqual(rc.C_uu.nnz, 0)
 
 
@@ -888,21 +889,21 @@ class TestCapacitanceEffects(unittest.TestCase):
 
     def test_c_matrix_in_native_ff_units(self):
         """C matrix should store values in native fF units (not converted to F).
-        
+
         This ensures the RC time constant calculation is correct:
         tau = R(kOhm) * C(fF) = ps
         """
         rc = self.transient_solver._ensure_rc_system()
-        
-        # The netlist has 50 caps of 1000 fF each
-        # C_full diagonal sum should be ~50000 fF (each cap appears once on diagonal)
-        C_diag_sum = rc.C_full.diagonal().sum()
-        
-        # If C were in Farads, the sum would be ~5e-11
-        # If C is in fF, the sum should be ~50000
-        self.assertGreater(C_diag_sum, 1000, 
+
+        # The netlist has 50 caps of 1000 fF each = 50000 fF total
+        # total_capacitance_fF stores total capacitance (diagonal sum / 2)
+        total_cap = rc.total_capacitance_fF
+
+        # If C were in Farads, the total would be ~5e-11
+        # If C is in fF, the total should be ~50000
+        self.assertGreater(total_cap, 1000,
             "C matrix should be in fF units, not Farads")
-        self.assertLess(C_diag_sum, 1e6,
+        self.assertLess(total_cap, 1e6,
             "C matrix values should be reasonable fF values")
 
     def test_backward_euler_vs_trapezoidal_consistency(self):
