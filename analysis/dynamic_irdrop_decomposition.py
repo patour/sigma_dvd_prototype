@@ -3,10 +3,13 @@
 
 Analyzes dynamic IR-drop in a PDN netlist and decomposes the IR-drop at worst-case
 instances into contributions from "near" instances (within a local window) and
-"far" instances (outside the window).
+"far" instances (outside the window). Optionally identifies the top-K aggressors
+within each victim's near-window using dynamic adjoint sensitivity analysis,
+reporting each aggressor's contribution to the victim IR-drop and distance.
 
 This analysis helps identify whether IR-drop issues are caused by local current
-density or by distributed grid resistance effects.
+density or by distributed grid resistance effects, and which specific aggressors
+contribute most to each victim.
 
 Usage:
     # Via command line arguments (with time units)
@@ -21,6 +24,12 @@ Usage:
         --output results.json \\
         --plot \\
         --verbose
+
+    # With aggressor analysis (top-10 per victim, dynamic adjoint)
+    python -m analysis.dynamic_irdrop_decomposition ./pdn/netlist_test \\
+        --net VDD --end-time 100ns --dt 100ps \\
+        --aggressor-top-k 10 --adjoint-method dynamic \\
+        --plot --output results.json
 
     # Via config file
     python -m analysis.dynamic_irdrop_decomposition --config config.yaml
@@ -40,12 +49,22 @@ Example output:
     --------------------------------------------------------------------------------
     1     i_cpu_core:VDD:...       12.345    8.234     4.111    66.7%  33.3%
     ...
+
+    TOP AGGRESSORS WITHIN NEAR-WINDOW (per victim)
+    ================================================================================
+    VICTIM #1: i_cpu_core:VDD:...
+      Peak IR-drop: 12.345 mV at t=50.00 ns
+      Self contribution: 2.100 mV (17.0%)
+      Rank   Node                     Contrib(mV)  %        Distance(um)
+      1      1500_2000_M1             3.234        26.2%    150.0
+      ...
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -112,6 +131,34 @@ def format_time_ns(t_seconds: float) -> str:
 # =============================================================================
 
 @dataclass
+class AggressorResult:
+    """Top aggressor contribution to victim IR-drop.
+
+    Attributes:
+        node: Aggressor node name
+        contribution_mV: Contribution to IR-drop in millivolts
+        contribution_pct: Percentage of total IR-drop at victim
+        source_names: List of current source instance names connected to this node
+        distance_um: Euclidean distance to victim in um
+    """
+    node: str
+    contribution_mV: float
+    contribution_pct: float
+    source_names: List[str]
+    distance_um: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dictionary."""
+        return {
+            'node': self.node,
+            'contribution_mV': self.contribution_mV,
+            'contribution_pct': self.contribution_pct,
+            'distance_um': self.distance_um,
+            'source_names': self.source_names,
+        }
+
+
+@dataclass
 class InstanceDecomposition:
     """Decomposition results for a single worst instance.
 
@@ -149,9 +196,15 @@ class InstanceDecomposition:
     avg_near_fraction: float       # Average % over time
     avg_far_fraction: float
 
+    # Aggressor analysis (optional, populated when aggressor_top_k > 0)
+    top_aggressors: List[AggressorResult] = field(default_factory=list)
+    self_contribution_mV: float = 0.0
+    self_contribution_pct: float = 0.0
+    attribution_efficiency: float = 0.0
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to JSON-serializable dictionary."""
-        return {
+        result = {
             'instance_name': self.instance_name,
             'node': self.node,
             'location': [self.x, self.y],
@@ -180,6 +233,15 @@ class InstanceDecomposition:
                 'far_mV': (self.ir_drop_far * 1000).tolist(),
             },
         }
+        # Add aggressor data if present
+        if self.top_aggressors:
+            result['aggressor_analysis'] = {
+                'self_contribution_mV': self.self_contribution_mV,
+                'self_contribution_pct': self.self_contribution_pct,
+                'attribution_efficiency': self.attribution_efficiency,
+                'top_aggressors': [agg.to_dict() for agg in self.top_aggressors],
+            }
+        return result
 
 
 @dataclass
@@ -652,6 +714,32 @@ def print_results(result: DecompositionResult) -> None:
         print(f"Average near contribution: {avg_near_pct:.1f}%")
         print(f"Average far contribution: {avg_far_pct:.1f}%")
 
+    # Print aggressor analysis if available
+    has_aggressors = any(inst.top_aggressors for inst in result.worst_instances)
+    if has_aggressors:
+        print()
+        print("=" * 80)
+        print("TOP AGGRESSORS WITHIN NEAR-WINDOW (per victim)")
+        print("=" * 80)
+
+        for i, inst in enumerate(result.worst_instances, 1):
+            if not inst.top_aggressors:
+                continue
+
+            print()
+            print(f"VICTIM #{i}: {inst.instance_name}")
+            print(f"  Peak IR-drop: {inst.peak_total_mV:.3f} mV at t={inst.peak_time_ns:.2f} ns")
+            print(f"  Self contribution: {inst.self_contribution_mV:.3f} mV ({inst.self_contribution_pct:.1f}%)")
+            print(f"  Attribution efficiency: {inst.attribution_efficiency:.1%}")
+            print()
+            print(f"  {'Rank':<5} {'Node':<25} {'Contrib(mV)':<12} {'%':<8} {'Distance(um)':<12}")
+            print(f"  {'-'*62}")
+
+            for j, agg in enumerate(inst.top_aggressors, 1):
+                node_short = agg.node[:23] + ".." if len(agg.node) > 25 else agg.node
+                print(f"  {j:<5} {node_short:<25} {agg.contribution_mV:<12.3f} "
+                      f"{agg.contribution_pct:<8.1f} {agg.distance_um:<12.1f}")
+
     print()
     print("Timing breakdown:")
     for key, val in result.timings.items():
@@ -800,6 +888,62 @@ def generate_plots(
         plt.show()
     plt.close()
 
+    # 5. Aggressor contribution bar plots (per victim, sorted by distance)
+    from matplotlib.colors import Normalize
+    from matplotlib.cm import ScalarMappable
+
+    for i, inst in enumerate(result.worst_instances):
+        if not inst.top_aggressors:
+            continue
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # Sort aggressors by distance
+        sorted_aggressors = sorted(inst.top_aggressors, key=lambda a: a.distance_um)
+        distances = [agg.distance_um for agg in sorted_aggressors]
+        contributions = [agg.contribution_mV for agg in sorted_aggressors]
+
+        # Create bar positions and labels
+        x_pos = np.arange(len(sorted_aggressors))
+        cmap = matplotlib.colormaps.get_cmap('viridis')
+        bar_colors = cmap(np.linspace(0.2, 0.8, len(sorted_aggressors)))
+
+        bars = ax.bar(x_pos, contributions, color=bar_colors, edgecolor='black', linewidth=0.5)
+
+        # Add value labels on bars
+        for bar, contrib in zip(bars, contributions):
+            height = bar.get_height()
+            ax.annotate(f'{contrib:.2f}',
+                       xy=(bar.get_x() + bar.get_width() / 2, height),
+                       xytext=(0, 3),
+                       textcoords="offset points",
+                       ha='center', va='bottom', fontsize=8)
+
+        # Create x-axis labels with distance
+        x_labels = [f'{d:.0f}' for d in distances]
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(x_labels, fontsize=9)
+
+        ax.set_xlabel('Distance to Victim (um)')
+        ax.set_ylabel('Contribution (mV)')
+        ax.set_title(f'Aggressor Contributions vs Distance\n'
+                     f'Victim #{i+1}: {inst.instance_name[:40]}\n'
+                     f'Peak IR-drop: {inst.peak_total_mV:.3f} mV')
+        ax.grid(axis='y', alpha=0.3)
+
+        # Add a color bar legend for distance
+        sm = ScalarMappable(cmap='viridis',
+                            norm=Normalize(vmin=min(distances), vmax=max(distances)))
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax, shrink=0.6)
+        cbar.set_label('Distance (um)')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, f'aggressors_{i+1}.png'), dpi=150)
+        if show:
+            plt.show()
+        plt.close()
+
     print(f"Plots saved to: {plot_dir}")
 
 
@@ -884,6 +1028,9 @@ def analyze_dynamic_irdrop_decomposition(
     instances: Optional[List[str]] = None,
     use_cache: bool = True,
     verbose: bool = False,
+    aggressor_top_k: int = 0,
+    adjoint_method: str = 'dynamic',
+    adjoint_memory_window: int = 20,
 ) -> DecompositionResult:
     """Analyze dynamic IR-drop and decompose into near/far contributions.
 
@@ -899,16 +1046,26 @@ def analyze_dynamic_irdrop_decomposition(
         instances: Optional list of instance/node names to analyze (skips initial transient)
         use_cache: If True, load from pdn_graph.pkl if available (default True)
         verbose: Print progress
+        aggressor_top_k: Number of top aggressors to identify per victim (0 = disabled)
+        adjoint_method: 'dynamic' (default) or 'static' for adjoint analysis
+        adjoint_memory_window: Number of time steps for dynamic adjoint memory
 
     Returns:
         DecompositionResult with analysis data.
     """
+    # Force Backward Euler when aggressor analysis is enabled
+    # (dynamic adjoint uses BE internally for consistency)
+    if aggressor_top_k > 0 and integration_method != 'be':
+        if verbose:
+            print("Note: Forcing Backward Euler integration for adjoint consistency")
+        integration_method = 'be'
     timings: Dict[str, float] = {}
     t0_total = time_module.perf_counter()
 
     # Import core modules
     from core import create_model_from_pdn
     from core.transient_solver import TransientIRDropSolver, IntegrationMethod
+    from core.adjoint_sensitivity import AdjointSensitivitySolver
 
     # Load graph (from cache or parse)
     graph, load_time = load_pdn_graph(netlist_dir, use_cache=use_cache, verbose=verbose)
@@ -948,8 +1105,13 @@ def analyze_dynamic_irdrop_decomposition(
     if verbose:
         print(f"Grid bounds: {grid_bounds}")
 
-    # Create solver (use vectorize_threshold=0 to enable solve_transient_multi_rhs)
-    solver = TransientIRDropSolver(model, graph, vectorize_threshold=0, clear_graph_metadata=True)
+    # Create solver (use vectorize_threshold=0 to enable solve_transient_multi_rhs).
+    # When aggressor analysis is enabled, do not clear graph metadata so the adjoint
+    # solver can read _instance_sources_objects when created after the decomposition loop.
+    solver = TransientIRDropSolver(
+        model, graph, vectorize_threshold=0,
+        clear_graph_metadata=(aggressor_top_k == 0),
+    )
 
     # Build source name list and index mapping
     source_names = list(current_sources.keys())
@@ -1070,6 +1232,69 @@ def analyze_dynamic_irdrop_decomposition(
         decompositions.append(decomp)
 
     timings['decomposition'] = time_module.perf_counter() - t0_decomp
+
+    # Adjoint aggressor analysis (if enabled)
+    if aggressor_top_k > 0 and decompositions:
+        if verbose:
+            print()
+            print("Running adjoint sensitivity analysis for top aggressors...")
+
+        t0_adjoint = time_module.perf_counter()
+
+        # Create adjoint solver from transient solver (shares RC system)
+        adjoint_solver = AdjointSensitivitySolver.from_transient_solver(solver)
+
+        # Prepare adjoint context for batch solving (reuses LU factorization)
+        adjoint_ctx = adjoint_solver.prepare(dt=dt)
+
+        for rank, decomp in enumerate(decompositions, 1):
+            if verbose:
+                print(f"  Analyzing aggressors for victim {rank}/{len(decompositions)}: {decomp.node}")
+
+            # Get peak time in seconds
+            peak_time_s = decomp.peak_time_ns * 1e-9
+
+            # Run adjoint analysis within the near-window
+            try:
+                attribution = adjoint_solver.analyze_victim(
+                    victim_node=decomp.node,
+                    observation_time=peak_time_s,
+                    memory_window=adjoint_memory_window,
+                    dt=dt,
+                    top_k=aggressor_top_k,
+                    spatial_window=decomp.window_bounds,
+                    use_static=(adjoint_method == 'static'),
+                    context=adjoint_ctx,
+                )
+
+                # Compute distances and build AggressorResult list
+                aggressor_results: List[AggressorResult] = []
+                for agg in attribution.top_aggressors:
+                    agg_x, agg_y = parse_node_coordinates(agg.node)
+                    if agg_x is not None and agg_y is not None:
+                        distance = math.sqrt((agg_x - decomp.x)**2 + (agg_y - decomp.y)**2)
+                    else:
+                        distance = 0.0
+
+                    aggressor_results.append(AggressorResult(
+                        node=agg.node,
+                        contribution_mV=agg.contribution_mV,
+                        contribution_pct=agg.contribution_pct,
+                        source_names=agg.source_names,
+                        distance_um=distance,
+                    ))
+
+                # Update decomposition with aggressor data
+                decomp.top_aggressors = aggressor_results
+                decomp.self_contribution_mV = attribution.self_contribution_mV
+                decomp.self_contribution_pct = attribution.self_contribution_pct
+                decomp.attribution_efficiency = attribution.attribution_efficiency
+
+            except Exception as e:
+                if verbose:
+                    print(f"    Warning: Adjoint analysis failed for {decomp.node}: {e}")
+
+        timings['adjoint_analysis'] = time_module.perf_counter() - t0_adjoint
     timings['total'] = time_module.perf_counter() - t0_total
 
     return DecompositionResult(
@@ -1142,6 +1367,11 @@ def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> 
     result['top_k'] = args.top_k if args.top_k is not None else analysis_config.get('top_k', 5)
     result['window_percent'] = args.window_percent if args.window_percent is not None else analysis_config.get('window_percent', 10.0)
     result['integration_method'] = args.integration or analysis_config.get('integration', 'trap')
+
+    # Aggressor analysis parameters
+    result['aggressor_top_k'] = args.aggressor_top_k if args.aggressor_top_k != 0 else analysis_config.get('aggressor_top_k', 0)
+    result['adjoint_method'] = args.adjoint_method or analysis_config.get('adjoint_method', 'dynamic')
+    result['adjoint_memory_window'] = args.adjoint_memory_window if args.adjoint_memory_window != 20 else analysis_config.get('adjoint_memory_window', 20)
 
     # Instances
     if args.instances:
@@ -1225,6 +1455,14 @@ Examples:
     parser.add_argument('--window-percent', type=float, help='Window size as %% of design')
     parser.add_argument('--integration', choices=['trap', 'be'], help='Integration method')
 
+    # Aggressor analysis parameters
+    parser.add_argument('--aggressor-top-k', type=int, default=0,
+                        help='Number of top aggressors per victim (0=disabled, default)')
+    parser.add_argument('--adjoint-method', choices=['dynamic', 'static'], default='dynamic',
+                        help='Adjoint analysis method (default: dynamic)')
+    parser.add_argument('--adjoint-memory-window', type=int, default=20,
+                        help='Memory window for dynamic adjoint (default: 20 time steps)')
+
     # Pre-defined instances
     parser.add_argument('--instances', type=str, help='Comma-separated list of instance/node names')
     parser.add_argument('--instances-file', type=str, help='File with instance/node names (one per line)')
@@ -1269,6 +1507,8 @@ Examples:
         print(f"  Net: {merged['net']}")
         print(f"  Time: {merged['t_start']*1e9:.2f} ns to {merged['t_end']*1e9:.2f} ns, dt={merged['dt']*1e9:.3f} ns")
         print(f"  Window: {merged['window_percent']}%")
+        if merged['aggressor_top_k'] > 0:
+            print(f"  Aggressor analysis: top-{merged['aggressor_top_k']} per victim ({merged['adjoint_method']} method)")
         print()
 
     result = analyze_dynamic_irdrop_decomposition(
@@ -1283,6 +1523,9 @@ Examples:
         instances=merged['instances'],
         use_cache=merged['use_cache'],
         verbose=merged['verbose'],
+        aggressor_top_k=merged['aggressor_top_k'],
+        adjoint_method=merged['adjoint_method'],
+        adjoint_memory_window=merged['adjoint_memory_window'],
     )
 
     # Print results
