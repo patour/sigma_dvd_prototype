@@ -794,6 +794,12 @@ def print_results(result: DecompositionResult, logger: Optional[Logger] = None) 
 # Plotting Functions
 # =============================================================================
 
+def truncate_name(name: str, max_len: int = 40) -> str:
+    """Truncate name with '...' suffix if too long."""
+    if len(name) > max_len:
+        return name[:max_len - 3] + '...'
+    return name
+
 def generate_plots(
     result: DecompositionResult,
     plot_dir: str,
@@ -871,7 +877,7 @@ def generate_plots(
 
         ax.set_xlabel('Time (ns)')
         ax.set_ylabel('IR-Drop (mV)')
-        ax.set_title(f'IR-Drop Decomposition: {inst.instance_name[:40]}\n'
+        ax.set_title(f'IR-Drop Decomposition: {truncate_name(inst.instance_name)}\n'
                      f'Peak: {inst.peak_total_mV:.3f} mV = {inst.peak_near_mV:.3f} (near) + {inst.peak_far_mV:.3f} (far)')
         ax.grid(alpha=0.3)
 
@@ -937,7 +943,7 @@ def generate_plots(
         # Enhanced title with more context
         total_agg_contrib = sum(agg.contribution_mV for agg in inst.top_aggressors)
         ax.set_title(f'Aggressor Contributions vs Distance\n'
-                     f'Victim #{i+1}: {inst.instance_name[:40]} (Node: {inst.node})\n'
+                     f'Victim #{i+1}: {truncate_name(inst.instance_name)} (Node: {inst.node})\n'
                      f'Peak IR-drop: {inst.peak_total_mV:.3f} mV | '
                      f'Self: {inst.self_contribution_mV:.3f} mV | '
                      f'Aggressors: {total_agg_contrib:.3f} mV')
