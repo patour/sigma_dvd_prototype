@@ -19,6 +19,7 @@ suite = unittest.TestSuite()
 
 # Load specific test modules, excluding integration tests
 test_modules = [
+    'tests.test_adjoint_sensitivity',
     'tests.test_batch_solving',
     'tests.test_coupled_hierarchical_solver',
     'tests.test_dynamic_solver',

@@ -471,9 +471,117 @@ DynamicPlotter.plot_node_waveforms(
 )
 ```
 
+#### Adjoint Sensitivity Analysis (IR-Drop Attribution)
+For identifying which aggressor current sources contribute most to IR-drop at a victim node:
+
+```python
+from core import TransientIRDropSolver, AdjointSensitivitySolver
+
+trans = TransientIRDropSolver(model, graph)
+result = trans.solve_transient(t_start=0, t_end=100e-9, dt=1e-9)
+
+# Analyze the worst node at peak time
+victim = result.peak_ir_drop_node
+T = result.peak_ir_drop_time
+
+adjoint = AdjointSensitivitySolver.from_transient_solver(trans)
+attribution = adjoint.analyze_victim(
+    victim_node=victim,
+    observation_time=T,
+    memory_window=20,      # L time steps to look back
+    dt=1e-9,
+    top_k=10,              # Return top 10 aggressors
+    spatial_window=(x_v - 500, x_v + 500, y_v - 500, y_v + 500),  # Optional spatial filter
+)
+
+print(f"Victim: {attribution.victim_node}")
+print(f"Total IR-drop: {attribution.ir_drop_at_T:.2f} mV")
+print(f"Self-contribution: {attribution.self_contribution_mV:.3f} mV ({attribution.self_contribution_pct:.1f}%)")
+
+for i, agg in enumerate(attribution.top_aggressors, 1):
+    print(f"  {i}. {agg.node}: {agg.contribution_mV:.3f} mV ({agg.contribution_pct:.1f}%)")
+```
+
+**Two Methods Available:**
+1. **Dynamic Adjoint** (`analyze_victim`): Propagates sensitivities backward through RC network's memory. For stiff systems (τ << dt), the dynamic method correctly converges to the static sensitivity result.
+2. **Static Sensitivity** (`analyze_victim_static` or `use_static=True`): Uses steady-state sensitivity (G^-1). Faster than dynamic for stiff RC systems.
+
+**Initial Condition Options:**
+- `initial_condition='zero'` (default): Assumes V=VDD at start (zero IR-drop baseline). Computes contributions to the **total** IR-drop at observation time T.
+- `initial_condition='dc'`: Starts from DC operating point. Computes contributions to the **incremental** IR-drop (above the DC baseline from static currents).
+
+Use `'dc'` mode when you want to analyze switching-induced IR-drop separately from the baseline drop caused by static leakage currents.
+
+**When to Use Static vs Dynamic:**
+- Use `use_static=True` for faster analysis when RC time constant is much smaller than time step (τ << dt)
+- For typical PDN grids with very small resistances, both methods give the same result; static is faster
+- Dynamic method captures time-varying effects for grids with significant decoupling capacitor effects
+
+**Vectorization Threshold:**
+```python
+# Force vectorized current evaluation (faster for many sources)
+adjoint = AdjointSensitivitySolver(model, graph, vectorize_threshold=0)
+
+# Or disable vectorization (uses raw CurrentSource objects)
+adjoint = AdjointSensitivitySolver(model, graph, vectorize_threshold=100000)
+```
+Default threshold is 10000 sources. Both modes produce identical results.
+
+**Example with Static Method (Recommended for Most PDNs):**
+```python
+attribution = adjoint.analyze_victim_static(
+    victim_node=victim,
+    observation_time=T,
+    top_k=10,
+)
+# OR equivalently:
+attribution = adjoint.analyze_victim(victim, T, use_static=True, top_k=10)
+```
+
+**Example with DC Initial Condition (Incremental Attribution):**
+```python
+# Analyze switching-induced IR-drop (contributions above DC baseline)
+attribution = adjoint.analyze_victim(
+    victim_node=victim,
+    observation_time=T,
+    initial_condition='dc',  # Start from DC operating point
+    top_k=10,
+)
+
+print(f"Total IR-drop at T: {attribution.ir_drop_at_T:.2f} mV")
+print(f"DC baseline IR-drop: {attribution.dc_ir_drop_mV:.2f} mV")
+incremental = attribution.ir_drop_at_T - attribution.dc_ir_drop_mV
+print(f"Incremental IR-drop: {incremental:.2f} mV")
+# Contributions are attributed to incremental IR-drop (switching activity)
+```
+
+**AdjointAttribution Fields:**
+- `victim_node`, `observation_time`, `ir_drop_at_T`: Victim info (always total IR-drop: VDD - V_T)
+- `memory_window`, `t_array`: Time window analyzed
+- `self_contribution_mV`, `self_contribution_pct`: Victim's own current contribution
+- `top_aggressors`: List of `AggressorContribution` (see below)
+- `attribution_efficiency`: Ratio of total_attributed / IR-drop being attributed (~1.0 for static)
+- `initial_condition`: Initial condition used (`'zero'` or `'dc'`)
+- `dc_ir_drop_mV`: DC baseline IR-drop (only when `initial_condition='dc'`). Incremental = `ir_drop_at_T - dc_ir_drop_mV`
+
+**AggressorContribution Fields:**
+- `node`: Aggressor node name
+- `contribution_mV`: Contribution in mV. In 'zero' mode: total (from I(t)). In 'dc' mode: incremental (from ΔI = I(t) - I_DC)
+- `contribution_pct`: Percentage of attributed IR-drop
+- `source_names`: List of current source instance names
+- `current_waveform`: Optional I(t) waveform over memory window
+- `static_contribution_mV`: Static (DC) contribution in mV (only in 'dc' mode). Total = `contribution_mV + static_contribution_mV`
+
+**Batch Attribution (multiple victims):**
+```python
+ctx = adjoint.prepare(dt=1e-9)  # Prepare once, caches LU factorization
+for victim in victims:
+    result = adjoint.analyze_victim(victim, T, context=ctx)
+```
+
 ## Testing
 
-**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`, `test_dynamic_solver.py`, `test_transient_solver.py`, `test_dynamic_integration.py`, `test_parallel_parser.py`
+**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`, `test_dynamic_solver.py`, `test_transient_solver.py`, `test_dynamic_integration.py`, `test_parallel_parser.py`, `test_adjoint_sensitivity.py`
 
 **Test fixtures:** `tests/fixtures.py` provides factory functions for edge case testing scenarios.
 

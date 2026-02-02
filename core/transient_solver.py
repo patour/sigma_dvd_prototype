@@ -996,10 +996,11 @@ class TransientIRDropSolver:
         t_end: float,
         dt: float,
         source_masks: np.ndarray,
-        method: IntegrationMethod = IntegrationMethod.TRAPEZOIDAL,
+        method: IntegrationMethod = IntegrationMethod.BACKWARD_EULER,
         track_nodes: Optional[List[Any]] = None,
         n_worst_nodes: int = 10,
         verbose: bool = False,
+        init_condition: str = 'dc',
     ) -> List[TransientResult]:
         """Solve transient with multiple RHS vectors (current source masks).
 
@@ -1022,6 +1023,9 @@ class TransientIRDropSolver:
             track_nodes: Nodes to store full waveforms for (None = none tracked)
             n_worst_nodes: Track N worst-case nodes per mask
             verbose: Print progress
+            init_condition: Initial condition type:
+                - 'dc': Start from steady-state DC solution at t_start (default)
+                - 'vdd': Start from V = VDD (zero IR-drop, useful for adjoint validation)
 
         Returns:
             List of TransientResult objects, one per mask.
@@ -1157,20 +1161,27 @@ class TransientIRDropSolver:
         # Initialize voltage states for each mask: (n_masks, n_unknown)
         V_u_all = np.zeros((n_masks, n_unknown), dtype=np.float64)
 
-        # Compute initial condition via DC solve for each mask
+        # Compute initial condition
         t0_dc = time_module.perf_counter()
-        lu_dc = _factor_conductance_matrix(rc.G_uu)
+        if init_condition == 'vdd':
+            # Start from V = VDD (zero IR-drop)
+            # Useful for adjoint validation where we want to measure the
+            # contribution of currents during the window from a clean start
+            V_u_all[:] = vdd
+        else:
+            # Default: DC solve for steady-state initial condition
+            lu_dc = _factor_conductance_matrix(rc.G_uu)
 
-        # Use vectorized multi-RHS evaluation for DC init
-        I_u_init_multi = np.zeros((n_unknown, n_masks), dtype=np.float64)
-        self._vec_sources.evaluate_to_multi_rhs(
-            t_start, I_u_init_multi, source_masks,
-            source_to_unknown_direct, valid_sources
-        )
+            # Use vectorized multi-RHS evaluation for DC init
+            I_u_init_multi = np.zeros((n_unknown, n_masks), dtype=np.float64)
+            self._vec_sources.evaluate_to_multi_rhs(
+                t_start, I_u_init_multi, source_masks,
+                source_to_unknown_direct, valid_sources
+            )
 
-        for m in range(n_masks):
-            rhs_dc = I_u_init_multi[:, m] - G_up_Vp
-            V_u_all[m] = lu_dc.solve(rhs_dc)
+            for m in range(n_masks):
+                rhs_dc = I_u_init_multi[:, m] - G_up_Vp
+                V_u_all[m] = lu_dc.solve(rhs_dc)
 
         timings['dc_init'] = time_module.perf_counter() - t0_dc
 

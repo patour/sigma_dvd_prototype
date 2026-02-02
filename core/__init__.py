@@ -75,6 +75,12 @@ from .dynamic_plotter import (
     plot_time_series,
     plot_node_waveforms,
 )
+from .adjoint_sensitivity import (
+    AdjointSensitivitySolver,
+    AdjointSolverContext,
+    AdjointAttribution,
+    AggressorContribution,
+)
 
 __all__ = [
     # Node adapter
@@ -161,4 +167,9 @@ __all__ = [
     "plot_peak_current_heatmap",
     "plot_time_series",
     "plot_node_waveforms",
+    # Adjoint sensitivity solver
+    "AdjointSensitivitySolver",
+    "AdjointSolverContext",
+    "AdjointAttribution",
+    "AggressorContribution",
 ]
