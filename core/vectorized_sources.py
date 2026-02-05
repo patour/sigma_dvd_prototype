@@ -417,7 +417,15 @@ class VectorizedCurrentSources:
         }
 
     def _evaluate_pulses(self, t: float) -> np.ndarray:
-        """Vectorized pulse evaluation.
+        """Vectorized pulse evaluation (standard SPICE timing).
+
+        Pulse timing interpretation (matches C++ SimPWL):
+        - delay = START time (when signal begins rising from v1)
+        - rt = rise time from v1 to v2
+        - width = duration at v2 after rise completes
+        - ft = fall time from v2 back to v1
+
+        Timeline: [delay] --rise--> [delay+rt] --high--> [delay+rt+width] --fall--> [delay+rt+width+ft]
 
         Args:
             t: Time in seconds
@@ -433,9 +441,12 @@ class VectorizedCurrentSources:
         delay = self.pulse_delay
         rt, ft, width = self.pulse_rt, self.pulse_ft, self.pulse_width
 
+        # Pulse starts at delay (standard SPICE timing)
+        pulse_start = delay
+
         # Handle periodicity: t_arr = t % period for periodic signals
         t_arr = np.where(period > 0, t % period, t)
-        t_rel = t_arr - delay
+        t_rel = t_arr - pulse_start
 
         # Wrap negative t_rel for periodic signals
         periodic_neg = (period > 0) & (t_rel < 0)

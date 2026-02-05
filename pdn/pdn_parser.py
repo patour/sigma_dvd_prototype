@@ -241,33 +241,47 @@ class Pulse:
     period: float = 0.0   # Period (s), 0 = non-periodic
 
     def evaluate(self, time: float) -> float:
-        """Evaluate pulse value at given time."""
-        if self.period <= 0:
-            t = time
-        else:
-            t = time % self.period
+        """Evaluate pulse value at given time (standard SPICE timing).
 
-        t_rel = t - self.delay
-        if t_rel < 0:
-            if self.period > 0:
-                t_rel += self.period
-            else:
-                return self.v1
+        Pulse timing interpretation (matches C++ SimPWL):
+        - delay = START time (when signal begins rising from v1)
+        - rt = rise time from v1 to v2
+        - width = duration at v2 after rise completes
+        - ft = fall time from v2 back to v1
 
-        if t_rel < 0:
+        Timeline: [delay] --rise--> [delay+rt] --high--> [delay+rt+width] --fall--> [delay+rt+width+ft]
+        """
+        # Step 1: Calculate time relative to pulse START (delay)
+        t_rel = time - self.delay
+
+        # Step 2: Apply periodic wrapping
+        if self.period > 0:
+            # Python's % handles negatives correctly: -2 % 10 = 8
+            t_rel = t_rel % self.period
+        elif t_rel < 0:
+            # Non-periodic, before pulse start
             return self.v1
-        elif t_rel < self.rt:
+
+        # Step 3: Check if beyond pulse envelope within one period
+        # Pulse duration = rt + width + ft (from start to end)
+        pulse_duration = self.rt + self.width + self.ft
+        if t_rel >= pulse_duration:
+            return self.v1
+
+        # Step 4: Evaluate phase within pulse envelope
+        if t_rel < self.rt:
+            # Rise phase: [0, rt)
             if self.rt > 0:
                 return self.v1 + (self.v2 - self.v1) * (t_rel / self.rt)
             return self.v2
         elif t_rel < self.rt + self.width:
+            # High phase: [rt, rt + width)
             return self.v2
-        elif t_rel < self.rt + self.width + self.ft:
+        else:
+            # Fall phase: [rt + width, rt + width + ft)
             if self.ft > 0:
                 t_fall = t_rel - self.rt - self.width
                 return self.v2 + (self.v1 - self.v2) * (t_fall / self.ft)
-            return self.v1
-        else:
             return self.v1
 
     def get_dc(self) -> float:

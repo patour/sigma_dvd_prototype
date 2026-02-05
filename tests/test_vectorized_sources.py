@@ -259,41 +259,61 @@ class TestPulseEvaluation(unittest.TestCase):
         )
 
     def test_before_delay(self):
-        """Pulse should be at v1 before delay."""
-        currents = self.vec.evaluate_at_time(5e-9)  # t=5ns < delay=10ns
+        """Pulse should be at v1 before pulse start.
+
+        With standard SPICE timing (matches C++ SimPWL):
+        - delay=10ns (start), pulse begins rising at 10ns
+        - t=5ns is before pulse start (10ns) -> v1=0
+        """
+        currents = self.vec.evaluate_at_time(5e-9)  # t=5ns < pulse_start=10ns
         self.assertAlmostEqual(currents[self.node_to_idx['N1']], 0.0)
 
     def test_during_rise(self):
-        """Pulse should interpolate during rise time."""
-        # delay=10ns, rt=2ns, so rise is 10-12ns
-        currents = self.vec.evaluate_at_time(11e-9)  # midpoint of rise
-        # At t=11ns: t_rel = 11-10 = 1ns, rise_frac = 1/2 = 0.5
-        # value = 0 + (10-0)*0.5 = 5.0
+        """Pulse should interpolate during rise time.
+
+        With standard SPICE timing:
+        - delay=10ns (start), rt=2ns -> rise is [10ns, 12ns)
+        - At t=11ns: midpoint of rise
+        """
+        currents = self.vec.evaluate_at_time(11e-9)  # midpoint of rise [10,12)
+        # t_rel = 11 - 10 = 1ns, rise_frac = 1/2 = 0.5
         self.assertAlmostEqual(currents[self.node_to_idx['N1']], 5.0, places=5)
 
     def test_during_high(self):
-        """Pulse should be at v2 during high period."""
-        # delay=10ns, rt=2ns, width=6ns, so high is 12-18ns
-        currents = self.vec.evaluate_at_time(15e-9)
+        """Pulse should be at v2 during high period.
+
+        With standard SPICE timing:
+        - delay=10ns, rt=2ns, width=6ns -> high is [12ns, 18ns)
+        """
+        currents = self.vec.evaluate_at_time(15e-9)  # mid-high [12,18)
         self.assertAlmostEqual(currents[self.node_to_idx['N1']], 10.0)
 
     def test_during_fall(self):
-        """Pulse should interpolate during fall time."""
-        # Fall is 18-20ns
-        currents = self.vec.evaluate_at_time(19e-9)  # midpoint of fall
-        # At t=19ns: t_rel = 9ns, t_fall = 9 - 2 - 6 = 1ns, fall_frac = 0.5
-        # value = 10 + (0-10)*0.5 = 5.0
+        """Pulse should interpolate during fall time.
+
+        With standard SPICE timing:
+        - delay=10ns, rt=2ns, width=6ns, ft=2ns -> fall is [18ns, 20ns)
+        """
+        currents = self.vec.evaluate_at_time(19e-9)  # midpoint of fall [18,20)
+        # t_rel = 19 - 10 = 9ns, t_fall = 9 - 2 - 6 = 1ns, fall_frac = 0.5
         self.assertAlmostEqual(currents[self.node_to_idx['N1']], 5.0, places=5)
 
     def test_during_low(self):
-        """Pulse should be at v1 during low period."""
-        # After fall: 20ns onwards until next period
+        """Pulse should be at v1 during low period.
+
+        With standard SPICE timing:
+        - Pulse ends at delay + rt + width + ft = 10 + 2 + 6 + 2 = 20ns
+        - After 20ns: low period
+        """
         currents = self.vec.evaluate_at_time(30e-9)
         self.assertAlmostEqual(currents[self.node_to_idx['N1']], 0.0)
 
     def test_periodic_wrap(self):
-        """Pulse should repeat with period."""
-        # At t=65ns, with period=50ns, effective t = 15ns (high)
+        """Pulse should repeat with period.
+
+        With standard SPICE timing and period=50ns:
+        - At t=65ns, effective t = 65 % 50 = 15ns (in high phase [12,18))
+        """
         currents = self.vec.evaluate_at_time(65e-9)
         self.assertAlmostEqual(currents[self.node_to_idx['N1']], 10.0)
 

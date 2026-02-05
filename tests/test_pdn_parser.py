@@ -865,20 +865,31 @@ class TestPulseWaveform(unittest.TestCase):
         self.assertEqual(pulse.evaluate(0.3e-9), 1.0)
     
     def test_evaluate_during_rise(self):
-        """Test pulse evaluation during rise time"""
-        pulse = Pulse(v1=0.0, v2=1.0, delay=0.0, rt=1.0, ft=1.0, 
+        """Test pulse evaluation during rise time.
+
+        With delay=peak time interpretation:
+        - delay=1.0, rt=1.0 means rise phase is [0.0, 1.0)
+        - At t=0.5, we're halfway through rise
+        """
+        pulse = Pulse(v1=0.0, v2=1.0, delay=1.0, rt=1.0, ft=1.0,
                      width=2.0, period=10.0)
-        
-        # Halfway through rise
+
+        # Halfway through rise (t=0.5 is in [delay-rt, delay) = [0, 1))
         value = pulse.evaluate(0.5)
         self.assertAlmostEqual(value, 0.5, places=5)
-    
+
     def test_evaluate_during_fall(self):
-        """Test pulse evaluation during fall time"""
-        pulse = Pulse(v1=0.0, v2=1.0, delay=0.0, rt=1.0, ft=1.0, 
+        """Test pulse evaluation during fall time.
+
+        With delay=peak time interpretation:
+        - delay=1.0, rt=1.0, width=2.0, ft=1.0
+        - Rise: [0, 1), High: [1, 3), Fall: [3, 4)
+        - At t=3.5, we're halfway through fall
+        """
+        pulse = Pulse(v1=0.0, v2=1.0, delay=1.0, rt=1.0, ft=1.0,
                      width=2.0, period=10.0)
-        
-        # Halfway through fall (at t=1+2+0.5=3.5)
+
+        # Halfway through fall (t=3.5 is in [delay+width, delay+width+ft) = [3, 4))
         value = pulse.evaluate(3.5)
         self.assertAlmostEqual(value, 0.5, places=5)
     
@@ -909,6 +920,117 @@ class TestPulseWaveform(unittest.TestCase):
         self.assertEqual(original.delay, restored.delay)
         self.assertEqual(original.rt, restored.rt)
         self.assertEqual(original.period, restored.period)
+
+    def test_evaluate_periodic_basic_waveform(self):
+        """Test basic periodic pulse evaluation through all phases.
+
+        With delay=peak time interpretation:
+        - delay=1ns (peak), rt=1ns, width=2ns, ft=1ns, period=10ns
+        - Rise: [0, 1ns), High: [1, 3ns), Fall: [3, 4ns), Low: [4, 10ns)
+        """
+        pulse = Pulse(v1=0.0, v2=1.0, delay=1e-9, rt=1e-9, ft=1e-9,
+                      width=2e-9, period=10e-9)
+
+        # Phase timeline with delay=1ns as peak time
+        self.assertAlmostEqual(pulse.evaluate(0.5e-9), 0.5, places=5)  # Rise
+        self.assertEqual(pulse.evaluate(2e-9), 1.0)                     # High
+        self.assertAlmostEqual(pulse.evaluate(3.5e-9), 0.5, places=5)  # Fall
+        self.assertEqual(pulse.evaluate(5e-9), 0.0)                     # Low
+
+        # Verify periodicity
+        self.assertAlmostEqual(pulse.evaluate(10.5e-9), 0.5, places=5)  # Rise in 2nd period
+
+    def test_evaluate_periodic_with_delay(self):
+        """Test periodic pulse with delay (peak time) offset.
+
+        With delay=peak time interpretation:
+        - delay=5ns (peak), rt=1ns, width=2ns, ft=1ns, period=20ns
+        - Rise: [4, 5ns), High: [5, 7ns), Fall: [7, 8ns), Low: [8, 24ns)
+        """
+        pulse = Pulse(v1=0.0, v2=1.0, delay=5e-9, rt=1e-9, ft=1e-9,
+                      width=2e-9, period=20e-9)
+
+        # Before pulse (0-4ns): should be v1
+        self.assertEqual(pulse.evaluate(3e-9), 0.0)
+
+        # During high (5-7ns): should be v2
+        self.assertEqual(pulse.evaluate(6e-9), 1.0)
+
+        # After pulse (8-20ns): should be v1
+        self.assertEqual(pulse.evaluate(12e-9), 0.0)
+
+        # Next period: t=23ns equivalent to t=3ns (before pulse)
+        self.assertEqual(pulse.evaluate(23e-9), 0.0)
+        # t=26ns equivalent to t=6ns (during high)
+        self.assertEqual(pulse.evaluate(26e-9), 1.0)
+
+    def test_evaluate_periodic_delay_exceeds_period(self):
+        """Test edge case where delay >= period (should normalize correctly)."""
+        # delay=15ns, period=10ns -> effective delay = 5ns
+        pulse = Pulse(v1=0.0, v2=1.0, delay=15e-9, rt=1e-9, ft=1e-9,
+                      width=2e-9, period=10e-9)
+
+        # At t=3ns: before effective delay (5ns), should be v1
+        self.assertEqual(pulse.evaluate(3e-9), 0.0)
+
+        # At t=6ns: during high phase, should be v2
+        self.assertEqual(pulse.evaluate(6e-9), 1.0)
+
+    def test_evaluate_periodic_pulse_wraps_around_period(self):
+        """Test pulse that extends beyond period boundary.
+
+        With delay=peak time interpretation:
+        - delay=8ns (peak), rt=1ns, width=2ns, ft=1ns, period=10ns
+        - Rise: [7, 8ns), High: [8, 10ns), Fall wraps: [0, 1ns), Low: [1, 7ns)
+        """
+        pulse = Pulse(v1=0.0, v2=1.0, delay=8e-9, rt=1e-9, ft=1e-9,
+                      width=2e-9, period=10e-9)
+
+        # At t=8ns (peak time): should be v2
+        self.assertAlmostEqual(pulse.evaluate(8e-9), 1.0, places=5)
+
+        # At t=0ns (in fall phase after wrap): should be falling
+        self.assertAlmostEqual(pulse.evaluate(0.5e-9), 0.5, places=5)
+
+        # At t=5ns (in low region): should be v1
+        self.assertAlmostEqual(pulse.evaluate(5e-9), 0.0, places=5)
+
+    def test_evaluate_non_periodic_before_delay(self):
+        """Test non-periodic pulse returns v1 before pulse start.
+
+        With delay=peak time interpretation:
+        - delay=5ns (peak), rt=1ns means pulse starts at 4ns
+        """
+        pulse = Pulse(v1=0.0, v2=1.0, delay=5e-9, rt=1e-9, ft=1e-9,
+                      width=2e-9, period=0.0)  # Non-periodic
+
+        self.assertEqual(pulse.evaluate(3e-9), 0.0)  # Before pulse start (4ns)
+        self.assertEqual(pulse.evaluate(6e-9), 1.0)  # During high [5, 7ns)
+
+    def test_evaluate_matches_cpp_simpwl_conversion(self):
+        """Verify Python evaluate matches expected pulse behavior.
+
+        With delay=peak time interpretation:
+        - delay=2ns (peak), rt=1ns, width=3ns, ft=1ns, period=10ns
+        - Rise: [1, 2ns), High: [2, 5ns), Fall: [5, 6ns), Low: [6, 11ns)
+        """
+        pulse = Pulse(v1=0.0, v2=10.0, delay=2e-9, rt=1e-9, ft=1e-9,
+                      width=3e-9, period=10e-9)
+
+        # Timeline: Rise[1,2), High[2,5), Fall[5,6), Low[6,10)+[0,1)
+        test_cases = [
+            (0e-9, 0.0),    # Before pulse (in low region, wrapped)
+            (1e-9, 0.0),    # At pulse start (start of rise)
+            (1.5e-9, 5.0),  # Mid-rise
+            (3e-9, 10.0),   # High phase
+            (5.5e-9, 5.0),  # Mid-fall
+            (7e-9, 0.0),    # After pulse (low region)
+        ]
+
+        for t, expected in test_cases:
+            actual = pulse.evaluate(t)
+            self.assertAlmostEqual(actual, expected, places=3,
+                                   msg=f"At t={t*1e9:.1f}ns: expected {expected}, got {actual}")
 
 
 class TestPWLWaveform(unittest.TestCase):
