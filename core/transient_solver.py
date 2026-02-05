@@ -309,6 +309,45 @@ class TransientIRDropSolver:
                         self._node_to_sources[node1] = []
                     self._node_to_sources[node1].append(name)
 
+    def preprocess_sources(
+        self,
+        dt: float,
+        t_start: float,
+        t_end: float,
+        compact_threshold: float = 1e-12,
+    ) -> VectorizedCurrentSources:
+        """Preprocess and return smoothed current sources for reuse.
+
+        Applies analytical triangular low-pass filtering to all PWL and Pulse
+        waveforms, then compacts redundant points. The resulting smoothed
+        sources can be passed to solve_transient() for reuse across
+        multiple analyses.
+
+        Args:
+            dt: Simulation time step (filter window = 2 * dt)
+            t_start: Simulation start time
+            t_end: Simulation end time
+            compact_threshold: Slope change threshold for compaction
+
+        Returns:
+            VectorizedCurrentSources with smoothed waveforms
+
+        Raises:
+            RuntimeError: If vectorized sources not available
+        """
+        if self._vec_sources is None:
+            raise RuntimeError(
+                "Vectorized sources not available. Use vectorize_threshold=0 "
+                "to enable vectorized mode."
+            )
+
+        return self._vec_sources.create_smoothed_copy(
+            time_step=dt,
+            t_start=t_start,
+            t_end=t_end,
+            compact_threshold=compact_threshold,
+        )
+
     def _evaluate_currents_at_time(self, t: float) -> Dict[Any, float]:
         """Evaluate all current sources at a given time.
 
@@ -586,6 +625,7 @@ class TransientIRDropSolver:
         n_worst_nodes: int = 10,
         track_nodes: Optional[List[Any]] = None,
         use_legacy: bool = False,
+        smoothed_sources: Optional[VectorizedCurrentSources] = None,
     ) -> TransientResult:
         """Run transient RC simulation.
 
@@ -602,17 +642,28 @@ class TransientIRDropSolver:
             track_nodes: Nodes to store full waveforms for (None = worst nodes only)
             use_legacy: If True, use legacy dict-based code path (for validation).
                         If False (default), use optimized array-based operations.
+            smoothed_sources: Pre-smoothed VectorizedCurrentSources from preprocess_sources().
+                             If provided, uses these instead of raw sources.
 
         Returns:
             TransientResult with voltages, IR-drop, and timing.
         """
-        if use_legacy:
-            return self._solve_transient_legacy(
+        # Temporarily swap in smoothed sources if provided
+        original_sources = self._vec_sources
+        if smoothed_sources is not None:
+            self._vec_sources = smoothed_sources
+
+        try:
+            if use_legacy:
+                return self._solve_transient_legacy(
+                    t_start, t_end, dt, method, verbose, n_worst_nodes, track_nodes
+                )
+            return self._solve_transient_array(
                 t_start, t_end, dt, method, verbose, n_worst_nodes, track_nodes
             )
-        return self._solve_transient_array(
-            t_start, t_end, dt, method, verbose, n_worst_nodes, track_nodes
-        )
+        finally:
+            # Restore original sources
+            self._vec_sources = original_sources
 
     def _solve_transient_array(
         self,

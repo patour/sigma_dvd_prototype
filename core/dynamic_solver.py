@@ -267,6 +267,45 @@ class DynamicIRDropSolver:
                         self._node_to_sources[node1] = []
                     self._node_to_sources[node1].append(name)
 
+    def preprocess_sources(
+        self,
+        time_step: float,
+        t_start: float,
+        t_end: float,
+        compact_threshold: float = 1e-12,
+    ) -> VectorizedCurrentSources:
+        """Preprocess and return smoothed current sources for reuse.
+
+        Applies analytical triangular low-pass filtering to all PWL and Pulse
+        waveforms, then compacts redundant points. The resulting smoothed
+        sources can be passed to solve_quasi_static() for reuse across
+        multiple analyses.
+
+        Args:
+            time_step: Simulation time step (filter window = 2 * time_step)
+            t_start: Simulation start time
+            t_end: Simulation end time
+            compact_threshold: Slope change threshold for compaction
+
+        Returns:
+            VectorizedCurrentSources with smoothed waveforms
+
+        Raises:
+            RuntimeError: If vectorized sources not available
+        """
+        if self._vec_sources is None:
+            raise RuntimeError(
+                "Vectorized sources not available. Use vectorize_threshold=0 "
+                "to enable vectorized mode."
+            )
+
+        return self._vec_sources.create_smoothed_copy(
+            time_step=time_step,
+            t_start=t_start,
+            t_end=t_end,
+            compact_threshold=compact_threshold,
+        )
+
     def _evaluate_currents_at_time(self, t: float) -> Dict[Any, float]:
         """Evaluate all current sources at a given time.
 
@@ -377,6 +416,7 @@ class DynamicIRDropSolver:
         n_worst_nodes: int = 10,
         track_nodes: Optional[List[Any]] = None,
         use_legacy: bool = False,
+        smoothed_sources: Optional[VectorizedCurrentSources] = None,
     ) -> QuasiStaticResult:
         """Quasi-static analysis via batch DC solves.
 
@@ -398,19 +438,30 @@ class DynamicIRDropSolver:
             track_nodes: Nodes to store full waveforms for (None = worst nodes only)
             use_legacy: If True, use legacy dict-based code path (for validation).
                         If False (default), use optimized array-based operations.
+            smoothed_sources: Pre-smoothed VectorizedCurrentSources from preprocess_sources().
+                             If provided, uses these instead of raw sources.
 
         Returns:
             QuasiStaticResult with peak statistics and optional waveforms.
         """
-        if use_legacy:
-            return self._solve_quasi_static_legacy(
+        # Temporarily swap in smoothed sources if provided
+        original_sources = self._vec_sources
+        if smoothed_sources is not None:
+            self._vec_sources = smoothed_sources
+
+        try:
+            if use_legacy:
+                return self._solve_quasi_static_legacy(
+                    t_start, t_end, n_points, t_array, method, partition_layer,
+                    top_k, weighting, verbose, n_worst_nodes, track_nodes
+                )
+            return self._solve_quasi_static_array(
                 t_start, t_end, n_points, t_array, method, partition_layer,
                 top_k, weighting, verbose, n_worst_nodes, track_nodes
             )
-        return self._solve_quasi_static_array(
-            t_start, t_end, n_points, t_array, method, partition_layer,
-            top_k, weighting, verbose, n_worst_nodes, track_nodes
-        )
+        finally:
+            # Restore original sources
+            self._vec_sources = original_sources
 
     def _solve_quasi_static_array(
         self,

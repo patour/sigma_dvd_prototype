@@ -812,3 +812,81 @@ class VectorizedCurrentSources:
                 rhs_multi[:, m] += aggregated
 
         return total_currents
+
+    def create_smoothed_copy(
+        self,
+        time_step: float,
+        t_start: float,
+        t_end: float,
+        compact_threshold: float = 1e-12,
+    ) -> 'VectorizedCurrentSources':
+        """Create copy with smoothed waveforms (pulses converted to PWL).
+
+        Applies analytical triangular low-pass filtering to all PWL and Pulse
+        waveforms, then compacts redundant points. Pulses are converted to PWL
+        format before smoothing.
+
+        Args:
+            time_step: Simulation time step (filter window = 2 * time_step)
+            t_start: Simulation start time
+            t_end: Simulation end time
+            compact_threshold: Slope change threshold for compaction
+
+        Returns:
+            New VectorizedCurrentSources with smoothed waveforms
+        """
+        from .pwl_smoothing import PWLSmoother
+
+        smoother = PWLSmoother(
+            time_step=time_step,
+            compact_threshold=compact_threshold,
+        )
+        cache = smoother.create_smoothed_cache(self, t_start, t_end)
+        return smoother.apply_cache_to_sources(self, cache)
+
+    @classmethod
+    def from_smoothed_cache(
+        cls,
+        cache: 'SmoothedWaveformCache',
+        original: 'VectorizedCurrentSources',
+    ) -> 'VectorizedCurrentSources':
+        """Create from smoothed cache, preserving DC values and node mappings.
+
+        Args:
+            cache: SmoothedWaveformCache from PWLSmoother.create_smoothed_cache
+            original: Original VectorizedCurrentSources to copy DC values from
+
+        Returns:
+            New VectorizedCurrentSources with smoothed waveforms
+        """
+        from .pwl_smoothing import SmoothedWaveformCache
+
+        return cls(
+            n_nodes=original.n_nodes,
+            node_to_idx=original.node_to_idx,
+            n_sources=original.n_sources,
+            dc_values=original.dc_values.copy(),
+            source_node_idx=original.source_node_idx.copy(),
+            # Zero out pulses (their contribution is now in PWL)
+            n_pulses=0,
+            pulse_node_idx=np.array([], dtype=np.int32),
+            pulse_source_idx=np.array([], dtype=np.int32),
+            pulse_v1=np.array([], dtype=np.float64),
+            pulse_v2=np.array([], dtype=np.float64),
+            pulse_delay=np.array([], dtype=np.float64),
+            pulse_rt=np.array([], dtype=np.float64),
+            pulse_ft=np.array([], dtype=np.float64),
+            pulse_width=np.array([], dtype=np.float64),
+            pulse_period=np.array([], dtype=np.float64),
+            # Use smoothed PWL data from cache
+            n_pwls=cache.n_pwls,
+            n_pwl_points=cache.n_pwl_points,
+            pwl_node_idx=cache.pwl_node_idx.copy(),
+            pwl_source_idx=np.zeros(cache.n_pwls, dtype=np.int32),
+            pwl_period=cache.pwl_period.copy(),
+            pwl_delay=cache.pwl_delay.copy(),
+            pwl_offset=cache.pwl_offset.copy(),
+            pwl_count=cache.pwl_count.copy(),
+            pwl_times=cache.pwl_times.copy(),
+            pwl_values=cache.pwl_values.copy(),
+        )

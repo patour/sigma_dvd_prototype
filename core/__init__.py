@@ -81,6 +81,16 @@ from .adjoint_sensitivity import (
     AdjointAttribution,
     AggressorContribution,
 )
+from .pwl_smoothing import (
+    PWLSmoother,
+    SmoothedWaveformCache,
+    SmoothingConfig,
+    smooth_pwl_points,
+    compact_pwl,
+    pulse_to_pwl_points,
+    triangular_window,
+    analytical_triangle_pwl_integral,
+)
 
 __all__ = [
     # Node adapter
@@ -172,4 +182,13 @@ __all__ = [
     "AdjointSolverContext",
     "AdjointAttribution",
     "AggressorContribution",
+    # PWL waveform smoothing
+    "PWLSmoother",
+    "SmoothedWaveformCache",
+    "SmoothingConfig",
+    "smooth_pwl_points",
+    "compact_pwl",
+    "pulse_to_pwl_points",
+    "triangular_window",
+    "analytical_triangle_pwl_integral",
 ]

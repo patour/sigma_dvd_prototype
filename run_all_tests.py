@@ -27,6 +27,7 @@ test_modules = [
     'tests.test_irdrop',
     'tests.test_parallel_parser',
     'tests.test_partitioner',
+    'tests.test_pwl_smoothing',
     'tests.test_pdn_parser',
     'tests.test_pdn_plotter',
     'tests.test_pdn_solver',

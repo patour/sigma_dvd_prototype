@@ -59,6 +59,7 @@ core/
 ├── tiling.py               # TileManager, solve_single_tile for parallel tiling
 ├── dynamic_solver.py       # DynamicIRDropSolver, QuasiStaticResult (batch DC)
 ├── transient_solver.py     # TransientIRDropSolver, TransientResult, RCSystem
+├── pwl_smoothing.py        # PWLSmoother, waveform preprocessing for dynamic analysis
 ├── dynamic_plotter.py      # DynamicPlotter for time-domain results
 ├── graph_converter.py      # NetworkX <-> Rustworkx conversion utilities
 ├── factory.py              # create_model_from_* functions
@@ -83,6 +84,8 @@ core/
 - **UnifiedEffectiveResistanceCalculator**: Pairwise and single-node effective resistance
 - **DynamicIRDropSolver**: Quasi-static analysis via batch DC solves at discrete time points
 - **TransientIRDropSolver**: Transient RC analysis with Backward Euler or Trapezoidal integration
+- **PWLSmoother**: Analytical triangular low-pass filter for waveform preprocessing
+- **SmoothedWaveformCache**: Cached smoothed waveforms for reuse across analyses
 - **DynamicPlotter**: Heatmap and time series plotting for dynamic analysis results
 
 **Factory Functions:**
@@ -471,6 +474,96 @@ DynamicPlotter.plot_node_waveforms(
 )
 ```
 
+#### PWL Waveform Smoothing (Preprocessing)
+
+Apply analytical triangular low-pass filter to current waveforms before dynamic/transient analysis. This removes high-frequency content that causes numerical noise while preserving DC and low-frequency behavior.
+
+**Algorithm:** Convolves each PWL segment with a triangular window (width = 2×time_step) using exact closed-form integration. Pulse waveforms are first converted to PWL. A compaction phase removes redundant collinear points after filtering.
+
+**Basic Usage (Automatic):**
+```python
+from core import DynamicIRDropSolver
+
+solver = DynamicIRDropSolver(model, graph)
+
+# Preprocess waveforms (returns VectorizedCurrentSources with smoothed PWLs)
+smoothed = solver.preprocess_sources(
+    time_step=0.1e-9,      # Filter window = 2 × time_step
+    t_start=0,
+    t_end=100e-9,
+    compact_threshold=1e-12,  # Collinearity threshold for compaction
+)
+
+# Use smoothed sources (reusable across multiple analyses)
+result = solver.solve_quasi_static(
+    t_start=0, t_end=100e-9, n_points=101,
+    smoothed_sources=smoothed,  # Pass pre-smoothed sources
+)
+```
+
+**Reusing Smoothed Sources Across Solvers:**
+```python
+# Preprocess once
+smoothed = solver.preprocess_sources(time_step=0.1e-9, t_start=0, t_end=100e-9)
+
+# Reuse for multiple quasi-static analyses
+result1 = solver.solve_quasi_static(..., smoothed_sources=smoothed)
+result2 = solver.solve_quasi_static(..., smoothed_sources=smoothed)
+
+# Also works with transient solver
+from core import TransientIRDropSolver
+trans = TransientIRDropSolver(model, graph)
+trans_smoothed = trans.preprocess_sources(time_step=0.1e-9, t_start=0, t_end=100e-9)
+result3 = trans.solve_transient(..., smoothed_sources=trans_smoothed)
+```
+
+**Manual Smoothing (Low-Level API):**
+```python
+from core import PWLSmoother, smooth_pwl_points, compact_pwl, pulse_to_pwl_points
+from pdn.pdn_parser import PWL, Pulse
+
+smoother = PWLSmoother(time_step=0.1e-9, compact_threshold=1e-12)
+
+# Smooth a single PWL waveform
+pwl = PWL(points=[(0, 0), (1e-9, 1), (2e-9, 0)], period=10e-9)
+smoothed_pwl = smoother.smooth_pwl(pwl, t_start=0, t_end=10e-9)
+
+# Convert pulse to PWL and smooth
+pulse = Pulse(v1=0, v2=1, delay=1e-9, rt=0.1e-9, ft=0.1e-9, width=2e-9, period=10e-9)
+smoothed_from_pulse = smoother.smooth_pulse(pulse, t_start=0, t_end=10e-9)
+
+# Direct function calls
+points = [(0, 0), (1e-9, 1), (2e-9, 0)]
+smoothed = smooth_pwl_points(points, period=10e-9, time_step=0.1e-9, t_start=0, t_end=10e-9)
+compacted = compact_pwl(smoothed, threshold=1e-12)
+```
+
+**SmoothedWaveformCache for Batch Analysis:**
+```python
+# Create cache from VectorizedCurrentSources
+vec_sources = solver._vec_sources  # Internal vectorized sources
+cache = smoother.create_smoothed_cache(vec_sources, t_start=0, t_end=100e-9)
+
+# Check cache compatibility
+if cache.is_compatible(time_step=0.1e-9, t_start=0, t_end=100e-9):
+    smoothed = smoother.apply_cache_to_sources(vec_sources, cache)
+```
+
+**Key Functions:**
+| Function | Description |
+|----------|-------------|
+| `smooth_pwl_points()` | Apply triangular LP filter to PWL points |
+| `compact_pwl()` | Remove collinear/redundant points |
+| `pulse_to_pwl_points()` | Convert Pulse to PWL representation |
+| `triangular_window()` | Evaluate triangle window function |
+| `analytical_triangle_pwl_integral()` | Exact triangle×PWL integral |
+
+**Smoothing Effect:**
+- Preserves DC average (energy conservation)
+- Removes high-frequency content above ~1/(2×time_step)
+- Reduces numerical noise in transient analysis
+- Compaction reduces memory for long simulations
+
 #### Adjoint Sensitivity Analysis (IR-Drop Attribution)
 For identifying which aggressor current sources contribute most to IR-drop at a victim node:
 
@@ -581,7 +674,7 @@ for victim in victims:
 
 ## Testing
 
-**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`, `test_dynamic_solver.py`, `test_transient_solver.py`, `test_dynamic_integration.py`, `test_parallel_parser.py`, `test_adjoint_sensitivity.py`
+**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`, `test_dynamic_solver.py`, `test_transient_solver.py`, `test_dynamic_integration.py`, `test_parallel_parser.py`, `test_adjoint_sensitivity.py`, `test_pwl_smoothing.py`
 
 **Test fixtures:** `tests/fixtures.py` provides factory functions for edge case testing scenarios.
 
