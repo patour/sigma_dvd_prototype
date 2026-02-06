@@ -482,11 +482,10 @@ class VectorizedCurrentSources:
         return result
 
     def _evaluate_pwls(self, t: float) -> np.ndarray:
-        """Evaluate all PWLs at time t using grouped vectorization.
+        """Evaluate all PWLs at time t using single-pass vectorized processing.
 
-        Groups PWLs by point count and batch-processes each group with
-        vectorized searchsorted and interpolation. Falls back to scalar
-        loop for singleton groups.
+        All PWLs are padded to the same max point count, enabling a single
+        searchsorted call and vectorized interpolation with no group loop.
 
         Args:
             t: Time in seconds
@@ -497,110 +496,133 @@ class VectorizedCurrentSources:
         if self.n_pwls == 0:
             return np.zeros(0, dtype=np.float64)
 
-        result = np.zeros(self.n_pwls, dtype=np.float64)
+        # Build padded cache on first call
+        if not hasattr(self, '_pwl_padded_times') or self._pwl_padded_times is None:
+            self._build_pwl_padded()
 
-        # Build PWL groups by count (cached on first call)
-        if not hasattr(self, '_pwl_groups') or self._pwl_groups is None:
-            self._build_pwl_groups()
+        n = self.n_pwls
+        max_count = self._pwl_padded_max_count
+        times_2d = self._pwl_padded_times
+        values_2d = self._pwl_padded_values
+        flat_times = self._pwl_padded_flat_times
+        row_offsets = self._pwl_padded_row_offsets
+        row_idx = self._pwl_padded_row_idx
+        row_stride = self._pwl_padded_row_stride
+        first_times = self._pwl_padded_first_times
+        last_times = self._pwl_padded_last_times
+        first_values = self._pwl_padded_first_values
+        last_values = self._pwl_padded_last_values
 
-        # Process each group
-        for count, group_indices in self._pwl_groups.items():
-            if count == 0:
-                continue
+        # Adjust time for delay and periodicity (vectorized, with fast paths)
+        if self._pwl_all_zero_delay and self._pwl_single_period > 0:
+            # Common smoothed case: no delay, uniform period
+            t_mod = t % self._pwl_single_period
+            t_adj = np.full(n, t_mod, dtype=np.float64)
+        else:
+            t_adj = np.full(n, t, dtype=np.float64) - self.pwl_delay
+            periodic_mask = self._pwl_has_period & (t_adj >= 0)
+            t_adj[periodic_mask] = t_adj[periodic_mask] % self.pwl_period[periodic_mask]
 
-            n_group = len(group_indices)
-            if n_group == 0:
-                continue
+        if max_count == 1:
+            return first_values.copy()
 
-            # Get group data
-            group_idx = np.array(group_indices, dtype=np.int32)
-            offsets = self.pwl_offset[group_idx]
-            delays = self.pwl_delay[group_idx]
-            periods = self.pwl_period[group_idx]
+        # Clamp time to valid range for safe interpolation
+        t_clamped = np.clip(t_adj, first_times, last_times)
 
-            # Adjust time for delay and periodicity (vectorized)
-            t_adj = np.full(n_group, t, dtype=np.float64) - delays
-            periodic_mask = (periods > 0) & (t_adj >= 0)
-            t_adj[periodic_mask] = t_adj[periodic_mask] % periods[periodic_mask]
+        # Single flat searchsorted for all PWLs at once
+        flat_t = t_clamped + row_offsets
+        flat_idx = np.searchsorted(flat_times, flat_t, side='right') - 1
+        seg_idx = np.clip(flat_idx - row_stride, 0, max_count - 2)
 
-            if n_group >= 4:
-                # Batch process: reshape packed data into 2D arrays
-                # times_2d[i, j] = time point j for PWL i in group
-                times_2d = np.zeros((n_group, count), dtype=np.float64)
-                values_2d = np.zeros((n_group, count), dtype=np.float64)
+        # Gather segment endpoints using advanced indexing
+        t1 = times_2d[row_idx, seg_idx]
+        t2 = times_2d[row_idx, seg_idx + 1]
+        v1 = values_2d[row_idx, seg_idx]
+        v2 = values_2d[row_idx, seg_idx + 1]
 
-                for local_i, offset in enumerate(offsets):
-                    times_2d[local_i, :] = self.pwl_times[offset:offset + count]
-                    values_2d[local_i, :] = self.pwl_values[offset:offset + count]
+        # Vectorized linear interpolation
+        dt = t2 - t1
+        safe_dt = np.where(dt > 0, dt, 1.0)
+        frac = np.where(dt > 0, (t_clamped - t1) / safe_dt, 0.0)
+        values = v1 + (v2 - v1) * frac
 
-                # Vectorized boundary conditions
-                first_times = times_2d[:, 0]
-                last_times = times_2d[:, -1]
-                first_values = values_2d[:, 0]
-                last_values = values_2d[:, -1]
+        # Override boundary cases
+        before_mask = t_adj <= first_times
+        after_mask = t_adj >= last_times
 
-                # Masks for boundary cases
-                before_mask = t_adj <= first_times
-                after_mask = t_adj >= last_times
-                interp_mask = ~before_mask & ~after_mask
+        values[before_mask] = first_values[before_mask]
 
-                # Handle before first point
-                result[group_idx[before_mask]] = first_values[before_mask]
+        # After last point: periodic → wrap to first value;
+        # non-periodic → hold last value
+        after_periodic = after_mask & self._pwl_has_period
+        after_nonperiodic = after_mask & self._pwl_no_period
+        values[after_periodic] = first_values[after_periodic]
+        values[after_nonperiodic] = last_values[after_nonperiodic]
 
-                # Handle after last point
-                after_idx = np.where(after_mask)[0]
-                if len(after_idx) > 0:
-                    # Periodic: wrap to first; non-periodic: hold last
-                    for local_i in after_idx:
-                        if periods[local_i] > 0:
-                            result[group_idx[local_i]] = first_values[local_i]
-                        else:
-                            result[group_idx[local_i]] = last_values[local_i]
+        return values
 
-                # Handle interpolation cases
-                interp_idx = np.where(interp_mask)[0]
-                if len(interp_idx) > 0:
-                    for local_i in interp_idx:
-                        t_val = t_adj[local_i]
-                        times_row = times_2d[local_i]
-                        values_row = values_2d[local_i]
-                        idx = np.searchsorted(times_row, t_val, side='right') - 1
-                        t1, t2 = times_row[idx], times_row[idx + 1]
-                        v1, v2 = values_row[idx], values_row[idx + 1]
-                        if t2 != t1:
-                            result[group_idx[local_i]] = v1 + (v2 - v1) * (t_val - t1) / (t2 - t1)
-                        else:
-                            result[group_idx[local_i]] = v1
-            else:
-                # Small group: use scalar loop
-                for local_i, global_i in enumerate(group_idx):
-                    offset = offsets[local_i]
-                    times = self.pwl_times[offset:offset + count]
-                    values = self.pwl_values[offset:offset + count]
-                    t_val = t_adj[local_i]
+    def _build_pwl_padded(self) -> None:
+        """Build padded 2D arrays for single-pass PWL evaluation.
 
-                    if t_val <= times[0]:
-                        result[global_i] = values[0]
-                    elif t_val >= times[-1]:
-                        result[global_i] = values[0] if periods[local_i] > 0 else values[-1]
-                    else:
-                        idx = np.searchsorted(times, t_val, side='right') - 1
-                        t1, t2 = times[idx], times[idx + 1]
-                        v1, v2 = values[idx], values[idx + 1]
-                        if t2 != t1:
-                            result[global_i] = v1 + (v2 - v1) * (t_val - t1) / (t2 - t1)
-                        else:
-                            result[global_i] = v1
+        Pads all PWLs to max point count by repeating the last time/value.
+        This creates a single (n_pwls, max_count) array that enables
+        evaluation in one vectorized pass with no group loop.
 
-        return result
+        Padding correctness: repeated last-time segments have dt=0, so
+        interpolation returns last_value via the np.where(dt > 0, ..., 0.0)
+        guard. Boundary overrides then handle periodic wrap.
 
-    def _build_pwl_groups(self) -> None:
-        """Build groups of PWLs by point count for batch processing."""
-        from collections import defaultdict
-        self._pwl_groups: Dict[int, List[int]] = defaultdict(list)
-        for i in range(self.n_pwls):
-            count = self.pwl_count[i]
-            self._pwl_groups[count].append(i)
+        Memory: O(n_pwls * max_count * 16 bytes) for times + values,
+        plus O(n_pwls * max_count * 8 bytes) for flat_times.
+        """
+        n = self.n_pwls
+        max_count = int(self.pwl_count.max()) if n > 0 else 0
+
+        # Build padded 2D arrays
+        times_padded = np.empty((n, max_count), dtype=np.float64)
+        values_padded = np.empty((n, max_count), dtype=np.float64)
+
+        for i in range(n):
+            off = int(self.pwl_offset[i])
+            cnt = int(self.pwl_count[i])
+            times_padded[i, :cnt] = self.pwl_times[off:off + cnt]
+            times_padded[i, cnt:] = self.pwl_times[off + cnt - 1]
+            values_padded[i, :cnt] = self.pwl_values[off:off + cnt]
+            values_padded[i, cnt:] = self.pwl_values[off + cnt - 1]
+
+        # Build flat sorted array for single searchsorted call
+        if max_count >= 2 and n >= 1:
+            time_span = times_padded[:, -1].max() - times_padded[:, 0].min()
+            big_offset = time_span + 1.0 if time_span > 0 else 1.0
+            row_offsets = np.arange(n, dtype=np.float64) * big_offset
+            flat_times = (times_padded + row_offsets[:, np.newaxis]).ravel()
+        else:
+            row_offsets = np.zeros(n, dtype=np.float64)
+            flat_times = times_padded.ravel() if n > 0 else np.array([], dtype=np.float64)
+
+        self._pwl_padded_times = times_padded
+        self._pwl_padded_values = values_padded
+        self._pwl_padded_max_count = max_count
+        self._pwl_padded_flat_times = flat_times
+        self._pwl_padded_row_offsets = row_offsets
+
+        # Pre-cache per-call constants to avoid repeated allocation
+        self._pwl_padded_row_idx = np.arange(n, dtype=np.intp)
+        self._pwl_padded_row_stride = np.arange(n, dtype=np.intp) * max_count
+        self._pwl_padded_first_times = times_padded[:, 0].copy()
+        self._pwl_padded_last_times = times_padded[:, -1].copy()
+        self._pwl_padded_first_values = values_padded[:, 0].copy()
+        self._pwl_padded_last_values = values_padded[:, -1].copy()
+
+        # Cache period/delay analysis for fast-path dispatch
+        self._pwl_has_period = self.pwl_period > 0
+        self._pwl_no_period = ~self._pwl_has_period
+        self._pwl_all_zero_delay = bool(np.all(self.pwl_delay == 0))
+        periods_unique = np.unique(self.pwl_period)
+        if len(periods_unique) == 1 and periods_unique[0] > 0:
+            self._pwl_single_period = float(periods_unique[0])
+        else:
+            self._pwl_single_period = 0.0  # 0 = not uniform
 
     def get_statistics(self) -> Dict[str, Any]:
         """Return statistics about the vectorized sources."""

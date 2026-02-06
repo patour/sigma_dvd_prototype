@@ -414,14 +414,14 @@ class TestPWLPeriodic(unittest.TestCase):
 
 
 class TestPWLGrouping(unittest.TestCase):
-    """Tests for PWL group-by-count optimization."""
+    """Tests for padded single-group PWL evaluation cache."""
 
-    def test_multiple_pwls_same_count(self):
-        """PWLs with same point count should be grouped."""
+    def test_padded_cache_structure(self):
+        """Padded cache should pad all PWLs to max point count."""
         sources = {
             'I1': {
                 'node1': 'N1', 'dc_value': 0.0, 'pulses': [],
-                'pwls': [{'delay': 0.0, 'period': 0.0, 
+                'pwls': [{'delay': 0.0, 'period': 0.0,
                           'points': [(0.0, 1.0), (10e-9, 2.0)]}],
             },
             'I2': {
@@ -436,17 +436,34 @@ class TestPWLGrouping(unittest.TestCase):
             },
         }
         node_to_idx, idx_to_node, n_nodes = create_node_mapping()
-        
+
         vec = VectorizedCurrentSources.from_serialized_dicts(
             sources, node_to_idx, n_nodes
         )
-        
-        # Trigger group building
-        vec._build_pwl_groups()
-        
-        # Should have 2 groups: count=2 (2 PWLs), count=3 (1 PWL)
-        self.assertEqual(len(vec._pwl_groups[2]), 2)
-        self.assertEqual(len(vec._pwl_groups[3]), 1)
+
+        # Trigger padded cache building
+        vec._build_pwl_padded()
+
+        # Max count is 3 (from I3), so all PWLs padded to 3 columns
+        self.assertEqual(vec._pwl_padded_max_count, 3)
+        self.assertEqual(vec._pwl_padded_times.shape, (3, 3))
+        self.assertEqual(vec._pwl_padded_values.shape, (3, 3))
+
+        # 2-point PWLs should have last column padded with last value
+        # I1 has times [0, 10e-9] -> padded to [0, 10e-9, 10e-9]
+        # I1 has values [1.0, 2.0] -> padded to [1.0, 2.0, 2.0]
+        for i in range(vec.n_pwls):
+            cnt = int(vec.pwl_count[i])
+            if cnt < 3:
+                # Padding columns should repeat last actual value
+                self.assertEqual(
+                    vec._pwl_padded_times[i, cnt],
+                    vec._pwl_padded_times[i, cnt - 1],
+                )
+                self.assertEqual(
+                    vec._pwl_padded_values[i, cnt],
+                    vec._pwl_padded_values[i, cnt - 1],
+                )
 
     def test_large_group_vectorized(self):
         """Large groups (>=4) should use vectorized path."""

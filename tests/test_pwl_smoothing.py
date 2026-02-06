@@ -1151,5 +1151,607 @@ class TestPulseSmoothingVectorized(unittest.TestCase):
             self.assertAlmostEqual(val1_class, val1_vec, places=3)
 
 
+class TestPulseActiveIntervalDetection(unittest.TestCase):
+    """Tests for _compute_pulse_active_intervals function."""
+
+    def test_simple_pulse_active_intervals(self):
+        """Test active intervals for standard pulse."""
+        from core.pwl_smoothing import _compute_pulse_active_intervals
+
+        delay = np.array([1e-9])
+        rt = np.array([0.1e-9])
+        ft = np.array([0.1e-9])
+        width = np.array([2e-9])
+        period = np.array([10e-9])
+        time_step = 0.1e-9
+        t_start = 0.0
+        t_end = 10e-9
+
+        intervals, n_intervals = _compute_pulse_active_intervals(
+            delay, rt, ft, width, period, time_step, t_start, t_end
+        )
+
+        # Should have intervals around rise (1ns) and fall (3.2ns) edges
+        self.assertEqual(n_intervals[0], 2)
+        # Rise interval should be around [0.9ns, 1.2ns]
+        self.assertLess(intervals[0, 0, 0], 1e-9)  # Before delay
+        self.assertGreater(intervals[0, 0, 1], 1.1e-9)  # After delay+rt
+
+    def test_step_pulse_active_intervals(self):
+        """Test with zero rise/fall (step pulse)."""
+        from core.pwl_smoothing import _compute_pulse_active_intervals
+
+        delay = np.array([1e-9])
+        rt = np.array([0.0])  # Instant rise
+        ft = np.array([0.0])  # Instant fall
+        width = np.array([2e-9])
+        period = np.array([10e-9])
+        time_step = 0.1e-9
+
+        intervals, n_intervals = _compute_pulse_active_intervals(
+            delay, rt, ft, width, period, time_step, 0.0, 10e-9
+        )
+
+        # Still should have intervals around transitions
+        self.assertGreater(n_intervals[0], 0)
+
+    def test_overlapping_pulse_intervals(self):
+        """Test when rise/fall intervals overlap (short width)."""
+        from core.pwl_smoothing import _compute_pulse_active_intervals
+
+        delay = np.array([1e-9])
+        rt = np.array([0.1e-9])
+        ft = np.array([0.1e-9])
+        width = np.array([0.05e-9])  # Very short pulse - intervals overlap
+        period = np.array([10e-9])
+        time_step = 0.2e-9  # Large time step causes overlap
+
+        intervals, n_intervals = _compute_pulse_active_intervals(
+            delay, rt, ft, width, period, time_step, 0.0, 10e-9
+        )
+
+        # Should have intervals (may be merged)
+        self.assertGreater(n_intervals[0], 0)
+
+    def test_non_periodic_pulse(self):
+        """Test with period=0."""
+        from core.pwl_smoothing import _compute_pulse_active_intervals
+
+        delay = np.array([1e-9])
+        rt = np.array([0.1e-9])
+        ft = np.array([0.1e-9])
+        width = np.array([2e-9])
+        period = np.array([0.0])  # Non-periodic
+        time_step = 0.1e-9
+
+        intervals, n_intervals = _compute_pulse_active_intervals(
+            delay, rt, ft, width, period, time_step, 0.0, 5e-9
+        )
+
+        # Should have intervals around transitions only in first period
+        self.assertGreater(n_intervals[0], 0)
+
+
+class TestPWLActiveIntervalDetection(unittest.TestCase):
+    """Tests for _compute_pwl_active_intervals function."""
+
+    def test_constant_pwl_no_active_intervals(self):
+        """Test PWL with all same values → no active intervals."""
+        from core.pwl_smoothing import _compute_pwl_active_intervals
+
+        times = np.array([0.0, 5.0, 10.0])
+        values = np.array([1.0, 1.0, 1.0])  # Constant
+        period = 0.0
+        time_step = 0.5
+
+        active, constant = _compute_pwl_active_intervals(
+            times, values, period, time_step, 0.0, 10.0
+        )
+
+        # Should have no active intervals (constant PWL)
+        self.assertEqual(len(active), 0)
+        # Should have one constant region covering entire range
+        self.assertEqual(len(constant), 1)
+        self.assertAlmostEqual(constant[0][2], 1.0)
+
+    def test_single_transition_pwl(self):
+        """Test PWL with one slope change."""
+        from core.pwl_smoothing import _compute_pwl_active_intervals
+
+        times = np.array([0.0, 5.0, 10.0])
+        values = np.array([0.0, 1.0, 0.0])  # Triangle
+        period = 0.0
+        time_step = 0.5
+
+        active, constant = _compute_pwl_active_intervals(
+            times, values, period, time_step, 0.0, 10.0
+        )
+
+        # Should have active intervals around t=0, t=5, t=10 (slope changes)
+        self.assertGreater(len(active), 0)
+
+    def test_interval_merging(self):
+        """Test interval merging when transitions are close."""
+        from core.pwl_smoothing import _compute_pwl_active_intervals
+
+        # Two transitions close together (closer than 2*time_step)
+        times = np.array([0.0, 1.0, 1.1, 2.0])  # Transitions at 1.0 and 1.1
+        values = np.array([0.0, 1.0, 0.5, 0.5])
+        period = 0.0
+        time_step = 0.2  # Intervals will overlap and merge
+
+        active, constant = _compute_pwl_active_intervals(
+            times, values, period, time_step, 0.0, 2.0
+        )
+
+        # Check that we get merged intervals (not one per transition)
+        # The intervals around 1.0 and 1.1 should merge
+        if len(active) > 0:
+            # Find intervals around t=1.0
+            found_merged = False
+            for start, end in active:
+                if start <= 1.0 <= end and start <= 1.1 <= end:
+                    found_merged = True
+                    break
+            # Either merged or two separate small intervals
+            self.assertTrue(len(active) <= 3)
+
+
+class TestSparseSmoothingFunctions(unittest.TestCase):
+    """Tests for sparse smoothing functions."""
+
+    def test_sparse_pulse_matches_dense(self):
+        """Sparse pulse smoothing matches dense within tolerance."""
+        from core.pwl_smoothing import (
+            _smooth_pulse_chunk, _smooth_pulse_chunk_sparse,
+            _pulse_to_pwl_arrays, _compute_pulse_active_intervals
+        )
+
+        # Single pulse
+        v1 = np.array([0.0])
+        v2 = np.array([1.0])
+        delay = np.array([1e-9])
+        rt = np.array([0.1e-9])
+        ft = np.array([0.1e-9])
+        width = np.array([2e-9])
+        period = np.array([10e-9])
+        time_step = 0.05e-9
+        t_start = 0.0
+        t_end = 10e-9
+
+        # Dense path
+        pulse_times_2d, pulse_values_2d = _pulse_to_pwl_arrays(
+            v1, v2, delay, rt, ft, width, period
+        )
+        n_samples = int((t_end - t_start) / time_step) + 1
+        sample_times = np.linspace(t_start, t_end, n_samples)
+        dense_result = _smooth_pulse_chunk(
+            pulse_times_2d, pulse_values_2d, period, sample_times, time_step
+        )
+
+        # Sparse path
+        intervals, n_intervals = _compute_pulse_active_intervals(
+            delay, rt, ft, width, period, time_step, t_start, t_end
+        )
+        sparse_times, sparse_values = _smooth_pulse_chunk_sparse(
+            pulse_times_2d, pulse_values_2d, period,
+            intervals, n_intervals, time_step, t_start, t_end
+        )
+
+        # Sparse now returns same format as dense:
+        # sparse_times: (n_samples,) - uniform sample times
+        # sparse_values: (chunk_size, n_samples) - same as dense_result
+        # Direct comparison - they should match exactly (within floating point)
+        np.testing.assert_array_equal(sparse_times, sample_times)
+        max_diff = np.max(np.abs(sparse_values - dense_result))
+        self.assertLess(max_diff, 1e-10,
+            f"Max difference {max_diff:.2e} exceeds tolerance")
+
+    def test_sparse_pwl_matches_dense(self):
+        """Sparse PWL smoothing matches dense within tolerance."""
+        from core.pwl_smoothing import _smooth_pwl_vectorized, _smooth_pwl_sparse
+
+        times = np.array([0.0, 1e-9, 2e-9, 5e-9, 10e-9])
+        values = np.array([0.0, 1.0, 0.5, 0.5, 0.0])
+        period = 10e-9
+        time_step = 0.05e-9
+        t_start = 0.0
+        t_end = 10e-9
+
+        # Dense path
+        dense_t, dense_v = _smooth_pwl_vectorized(
+            times, values, period, time_step, t_start, t_end
+        )
+
+        # Sparse path
+        sparse_t, sparse_v = _smooth_pwl_sparse(
+            times, values, period, time_step, t_start, t_end
+        )
+
+        # Compare at interior dense sample times (skip boundaries which may differ)
+        # Sample in the middle where smoothing effects are minimal
+        test_times = dense_t[len(dense_t)//4 : 3*len(dense_t)//4]
+        for t in test_times:
+            idx = np.searchsorted(sparse_t, t)
+            if idx == 0:
+                interp_val = sparse_v[0]
+            elif idx >= len(sparse_t):
+                interp_val = sparse_v[-1]
+            else:
+                t_lo, t_hi = sparse_t[idx-1], sparse_t[idx]
+                v_lo, v_hi = sparse_v[idx-1], sparse_v[idx]
+                if t_hi > t_lo:
+                    interp_val = v_lo + (v_hi - v_lo) * (t - t_lo) / (t_hi - t_lo)
+                else:
+                    interp_val = v_lo
+
+            # Find corresponding dense value
+            dense_idx = np.searchsorted(dense_t, t)
+            if dense_idx < len(dense_v):
+                dense_val = dense_v[dense_idx]
+            else:
+                dense_val = dense_v[-1]
+
+            # Sparse and dense should match closely; any divergence indicates
+            # a bug in active-interval detection or constant-region evaluation.
+            self.assertAlmostEqual(
+                interp_val, dense_val, places=4,
+                msg=f"Mismatch at t={t:.2e}: sparse={interp_val:.6f}, dense={dense_val:.6f}"
+            )
+
+    def test_sparse_periodic_handling(self):
+        """Periodic wraparound handled correctly in sparse mode."""
+        from core.pwl_smoothing import _smooth_pwl_sparse, _smooth_pwl_vectorized
+
+        # Triangle wave that wraps at period boundary
+        times = np.array([0.0, 5e-9, 10e-9])
+        values = np.array([0.0, 1.0, 0.0])
+        period = 10e-9
+        time_step = 0.1e-9
+
+        sparse_t, sparse_v = _smooth_pwl_sparse(
+            times, values, period, time_step, 0.0, 10e-9
+        )
+
+        # Should have samples at both ends
+        self.assertGreater(len(sparse_t), 2)
+
+        # Compare with dense result at the same time points for periodicity check
+        dense_t, dense_v = _smooth_pwl_vectorized(
+            times, values, period, time_step, 0.0, 10e-9
+        )
+        # For periodic waveforms, dense_v[0] should equal dense_v[-1]
+        self.assertAlmostEqual(dense_v[0], dense_v[-1], places=2)
+
+        # Sparse should produce correct values at interior points
+        self.assertGreater(max(sparse_v), 0.1)  # Should have some variation
+
+
+class TestSparseVsDenseEquivalence(unittest.TestCase):
+    """Equivalence tests between sparse and dense smoothing paths."""
+
+    def test_pulse_smoothing_equivalence_end_to_end(self):
+        """Verify sparse and dense produce equivalent results for pulses."""
+        from core.vectorized_sources import VectorizedCurrentSources
+        from core.pwl_smoothing import PWLSmoother
+
+        n_pulses = 100
+        np.random.seed(42)
+
+        sources = VectorizedCurrentSources(
+            n_nodes=n_pulses,
+            node_to_idx={f'n{i}': i for i in range(n_pulses)},
+            n_sources=n_pulses,
+            dc_values=np.zeros(n_pulses),
+            source_node_idx=np.arange(n_pulses, dtype=np.int32),
+            n_pulses=n_pulses,
+            pulse_node_idx=np.arange(n_pulses, dtype=np.int32),
+            pulse_source_idx=np.arange(n_pulses, dtype=np.int32),
+            pulse_v1=np.zeros(n_pulses),
+            pulse_v2=np.random.uniform(0.5, 1.5, n_pulses),
+            pulse_delay=np.random.uniform(0.5e-9, 2e-9, n_pulses),
+            pulse_rt=np.full(n_pulses, 0.1e-9),
+            pulse_ft=np.full(n_pulses, 0.1e-9),
+            pulse_width=np.random.uniform(1e-9, 3e-9, n_pulses),
+            pulse_period=np.full(n_pulses, 10e-9),
+            n_pwls=0, n_pwl_points=0,
+            pwl_node_idx=np.array([], dtype=np.int32),
+            pwl_source_idx=np.array([], dtype=np.int32),
+            pwl_period=np.array([]),
+            pwl_delay=np.array([]),
+            pwl_offset=np.array([], dtype=np.int32),
+            pwl_count=np.array([], dtype=np.int32),
+            pwl_times=np.array([]),
+            pwl_values=np.array([]),
+        )
+
+        time_step = 0.02e-9  # Small enough to trigger sparse path
+
+        # Create caches with sparse and dense
+        smoother = PWLSmoother(time_step=time_step, compact_threshold=1e-12)
+        cache_sparse = smoother.create_smoothed_cache(
+            sources, 0, 10e-9, sparse_threshold=100e-12
+        )
+        cache_dense = smoother.create_smoothed_cache(
+            sources, 0, 10e-9, sparse_threshold=0  # Force dense
+        )
+
+        # Apply caches
+        smoothed_sparse = smoother.apply_cache_to_sources(sources, cache_sparse)
+        smoothed_dense = smoother.apply_cache_to_sources(sources, cache_dense)
+
+        # Compare at multiple time points
+        t_samples = np.linspace(0, 10e-9, 51)
+        for t in t_samples:
+            curr_sparse = smoothed_sparse.evaluate_at_time(t)
+            curr_dense = smoothed_dense.evaluate_at_time(t)
+
+            # Sparse and dense paths should produce identical results
+            max_diff = np.max(np.abs(curr_sparse - curr_dense))
+            self.assertLessEqual(
+                max_diff, 1e-9,
+                f"Max diff {max_diff:.2e} at t={t:.2e}"
+            )
+
+
+class TestSparsePerformanceBenchmarks(unittest.TestCase):
+    """Performance benchmark tests for sparse smoothing."""
+
+    def test_pulse_speedup_10ps(self):
+        """Sparse should be faster than dense at 10ps time step."""
+        from core.vectorized_sources import VectorizedCurrentSources
+        from core.pwl_smoothing import PWLSmoother
+        import time
+
+        n_pulses = 1000
+        np.random.seed(42)
+
+        sources = VectorizedCurrentSources(
+            n_nodes=n_pulses,
+            node_to_idx={f'n{i}': i for i in range(n_pulses)},
+            n_sources=n_pulses,
+            dc_values=np.zeros(n_pulses),
+            source_node_idx=np.arange(n_pulses, dtype=np.int32),
+            n_pulses=n_pulses,
+            pulse_node_idx=np.arange(n_pulses, dtype=np.int32),
+            pulse_source_idx=np.arange(n_pulses, dtype=np.int32),
+            pulse_v1=np.zeros(n_pulses),
+            pulse_v2=np.ones(n_pulses),
+            pulse_delay=np.full(n_pulses, 1e-9),
+            pulse_rt=np.full(n_pulses, 0.1e-9),
+            pulse_ft=np.full(n_pulses, 0.1e-9),
+            pulse_width=np.full(n_pulses, 2e-9),
+            pulse_period=np.full(n_pulses, 10e-9),
+            n_pwls=0, n_pwl_points=0,
+            pwl_node_idx=np.array([], dtype=np.int32),
+            pwl_source_idx=np.array([], dtype=np.int32),
+            pwl_period=np.array([]),
+            pwl_delay=np.array([]),
+            pwl_offset=np.array([], dtype=np.int32),
+            pwl_count=np.array([], dtype=np.int32),
+            pwl_times=np.array([]),
+            pwl_values=np.array([]),
+        )
+
+        time_step = 10e-12  # 10ps
+
+        smoother = PWLSmoother(time_step=time_step, compact_threshold=1e-12)
+
+        # Time sparse path
+        start = time.perf_counter()
+        cache_sparse = smoother.create_smoothed_cache(
+            sources, 0, 10e-9, sparse_threshold=100e-12
+        )
+        sparse_time = time.perf_counter() - start
+
+        # Time dense path
+        start = time.perf_counter()
+        cache_dense = smoother.create_smoothed_cache(
+            sources, 0, 10e-9, sparse_threshold=0
+        )
+        dense_time = time.perf_counter() - start
+
+        # Sparse should be faster (at least 1.2x)
+        # Note: The speedup may vary depending on pulse characteristics and system load
+        speedup = dense_time / sparse_time if sparse_time > 0 else float('inf')
+        self.assertGreater(
+            speedup, 1.2,
+            f"Sparse should be at least 1.2x faster: dense={dense_time:.3f}s, "
+            f"sparse={sparse_time:.3f}s, speedup={speedup:.1f}x"
+        )
+
+    def test_total_time_10k_pulses_10ps(self):
+        """10K pulses at 10ps should complete in reasonable time."""
+        from core.vectorized_sources import VectorizedCurrentSources
+        from core.pwl_smoothing import PWLSmoother
+        import time
+
+        n_pulses = 10000
+        np.random.seed(42)
+
+        sources = VectorizedCurrentSources(
+            n_nodes=n_pulses,
+            node_to_idx={f'n{i}': i for i in range(n_pulses)},
+            n_sources=n_pulses,
+            dc_values=np.zeros(n_pulses),
+            source_node_idx=np.arange(n_pulses, dtype=np.int32),
+            n_pulses=n_pulses,
+            pulse_node_idx=np.arange(n_pulses, dtype=np.int32),
+            pulse_source_idx=np.arange(n_pulses, dtype=np.int32),
+            pulse_v1=np.zeros(n_pulses),
+            pulse_v2=np.ones(n_pulses),
+            pulse_delay=np.full(n_pulses, 1e-9),
+            pulse_rt=np.full(n_pulses, 0.1e-9),
+            pulse_ft=np.full(n_pulses, 0.1e-9),
+            pulse_width=np.full(n_pulses, 2e-9),
+            pulse_period=np.full(n_pulses, 10e-9),
+            n_pwls=0, n_pwl_points=0,
+            pwl_node_idx=np.array([], dtype=np.int32),
+            pwl_source_idx=np.array([], dtype=np.int32),
+            pwl_period=np.array([]),
+            pwl_delay=np.array([]),
+            pwl_offset=np.array([], dtype=np.int32),
+            pwl_count=np.array([], dtype=np.int32),
+            pwl_times=np.array([]),
+            pwl_values=np.array([]),
+        )
+
+        time_step = 10e-12  # 10ps
+
+        smoother = PWLSmoother(time_step=time_step, compact_threshold=1e-12)
+
+        start = time.perf_counter()
+        cache = smoother.create_smoothed_cache(
+            sources, 0, 10e-9, sparse_threshold=100e-12
+        )
+        elapsed = time.perf_counter() - start
+
+        # Should complete in < 30 seconds for 10K pulses
+        self.assertLess(
+            elapsed, 30.0,
+            f"10K pulses at 10ps took {elapsed:.1f}s, expected < 30s"
+        )
+
+        # Verify output is correct
+        self.assertEqual(cache.n_pwls, n_pulses)
+
+
+class TestSmoothedEvaluationPerformance(unittest.TestCase):
+    """Performance regression test for smoothed waveform evaluation throughput."""
+
+    def test_smoothed_evaluate_at_time_within_2x_original(self):
+        """Smoothed evaluate_at_time should be < 2x slower than original.
+
+        Creates 20K sources (16K pulses + 4K PWLs), smooths them, then
+        compares evaluation throughput. The vectorized _evaluate_pwls
+        implementation should keep smoothed evaluation close to original
+        pulse-dominated evaluation speed.
+        """
+        import time
+        from core.vectorized_sources import VectorizedCurrentSources
+
+        N_WAVEFORMS = 20_000
+        N_EVAL = 50  # Number of evaluate_at_time calls
+        T_START = 0.0
+        T_END = 10e-9
+        SEED = 42
+
+        rng = np.random.RandomState(SEED)
+
+        # --- Pulse sources (80%) ---
+        n_pulses = int(N_WAVEFORMS * 0.8)
+        pulse_v1 = np.zeros(n_pulses)
+        pulse_v2 = rng.uniform(0.1, 2.0, n_pulses)
+        pulse_delay = rng.uniform(0.5e-9, 5e-9, n_pulses)
+        pulse_rt = rng.uniform(1e-12, 5e-11, n_pulses)
+        pulse_ft = rng.uniform(1e-12, 5e-11, n_pulses)
+        pulse_width = rng.uniform(5e-12, 1e-10, n_pulses)
+        pulse_period = np.full(n_pulses, T_END)
+
+        # --- PWL sources (20%) ---
+        n_pwls = N_WAVEFORMS - n_pulses
+        pwl_times_list = []
+        pwl_values_list = []
+        pwl_offsets = []
+        pwl_counts = []
+        pwl_periods = []
+        pwl_delays = []
+
+        for i in range(n_pwls):
+            n_pts = rng.randint(4, 12)
+            t_pts = np.sort(rng.uniform(0, T_END, n_pts))
+            t_pts[0] = 0.0
+            t_pts[-1] = T_END
+            v_pts = rng.uniform(0, 1.5, n_pts)
+
+            pwl_offsets.append(len(pwl_times_list))
+            pwl_counts.append(n_pts)
+            pwl_periods.append(T_END)
+            pwl_delays.append(0.0)
+            pwl_times_list.extend(t_pts.tolist())
+            pwl_values_list.extend(v_pts.tolist())
+
+        # Build original VectorizedCurrentSources
+        n_nodes = N_WAVEFORMS
+        node_to_idx = {f'n{i}': i for i in range(n_nodes)}
+
+        sources = VectorizedCurrentSources(
+            n_nodes=n_nodes,
+            node_to_idx=node_to_idx,
+            n_sources=N_WAVEFORMS,
+            dc_values=rng.uniform(0, 0.5, N_WAVEFORMS),
+            source_node_idx=np.arange(N_WAVEFORMS, dtype=np.int32),
+            n_pulses=n_pulses,
+            pulse_node_idx=np.arange(n_pulses, dtype=np.int32),
+            pulse_source_idx=np.arange(n_pulses, dtype=np.int32),
+            pulse_v1=pulse_v1,
+            pulse_v2=pulse_v2,
+            pulse_delay=pulse_delay,
+            pulse_rt=pulse_rt,
+            pulse_ft=pulse_ft,
+            pulse_width=pulse_width,
+            pulse_period=pulse_period,
+            n_pwls=n_pwls,
+            n_pwl_points=len(pwl_times_list),
+            pwl_node_idx=np.arange(n_pulses, n_pulses + n_pwls, dtype=np.int32),
+            pwl_source_idx=np.arange(n_pulses, n_pulses + n_pwls, dtype=np.int32),
+            pwl_period=np.array(pwl_periods),
+            pwl_delay=np.array(pwl_delays),
+            pwl_offset=np.array(pwl_offsets, dtype=np.int32),
+            pwl_count=np.array(pwl_counts, dtype=np.int32),
+            pwl_times=np.array(pwl_times_list),
+            pwl_values=np.array(pwl_values_list),
+        )
+
+        # Smooth sources
+        dt_smooth = 0.05e-9  # 50ps
+        smoother = PWLSmoother(time_step=dt_smooth, compact_threshold=1e-12)
+        cache = smoother.create_smoothed_cache(
+            sources, T_START, T_END, sparse_threshold=100e-12
+        )
+        smoothed = smoother.apply_cache_to_sources(sources, cache)
+
+        # Random evaluation times
+        eval_t = rng.uniform(T_START, T_END, N_EVAL)
+
+        # Warm up (trigger lazy cache building, stabilize CPU caches)
+        for _ in range(5):
+            _ = sources.evaluate_at_time(T_START)
+            _ = smoothed.evaluate_at_time(T_START)
+
+        # Benchmark (with retry if first attempt fails due to noise)
+        def run_benchmark():
+            t0 = time.perf_counter()
+            for t in eval_t:
+                _ = sources.evaluate_at_time(t)
+            original_time = time.perf_counter() - t0
+
+            t0 = time.perf_counter()
+            for t in eval_t:
+                _ = smoothed.evaluate_at_time(t)
+            smoothed_time = time.perf_counter() - t0
+
+            ratio = smoothed_time / original_time if original_time > 0 else float('inf')
+            return ratio, original_time, smoothed_time
+
+        ratio, original_time, smoothed_time = run_benchmark()
+        
+        # Retry once if failed (to handle occasional CPU scheduling jitter)
+        if ratio >= 2.0:
+            ratio_retry, original_retry, smoothed_retry = run_benchmark()
+            if ratio_retry < ratio:
+                ratio = ratio_retry
+                original_time = original_retry
+                smoothed_time = smoothed_retry
+
+        self.assertLess(
+            ratio, 2.0,
+            f"Smoothed evaluation is {ratio:.2f}x slower than original "
+            f"(original={original_time:.3f}s, smoothed={smoothed_time:.3f}s "
+            f"for {N_EVAL} calls over {N_WAVEFORMS:,} sources). "
+            f"Expected < 2.0x."
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

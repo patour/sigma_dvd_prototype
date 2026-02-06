@@ -388,6 +388,818 @@ def _smooth_pwl_vectorized(
 
 
 # =============================================================================
+# Sparse Sampling Functions (Optimized for small time_step)
+# =============================================================================
+
+
+def _compute_pulse_active_intervals(
+    delay: np.ndarray,
+    rt: np.ndarray,
+    ft: np.ndarray,
+    width: np.ndarray,
+    period: np.ndarray,
+    time_step: float,
+    t_start: float,
+    t_end: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute active intervals for each pulse where smoothed output varies.
+
+    Active intervals are regions within ±time_step of transitions:
+    - Rising edge: [delay - time_step, delay + rt + time_step]
+    - Falling edge: [delay+rt+width - time_step, delay+rt+width+ft + time_step]
+
+    For periodic pulses, this also considers transitions from adjacent periods
+    that fall within the [t_start, t_end] window.
+
+    Args:
+        delay: Pulse delays (n_pulses,)
+        rt: Rise times (n_pulses,)
+        ft: Fall times (n_pulses,)
+        width: Pulse widths (n_pulses,)
+        period: Pulse periods (n_pulses,), 0 = non-periodic
+        time_step: Simulation time step
+        t_start: Start of output time range
+        t_end: End of output time range
+
+    Returns:
+        intervals: (n_pulses, max_intervals, 2) array of [start, end] pairs.
+                   Invalid intervals are marked with start=end=0.
+        n_intervals: (n_pulses,) count of valid intervals per pulse
+    """
+    n_pulses = len(delay)
+    h = time_step  # Half-width of triangle filter
+
+    # Defensive check: this function only handles ±1 period offset from the
+    # base transition times.  If the simulation window spans more than 2 periods,
+    # transitions in intermediate periods would be missed and those samples
+    # would receive un-smoothed PWL values instead of correctly smoothed ones.
+    periodic_mask = period > 0
+    if np.any(periodic_mask):
+        max_periods_spanned = np.max(
+            (t_end - t_start) / period[periodic_mask]
+        )
+        if max_periods_spanned > 2.0 + 1e-9:
+            raise ValueError(
+                f"Sparse active-interval detection only supports simulation windows "
+                f"up to 2 periods wide, but window spans {max_periods_spanned:.1f} "
+                f"periods. Use dense smoothing (sparse_threshold=0) for longer windows."
+            )
+
+    # Maximum possible intervals per pulse:
+    # - 2 transitions per period (rise and fall)
+    # - Up to 3 periods worth of intervals (current, previous wrap, next wrap)
+    # Allocate for worst case: 6 intervals per pulse
+    max_intervals = 6
+    intervals = np.zeros((n_pulses, max_intervals, 2), dtype=np.float64)
+    n_intervals = np.zeros(n_pulses, dtype=np.int32)
+
+    # Compute rise edge intervals for base period
+    rise_start = delay - h
+    rise_end = delay + rt + h
+
+    # Compute fall edge intervals for base period
+    fall_start = delay + rt + width - h
+    fall_end = delay + rt + width + ft + h
+
+    for i in range(n_pulses):
+        idx = 0
+        p = period[i]
+
+        # Function to add interval if it overlaps [t_start, t_end]
+        def add_interval(start: float, end: float) -> int:
+            nonlocal idx
+            # Clip to [t_start, t_end]
+            clipped_start = max(start, t_start)
+            clipped_end = min(end, t_end)
+            if clipped_start < clipped_end and idx < max_intervals:
+                intervals[i, idx, 0] = clipped_start
+                intervals[i, idx, 1] = clipped_end
+                idx += 1
+            return idx
+
+        # Add base period intervals
+        add_interval(rise_start[i], rise_end[i])
+        add_interval(fall_start[i], fall_end[i])
+
+        # Handle periodic wraparound
+        if p > 0:
+            # How many periods fit in [t_start, t_end]?
+            # Check previous period contribution (for samples near t_start)
+            if rise_start[i] + p <= t_end:
+                add_interval(rise_start[i] + p, rise_end[i] + p)
+            if fall_start[i] + p <= t_end:
+                add_interval(fall_start[i] + p, fall_end[i] + p)
+
+            # Check next period contribution (for samples near t_end)
+            # This handles the case where t_out is near t_end and the filter
+            # window extends into the next period
+            if rise_start[i] - p >= t_start - h:
+                add_interval(rise_start[i] - p, rise_end[i] - p)
+            if fall_start[i] - p >= t_start - h:
+                add_interval(fall_start[i] - p, fall_end[i] - p)
+
+        n_intervals[i] = idx
+
+    return intervals, n_intervals
+
+
+def _compute_pwl_active_intervals(
+    times: np.ndarray,
+    values: np.ndarray,
+    period: float,
+    time_step: float,
+    t_start: float,
+    t_end: float,
+) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float, float]]]:
+    """Compute active intervals for PWL where smoothed output varies.
+
+    Active intervals are regions within ±time_step of any point where
+    the slope changes (i.e., at each PWL vertex). Between these intervals,
+    the smoothed output is constant (equal to the local PWL value).
+
+    Args:
+        times: PWL time points (n_points,) sorted
+        values: PWL values (n_points,)
+        period: PWL period (0 = non-periodic)
+        time_step: Simulation time step
+        t_start: Start of output time range
+        t_end: End of output time range
+
+    Returns:
+        active_intervals: List of (start, end) tuples where output varies
+        constant_regions: List of (start, end, value) tuples for constant regions
+    """
+    if len(times) < 2:
+        # Single point or empty - entire range is constant
+        val = values[0] if len(values) > 0 else 0.0
+        return [], [(t_start, t_end, val)]
+
+    h = time_step
+
+    n_points = len(times)
+
+    # Check if all values are the same (constant PWL)
+    val_range = np.max(values) - np.min(values)
+    if val_range < 1e-15:
+        # Constant PWL - no active intervals
+        return [], [(t_start, t_end, values[0])]
+
+    # Compute slopes between consecutive points
+    slopes = np.zeros(n_points - 1)
+    for i in range(n_points - 1):
+        dt = times[i + 1] - times[i]
+        if dt > 0:
+            slopes[i] = (values[i + 1] - values[i]) / dt
+        else:
+            slopes[i] = 0.0
+
+    # Find slope change points
+    transition_times: List[float] = []
+
+    # For non-periodic: add first point if slope is non-zero
+    if period <= 0 and len(slopes) > 0 and abs(slopes[0]) > 1e-15:
+        transition_times.append(times[0])
+
+    # Interior points where slope changes
+    for i in range(1, n_points - 1):
+        if abs(slopes[i] - slopes[i - 1]) > 1e-15:
+            transition_times.append(times[i])
+
+    # For non-periodic: add last point if last slope is non-zero
+    if period <= 0 and len(slopes) > 0 and abs(slopes[-1]) > 1e-15:
+        transition_times.append(times[-1])
+
+    # For periodic: check slope changes at wraparound
+    if period > 0 and n_points > 1:
+        dt_wrap = period - times[-1] + times[0]
+        if dt_wrap > 0:
+            slope_wrap = (values[0] - values[-1]) / dt_wrap
+            # Check if slope changes at times[0]
+            if abs(slopes[0] - slope_wrap) > 1e-15:
+                transition_times.append(times[0])
+            # Check if slope changes at times[-1]
+            if abs(slope_wrap - slopes[-1]) > 1e-15:
+                transition_times.append(times[-1])
+        else:
+            # dt_wrap <= 0: times[-1] coincides with times[0]+period (no gap
+            # segment), but the slope may still change at the boundary.
+            if abs(slopes[0] - slopes[-1]) > 1e-15:
+                transition_times.append(times[0])
+                transition_times.append(times[-1])
+
+    # If no transitions found, entire range is constant
+    if not transition_times:
+        t_mid = (t_start + t_end) / 2
+        val = _interpolate_pwl_vectorized(times, values, period, t_mid)
+        return [], [(t_start, t_end, val)]
+
+    # Create active intervals around each transition point
+    active_intervals: List[Tuple[float, float]] = []
+
+    for t_trans in transition_times:
+        int_start = max(t_trans - h, t_start)
+        int_end = min(t_trans + h, t_end)
+        if int_start < int_end:
+            active_intervals.append((int_start, int_end))
+
+    # Handle periodic contributions from adjacent periods
+    if period > 0:
+        for t_trans in transition_times:
+            # Previous period
+            t_prev = t_trans - period
+            int_start = max(t_prev - h, t_start)
+            int_end = min(t_prev + h, t_end)
+            if int_start < int_end:
+                active_intervals.append((int_start, int_end))
+
+            # Next period
+            t_next = t_trans + period
+            int_start = max(t_next - h, t_start)
+            int_end = min(t_next + h, t_end)
+            if int_start < int_end:
+                active_intervals.append((int_start, int_end))
+
+    # Sort and merge overlapping intervals
+    if active_intervals:
+        active_intervals.sort(key=lambda x: x[0])
+        merged: List[Tuple[float, float]] = []
+        current_start, current_end = active_intervals[0]
+        for start, end in active_intervals[1:]:
+            if start <= current_end:
+                current_end = max(current_end, end)
+            else:
+                merged.append((current_start, current_end))
+                current_start, current_end = start, end
+        merged.append((current_start, current_end))
+        active_intervals = merged
+
+    # Compute constant regions (gaps between active intervals)
+    constant_regions: List[Tuple[float, float, float]] = []
+
+    if not active_intervals:
+        t_mid = (t_start + t_end) / 2
+        val = _interpolate_pwl_vectorized(times, values, period, t_mid)
+        constant_regions.append((t_start, t_end, val))
+    else:
+        # Before first active interval
+        if active_intervals[0][0] > t_start:
+            t_mid = (t_start + active_intervals[0][0]) / 2
+            val = _interpolate_pwl_vectorized(times, values, period, t_mid)
+            constant_regions.append((t_start, active_intervals[0][0], val))
+
+        # Between active intervals
+        for i in range(len(active_intervals) - 1):
+            gap_start = active_intervals[i][1]
+            gap_end = active_intervals[i + 1][0]
+            if gap_end > gap_start:
+                t_mid = (gap_start + gap_end) / 2
+                val = _interpolate_pwl_vectorized(times, values, period, t_mid)
+                constant_regions.append((gap_start, gap_end, val))
+
+        # After last active interval
+        if active_intervals[-1][1] < t_end:
+            t_mid = (active_intervals[-1][1] + t_end) / 2
+            val = _interpolate_pwl_vectorized(times, values, period, t_mid)
+            constant_regions.append((active_intervals[-1][1], t_end, val))
+
+    return active_intervals, constant_regions
+
+
+def _interpolate_pwl_vectorized(
+    times: np.ndarray,
+    values: np.ndarray,
+    period: float,
+    t: float,
+) -> float:
+    """Interpolate PWL at time t (vectorized-friendly version)."""
+    if len(times) == 0:
+        return 0.0
+
+    # Handle periodic wrapping
+    if period > 0:
+        t = t % period
+        if t < 0:
+            t += period
+
+    # Before first point
+    if t <= times[0]:
+        return values[0]
+
+    # After last point
+    if t >= times[-1]:
+        if period > 0:
+            return values[0]  # Wrap to start
+        return values[-1]
+
+    # Binary search for interval
+    idx = np.searchsorted(times, t, side='right') - 1
+    idx = max(0, min(idx, len(times) - 2))
+
+    t1, v1 = times[idx], values[idx]
+    t2, v2 = times[idx + 1], values[idx + 1]
+
+    if t2 == t1:
+        return v1
+    return v1 + (v2 - v1) * (t - t1) / (t2 - t1)
+
+
+def _smooth_pwl_sparse(
+    times: np.ndarray,
+    values: np.ndarray,
+    period: float,
+    time_step: float,
+    t_start: float,
+    t_end: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Smooth PWL using sparse sampling within active intervals.
+
+    This function computes the smoothed PWL by:
+    1. Identifying active intervals (where the output varies)
+    2. Sampling densely only within active intervals
+    3. Computing smoothed boundary values for constant regions
+
+    This provides significant speedup when time_step is small relative to
+    the waveform period, as most of the output is constant between transitions.
+
+    Args:
+        times: PWL time points (n_points,) sorted
+        values: PWL values (n_points,)
+        period: PWL period (0 = non-periodic)
+        time_step: Simulation time step
+        t_start: Start of output time range
+        t_end: End of output time range
+
+    Returns:
+        Tuple of (smoothed_times, smoothed_values) arrays
+    """
+    if len(times) < 2 or time_step <= 0:
+        return times.copy(), values.copy()
+
+    # Get active intervals
+    active_intervals, constant_regions = _compute_pwl_active_intervals(
+        times, values, period, time_step, t_start, t_end
+    )
+
+    half_width = time_step
+    n_points = len(times)
+
+    def compute_smoothed_value(t_out: float) -> float:
+        """Compute smoothed value at a single time point."""
+        weighted_sum = 0.0
+        for i in range(n_points - 1):
+            t1, v1_seg = times[i], values[i]
+            t2, v2_seg = times[i + 1], values[i + 1]
+            weighted_sum += analytical_triangle_pwl_integral(
+                t_out, half_width, t1, v1_seg, t2, v2_seg
+            )
+
+        if period > 0:
+            for i in range(n_points - 1):
+                t1, v1_seg = times[i], values[i]
+                t2, v2_seg = times[i + 1], values[i + 1]
+                weighted_sum += analytical_triangle_pwl_integral(
+                    t_out, half_width, t1 - period, v1_seg, t2 - period, v2_seg
+                )
+                weighted_sum += analytical_triangle_pwl_integral(
+                    t_out, half_width, t1 + period, v1_seg, t2 + period, v2_seg
+                )
+
+        return weighted_sum / half_width if half_width > 0 else 0.0
+
+    # If no active intervals, compute value at a few key points
+    if not active_intervals:
+        v_start = compute_smoothed_value(t_start)
+        v_end = compute_smoothed_value(t_end)
+        return np.array([t_start, t_end]), np.array([v_start, v_end])
+
+    # Build sparse output
+    out_times: List[float] = []
+    out_values: List[float] = []
+
+    # Always start with t_start
+    current_t = t_start
+
+    for i, (a_start, a_end) in enumerate(active_intervals):
+        # Add points for constant region before this active interval
+        if current_t < a_start:
+            # Compute smoothed value at boundaries of constant region
+            if not out_times or out_times[-1] < current_t:
+                out_times.append(current_t)
+                out_values.append(compute_smoothed_value(current_t))
+            out_times.append(a_start)
+            out_values.append(compute_smoothed_value(a_start))
+
+        # Dense samples within active interval
+        # Use round() instead of int() to avoid floating-point truncation
+        # (e.g. int(1.9999998) = 1 instead of the correct 2)
+        n_samples = max(2, round((a_end - a_start) / time_step) + 1)
+        sample_times = np.linspace(a_start, a_end, n_samples)
+
+        # Compute smoothed values using vectorized function
+        weighted_sum = np.zeros(n_samples, dtype=np.float64)
+        for j in range(n_points - 1):
+            t1, v1_seg = times[j], values[j]
+            t2, v2_seg = times[j + 1], values[j + 1]
+            weighted_sum += _analytical_integral_vectorized(
+                sample_times, half_width, t1, v1_seg, t2, v2_seg
+            )
+
+        if period > 0:
+            for j in range(n_points - 1):
+                t1, v1_seg = times[j], values[j]
+                t2, v2_seg = times[j + 1], values[j + 1]
+                weighted_sum += _analytical_integral_vectorized(
+                    sample_times, half_width, t1 - period, v1_seg, t2 - period, v2_seg
+                )
+                weighted_sum += _analytical_integral_vectorized(
+                    sample_times, half_width, t1 + period, v1_seg, t2 + period, v2_seg
+                )
+
+        smoothed = weighted_sum / half_width
+
+        # Add to output (handle overlap with previous points)
+        start_idx = 0
+        if out_times and abs(out_times[-1] - sample_times[0]) < 1e-15:
+            out_values[-1] = smoothed[0]
+            start_idx = 1
+
+        out_times.extend(sample_times[start_idx:].tolist())
+        out_values.extend(smoothed[start_idx:].tolist())
+
+        current_t = a_end
+
+    # Handle constant region after last active interval
+    if current_t < t_end:
+        if not out_times or out_times[-1] < current_t:
+            out_times.append(current_t)
+            out_values.append(compute_smoothed_value(current_t))
+        out_times.append(t_end)
+        out_values.append(compute_smoothed_value(t_end))
+
+    # Ensure we have at least 2 points
+    if len(out_times) < 2:
+        v_start = compute_smoothed_value(t_start)
+        v_end = compute_smoothed_value(t_end)
+        return np.array([t_start, t_end]), np.array([v_start, v_end])
+
+    return np.array(out_times, dtype=np.float64), np.array(out_values, dtype=np.float64)
+
+
+def _smooth_pulse_chunk_sparse(
+    pulse_times_2d: np.ndarray,
+    pulse_values_2d: np.ndarray,
+    periods: np.ndarray,
+    intervals: np.ndarray,
+    n_intervals: np.ndarray,
+    time_step: float,
+    t_start: float,
+    t_end: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Smooth pulses using sparse computation within active intervals only.
+
+    This function produces the SAME output format as _smooth_pulse_chunk
+    (uniform sample times), but only computes smoothed values within active
+    intervals. Values outside active intervals are set to the PWL value at
+    that time (which equals the smoothed value when far from transitions).
+
+    This ensures perfect numerical equivalence with the dense path while
+    achieving speedup by skipping computation outside active intervals.
+
+    Args:
+        pulse_times_2d: PWL times (chunk_size, n_pwl_points)
+        pulse_values_2d: PWL values (chunk_size, n_pwl_points)
+        periods: Period for each pulse (chunk_size,)
+        intervals: Pre-computed active intervals (chunk_size, max_intervals, 2)
+        n_intervals: Number of valid intervals per pulse (chunk_size,)
+        time_step: Filter half-width
+        t_start: Start of output time range
+        t_end: End of output time range
+
+    Returns:
+        sample_times: Uniform sample times (n_samples,) - same as dense path
+        result: Smoothed values (chunk_size, n_samples) - same format as dense path
+    """
+    chunk_size = pulse_times_2d.shape[0]
+    n_pwl_points = pulse_times_2d.shape[1]
+    half_width = time_step
+
+    # Generate the same uniform sample times as the dense path
+    n_samples = int((t_end - t_start) / time_step) + 1
+    sample_times = np.linspace(t_start, t_end, n_samples)
+
+    # Initialize result using vectorized constant region assignment
+    # For pulses, there are only 2 values: v1 (low) and v2 (high)
+    # The PWL structure is: [0, delay, delay+rt, delay+rt+width, delay+rt+width+ft, period]
+    #                       [v1,   v1,      v2,              v2,                v1,    v1]
+    # So the "high" region is [delay+rt, delay+rt+width]
+    result = _init_pulse_values_vectorized(
+        sample_times, pulse_times_2d, pulse_values_2d, periods
+    )
+
+    # Process active samples for all pulses together
+    _compute_active_samples_vectorized(
+        result, sample_times, pulse_times_2d, pulse_values_2d,
+        periods, intervals, n_intervals, half_width
+    )
+
+    return sample_times, result
+
+
+def _init_pulse_values_vectorized(
+    sample_times: np.ndarray,
+    pulse_times_2d: np.ndarray,
+    pulse_values_2d: np.ndarray,
+    periods: np.ndarray,
+) -> np.ndarray:
+    """Initialize result array with PWL values using vectorized operations.
+
+    For pulse waveforms, the structure is:
+    - times: [0, delay, delay+rt, delay+rt+width, delay+rt+width+ft, period]
+    - values: [v1, v1, v2, v2, v1, v1]
+
+    Outside transitions, samples are either v1 or v2 depending on time.
+
+    Args:
+        sample_times: Uniform sample times (n_samples,)
+        pulse_times_2d: PWL times (chunk_size, 6)
+        pulse_values_2d: PWL values (chunk_size, 6)
+        periods: Period for each pulse (chunk_size,)
+
+    Returns:
+        result: Initialized values (chunk_size, n_samples)
+    """
+    chunk_size = pulse_times_2d.shape[0]
+    n_samples = len(sample_times)
+
+    # Extract v1 (baseline) and v2 (high) for each pulse
+    v1 = pulse_values_2d[:, 0]  # (chunk_size,)
+    v2 = pulse_values_2d[:, 2]  # (chunk_size,)
+
+    # Initialize all to v1 (baseline value)
+    result = np.outer(v1, np.ones(n_samples))  # (chunk_size, n_samples)
+
+    # Get high region boundaries: [delay+rt, delay+rt+width]
+    # From pulse_times_2d: index 2 = delay+rt, index 3 = delay+rt+width
+    high_start = pulse_times_2d[:, 2]  # (chunk_size,)
+    high_end = pulse_times_2d[:, 3]    # (chunk_size,)
+
+    # For each pulse, set high region samples to v2
+    # Use broadcasting: sample_times is (n_samples,), high_start/end are (chunk_size,)
+    sample_times_2d = sample_times[np.newaxis, :]  # (1, n_samples)
+    high_start_2d = high_start[:, np.newaxis]       # (chunk_size, 1)
+    high_end_2d = high_end[:, np.newaxis]           # (chunk_size, 1)
+
+    # Handle periodic case: need to check wrapped time
+    periods_2d = periods[:, np.newaxis]  # (chunk_size, 1)
+    is_periodic = periods > 0  # (chunk_size,)
+
+    # For non-periodic pulses, use sample times directly
+    # For periodic pulses, wrap sample times to [0, period)
+    effective_times = np.where(
+        is_periodic[:, np.newaxis] & (sample_times_2d >= periods_2d),
+        sample_times_2d % periods_2d,
+        sample_times_2d
+    )
+
+    # Create mask for high region
+    in_high_region = (effective_times >= high_start_2d) & (effective_times < high_end_2d)
+
+    # Set high region values
+    result = np.where(in_high_region, v2[:, np.newaxis], result)
+
+    return result
+
+
+def _compute_active_samples_vectorized(
+    result: np.ndarray,
+    sample_times: np.ndarray,
+    pulse_times_2d: np.ndarray,
+    pulse_values_2d: np.ndarray,
+    periods: np.ndarray,
+    intervals: np.ndarray,
+    n_intervals: np.ndarray,
+    half_width: float,
+) -> None:
+    """Compute smoothed values at active sample positions.
+
+    Modifies result in-place to replace PWL values with smoothed values
+    at sample positions within active intervals.
+
+    Uses fully vectorized batch processing: all active (pulse, sample) pairs
+    are computed together to maximize numpy efficiency.
+
+    **Memory note:** The intermediate 3D boolean array has shape
+    ``(chunk_size, n_samples, max_intervals)``.  At chunk_size=10000,
+    n_samples=1001 (10ns/10ps), max_intervals=6 this is ~60 MB.
+    For very small dt (e.g. 1ps -> n_samples=10001) this can reach ~600 MB.
+    A warning is emitted when estimated usage exceeds 100 MB.
+
+    Args:
+        result: Output array (chunk_size, n_samples) - modified in-place
+        sample_times: Uniform sample times (n_samples,)
+        pulse_times_2d: PWL times (chunk_size, n_pwl_points)
+        pulse_values_2d: PWL values (chunk_size, n_pwl_points)
+        periods: Period for each pulse (chunk_size,)
+        intervals: Pre-computed active intervals (chunk_size, max_intervals, 2)
+        n_intervals: Number of valid intervals per pulse (chunk_size,)
+        half_width: Filter half-width (= time_step)
+    """
+    import warnings
+
+    chunk_size = pulse_times_2d.shape[0]
+    n_pwl_points = pulse_times_2d.shape[1]
+    n_samples = len(sample_times)
+
+    # Build active mask for all pulses using vectorized interval checks
+    # intervals shape: (chunk_size, max_intervals, 2)
+    max_intervals = intervals.shape[1]
+
+    # Estimate peak memory for the 3D boolean broadcast array
+    # Shape: (chunk_size, n_samples, max_intervals), dtype=bool (1 byte each)
+    estimated_bytes = chunk_size * n_samples * max_intervals
+    estimated_mb = estimated_bytes / (1024 * 1024)
+    if estimated_mb > 100:
+        warnings.warn(
+            f"_compute_active_samples_vectorized: intermediate 3D array "
+            f"({chunk_size} x {n_samples} x {max_intervals}) will use "
+            f"~{estimated_mb:.0f} MB. Consider reducing chunk_size or "
+            f"increasing time_step to reduce memory usage.",
+            ResourceWarning,
+            stacklevel=2,
+        )
+
+    # Expand sample_times for broadcasting: (1, n_samples, 1)
+    sample_times_3d = sample_times[np.newaxis, :, np.newaxis]
+
+    # Expand intervals: (chunk_size, 1, max_intervals)
+    int_starts = intervals[:, :, 0][:, np.newaxis, :]  # (chunk_size, 1, max_intervals)
+    int_ends = intervals[:, :, 1][:, np.newaxis, :]
+
+    # Create validity mask for intervals: (chunk_size, max_intervals)
+    interval_valid = np.arange(max_intervals)[np.newaxis, :] < n_intervals[:, np.newaxis]
+    interval_valid_3d = interval_valid[:, np.newaxis, :]  # (chunk_size, 1, max_intervals)
+
+    # Check if each (pulse, sample) is in any valid interval
+    # Shape: (chunk_size, n_samples, max_intervals)
+    in_interval = (
+        (sample_times_3d >= int_starts - 1e-15) &
+        (sample_times_3d <= int_ends + 1e-15) &
+        interval_valid_3d
+    )
+
+    # Reduce over intervals: (chunk_size, n_samples)
+    all_active_masks = np.any(in_interval, axis=2)
+
+    # Find all active (pulse_idx, sample_idx) pairs
+    pulse_indices, sample_indices = np.where(all_active_masks)
+
+    if len(pulse_indices) == 0:
+        return  # No active samples to compute
+
+    # Get the sample times for active pairs
+    active_sample_times = sample_times[sample_indices]  # (n_active,)
+
+    # Get pulse parameters for active pairs
+    active_periods = periods[pulse_indices]  # (n_active,)
+
+    # Compute weighted sums for all active pairs at once
+    # We need to sum contributions from all PWL segments for each active pair
+    weighted_sums = np.zeros(len(pulse_indices), dtype=np.float64)
+
+    # Process each segment index (typically 5 segments for pulses)
+    for k in range(n_pwl_points - 1):
+        # Get segment endpoints for each active pair's pulse
+        t1 = pulse_times_2d[pulse_indices, k]    # (n_active,)
+        v1 = pulse_values_2d[pulse_indices, k]
+        t2 = pulse_times_2d[pulse_indices, k + 1]
+        v2 = pulse_values_2d[pulse_indices, k + 1]
+
+        # Compute contribution from this segment (vectorized over all active pairs)
+        valid_seg = t2 > t1
+        if np.any(valid_seg):
+            contrib = _analytical_integral_batch_flat(
+                active_sample_times, half_width, t1, v1, t2, v2
+            )
+            weighted_sums += contrib
+
+    # Handle periodic wraparound (only for pulses with period > 0)
+    periodic_mask = active_periods > 0
+    if np.any(periodic_mask):
+        for k in range(n_pwl_points - 1):
+            t1 = pulse_times_2d[pulse_indices, k]
+            v1 = pulse_values_2d[pulse_indices, k]
+            t2 = pulse_times_2d[pulse_indices, k + 1]
+            v2 = pulse_values_2d[pulse_indices, k + 1]
+
+            valid_seg = (t2 > t1) & periodic_mask
+            if np.any(valid_seg):
+                # Previous period
+                contrib_prev = _analytical_integral_batch_flat(
+                    active_sample_times, half_width,
+                    t1 - active_periods, v1, t2 - active_periods, v2
+                )
+                weighted_sums = np.where(periodic_mask, weighted_sums + contrib_prev, weighted_sums)
+
+                # Next period
+                contrib_next = _analytical_integral_batch_flat(
+                    active_sample_times, half_width,
+                    t1 + active_periods, v1, t2 + active_periods, v2
+                )
+                weighted_sums = np.where(periodic_mask, weighted_sums + contrib_next, weighted_sums)
+
+    # Store results
+    result[pulse_indices, sample_indices] = weighted_sums / half_width
+
+
+def _analytical_integral_batch_flat(
+    t_out: np.ndarray,
+    half_width: float,
+    t1: np.ndarray,
+    v1: np.ndarray,
+    t2: np.ndarray,
+    v2: np.ndarray,
+) -> np.ndarray:
+    """Batch analytical integral for flat arrays (one segment per sample).
+
+    Unlike _analytical_integral_batch which computes all samples for each segment,
+    this computes one sample per segment where each element has its own (t1, v1, t2, v2).
+
+    Args:
+        t_out: Sample times (n,)
+        half_width: Filter half-width
+        t1, v1: Segment start times/values (n,)
+        t2, v2: Segment end times/values (n,)
+
+    Returns:
+        Integrals (n,) - one per (t_out, segment) pair
+    """
+    n = len(t_out)
+    result = np.zeros(n, dtype=np.float64)
+
+    if half_width <= 0:
+        return result
+
+    # Window bounds
+    w_lo = t_out - half_width
+    w_hi = t_out + half_width
+
+    # Segment validity
+    valid_seg = t2 > t1
+
+    # Find overlap
+    seg_lo = np.maximum(t1, w_lo)
+    seg_hi = np.minimum(t2, w_hi)
+    has_overlap = (seg_lo < seg_hi) & valid_seg
+
+    if not np.any(has_overlap):
+        return result
+
+    # PWL slope and intercept (avoid division by zero for invalid segments)
+    dt_seg = np.where(valid_seg, t2 - t1, 1.0)
+    m = (v2 - v1) / dt_seg
+    pwl_a = v1 - m * t1
+    pwl_b = m
+
+    # Left half of triangle: t in [w_lo, t_out]
+    left_lo = np.maximum(seg_lo, w_lo)
+    left_hi = np.minimum(seg_hi, t_out)
+    left_valid = (left_lo < left_hi) & has_overlap
+
+    if np.any(left_valid):
+        tri_b_left = 1.0 / half_width
+        tri_a_left = -w_lo / half_width
+
+        c0 = tri_a_left * pwl_a
+        c1 = tri_a_left * pwl_b + tri_b_left * pwl_a
+        c2 = tri_b_left * pwl_b
+
+        F_hi = c0 * left_hi + c1 * left_hi**2 / 2.0 + c2 * left_hi**3 / 3.0
+        F_lo = c0 * left_lo + c1 * left_lo**2 / 2.0 + c2 * left_lo**3 / 3.0
+
+        result = np.where(left_valid, result + (F_hi - F_lo), result)
+
+    # Right half of triangle: t in [t_out, w_hi]
+    right_lo = np.maximum(seg_lo, t_out)
+    right_hi = np.minimum(seg_hi, w_hi)
+    right_valid = (right_lo < right_hi) & has_overlap
+
+    if np.any(right_valid):
+        tri_b_right = -1.0 / half_width
+        tri_a_right = w_hi / half_width
+
+        c0 = tri_a_right * pwl_a
+        c1 = tri_a_right * pwl_b + tri_b_right * pwl_a
+        c2 = tri_b_right * pwl_b
+
+        F_hi = c0 * right_hi + c1 * right_hi**2 / 2.0 + c2 * right_hi**3 / 3.0
+        F_lo = c0 * right_lo + c1 * right_lo**2 / 2.0 + c2 * right_lo**3 / 3.0
+
+        result = np.where(right_valid, result + (F_hi - F_lo), result)
+
+    return result
+
+
+# =============================================================================
 # Chunked Batch Processing Functions
 # =============================================================================
 
@@ -1289,6 +2101,7 @@ class PWLSmoother:
         t_start: float,
         t_end: float,
         chunk_size: int = 10000,
+        sparse_threshold: float = 100e-12,
     ) -> SmoothedWaveformCache:
         """Create reusable cache from VectorizedCurrentSources.
 
@@ -1300,12 +2113,18 @@ class PWLSmoother:
         Uses chunked batch processing to control memory usage while
         maintaining high performance through vectorization.
 
+        For small time_step values (< sparse_threshold), uses sparse sampling
+        to achieve 10x+ speedup by only computing samples within active
+        intervals where the smoothed output varies.
+
         Args:
             vec_sources: VectorizedCurrentSources instance
             t_start: Simulation start time
             t_end: Simulation end time
             chunk_size: Number of waveforms to process per chunk (default 10000).
                        Controls memory/speed tradeoff. Larger = faster but more memory.
+            sparse_threshold: Use sparse sampling when time_step < this value (default 100ps).
+                             Set to 0 to always use dense sampling.
 
         Returns:
             SmoothedWaveformCache with all smoothed waveforms
@@ -1330,12 +2149,10 @@ class PWLSmoother:
                 n_pwl_points=vec_sources.n_pwl_points,
             )
 
-        # Pre-compute shared sample times
         time_step = self.config.time_step
-        n_samples = int((t_end - t_start) / time_step) + 1
-        sample_times = np.linspace(t_start, t_end, n_samples)
+        use_sparse = time_step < sparse_threshold
 
-        # Collect smoothed PWL data
+        # Collect smoothed PWL data using pre-allocated lists for efficiency
         all_times: List[float] = []
         all_values: List[float] = []
         offsets: List[int] = []
@@ -1344,7 +2161,7 @@ class PWLSmoother:
         delays: List[float] = []
         node_indices: List[int] = []
 
-        # Process original PWLs using vectorized smoothing
+        # Process original PWLs
         for i in range(vec_sources.n_pwls):
             offset = int(vec_sources.pwl_offset[i])
             count = int(vec_sources.pwl_count[i])
@@ -1360,10 +2177,15 @@ class PWLSmoother:
             if delay > 0:
                 pwl_times = pwl_times + delay
 
-            # Smooth using vectorized function
-            smoothed_times, smoothed_values = _smooth_pwl_vectorized(
-                pwl_times, pwl_values, period, time_step, t_start, t_end
-            )
+            # Choose sparse or dense smoothing
+            if use_sparse:
+                smoothed_times, smoothed_values = _smooth_pwl_sparse(
+                    pwl_times, pwl_values, period, time_step, t_start, t_end
+                )
+            else:
+                smoothed_times, smoothed_values = _smooth_pwl_vectorized(
+                    pwl_times, pwl_values, period, time_step, t_start, t_end
+                )
 
             # Compact
             compacted = compact_pwl(
@@ -1382,47 +2204,57 @@ class PWLSmoother:
                 all_times.append(t)
                 all_values.append(v)
 
-        # Process pulses in chunks using batch processing
+        # Process pulses in chunks
         n_pulses = vec_sources.n_pulses
         if n_pulses > 0:
-            for chunk_start in range(0, n_pulses, chunk_size):
-                chunk_end = min(chunk_start + chunk_size, n_pulses)
-                chunk_n = chunk_end - chunk_start
-
-                # Extract chunk data
-                chunk_v1 = vec_sources.pulse_v1[chunk_start:chunk_end]
-                chunk_v2 = vec_sources.pulse_v2[chunk_start:chunk_end]
-                chunk_delay = vec_sources.pulse_delay[chunk_start:chunk_end]
-                chunk_rt = vec_sources.pulse_rt[chunk_start:chunk_end]
-                chunk_ft = vec_sources.pulse_ft[chunk_start:chunk_end]
-                chunk_width = vec_sources.pulse_width[chunk_start:chunk_end]
-                chunk_period = vec_sources.pulse_period[chunk_start:chunk_end]
-                chunk_node_idx = vec_sources.pulse_node_idx[chunk_start:chunk_end]
-
-                # Convert pulses to PWL arrays
-                pulse_times_2d, pulse_values_2d = _pulse_to_pwl_arrays(
-                    chunk_v1, chunk_v2, chunk_delay, chunk_rt,
-                    chunk_ft, chunk_width, chunk_period
+            if use_sparse:
+                # Sparse path: use active interval detection
+                self._process_pulses_sparse(
+                    vec_sources, t_start, t_end, chunk_size,
+                    all_times, all_values, offsets, counts, periods, delays, node_indices
                 )
+            else:
+                # Dense path: use existing batch processing
+                n_samples = int((t_end - t_start) / time_step) + 1
+                sample_times = np.linspace(t_start, t_end, n_samples)
 
-                # Smooth chunk
-                smoothed_values_2d = _smooth_pulse_chunk(
-                    pulse_times_2d, pulse_values_2d, chunk_period,
-                    sample_times, self.config.time_step
-                )
+                for chunk_start in range(0, n_pulses, chunk_size):
+                    chunk_end = min(chunk_start + chunk_size, n_pulses)
 
-                # Compact chunk
-                times_list, values_list, chunk_counts = _compact_chunk_vectorized(
-                    sample_times, smoothed_values_2d, self.config.compact_threshold
-                )
+                    # Extract chunk data
+                    chunk_v1 = vec_sources.pulse_v1[chunk_start:chunk_end]
+                    chunk_v2 = vec_sources.pulse_v2[chunk_start:chunk_end]
+                    chunk_delay = vec_sources.pulse_delay[chunk_start:chunk_end]
+                    chunk_rt = vec_sources.pulse_rt[chunk_start:chunk_end]
+                    chunk_ft = vec_sources.pulse_ft[chunk_start:chunk_end]
+                    chunk_width = vec_sources.pulse_width[chunk_start:chunk_end]
+                    chunk_period = vec_sources.pulse_period[chunk_start:chunk_end]
+                    chunk_node_idx = vec_sources.pulse_node_idx[chunk_start:chunk_end]
 
-                # Append to output
-                _compact_and_append(
-                    times_list, values_list, chunk_counts,
-                    chunk_period, chunk_node_idx,
-                    all_times, all_values, offsets, counts,
-                    periods, delays, node_indices
-                )
+                    # Convert pulses to PWL arrays
+                    pulse_times_2d, pulse_values_2d = _pulse_to_pwl_arrays(
+                        chunk_v1, chunk_v2, chunk_delay, chunk_rt,
+                        chunk_ft, chunk_width, chunk_period
+                    )
+
+                    # Smooth chunk
+                    smoothed_values_2d = _smooth_pulse_chunk(
+                        pulse_times_2d, pulse_values_2d, chunk_period,
+                        sample_times, self.config.time_step
+                    )
+
+                    # Compact chunk
+                    times_list, values_list, chunk_counts = _compact_chunk_vectorized(
+                        sample_times, smoothed_values_2d, self.config.compact_threshold
+                    )
+
+                    # Append to output
+                    _compact_and_append(
+                        times_list, values_list, chunk_counts,
+                        chunk_period, chunk_node_idx,
+                        all_times, all_values, offsets, counts,
+                        periods, delays, node_indices
+                    )
 
         # Update stats
         self._stats = {
@@ -1431,6 +2263,7 @@ class PWLSmoother:
             "total_smoothed": len(offsets),
             "original_points": vec_sources.n_pwl_points,
             "smoothed_points": len(all_times),
+            "use_sparse": use_sparse,
         }
 
         return SmoothedWaveformCache(
@@ -1450,6 +2283,72 @@ class PWLSmoother:
             n_pwls=len(offsets),
             n_pwl_points=len(all_times),
         )
+
+    def _process_pulses_sparse(
+        self,
+        vec_sources: "VectorizedCurrentSources",
+        t_start: float,
+        t_end: float,
+        chunk_size: int,
+        all_times: List[float],
+        all_values: List[float],
+        offsets: List[int],
+        counts: List[int],
+        periods: List[float],
+        delays: List[float],
+        node_indices: List[int],
+    ) -> None:
+        """Process pulses using sparse sampling (internal method).
+
+        Uses active interval detection to only compute samples where the
+        smoothed output varies, achieving significant speedup for small time_step.
+        """
+        time_step = self.config.time_step
+        n_pulses = vec_sources.n_pulses
+
+        for chunk_start in range(0, n_pulses, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, n_pulses)
+
+            # Extract chunk data
+            chunk_delay = vec_sources.pulse_delay[chunk_start:chunk_end]
+            chunk_rt = vec_sources.pulse_rt[chunk_start:chunk_end]
+            chunk_ft = vec_sources.pulse_ft[chunk_start:chunk_end]
+            chunk_width = vec_sources.pulse_width[chunk_start:chunk_end]
+            chunk_period = vec_sources.pulse_period[chunk_start:chunk_end]
+            chunk_node_idx = vec_sources.pulse_node_idx[chunk_start:chunk_end]
+            chunk_v1 = vec_sources.pulse_v1[chunk_start:chunk_end]
+            chunk_v2 = vec_sources.pulse_v2[chunk_start:chunk_end]
+
+            # Compute active intervals for all pulses in chunk
+            intervals, n_intervals = _compute_pulse_active_intervals(
+                chunk_delay, chunk_rt, chunk_ft, chunk_width, chunk_period,
+                time_step, t_start, t_end
+            )
+
+            # Convert pulses to PWL arrays
+            pulse_times_2d, pulse_values_2d = _pulse_to_pwl_arrays(
+                chunk_v1, chunk_v2, chunk_delay, chunk_rt,
+                chunk_ft, chunk_width, chunk_period
+            )
+
+            # Smooth using sparse computation (same output format as dense)
+            sample_times, smoothed_values_2d = _smooth_pulse_chunk_sparse(
+                pulse_times_2d, pulse_values_2d, chunk_period,
+                intervals, n_intervals, time_step, t_start, t_end
+            )
+
+            # Compact chunk (same as dense path)
+            times_list, values_list, chunk_counts = _compact_chunk_vectorized(
+                sample_times, smoothed_values_2d, self.config.compact_threshold
+            )
+
+            # Append to output (same as dense path)
+            _compact_and_append(
+                times_list, values_list, chunk_counts,
+                chunk_period, chunk_node_idx,
+                all_times, all_values, offsets, counts,
+                periods, delays, node_indices
+            )
 
     def apply_cache_to_sources(
         self,
@@ -1503,7 +2402,7 @@ class PWLSmoother:
         )
 
         # Clear any cached data that depends on PWL structure
-        smoothed._pwl_groups = None
+        smoothed._pwl_padded_times = None
 
         return smoothed
 
