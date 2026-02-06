@@ -482,10 +482,11 @@ class VectorizedCurrentSources:
         return result
 
     def _evaluate_pwls(self, t: float) -> np.ndarray:
-        """Evaluate all PWLs at time t using single-pass vectorized processing.
+        """Evaluate all PWLs at time t using vectorized processing.
 
-        All PWLs are padded to the same max point count, enabling a single
-        searchsorted call and vectorized interpolation with no group loop.
+        Uses padded 2D arrays with per-row searchsorted to find segment indices.
+        The per-row approach avoids floating-point precision issues that occur
+        with flat searchsorted when row offsets become large (> ~500K rows).
 
         Args:
             t: Time in seconds
@@ -504,10 +505,7 @@ class VectorizedCurrentSources:
         max_count = self._pwl_padded_max_count
         times_2d = self._pwl_padded_times
         values_2d = self._pwl_padded_values
-        flat_times = self._pwl_padded_flat_times
-        row_offsets = self._pwl_padded_row_offsets
         row_idx = self._pwl_padded_row_idx
-        row_stride = self._pwl_padded_row_stride
         first_times = self._pwl_padded_first_times
         last_times = self._pwl_padded_last_times
         first_values = self._pwl_padded_first_values
@@ -529,10 +527,14 @@ class VectorizedCurrentSources:
         # Clamp time to valid range for safe interpolation
         t_clamped = np.clip(t_adj, first_times, last_times)
 
-        # Single flat searchsorted for all PWLs at once
-        flat_t = t_clamped + row_offsets
-        flat_idx = np.searchsorted(flat_times, flat_t, side='right') - 1
-        seg_idx = np.clip(flat_idx - row_stride, 0, max_count - 2)
+        # Per-row searchsorted using broadcasting
+        # times_2d: (n, max_count), t_clamped: (n,)
+        # Compare each row's times against its corresponding t_clamped value
+        # seg_idx[i] = largest j such that times_2d[i, j] <= t_clamped[i]
+        t_clamped_2d = t_clamped[:, np.newaxis]  # (n, 1)
+        # Count how many time points are <= t_clamped for each row
+        seg_idx = np.sum(times_2d <= t_clamped_2d, axis=1) - 1
+        seg_idx = np.clip(seg_idx, 0, max_count - 2)
 
         # Gather segment endpoints using advanced indexing
         t1 = times_2d[row_idx, seg_idx]
@@ -562,18 +564,17 @@ class VectorizedCurrentSources:
         return values
 
     def _build_pwl_padded(self) -> None:
-        """Build padded 2D arrays for single-pass PWL evaluation.
+        """Build padded 2D arrays for vectorized PWL evaluation.
 
         Pads all PWLs to max point count by repeating the last time/value.
         This creates a single (n_pwls, max_count) array that enables
-        evaluation in one vectorized pass with no group loop.
+        vectorized evaluation with no per-PWL Python loop.
 
         Padding correctness: repeated last-time segments have dt=0, so
         interpolation returns last_value via the np.where(dt > 0, ..., 0.0)
         guard. Boundary overrides then handle periodic wrap.
 
-        Memory: O(n_pwls * max_count * 16 bytes) for times + values,
-        plus O(n_pwls * max_count * 8 bytes) for flat_times.
+        Memory: O(n_pwls * max_count * 16 bytes) for times + values.
         """
         n = self.n_pwls
         max_count = int(self.pwl_count.max()) if n > 0 else 0
@@ -590,29 +591,16 @@ class VectorizedCurrentSources:
             values_padded[i, :cnt] = self.pwl_values[off:off + cnt]
             values_padded[i, cnt:] = self.pwl_values[off + cnt - 1]
 
-        # Build flat sorted array for single searchsorted call
-        if max_count >= 2 and n >= 1:
-            time_span = times_padded[:, -1].max() - times_padded[:, 0].min()
-            big_offset = time_span + 1.0 if time_span > 0 else 1.0
-            row_offsets = np.arange(n, dtype=np.float64) * big_offset
-            flat_times = (times_padded + row_offsets[:, np.newaxis]).ravel()
-        else:
-            row_offsets = np.zeros(n, dtype=np.float64)
-            flat_times = times_padded.ravel() if n > 0 else np.array([], dtype=np.float64)
-
         self._pwl_padded_times = times_padded
         self._pwl_padded_values = values_padded
         self._pwl_padded_max_count = max_count
-        self._pwl_padded_flat_times = flat_times
-        self._pwl_padded_row_offsets = row_offsets
 
         # Pre-cache per-call constants to avoid repeated allocation
         self._pwl_padded_row_idx = np.arange(n, dtype=np.intp)
-        self._pwl_padded_row_stride = np.arange(n, dtype=np.intp) * max_count
-        self._pwl_padded_first_times = times_padded[:, 0].copy()
-        self._pwl_padded_last_times = times_padded[:, -1].copy()
-        self._pwl_padded_first_values = values_padded[:, 0].copy()
-        self._pwl_padded_last_values = values_padded[:, -1].copy()
+        self._pwl_padded_first_times = times_padded[:, 0].copy() if max_count > 0 else np.zeros(n)
+        self._pwl_padded_last_times = times_padded[:, -1].copy() if max_count > 0 else np.zeros(n)
+        self._pwl_padded_first_values = values_padded[:, 0].copy() if max_count > 0 else np.zeros(n)
+        self._pwl_padded_last_values = values_padded[:, -1].copy() if max_count > 0 else np.zeros(n)
 
         # Cache period/delay analysis for fast-path dispatch
         self._pwl_has_period = self.pwl_period > 0
