@@ -211,6 +211,39 @@ class TestCompactPWL(unittest.TestCase):
         self.assertEqual(compact_pwl(points2), points2)
 
 
+class TestCompactArrays(unittest.TestCase):
+    """Tests for _compact_arrays numpy-native compaction."""
+
+    def test_matches_compact_pwl(self):
+        """_compact_arrays should produce identical results to compact_pwl."""
+        from core.pwl_smoothing import _compact_arrays
+
+        test_cases = [
+            # (times, values, description)
+            (np.array([0, 1, 2, 3.0]), np.array([0, 1, 2, 3.0]), "collinear"),
+            (np.array([0, 1, 2.0]), np.array([0, 1, 0.0]), "triangle"),
+            (np.array([0, 1, 2, 3.0]), np.array([5, 5, 5, 5.0]), "flat"),
+            (np.array([0, 1, 2, 3, 4.0]), np.array([0, 0, 5, 5, 5.0]), "step"),
+            (np.array([0.0, 1.0]), np.array([0.0, 1.0]), "two points"),
+            (np.array([0.0]), np.array([0.0]), "single point"),
+        ]
+
+        for times, values, desc in test_cases:
+            points = list(zip(times.tolist(), values.tolist()))
+            expected = compact_pwl(points)
+            exp_t = [p[0] for p in expected]
+            exp_v = [p[1] for p in expected]
+
+            got_t, got_v = _compact_arrays(times, values)
+
+            np.testing.assert_array_almost_equal(
+                got_t, exp_t, err_msg=f"times mismatch for {desc}"
+            )
+            np.testing.assert_array_almost_equal(
+                got_v, exp_v, err_msg=f"values mismatch for {desc}"
+            )
+
+
 class TestPulseToPWL(unittest.TestCase):
     """Tests for pulse_to_pwl_points function."""
 
@@ -872,24 +905,36 @@ class TestChunkProcessing(unittest.TestCase):
             np.array([0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0]),  # Triangle - needs 3 points
         ])
 
-        times_list, values_list, counts = _compact_chunk_vectorized(
+        kept_times, kept_values, offsets, counts = _compact_chunk_vectorized(
             sample_times, values_2d, threshold=1e-10
         )
 
-        self.assertEqual(len(times_list), 3)
-        self.assertEqual(len(values_list), 3)
         self.assertEqual(len(counts), 3)
+        self.assertEqual(len(offsets), 3)
+
+        # Verify flat arrays contain all kept points
+        self.assertEqual(len(kept_times), int(counts.sum()))
+        self.assertEqual(len(kept_values), int(counts.sum()))
 
         # Linear should compact significantly
         self.assertLess(counts[0], 11)
+
+        # Verify we can reconstruct per-waveform data from flat arrays
+        for i in range(3):
+            wf_times = kept_times[offsets[i]:offsets[i] + counts[i]]
+            wf_values = kept_values[offsets[i]:offsets[i] + counts[i]]
+            self.assertEqual(len(wf_times), counts[i])
+            self.assertEqual(len(wf_values), counts[i])
 
     def test_compact_and_append(self):
         """Test compact and append helper."""
         from core.pwl_smoothing import _compact_and_append
 
-        times_list = [np.array([0, 5, 10]), np.array([0, 10])]
-        values_list = [np.array([0, 1, 0]), np.array([0, 1])]
-        counts = np.array([3, 2])
+        # Simulate flat arrays from _compact_chunk_vectorized
+        kept_times_flat = np.array([0, 5, 10, 0, 10], dtype=np.float64)
+        kept_values_flat = np.array([0, 1, 0, 0, 1], dtype=np.float64)
+        offsets_local = np.array([0, 3], dtype=np.int32)
+        counts = np.array([3, 2], dtype=np.int32)
         periods = np.array([10.0, 10.0])
         node_indices = np.array([0, 1])
 
@@ -902,7 +947,8 @@ class TestChunkProcessing(unittest.TestCase):
         out_node_indices = []
 
         _compact_and_append(
-            times_list, values_list, counts, periods, node_indices,
+            kept_times_flat, kept_values_flat, offsets_local,
+            counts, periods, node_indices,
             all_times, all_values, offsets, out_counts,
             out_periods, out_delays, out_node_indices
         )

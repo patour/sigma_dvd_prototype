@@ -715,8 +715,8 @@ def _smooth_pwl_sparse(
 
     This function computes the smoothed PWL by:
     1. Identifying active intervals (where the output varies)
-    2. Sampling densely only within active intervals
-    3. Computing smoothed boundary values for constant regions
+    2. Collecting ALL output times (boundary + active samples) into one array
+    3. Computing smoothed values in a single vectorized pass per segment
 
     This provides significant speedup when time_step is small relative to
     the waveform period, as most of the output is constant between transitions.
@@ -743,106 +743,108 @@ def _smooth_pwl_sparse(
     half_width = time_step
     n_points = len(times)
 
-    def compute_smoothed_value(t_out: float) -> float:
-        """Compute smoothed value at a single time point."""
-        weighted_sum = 0.0
-        for i in range(n_points - 1):
-            t1, v1_seg = times[i], values[i]
-            t2, v2_seg = times[i + 1], values[i + 1]
-            weighted_sum += analytical_triangle_pwl_integral(
-                t_out, half_width, t1, v1_seg, t2, v2_seg
-            )
+    # Phase 1: Collect ALL output times into one array with metadata
+    # Each output point is tagged as either 'boundary' (constant region edge)
+    # or 'active' (dense sample within active interval)
+    all_out_times: List[float] = []
+    # Track structure for reassembly: list of (type, count) segments
+    # type: 'boundary_pair' for constant region edges, 'active' for interval samples
+    segments: List[Tuple[str, int]] = []
 
-        if period > 0:
-            for i in range(n_points - 1):
-                t1, v1_seg = times[i], values[i]
-                t2, v2_seg = times[i + 1], values[i + 1]
-                weighted_sum += analytical_triangle_pwl_integral(
-                    t_out, half_width, t1 - period, v1_seg, t2 - period, v2_seg
-                )
-                weighted_sum += analytical_triangle_pwl_integral(
-                    t_out, half_width, t1 + period, v1_seg, t2 + period, v2_seg
-                )
-
-        return weighted_sum / half_width if half_width > 0 else 0.0
-
-    # If no active intervals, compute value at a few key points
-    if not active_intervals:
-        v_start = compute_smoothed_value(t_start)
-        v_end = compute_smoothed_value(t_end)
-        return np.array([t_start, t_end]), np.array([v_start, v_end])
-
-    # Build sparse output
-    out_times: List[float] = []
-    out_values: List[float] = []
-
-    # Always start with t_start
     current_t = t_start
 
     for i, (a_start, a_end) in enumerate(active_intervals):
-        # Add points for constant region before this active interval
+        # Boundary points for constant region before this active interval
         if current_t < a_start:
-            # Compute smoothed value at boundaries of constant region
-            if not out_times or out_times[-1] < current_t:
-                out_times.append(current_t)
-                out_values.append(compute_smoothed_value(current_t))
-            out_times.append(a_start)
-            out_values.append(compute_smoothed_value(a_start))
+            boundary_count = 0
+            if not all_out_times or all_out_times[-1] < current_t:
+                all_out_times.append(current_t)
+                boundary_count += 1
+            all_out_times.append(a_start)
+            boundary_count += 1
+            if boundary_count > 0:
+                segments.append(('boundary', boundary_count))
 
         # Dense samples within active interval
-        # Use round() instead of int() to avoid floating-point truncation
-        # (e.g. int(1.9999998) = 1 instead of the correct 2)
         n_samples = max(2, round((a_end - a_start) / time_step) + 1)
-        sample_times = np.linspace(a_start, a_end, n_samples)
+        sample_times_list = np.linspace(a_start, a_end, n_samples).tolist()
 
-        # Compute smoothed values using vectorized function
-        weighted_sum = np.zeros(n_samples, dtype=np.float64)
-        for j in range(n_points - 1):
-            t1, v1_seg = times[j], values[j]
-            t2, v2_seg = times[j + 1], values[j + 1]
-            weighted_sum += _analytical_integral_vectorized(
-                sample_times, half_width, t1, v1_seg, t2, v2_seg
-            )
+        # Handle overlap with previous boundary point
+        skip_first = False
+        if all_out_times and abs(all_out_times[-1] - sample_times_list[0]) < 1e-15:
+            # Remove the last boundary point; the active sample will replace it
+            all_out_times.pop()
+            # Adjust the previous segment count
+            if segments and segments[-1][0] == 'boundary':
+                prev_type, prev_count = segments.pop()
+                if prev_count > 1:
+                    segments.append(('boundary', prev_count - 1))
 
-        if period > 0:
-            for j in range(n_points - 1):
-                t1, v1_seg = times[j], values[j]
-                t2, v2_seg = times[j + 1], values[j + 1]
-                weighted_sum += _analytical_integral_vectorized(
-                    sample_times, half_width, t1 - period, v1_seg, t2 - period, v2_seg
-                )
-                weighted_sum += _analytical_integral_vectorized(
-                    sample_times, half_width, t1 + period, v1_seg, t2 + period, v2_seg
-                )
-
-        smoothed = weighted_sum / half_width
-
-        # Add to output (handle overlap with previous points)
-        start_idx = 0
-        if out_times and abs(out_times[-1] - sample_times[0]) < 1e-15:
-            out_values[-1] = smoothed[0]
-            start_idx = 1
-
-        out_times.extend(sample_times[start_idx:].tolist())
-        out_values.extend(smoothed[start_idx:].tolist())
+        all_out_times.extend(sample_times_list)
+        segments.append(('active', len(sample_times_list)))
 
         current_t = a_end
 
-    # Handle constant region after last active interval
+    # Boundary points for constant region after last active interval
     if current_t < t_end:
-        if not out_times or out_times[-1] < current_t:
-            out_times.append(current_t)
-            out_values.append(compute_smoothed_value(current_t))
-        out_times.append(t_end)
-        out_values.append(compute_smoothed_value(t_end))
+        boundary_count = 0
+        if not all_out_times or all_out_times[-1] < current_t:
+            all_out_times.append(current_t)
+            boundary_count += 1
+        all_out_times.append(t_end)
+        boundary_count += 1
+        if boundary_count > 0:
+            segments.append(('boundary', boundary_count))
+
+    # Handle edge case: no active intervals
+    if not all_out_times:
+        all_out_times = [t_start, t_end]
+        segments = [('boundary', 2)]
+
+    # Phase 2: Single vectorized pass for ALL output points
+    t_all = np.array(all_out_times, dtype=np.float64)
+    n_total = len(t_all)
+
+    weighted_sum = np.zeros(n_total, dtype=np.float64)
+    for j in range(n_points - 1):
+        weighted_sum += _analytical_integral_vectorized(
+            t_all, half_width, times[j], values[j], times[j + 1], values[j + 1]
+        )
+
+    if period > 0:
+        for j in range(n_points - 1):
+            weighted_sum += _analytical_integral_vectorized(
+                t_all, half_width,
+                times[j] - period, values[j], times[j + 1] - period, values[j + 1]
+            )
+            weighted_sum += _analytical_integral_vectorized(
+                t_all, half_width,
+                times[j] + period, values[j], times[j + 1] + period, values[j + 1]
+            )
+
+    smoothed_all = weighted_sum / half_width
 
     # Ensure we have at least 2 points
-    if len(out_times) < 2:
-        v_start = compute_smoothed_value(t_start)
-        v_end = compute_smoothed_value(t_end)
-        return np.array([t_start, t_end]), np.array([v_start, v_end])
+    if n_total < 2:
+        t_all_2 = np.array([t_start, t_end], dtype=np.float64)
+        ws = np.zeros(2, dtype=np.float64)
+        for j in range(n_points - 1):
+            ws += _analytical_integral_vectorized(
+                t_all_2, half_width, times[j], values[j], times[j + 1], values[j + 1]
+            )
+        if period > 0:
+            for j in range(n_points - 1):
+                ws += _analytical_integral_vectorized(
+                    t_all_2, half_width,
+                    times[j] - period, values[j], times[j + 1] - period, values[j + 1]
+                )
+                ws += _analytical_integral_vectorized(
+                    t_all_2, half_width,
+                    times[j] + period, values[j], times[j + 1] + period, values[j + 1]
+                )
+        return t_all_2, ws / half_width
 
-    return np.array(out_times, dtype=np.float64), np.array(out_values, dtype=np.float64)
+    return t_all, smoothed_all
 
 
 def _smooth_pulse_chunk_sparse(
@@ -1434,8 +1436,11 @@ def _compact_chunk_vectorized(
     sample_times: np.ndarray,
     values_2d: np.ndarray,
     threshold: float = 1e-12,
-) -> Tuple[List[np.ndarray], List[np.ndarray], np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Vectorized compaction for a chunk of smoothed waveforms.
+
+    Uses flat boolean indexing to extract all kept points in bulk,
+    avoiding per-waveform Python loops.
 
     Args:
         sample_times: Shared sample times (n_samples,)
@@ -1443,17 +1448,21 @@ def _compact_chunk_vectorized(
         threshold: Slope change threshold for compaction
 
     Returns:
-        Tuple of (times_list, values_list, counts) where each list has
-        chunk_size elements of variable-length arrays.
+        Tuple of (kept_times_flat, kept_values_flat, offsets, counts):
+        - kept_times_flat: All kept time points concatenated (total_kept,)
+        - kept_values_flat: All kept value points concatenated (total_kept,)
+        - offsets: Starting index in flat arrays for each waveform (chunk_size,)
+        - counts: Number of kept points per waveform (chunk_size,)
     """
     chunk_size, n_samples = values_2d.shape
 
     if n_samples <= 2:
-        # Nothing to compact
-        times_list = [sample_times.copy() for _ in range(chunk_size)]
-        values_list = [values_2d[i].copy() for i in range(chunk_size)]
+        # Nothing to compact - tile sample_times for each waveform
+        kept_times_flat = np.tile(sample_times, chunk_size)
+        kept_values_flat = values_2d.ravel()
         counts = np.full(chunk_size, n_samples, dtype=np.int32)
-        return times_list, values_list, counts
+        offsets = np.arange(chunk_size, dtype=np.int32) * n_samples
+        return kept_times_flat, kept_values_flat, offsets, counts
 
     # Compute time differences (same for all waveforms)
     dt = np.diff(sample_times)
@@ -1477,33 +1486,34 @@ def _compact_chunk_vectorized(
             slope_changes
         )
 
-    # Keep mask: True for points to keep
-    # Always keep first and last, keep interior if slope changes significantly
+    # Build full 2D keep mask: always keep first and last columns
     keep_interior = (relative_changes > threshold) | (slope_changes > threshold)
+    keep_2d = np.ones((chunk_size, n_samples), dtype=bool)
+    keep_2d[:, 1:-1] = keep_interior  # Single 2D assignment
 
-    times_list = []
-    values_list = []
-    counts = np.zeros(chunk_size, dtype=np.int32)
+    # Count kept points per waveform
+    counts = keep_2d.sum(axis=1).astype(np.int32)  # (chunk_size,)
 
-    for i in range(chunk_size):
-        # Build keep mask for this waveform
-        keep = np.ones(n_samples, dtype=bool)
-        keep[1:-1] = keep_interior[i]
+    # Flat extraction using np.where to get (row, col) indices of kept points.
+    # This avoids allocating a chunk_size × n_samples float64 tile array.
+    row_idx, col_idx = np.where(keep_2d)
 
-        # Extract kept points
-        kept_times = sample_times[keep]
-        kept_values = values_2d[i, keep]
+    # col_idx indexes into the shared sample_times; row_idx indexes into values_2d
+    kept_times_flat = sample_times[col_idx]
+    kept_values_flat = values_2d[row_idx, col_idx]
 
-        times_list.append(kept_times)
-        values_list.append(kept_values)
-        counts[i] = len(kept_times)
+    # Compute offsets from counts
+    offsets = np.zeros(chunk_size, dtype=np.int32)
+    if chunk_size > 1:
+        np.cumsum(counts[:-1], out=offsets[1:])
 
-    return times_list, values_list, counts
+    return kept_times_flat, kept_values_flat, offsets, counts
 
 
 def _compact_and_append(
-    times_list: List[np.ndarray],
-    values_list: List[np.ndarray],
+    kept_times_flat: np.ndarray,
+    kept_values_flat: np.ndarray,
+    offsets_local: np.ndarray,
     counts: np.ndarray,
     periods: np.ndarray,
     node_indices: np.ndarray,
@@ -1517,10 +1527,14 @@ def _compact_and_append(
 ) -> None:
     """Append compacted chunk results to output lists.
 
+    Accepts flat arrays from _compact_chunk_vectorized and performs one
+    bulk tolist() conversion per chunk instead of per-waveform conversions.
+
     Args:
-        times_list: List of compacted time arrays
-        values_list: List of compacted value arrays
-        counts: Number of points in each compacted waveform
+        kept_times_flat: All kept time points concatenated (total_kept,)
+        kept_values_flat: All kept value points concatenated (total_kept,)
+        offsets_local: Starting index in flat arrays per waveform (chunk_size,)
+        counts: Number of kept points per waveform (chunk_size,)
         periods: Period for each waveform
         node_indices: Node index for each waveform
         all_times: Output times list (modified in-place)
@@ -1531,15 +1545,20 @@ def _compact_and_append(
         out_delays: Output delays list (modified in-place)
         out_node_indices: Output node indices list (modified in-place)
     """
-    for i in range(len(times_list)):
-        offsets.append(len(all_times))
+    chunk_size = len(counts)
+
+    # Bulk conversion: one tolist() for entire chunk
+    base_offset = len(all_times)
+    all_times.extend(kept_times_flat.tolist())
+    all_values.extend(kept_values_flat.tolist())
+
+    # Per-waveform metadata (scalar appends only - cheap)
+    for i in range(chunk_size):
+        offsets.append(base_offset + int(offsets_local[i]))
         out_counts.append(int(counts[i]))
         out_periods.append(float(periods[i]))
         out_delays.append(0.0)  # Delay absorbed into points
         out_node_indices.append(int(node_indices[i]))
-
-        all_times.extend(times_list[i].tolist())
-        all_values.extend(values_list[i].tolist())
 
 
 def smooth_pwl_points(
@@ -1735,6 +1754,53 @@ def compact_pwl(
 
     result.append(points[-1])  # Always keep last point
     return result
+
+
+def _compact_arrays(
+    times: np.ndarray,
+    values: np.ndarray,
+    threshold: float = 1e-12,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Numpy-native compaction operating directly on arrays.
+
+    Equivalent to compact_pwl(list(zip(times, values))) but avoids creating
+    an intermediate list of tuples.
+
+    Args:
+        times: Time points array (n,)
+        values: Value points array (n,)
+        threshold: Slope change threshold for removal
+
+    Returns:
+        Tuple of (compacted_times, compacted_values) arrays
+    """
+    n = len(times)
+    if n <= 2:
+        return times.copy(), values.copy()
+
+    # Compute slopes between consecutive points
+    dt = np.diff(times)
+    dv = np.diff(values)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        slopes = np.where(dt > 0, dv / dt, 0.0)
+
+    # Compute slope changes at interior points
+    slope_changes = np.abs(np.diff(slopes))  # (n-2,)
+
+    # Relative threshold
+    slope_magnitude = np.abs(slopes[:-1]) + np.abs(slopes[1:])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        relative_changes = np.where(
+            slope_magnitude > 0,
+            slope_changes / slope_magnitude,
+            slope_changes,
+        )
+
+    # Build keep mask
+    keep = np.ones(n, dtype=bool)
+    keep[1:-1] = (relative_changes > threshold) | (slope_changes > threshold)
+
+    return times[keep], values[keep]
 
 
 # =============================================================================
@@ -2187,22 +2253,21 @@ class PWLSmoother:
                     pwl_times, pwl_values, period, time_step, t_start, t_end
                 )
 
-            # Compact
-            compacted = compact_pwl(
-                list(zip(smoothed_times, smoothed_values)),
+            # Compact using numpy-native arrays
+            comp_times, comp_values = _compact_arrays(
+                smoothed_times, smoothed_values,
                 self.config.compact_threshold
             )
 
             # Store results
             offsets.append(len(all_times))
-            counts.append(len(compacted))
+            counts.append(len(comp_times))
             periods.append(period)
             delays.append(0.0)  # Delay absorbed into points
             node_indices.append(node_idx)
 
-            for t, v in compacted:
-                all_times.append(t)
-                all_values.append(v)
+            all_times.extend(comp_times.tolist())
+            all_values.extend(comp_values.tolist())
 
         # Process pulses in chunks
         n_pulses = vec_sources.n_pulses
@@ -2244,13 +2309,13 @@ class PWLSmoother:
                     )
 
                     # Compact chunk
-                    times_list, values_list, chunk_counts = _compact_chunk_vectorized(
+                    kept_t, kept_v, chunk_offsets, chunk_counts = _compact_chunk_vectorized(
                         sample_times, smoothed_values_2d, self.config.compact_threshold
                     )
 
                     # Append to output
                     _compact_and_append(
-                        times_list, values_list, chunk_counts,
+                        kept_t, kept_v, chunk_offsets, chunk_counts,
                         chunk_period, chunk_node_idx,
                         all_times, all_values, offsets, counts,
                         periods, delays, node_indices
@@ -2338,13 +2403,13 @@ class PWLSmoother:
             )
 
             # Compact chunk (same as dense path)
-            times_list, values_list, chunk_counts = _compact_chunk_vectorized(
+            kept_t, kept_v, chunk_offsets, chunk_counts = _compact_chunk_vectorized(
                 sample_times, smoothed_values_2d, self.config.compact_threshold
             )
 
             # Append to output (same as dense path)
             _compact_and_append(
-                times_list, values_list, chunk_counts,
+                kept_t, kept_v, chunk_offsets, chunk_counts,
                 chunk_period, chunk_node_idx,
                 all_times, all_values, offsets, counts,
                 periods, delays, node_indices
