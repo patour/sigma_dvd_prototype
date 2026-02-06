@@ -819,6 +819,7 @@ class VectorizedCurrentSources:
         t_start: float,
         t_end: float,
         compact_threshold: float = 1e-12,
+        chunk_size: int = 10000,
     ) -> 'VectorizedCurrentSources':
         """Create copy with smoothed waveforms (pulses converted to PWL).
 
@@ -826,11 +827,16 @@ class VectorizedCurrentSources:
         waveforms, then compacts redundant points. Pulses are converted to PWL
         format before smoothing.
 
+        Uses chunked batch processing for high performance with controllable
+        memory usage.
+
         Args:
             time_step: Simulation time step (filter window = 2 * time_step)
             t_start: Simulation start time
             t_end: Simulation end time
             compact_threshold: Slope change threshold for compaction
+            chunk_size: Number of waveforms to process per chunk (default 10000).
+                       Controls memory/speed tradeoff. Larger = faster but more memory.
 
         Returns:
             New VectorizedCurrentSources with smoothed waveforms
@@ -841,7 +847,7 @@ class VectorizedCurrentSources:
             time_step=time_step,
             compact_threshold=compact_threshold,
         )
-        cache = smoother.create_smoothed_cache(self, t_start, t_end)
+        cache = smoother.create_smoothed_cache(self, t_start, t_end, chunk_size=chunk_size)
         return smoother.apply_cache_to_sources(self, cache)
 
     @classmethod

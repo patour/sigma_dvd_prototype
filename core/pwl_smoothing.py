@@ -159,6 +159,577 @@ def analytical_triangle_pwl_integral(
     return result
 
 
+# =============================================================================
+# Vectorized Smoothing Functions
+# =============================================================================
+
+
+def _integrate_linear_product_vectorized(
+    a: float,
+    b: float,
+    c: float,
+    d: float,
+    t_lo: np.ndarray,
+    t_hi: np.ndarray,
+) -> np.ndarray:
+    """Vectorized integration of (a + b*t) * (c + d*t) from t_lo to t_hi.
+
+    Args:
+        a, b: Coefficients of first linear function (scalars)
+        c, d: Coefficients of second linear function (scalars)
+        t_lo: Lower bounds (n_samples,)
+        t_hi: Upper bounds (n_samples,)
+
+    Returns:
+        Definite integral values (n_samples,)
+    """
+    # Mask for valid intervals
+    valid = t_hi > t_lo
+
+    # Coefficients for polynomial ac + (ad+bc)*t + bd*t^2
+    c0 = a * c
+    c1 = a * d + b * c
+    c2 = b * d
+
+    # Evaluate antiderivative: c0*t + c1*t^2/2 + c2*t^3/3
+    result = np.zeros_like(t_lo)
+
+    if np.any(valid):
+        t_lo_v = t_lo[valid]
+        t_hi_v = t_hi[valid]
+
+        F_hi = c0 * t_hi_v + c1 * t_hi_v * t_hi_v / 2.0 + c2 * t_hi_v**3 / 3.0
+        F_lo = c0 * t_lo_v + c1 * t_lo_v * t_lo_v / 2.0 + c2 * t_lo_v**3 / 3.0
+        result[valid] = F_hi - F_lo
+
+    return result
+
+
+def _analytical_integral_vectorized(
+    t_out: np.ndarray,
+    half_width: float,
+    t1: float,
+    v1: float,
+    t2: float,
+    v2: float,
+) -> np.ndarray:
+    """Vectorized analytical integral of triangle(t) * pwl_segment(t).
+
+    Computes the integral for multiple output sample times at once.
+    Fully vectorized with no Python loops.
+
+    Args:
+        t_out: Center of triangular windows (n_samples,)
+        half_width: Half-width of triangle (typically = time_step)
+        t1, v1: Start of PWL segment
+        t2, v2: End of PWL segment
+
+    Returns:
+        Integral values (n_samples,) - contribution to smoothed output
+    """
+    n_samples = len(t_out)
+    result = np.zeros(n_samples, dtype=np.float64)
+
+    if half_width <= 0 or t2 <= t1:
+        return result
+
+    # Window bounds for all samples
+    w_lo = t_out - half_width
+    w_hi = t_out + half_width
+
+    # Find overlap of segment [t1, t2] with each window [w_lo, w_hi]
+    seg_lo = np.maximum(t1, w_lo)
+    seg_hi = np.minimum(t2, w_hi)
+
+    # Mask for samples with overlap
+    has_overlap = seg_lo < seg_hi
+    if not np.any(has_overlap):
+        return result
+
+    # PWL segment: f(t) = v1 + m * (t - t1) = (v1 - m*t1) + m*t
+    m = (v2 - v1) / (t2 - t1)
+    pwl_a = v1 - m * t1  # Intercept
+    pwl_b = m  # Slope
+
+    # Process left half of triangle: t in [w_lo, t_out]
+    # Triangle: w(t) = (t - w_lo) / half_width = (-w_lo/h) + (1/h)*t
+    left_lo = np.maximum(seg_lo, w_lo)
+    left_hi = np.minimum(seg_hi, t_out)
+    left_valid = (left_lo < left_hi) & has_overlap
+
+    if np.any(left_valid):
+        # Triangle coefficients: tri_a = -w_lo/h, tri_b = 1/h
+        # The integral is: ∫(tri_a + tri_b*t) * (pwl_a + pwl_b*t) dt
+        # = ∫(tri_a*pwl_a) + (tri_a*pwl_b + tri_b*pwl_a)*t + (tri_b*pwl_b)*t^2 dt
+        #
+        # With tri_a = -w_lo/h varying per sample, we expand:
+        # c0[i] = tri_a[i] * pwl_a = (-w_lo[i]/h) * pwl_a
+        # c1[i] = tri_a[i] * pwl_b + tri_b * pwl_a = (-w_lo[i]/h) * pwl_b + (1/h) * pwl_a
+        # c2 = tri_b * pwl_b = (1/h) * pwl_b  (constant)
+
+        tri_b_left = 1.0 / half_width
+        c2 = tri_b_left * pwl_b  # Constant for all samples
+
+        # Vectorized computation for all valid left samples
+        w_lo_v = w_lo[left_valid]
+        tri_a_v = -w_lo_v / half_width
+        c0_v = tri_a_v * pwl_a
+        c1_v = tri_a_v * pwl_b + tri_b_left * pwl_a
+
+        t_lo_v = left_lo[left_valid]
+        t_hi_v = left_hi[left_valid]
+
+        # Antiderivative: F(t) = c0*t + c1*t^2/2 + c2*t^3/3
+        F_hi = c0_v * t_hi_v + c1_v * t_hi_v**2 / 2.0 + c2 * t_hi_v**3 / 3.0
+        F_lo = c0_v * t_lo_v + c1_v * t_lo_v**2 / 2.0 + c2 * t_lo_v**3 / 3.0
+
+        result[left_valid] += F_hi - F_lo
+
+    # Process right half of triangle: t in [t_out, w_hi]
+    # Triangle: w(t) = (w_hi - t) / half_width = (w_hi/h) + (-1/h)*t
+    right_lo = np.maximum(seg_lo, t_out)
+    right_hi = np.minimum(seg_hi, w_hi)
+    right_valid = (right_lo < right_hi) & has_overlap
+
+    if np.any(right_valid):
+        # Triangle coefficients: tri_a = w_hi/h, tri_b = -1/h
+        tri_b_right = -1.0 / half_width
+        c2 = tri_b_right * pwl_b  # Constant for all samples
+
+        w_hi_v = w_hi[right_valid]
+        tri_a_v = w_hi_v / half_width
+        c0_v = tri_a_v * pwl_a
+        c1_v = tri_a_v * pwl_b + tri_b_right * pwl_a
+
+        t_lo_v = right_lo[right_valid]
+        t_hi_v = right_hi[right_valid]
+
+        # Antiderivative: F(t) = c0*t + c1*t^2/2 + c2*t^3/3
+        F_hi = c0_v * t_hi_v + c1_v * t_hi_v**2 / 2.0 + c2 * t_hi_v**3 / 3.0
+        F_lo = c0_v * t_lo_v + c1_v * t_lo_v**2 / 2.0 + c2 * t_lo_v**3 / 3.0
+
+        result[right_valid] += F_hi - F_lo
+
+    return result
+
+
+def _smooth_pwl_vectorized(
+    times: np.ndarray,
+    values: np.ndarray,
+    period: float,
+    time_step: float,
+    t_start: float,
+    t_end: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Vectorized smoothing for a single PWL waveform.
+
+    Applies triangular low-pass filter using vectorized operations.
+
+    Args:
+        times: PWL time points (n_points,)
+        values: PWL values (n_points,)
+        period: PWL period (0 = non-periodic)
+        time_step: Simulation time step (window = 2 * time_step)
+        t_start: Start of output time range
+        t_end: End of output time range
+
+    Returns:
+        Tuple of (smoothed_times, smoothed_values) arrays
+    """
+    if len(times) < 2 or time_step <= 0:
+        return times.copy(), values.copy()
+
+    half_width = time_step
+
+    # Generate output sample times
+    # For periodic waveforms, adjust to ensure integer number of periods
+    if period > 0 and t_end - t_start >= period:
+        steps_per_period = max(1, int(round(period / time_step)))
+        actual_step = period / steps_per_period
+    else:
+        actual_step = time_step
+
+    n_samples = int((t_end - t_start) / actual_step) + 1
+    sample_times = np.linspace(t_start, t_end, n_samples)
+
+    # Initialize output
+    weighted_sum = np.zeros(n_samples, dtype=np.float64)
+
+    # Process each segment
+    n_points = len(times)
+    for i in range(n_points - 1):
+        t1, v1 = times[i], values[i]
+        t2, v2 = times[i + 1], values[i + 1]
+
+        # Direct contribution from this segment
+        weighted_sum += _analytical_integral_vectorized(
+            sample_times, half_width, t1, v1, t2, v2
+        )
+
+    # Handle periodic wraparound
+    if period > 0:
+        for i in range(n_points - 1):
+            t1, v1 = times[i], values[i]
+            t2, v2 = times[i + 1], values[i + 1]
+
+            # Previous period contribution
+            weighted_sum += _analytical_integral_vectorized(
+                sample_times, half_width, t1 - period, v1, t2 - period, v2
+            )
+            # Next period contribution
+            weighted_sum += _analytical_integral_vectorized(
+                sample_times, half_width, t1 + period, v1, t2 + period, v2
+            )
+
+    # Normalize by triangle area (= half_width)
+    smoothed_values = weighted_sum / half_width
+
+    return sample_times, smoothed_values
+
+
+# =============================================================================
+# Chunked Batch Processing Functions
+# =============================================================================
+
+
+def _pulse_to_pwl_arrays(
+    v1: np.ndarray,
+    v2: np.ndarray,
+    delay: np.ndarray,
+    rt: np.ndarray,
+    ft: np.ndarray,
+    width: np.ndarray,
+    period: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert batch of pulses to PWL arrays.
+
+    Args:
+        v1, v2, delay, rt, ft, width, period: Arrays (n_pulses,) of pulse parameters
+
+    Returns:
+        Tuple of (times_2d, values_2d) with shape (n_pulses, max_points)
+        Padded with last value where needed.
+    """
+    n = len(v1)
+
+    # Standard pulse has up to 7 points:
+    # (0, v1), (delay, v1), (delay+rt, v2), (delay+rt+width, v2),
+    # (delay+rt+width+ft, v1), (period, v1)
+    # But we use a simplified 6-point representation that captures key transitions
+    max_points = 6
+
+    times = np.zeros((n, max_points), dtype=np.float64)
+    values = np.zeros((n, max_points), dtype=np.float64)
+
+    # Point 0: Start at v1
+    times[:, 0] = 0.0
+    values[:, 0] = v1
+
+    # Point 1: End of delay (still at v1)
+    times[:, 1] = delay
+    values[:, 1] = v1
+
+    # Point 2: End of rise (at v2)
+    times[:, 2] = delay + rt
+    values[:, 2] = v2
+
+    # Point 3: End of high (still at v2)
+    times[:, 3] = delay + rt + width
+    values[:, 3] = v2
+
+    # Point 4: End of fall (back to v1)
+    times[:, 4] = delay + rt + width + ft
+    values[:, 4] = v1
+
+    # Point 5: End of period (at v1)
+    # Use period if > 0, else use point 4 time
+    times[:, 5] = np.where(period > 0, period, times[:, 4])
+    values[:, 5] = v1
+
+    return times, values
+
+
+def _analytical_integral_batch(
+    t_out: np.ndarray,
+    half_width: float,
+    t1: np.ndarray,
+    v1: np.ndarray,
+    t2: np.ndarray,
+    v2: np.ndarray,
+) -> np.ndarray:
+    """Batch analytical integral for multiple segments at once.
+
+    Computes integral for multiple segments, each evaluated at same sample times.
+
+    Args:
+        t_out: Sample times (n_samples,)
+        half_width: Filter half-width
+        t1, v1: Segment start times/values (n_segments,)
+        t2, v2: Segment end times/values (n_segments,)
+
+    Returns:
+        Integrals (n_segments, n_samples)
+    """
+    n_samples = len(t_out)
+    n_segments = len(t1)
+
+    if half_width <= 0:
+        return np.zeros((n_segments, n_samples), dtype=np.float64)
+
+    # Broadcast to (n_segments, n_samples)
+    t_out_2d = t_out[np.newaxis, :]  # (1, n_samples)
+    t1_2d = t1[:, np.newaxis]  # (n_segments, 1)
+    t2_2d = t2[:, np.newaxis]
+    v1_2d = v1[:, np.newaxis]
+    v2_2d = v2[:, np.newaxis]
+
+    # Window bounds (n_segments, n_samples)
+    w_lo = t_out_2d - half_width
+    w_hi = t_out_2d + half_width
+
+    # Segment validity mask
+    valid_seg = (t2_2d > t1_2d)  # (n_segments, 1)
+
+    # Find overlap
+    seg_lo = np.maximum(t1_2d, w_lo)  # (n_segments, n_samples)
+    seg_hi = np.minimum(t2_2d, w_hi)
+
+    # Overlap mask
+    has_overlap = (seg_lo < seg_hi) & valid_seg
+
+    # PWL slope and intercept
+    dt_seg = t2_2d - t1_2d
+    dt_seg = np.where(dt_seg > 0, dt_seg, 1.0)  # Avoid division by zero
+    m = (v2_2d - v1_2d) / dt_seg
+    pwl_a = v1_2d - m * t1_2d
+    pwl_b = m
+
+    result = np.zeros((n_segments, n_samples), dtype=np.float64)
+
+    # Left half of triangle: t in [w_lo, t_out]
+    left_lo = np.maximum(seg_lo, w_lo)
+    left_hi = np.minimum(seg_hi, t_out_2d)
+    left_valid = (left_lo < left_hi) & has_overlap
+
+    if np.any(left_valid):
+        tri_b_left = 1.0 / half_width
+        tri_a_left = -w_lo / half_width
+
+        c0 = tri_a_left * pwl_a
+        c1 = tri_a_left * pwl_b + tri_b_left * pwl_a
+        c2 = tri_b_left * pwl_b
+
+        F_hi = c0 * left_hi + c1 * left_hi**2 / 2.0 + c2 * left_hi**3 / 3.0
+        F_lo = c0 * left_lo + c1 * left_lo**2 / 2.0 + c2 * left_lo**3 / 3.0
+
+        result = np.where(left_valid, result + (F_hi - F_lo), result)
+
+    # Right half of triangle: t in [t_out, w_hi]
+    right_lo = np.maximum(seg_lo, t_out_2d)
+    right_hi = np.minimum(seg_hi, w_hi)
+    right_valid = (right_lo < right_hi) & has_overlap
+
+    if np.any(right_valid):
+        tri_b_right = -1.0 / half_width
+        tri_a_right = w_hi / half_width
+
+        c0 = tri_a_right * pwl_a
+        c1 = tri_a_right * pwl_b + tri_b_right * pwl_a
+        c2 = tri_b_right * pwl_b
+
+        F_hi = c0 * right_hi + c1 * right_hi**2 / 2.0 + c2 * right_hi**3 / 3.0
+        F_lo = c0 * right_lo + c1 * right_lo**2 / 2.0 + c2 * right_lo**3 / 3.0
+
+        result = np.where(right_valid, result + (F_hi - F_lo), result)
+
+    return result
+
+
+def _smooth_pulse_chunk(
+    pulse_times_2d: np.ndarray,
+    pulse_values_2d: np.ndarray,
+    periods: np.ndarray,
+    sample_times: np.ndarray,
+    time_step: float,
+) -> np.ndarray:
+    """Smooth a chunk of pulses using fully vectorized operations.
+
+    Args:
+        pulse_times_2d: PWL times (chunk_size, n_pwl_points)
+        pulse_values_2d: PWL values (chunk_size, n_pwl_points)
+        periods: Period for each pulse (chunk_size,)
+        sample_times: Output sample times (n_samples,)
+        time_step: Filter half-width
+
+    Returns:
+        Smoothed values (chunk_size, n_samples)
+    """
+    chunk_size = pulse_times_2d.shape[0]
+    n_pwl_points = pulse_times_2d.shape[1]
+    n_samples = len(sample_times)
+
+    # Output array
+    result = np.zeros((chunk_size, n_samples), dtype=np.float64)
+
+    half_width = time_step
+
+    # Process all segments for all waveforms using batch operations
+    # Loop over segment index j (typically 5-6 segments), but vectorize over chunk_size
+    for j in range(n_pwl_points - 1):
+        # Extract segment j from all waveforms
+        t1 = pulse_times_2d[:, j]  # (chunk_size,)
+        v1 = pulse_values_2d[:, j]
+        t2 = pulse_times_2d[:, j + 1]
+        v2 = pulse_values_2d[:, j + 1]
+
+        # Compute integrals for all waveforms at once
+        # Shape: (chunk_size, n_samples)
+        contrib = _analytical_integral_batch(sample_times, half_width, t1, v1, t2, v2)
+        result += contrib
+
+    # Handle periodic wraparound - check which waveforms need it
+    periodic_mask = periods > 0
+    if np.any(periodic_mask):
+        periods_2d = periods[:, np.newaxis]  # (chunk_size, 1)
+
+        for j in range(n_pwl_points - 1):
+            t1 = pulse_times_2d[:, j]
+            v1 = pulse_values_2d[:, j]
+            t2 = pulse_times_2d[:, j + 1]
+            v2 = pulse_values_2d[:, j + 1]
+
+            # Previous period
+            contrib_prev = _analytical_integral_batch(
+                sample_times, half_width,
+                t1 - periods, v1, t2 - periods, v2
+            )
+            result = np.where(periodic_mask[:, np.newaxis], result + contrib_prev, result)
+
+            # Next period
+            contrib_next = _analytical_integral_batch(
+                sample_times, half_width,
+                t1 + periods, v1, t2 + periods, v2
+            )
+            result = np.where(periodic_mask[:, np.newaxis], result + contrib_next, result)
+
+    # Normalize
+    result /= half_width
+
+    return result
+
+
+def _compact_chunk_vectorized(
+    sample_times: np.ndarray,
+    values_2d: np.ndarray,
+    threshold: float = 1e-12,
+) -> Tuple[List[np.ndarray], List[np.ndarray], np.ndarray]:
+    """Vectorized compaction for a chunk of smoothed waveforms.
+
+    Args:
+        sample_times: Shared sample times (n_samples,)
+        values_2d: Smoothed values (chunk_size, n_samples)
+        threshold: Slope change threshold for compaction
+
+    Returns:
+        Tuple of (times_list, values_list, counts) where each list has
+        chunk_size elements of variable-length arrays.
+    """
+    chunk_size, n_samples = values_2d.shape
+
+    if n_samples <= 2:
+        # Nothing to compact
+        times_list = [sample_times.copy() for _ in range(chunk_size)]
+        values_list = [values_2d[i].copy() for i in range(chunk_size)]
+        counts = np.full(chunk_size, n_samples, dtype=np.int32)
+        return times_list, values_list, counts
+
+    # Compute time differences (same for all waveforms)
+    dt = np.diff(sample_times)
+
+    # Compute value differences and slopes for each waveform
+    dv = np.diff(values_2d, axis=1)  # (chunk_size, n_samples-1)
+
+    # Compute slopes, avoiding division by zero
+    with np.errstate(divide='ignore', invalid='ignore'):
+        slopes = np.where(dt > 0, dv / dt, 0.0)  # (chunk_size, n_samples-1)
+
+    # Compute slope changes at interior points
+    slope_changes = np.abs(np.diff(slopes, axis=1))  # (chunk_size, n_samples-2)
+
+    # Compute relative threshold
+    slope_magnitude = np.abs(slopes[:, :-1]) + np.abs(slopes[:, 1:])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        relative_changes = np.where(
+            slope_magnitude > 0,
+            slope_changes / slope_magnitude,
+            slope_changes
+        )
+
+    # Keep mask: True for points to keep
+    # Always keep first and last, keep interior if slope changes significantly
+    keep_interior = (relative_changes > threshold) | (slope_changes > threshold)
+
+    times_list = []
+    values_list = []
+    counts = np.zeros(chunk_size, dtype=np.int32)
+
+    for i in range(chunk_size):
+        # Build keep mask for this waveform
+        keep = np.ones(n_samples, dtype=bool)
+        keep[1:-1] = keep_interior[i]
+
+        # Extract kept points
+        kept_times = sample_times[keep]
+        kept_values = values_2d[i, keep]
+
+        times_list.append(kept_times)
+        values_list.append(kept_values)
+        counts[i] = len(kept_times)
+
+    return times_list, values_list, counts
+
+
+def _compact_and_append(
+    times_list: List[np.ndarray],
+    values_list: List[np.ndarray],
+    counts: np.ndarray,
+    periods: np.ndarray,
+    node_indices: np.ndarray,
+    all_times: List[float],
+    all_values: List[float],
+    offsets: List[int],
+    out_counts: List[int],
+    out_periods: List[float],
+    out_delays: List[float],
+    out_node_indices: List[int],
+) -> None:
+    """Append compacted chunk results to output lists.
+
+    Args:
+        times_list: List of compacted time arrays
+        values_list: List of compacted value arrays
+        counts: Number of points in each compacted waveform
+        periods: Period for each waveform
+        node_indices: Node index for each waveform
+        all_times: Output times list (modified in-place)
+        all_values: Output values list (modified in-place)
+        offsets: Output offsets list (modified in-place)
+        out_counts: Output counts list (modified in-place)
+        out_periods: Output periods list (modified in-place)
+        out_delays: Output delays list (modified in-place)
+        out_node_indices: Output node indices list (modified in-place)
+    """
+    for i in range(len(times_list)):
+        offsets.append(len(all_times))
+        out_counts.append(int(counts[i]))
+        out_periods.append(float(periods[i]))
+        out_delays.append(0.0)  # Delay absorbed into points
+        out_node_indices.append(int(node_indices[i]))
+
+        all_times.extend(times_list[i].tolist())
+        all_values.extend(values_list[i].tolist())
+
+
 def smooth_pwl_points(
     points: List[Tuple[float, float]],
     period: float,
@@ -167,8 +738,6 @@ def smooth_pwl_points(
     t_end: float,
 ) -> List[Tuple[float, float]]:
     """Apply analytical triangular low-pass filter to PWL waveform.
-
-    Reference: C++ Filter::analytical_LP_filter
 
     For each output sample time t (at intervals of time_step):
     - Define triangular window centered at t with half_width = time_step
@@ -719,18 +1288,24 @@ class PWLSmoother:
         vec_sources: "VectorizedCurrentSources",
         t_start: float,
         t_end: float,
+        chunk_size: int = 10000,
     ) -> SmoothedWaveformCache:
         """Create reusable cache from VectorizedCurrentSources.
 
         This method:
         1. Converts all pulses to PWL
-        2. Smooths all PWL waveforms
+        2. Smooths all PWL waveforms using chunked batch processing
         3. Packs results into cache for reuse
+
+        Uses chunked batch processing to control memory usage while
+        maintaining high performance through vectorization.
 
         Args:
             vec_sources: VectorizedCurrentSources instance
             t_start: Simulation start time
             t_end: Simulation end time
+            chunk_size: Number of waveforms to process per chunk (default 10000).
+                       Controls memory/speed tradeoff. Larger = faster but more memory.
 
         Returns:
             SmoothedWaveformCache with all smoothed waveforms
@@ -755,6 +1330,11 @@ class PWLSmoother:
                 n_pwl_points=vec_sources.n_pwl_points,
             )
 
+        # Pre-compute shared sample times
+        time_step = self.config.time_step
+        n_samples = int((t_end - t_start) / time_step) + 1
+        sample_times = np.linspace(t_start, t_end, n_samples)
+
         # Collect smoothed PWL data
         all_times: List[float] = []
         all_values: List[float] = []
@@ -764,7 +1344,7 @@ class PWLSmoother:
         delays: List[float] = []
         node_indices: List[int] = []
 
-        # Process original PWLs
+        # Process original PWLs using vectorized smoothing
         for i in range(vec_sources.n_pwls):
             offset = int(vec_sources.pwl_offset[i])
             count = int(vec_sources.pwl_count[i])
@@ -772,20 +1352,24 @@ class PWLSmoother:
             delay = float(vec_sources.pwl_delay[i])
             node_idx = int(vec_sources.pwl_node_idx[i])
 
-            # Extract original points
-            times = vec_sources.pwl_times[offset : offset + count]
-            values = vec_sources.pwl_values[offset : offset + count]
-            points = list(zip(times, values))
+            # Extract original points as arrays
+            pwl_times = vec_sources.pwl_times[offset : offset + count].copy()
+            pwl_values = vec_sources.pwl_values[offset : offset + count].copy()
 
             # Adjust for delay
             if delay > 0:
-                points = [(t + delay, v) for t, v in points]
+                pwl_times = pwl_times + delay
 
-            # Smooth and compact
-            smoothed = smooth_pwl_points(
-                points, period, self.config.time_step, t_start, t_end
+            # Smooth using vectorized function
+            smoothed_times, smoothed_values = _smooth_pwl_vectorized(
+                pwl_times, pwl_values, period, time_step, t_start, t_end
             )
-            compacted = compact_pwl(smoothed, self.config.compact_threshold)
+
+            # Compact
+            compacted = compact_pwl(
+                list(zip(smoothed_times, smoothed_values)),
+                self.config.compact_threshold
+            )
 
             # Store results
             offsets.append(len(all_times))
@@ -798,36 +1382,47 @@ class PWLSmoother:
                 all_times.append(t)
                 all_values.append(v)
 
-        # Process pulses (convert to PWL and smooth)
-        for i in range(vec_sources.n_pulses):
-            node_idx = int(vec_sources.pulse_node_idx[i])
-            v1 = float(vec_sources.pulse_v1[i])
-            v2 = float(vec_sources.pulse_v2[i])
-            delay = float(vec_sources.pulse_delay[i])
-            rt = float(vec_sources.pulse_rt[i])
-            ft = float(vec_sources.pulse_ft[i])
-            width = float(vec_sources.pulse_width[i])
-            period = float(vec_sources.pulse_period[i])
+        # Process pulses in chunks using batch processing
+        n_pulses = vec_sources.n_pulses
+        if n_pulses > 0:
+            for chunk_start in range(0, n_pulses, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, n_pulses)
+                chunk_n = chunk_end - chunk_start
 
-            # Convert to PWL points
-            pwl_points = pulse_to_pwl_points(v1, v2, delay, rt, ft, width, period)
+                # Extract chunk data
+                chunk_v1 = vec_sources.pulse_v1[chunk_start:chunk_end]
+                chunk_v2 = vec_sources.pulse_v2[chunk_start:chunk_end]
+                chunk_delay = vec_sources.pulse_delay[chunk_start:chunk_end]
+                chunk_rt = vec_sources.pulse_rt[chunk_start:chunk_end]
+                chunk_ft = vec_sources.pulse_ft[chunk_start:chunk_end]
+                chunk_width = vec_sources.pulse_width[chunk_start:chunk_end]
+                chunk_period = vec_sources.pulse_period[chunk_start:chunk_end]
+                chunk_node_idx = vec_sources.pulse_node_idx[chunk_start:chunk_end]
 
-            # Smooth and compact
-            smoothed = smooth_pwl_points(
-                pwl_points, period, self.config.time_step, t_start, t_end
-            )
-            compacted = compact_pwl(smoothed, self.config.compact_threshold)
+                # Convert pulses to PWL arrays
+                pulse_times_2d, pulse_values_2d = _pulse_to_pwl_arrays(
+                    chunk_v1, chunk_v2, chunk_delay, chunk_rt,
+                    chunk_ft, chunk_width, chunk_period
+                )
 
-            # Store results
-            offsets.append(len(all_times))
-            counts.append(len(compacted))
-            periods.append(period)
-            delays.append(0.0)
-            node_indices.append(node_idx)
+                # Smooth chunk
+                smoothed_values_2d = _smooth_pulse_chunk(
+                    pulse_times_2d, pulse_values_2d, chunk_period,
+                    sample_times, self.config.time_step
+                )
 
-            for t, v in compacted:
-                all_times.append(t)
-                all_values.append(v)
+                # Compact chunk
+                times_list, values_list, chunk_counts = _compact_chunk_vectorized(
+                    sample_times, smoothed_values_2d, self.config.compact_threshold
+                )
+
+                # Append to output
+                _compact_and_append(
+                    times_list, values_list, chunk_counts,
+                    chunk_period, chunk_node_idx,
+                    all_times, all_values, offsets, counts,
+                    periods, delays, node_indices
+                )
 
         # Update stats
         self._stats = {

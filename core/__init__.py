@@ -90,6 +90,15 @@ from .pwl_smoothing import (
     pulse_to_pwl_points,
     triangular_window,
     analytical_triangle_pwl_integral,
+    # Vectorized functions (internal but exported for testing)
+    _analytical_integral_vectorized,
+    _smooth_pwl_vectorized,
+    # Batch processing functions (internal but exported for testing)
+    _pulse_to_pwl_arrays,
+    _smooth_pulse_chunk,
+    _analytical_integral_batch,
+    _compact_chunk_vectorized,
+    _compact_and_append,
 )
 
 __all__ = [

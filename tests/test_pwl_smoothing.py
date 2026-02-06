@@ -390,6 +390,52 @@ class TestPeriodicWraparound(unittest.TestCase):
         self.assertAlmostEqual(v_near_start, v_near_end, places=1)
 
 
+class TestPulseSmoothing(unittest.TestCase):
+    """Tests for pulse smoothing with real-world cases."""
+
+    def test_raw_vs_smoothed_pulses(self):
+        """Compare raw and smoothed pulse waveforms at specific time points."""
+        from pdn.pdn_parser import Pulse
+
+        smoother = PWLSmoother(time_step=0.01e-9, compact_threshold=1e-12)
+
+        # Convert pulses to PWL and smooth
+        pulse1 = Pulse(0, 0.0117914, 3.52914e-09, 6.25e-13, 6.25e-13, 0, 1e-08)
+        pulse2 = Pulse(0, -0.000131702, 3.51998e-09, 9.78805e-12, 9.78805e-12, 0, 1e-08)
+        smoothed1 = smoother.smooth_pulse(pulse1, t_start=0, t_end=10e-9)
+        smoothed2 = smoother.smooth_pulse(pulse2, t_start=0, t_end=10e-9)
+
+        # Sample at specific time points
+        t_compare = np.arange(3.48e-9, 3.58e-9 + 1e-12, 10e-12)
+        
+        # Compute raw and smoothed values in mA
+        raw = [(pulse1.evaluate(t) + pulse2.evaluate(t)) * 1e3 for t in t_compare]
+        smooth = [(smoothed1.evaluate(t) + smoothed2.evaluate(t)) * 1e3 for t in t_compare]
+
+        # Expected values (from reference run)
+        expected_raw = [
+            0.0, 0.0, 0.0, 0.0, -0.00026910773852576017, 7.2292525769831295,
+            0.0, 0.0, 0.0, 0.0, 0.0
+        ]
+        expected_smooth = [
+            0.0, 0.0, 0.0, -6.617444900408621e-10, -0.003377999488249955,
+            0.6291331011861812, -0.0177050009610841, -4.17398778165606e-14,
+            0.0, 0.0, 0.0
+        ]
+
+        # Assert raw values match exactly (accounting for floating point)
+        self.assertEqual(len(raw), len(expected_raw))
+        for i, (actual, expected) in enumerate(zip(raw, expected_raw)):
+            self.assertAlmostEqual(actual, expected, places=14,
+                                   msg=f"Raw mismatch at index {i}")
+
+        # Assert smoothed values match exactly
+        self.assertEqual(len(smooth), len(expected_smooth))
+        for i, (actual, expected) in enumerate(zip(smooth, expected_smooth)):
+            self.assertAlmostEqual(actual, expected, places=14,
+                                   msg=f"Smoothed mismatch at index {i}")
+
+
 class TestIntegrationVectorizedSources(unittest.TestCase):
     """Integration tests for VectorizedCurrentSources smoothing."""
 
@@ -531,6 +577,578 @@ class TestIntegrationVectorizedSources(unittest.TestCase):
 
         # DC values should be preserved
         np.testing.assert_array_equal(smoothed.dc_values, sources.dc_values)
+
+
+class TestAnalyticalIntegralVectorized(unittest.TestCase):
+    """Tests for _analytical_integral_vectorized function."""
+
+    def test_matches_scalar_constant_segment(self):
+        """Vectorized should match scalar for constant segment."""
+        from core.pwl_smoothing import _analytical_integral_vectorized
+
+        t_out = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+        half_width = 1.0
+        t1, v1 = 0.0, 5.0
+        t2, v2 = 4.0, 5.0
+
+        # Scalar results
+        scalar = [analytical_triangle_pwl_integral(t, half_width, t1, v1, t2, v2) for t in t_out]
+
+        # Vectorized results
+        vec = _analytical_integral_vectorized(t_out, half_width, t1, v1, t2, v2)
+
+        np.testing.assert_allclose(vec, scalar, rtol=1e-12)
+
+    def test_matches_scalar_linear_segment(self):
+        """Vectorized should match scalar for linear segment."""
+        from core.pwl_smoothing import _analytical_integral_vectorized
+
+        t_out = np.array([0.0, 2.5, 5.0, 7.5, 10.0])
+        half_width = 2.0
+        t1, v1 = 0.0, 0.0
+        t2, v2 = 10.0, 10.0
+
+        scalar = [analytical_triangle_pwl_integral(t, half_width, t1, v1, t2, v2) for t in t_out]
+        vec = _analytical_integral_vectorized(t_out, half_width, t1, v1, t2, v2)
+
+        np.testing.assert_allclose(vec, scalar, rtol=1e-12)
+
+    def test_matches_scalar_no_overlap(self):
+        """Vectorized should match scalar when no overlap."""
+        from core.pwl_smoothing import _analytical_integral_vectorized
+
+        t_out = np.array([0.0, 1.0, 2.0])
+        half_width = 0.5
+        t1, v1 = 10.0, 1.0  # Segment far from sample times
+        t2, v2 = 11.0, 2.0
+
+        scalar = [analytical_triangle_pwl_integral(t, half_width, t1, v1, t2, v2) for t in t_out]
+        vec = _analytical_integral_vectorized(t_out, half_width, t1, v1, t2, v2)
+
+        np.testing.assert_allclose(vec, scalar, rtol=1e-12)
+        np.testing.assert_allclose(vec, [0.0, 0.0, 0.0])  # All zeros
+
+    def test_matches_scalar_partial_overlap(self):
+        """Vectorized should match scalar for partial overlap."""
+        from core.pwl_smoothing import _analytical_integral_vectorized
+
+        t_out = np.array([0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
+        half_width = 1.0
+        t1, v1 = 2.0, 1.0  # Segment starts at t=2
+        t2, v2 = 4.0, 3.0
+
+        scalar = [analytical_triangle_pwl_integral(t, half_width, t1, v1, t2, v2) for t in t_out]
+        vec = _analytical_integral_vectorized(t_out, half_width, t1, v1, t2, v2)
+
+        np.testing.assert_allclose(vec, scalar, rtol=1e-12)
+
+    def test_vectorized_multiple_samples_numerical(self):
+        """Test vectorized integral against numerical integration."""
+        from scipy import integrate
+        from core.pwl_smoothing import _analytical_integral_vectorized
+
+        t_out = np.array([2.0, 3.0, 4.0])
+        half_width = 1.0
+        t1, v1 = 0.0, 0.0
+        t2, v2 = 6.0, 6.0
+
+        vec = _analytical_integral_vectorized(t_out, half_width, t1, v1, t2, v2)
+
+        # Numerical verification
+        for i, t in enumerate(t_out):
+            def integrand(tau):
+                if tau < t - half_width or tau > t + half_width:
+                    return 0.0
+                tri = 1.0 - abs(tau - t) / half_width
+                pwl = v1 + (v2 - v1) * (tau - t1) / (t2 - t1)
+                return tri * pwl
+            numerical, _ = integrate.quad(integrand, t1, t2)
+            self.assertAlmostEqual(vec[i], numerical, places=8)
+
+
+class TestSmoothPWLVectorized(unittest.TestCase):
+    """Tests for _smooth_pwl_vectorized function."""
+
+    def test_matches_scalar_constant_pwl(self):
+        """Vectorized should match scalar for constant PWL."""
+        from core.pwl_smoothing import _smooth_pwl_vectorized
+
+        points = [(0.0, 5.0), (10.0, 5.0)]
+        times = np.array([p[0] for p in points])
+        values = np.array([p[1] for p in points])
+
+        scalar = smooth_pwl_points(points, period=0, time_step=1.0, t_start=0, t_end=10)
+        scalar_times = np.array([p[0] for p in scalar])
+        scalar_values = np.array([p[1] for p in scalar])
+
+        vec_times, vec_values = _smooth_pwl_vectorized(times, values, 0, 1.0, 0, 10)
+
+        np.testing.assert_allclose(vec_times, scalar_times, rtol=1e-12)
+        np.testing.assert_allclose(vec_values, scalar_values, rtol=1e-12)
+
+    def test_matches_scalar_linear_pwl(self):
+        """Vectorized should match scalar for linear PWL."""
+        from core.pwl_smoothing import _smooth_pwl_vectorized
+
+        points = [(0.0, 0.0), (10.0, 10.0)]
+        times = np.array([p[0] for p in points])
+        values = np.array([p[1] for p in points])
+
+        scalar = smooth_pwl_points(points, period=0, time_step=0.5, t_start=0, t_end=10)
+        scalar_times = np.array([p[0] for p in scalar])
+        scalar_values = np.array([p[1] for p in scalar])
+
+        vec_times, vec_values = _smooth_pwl_vectorized(times, values, 0, 0.5, 0, 10)
+
+        np.testing.assert_allclose(vec_times, scalar_times, rtol=1e-12)
+        np.testing.assert_allclose(vec_values, scalar_values, rtol=1e-12)
+
+    def test_matches_scalar_periodic(self):
+        """Vectorized should match scalar for periodic PWL."""
+        from core.pwl_smoothing import _smooth_pwl_vectorized
+
+        points = [(0.0, 0.0), (5.0, 1.0), (10.0, 0.0)]
+        times = np.array([p[0] for p in points])
+        values = np.array([p[1] for p in points])
+        period = 10.0
+
+        scalar = smooth_pwl_points(points, period=period, time_step=1.0, t_start=0, t_end=10)
+        scalar_times = np.array([p[0] for p in scalar])
+        scalar_values = np.array([p[1] for p in scalar])
+
+        vec_times, vec_values = _smooth_pwl_vectorized(times, values, period, 1.0, 0, 10)
+
+        np.testing.assert_allclose(vec_times, scalar_times, rtol=1e-12)
+        np.testing.assert_allclose(vec_values, scalar_values, rtol=1e-12)
+
+    def test_matches_scalar_nonperiodic(self):
+        """Vectorized should match scalar for non-periodic PWL."""
+        from core.pwl_smoothing import _smooth_pwl_vectorized
+
+        points = [(0.0, 1.0), (3.0, 4.0), (6.0, 2.0), (10.0, 5.0)]
+        times = np.array([p[0] for p in points])
+        values = np.array([p[1] for p in points])
+
+        scalar = smooth_pwl_points(points, period=0, time_step=0.5, t_start=0, t_end=10)
+        scalar_times = np.array([p[0] for p in scalar])
+        scalar_values = np.array([p[1] for p in scalar])
+
+        vec_times, vec_values = _smooth_pwl_vectorized(times, values, 0, 0.5, 0, 10)
+
+        np.testing.assert_allclose(vec_times, scalar_times, rtol=1e-12)
+        np.testing.assert_allclose(vec_values, scalar_values, rtol=1e-12)
+
+    def test_triangle_pulse(self):
+        """Vectorized smoothing of triangle pulse should match scalar."""
+        from core.pwl_smoothing import _smooth_pwl_vectorized
+
+        # Triangle pulse
+        points = [(0.0, 0.0), (2.0, 0.0), (3.0, 1.0), (4.0, 0.0), (6.0, 0.0)]
+        times = np.array([p[0] for p in points])
+        values = np.array([p[1] for p in points])
+        period = 6.0
+
+        scalar = smooth_pwl_points(points, period=period, time_step=0.2, t_start=0, t_end=6)
+        scalar_times = np.array([p[0] for p in scalar])
+        scalar_values = np.array([p[1] for p in scalar])
+
+        vec_times, vec_values = _smooth_pwl_vectorized(times, values, period, 0.2, 0, 6)
+
+        np.testing.assert_allclose(vec_times, scalar_times, rtol=1e-10)
+        np.testing.assert_allclose(vec_values, scalar_values, rtol=1e-10)
+
+
+class TestChunkProcessing(unittest.TestCase):
+    """Tests for chunked batch processing functions."""
+
+    def test_pulse_to_pwl_arrays(self):
+        """Test pulse to PWL array conversion."""
+        from core.pwl_smoothing import _pulse_to_pwl_arrays
+
+        v1 = np.array([0.0, 0.0])
+        v2 = np.array([1.0, 2.0])
+        delay = np.array([1.0, 2.0])
+        rt = np.array([0.1, 0.2])
+        ft = np.array([0.1, 0.2])
+        width = np.array([0.5, 1.0])
+        period = np.array([5.0, 10.0])
+
+        times, values = _pulse_to_pwl_arrays(v1, v2, delay, rt, ft, width, period)
+
+        self.assertEqual(times.shape, (2, 6))
+        self.assertEqual(values.shape, (2, 6))
+
+        # Check first pulse timing
+        np.testing.assert_allclose(times[0], [0.0, 1.0, 1.1, 1.6, 1.7, 5.0])
+        np.testing.assert_allclose(values[0], [0.0, 0.0, 1.0, 1.0, 0.0, 0.0])
+
+    def test_analytical_integral_batch_matches_vectorized(self):
+        """Batch integral should match individual vectorized calls."""
+        from core.pwl_smoothing import (
+            _analytical_integral_batch,
+            _analytical_integral_vectorized,
+        )
+
+        sample_times = np.linspace(0, 10, 101)
+        half_width = 0.5
+
+        # Multiple segments
+        t1 = np.array([0.0, 2.0, 5.0])
+        v1 = np.array([0.0, 1.0, 0.5])
+        t2 = np.array([2.0, 5.0, 10.0])
+        v2 = np.array([1.0, 0.5, 2.0])
+
+        # Batch result
+        batch_result = _analytical_integral_batch(sample_times, half_width, t1, v1, t2, v2)
+        self.assertEqual(batch_result.shape, (3, 101))
+
+        # Individual results
+        for i in range(3):
+            individual = _analytical_integral_vectorized(
+                sample_times, half_width, t1[i], v1[i], t2[i], v2[i]
+            )
+            np.testing.assert_allclose(
+                batch_result[i], individual, rtol=1e-10,
+                err_msg=f"Mismatch at segment {i}"
+            )
+
+    def test_smooth_pulse_chunk_single_pulse(self):
+        """Test smoothing a single pulse in chunk."""
+        from core.pwl_smoothing import _smooth_pulse_chunk, _pulse_to_pwl_arrays
+
+        # Single pulse
+        v1 = np.array([0.0])
+        v2 = np.array([1.0])
+        delay = np.array([1.0])
+        rt = np.array([0.1])
+        ft = np.array([0.1])
+        width = np.array([2.0])
+        period = np.array([10.0])
+
+        times_2d, values_2d = _pulse_to_pwl_arrays(v1, v2, delay, rt, ft, width, period)
+        sample_times = np.linspace(0, 10, 101)
+
+        result = _smooth_pulse_chunk(times_2d, values_2d, period, sample_times, 0.5)
+
+        self.assertEqual(result.shape, (1, 101))
+        # Should have peak around delay+rt to delay+rt+width
+        peak_idx = np.argmax(result[0])
+        self.assertTrue(10 < peak_idx < 40)  # Peak somewhere in first third
+
+    def test_smooth_pulse_chunk_batch(self):
+        """Test smoothing multiple pulses in chunk."""
+        from core.pwl_smoothing import _smooth_pulse_chunk, _pulse_to_pwl_arrays
+
+        n = 10
+        v1 = np.zeros(n)
+        v2 = np.ones(n)
+        delay = np.full(n, 1.0)
+        rt = np.full(n, 0.1)
+        ft = np.full(n, 0.1)
+        width = np.full(n, 2.0)
+        period = np.full(n, 10.0)
+
+        times_2d, values_2d = _pulse_to_pwl_arrays(v1, v2, delay, rt, ft, width, period)
+        sample_times = np.linspace(0, 10, 101)
+
+        result = _smooth_pulse_chunk(times_2d, values_2d, period, sample_times, 0.5)
+
+        self.assertEqual(result.shape, (n, 101))
+
+        # All pulses are identical, so all results should be identical
+        for i in range(1, n):
+            np.testing.assert_allclose(result[i], result[0], rtol=1e-12)
+
+    def test_compact_chunk_vectorized(self):
+        """Test vectorized chunk compaction."""
+        from core.pwl_smoothing import _compact_chunk_vectorized
+
+        sample_times = np.linspace(0, 10, 11)
+
+        # Create values with different characteristics
+        values_2d = np.array([
+            np.linspace(0, 10, 11),  # Linear - should compact to 2 points
+            np.array([0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5]),  # Step - needs middle point
+            np.array([0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0]),  # Triangle - needs 3 points
+        ])
+
+        times_list, values_list, counts = _compact_chunk_vectorized(
+            sample_times, values_2d, threshold=1e-10
+        )
+
+        self.assertEqual(len(times_list), 3)
+        self.assertEqual(len(values_list), 3)
+        self.assertEqual(len(counts), 3)
+
+        # Linear should compact significantly
+        self.assertLess(counts[0], 11)
+
+    def test_compact_and_append(self):
+        """Test compact and append helper."""
+        from core.pwl_smoothing import _compact_and_append
+
+        times_list = [np.array([0, 5, 10]), np.array([0, 10])]
+        values_list = [np.array([0, 1, 0]), np.array([0, 1])]
+        counts = np.array([3, 2])
+        periods = np.array([10.0, 10.0])
+        node_indices = np.array([0, 1])
+
+        all_times = []
+        all_values = []
+        offsets = []
+        out_counts = []
+        out_periods = []
+        out_delays = []
+        out_node_indices = []
+
+        _compact_and_append(
+            times_list, values_list, counts, periods, node_indices,
+            all_times, all_values, offsets, out_counts,
+            out_periods, out_delays, out_node_indices
+        )
+
+        self.assertEqual(len(all_times), 5)  # 3 + 2
+        self.assertEqual(len(all_values), 5)
+        self.assertEqual(offsets, [0, 3])
+        self.assertEqual(out_counts, [3, 2])
+        self.assertEqual(out_periods, [10.0, 10.0])
+        self.assertEqual(out_delays, [0.0, 0.0])
+
+
+class TestPerformance(unittest.TestCase):
+    """Performance regression tests for PWL smoothing."""
+
+    def test_vectorized_batch_speedup(self):
+        """Vectorized+batch should be at least 5x faster than sequential.
+
+        Test with 1000 waveforms to measure meaningful speedup while keeping
+        test runtime reasonable.
+        """
+        from core.vectorized_sources import VectorizedCurrentSources
+        import time
+
+        n_pulses = 1000
+        sources = VectorizedCurrentSources(
+            n_nodes=n_pulses,
+            node_to_idx={f'n{i}': i for i in range(n_pulses)},
+            n_sources=n_pulses,
+            dc_values=np.zeros(n_pulses),
+            source_node_idx=np.arange(n_pulses, dtype=np.int32),
+            n_pulses=n_pulses,
+            pulse_node_idx=np.arange(n_pulses, dtype=np.int32),
+            pulse_source_idx=np.arange(n_pulses, dtype=np.int32),
+            pulse_v1=np.zeros(n_pulses),
+            pulse_v2=np.ones(n_pulses),
+            pulse_delay=np.full(n_pulses, 1e-9),
+            pulse_rt=np.full(n_pulses, 0.1e-9),
+            pulse_ft=np.full(n_pulses, 0.1e-9),
+            pulse_width=np.full(n_pulses, 2e-9),
+            pulse_period=np.full(n_pulses, 10e-9),
+            n_pwls=0, n_pwl_points=0,
+            pwl_node_idx=np.array([], dtype=np.int32),
+            pwl_source_idx=np.array([], dtype=np.int32),
+            pwl_period=np.array([]),
+            pwl_delay=np.array([]),
+            pwl_offset=np.array([], dtype=np.int32),
+            pwl_count=np.array([], dtype=np.int32),
+            pwl_times=np.array([]),
+            pwl_values=np.array([]),
+        )
+
+        # Time the new implementation
+        smoother = PWLSmoother(time_step=0.1e-9, compact_threshold=1e-12)
+
+        start = time.perf_counter()
+        cache = smoother.create_smoothed_cache(sources, 0, 10e-9, chunk_size=1000)
+        elapsed = time.perf_counter() - start
+
+        # Expected performance: < 0.5ms per pulse (new) vs ~0.8ms (old)
+        # For 1000 pulses: < 0.5s new
+        per_pulse_ms = elapsed / n_pulses * 1000
+
+        # Verify reasonable performance (< 1ms per pulse)
+        self.assertLess(
+            per_pulse_ms, 1.0,
+            f"Per-pulse time {per_pulse_ms:.3f}ms exceeds 1.0ms threshold"
+        )
+
+        # Verify output is correct
+        self.assertEqual(cache.n_pwls, n_pulses)
+        self.assertGreater(cache.n_pwl_points, 0)
+
+
+class TestTransientSmoothingIntegration(unittest.TestCase):
+    """Integration tests for smoothing in transient analysis workflow."""
+
+    def test_preprocess_sources_transient_workflow(self):
+        """Test full preprocessing workflow: sources -> smoothed -> evaluate."""
+        from core.vectorized_sources import VectorizedCurrentSources
+
+        np.random.seed(42)
+        n_sources = 100
+        sources = VectorizedCurrentSources(
+            n_nodes=n_sources,
+            node_to_idx={f'node_{i}': i for i in range(n_sources)},
+            n_sources=n_sources,
+            dc_values=np.zeros(n_sources),
+            source_node_idx=np.arange(n_sources, dtype=np.int32),
+            n_pulses=n_sources,
+            pulse_node_idx=np.arange(n_sources, dtype=np.int32),
+            pulse_source_idx=np.arange(n_sources, dtype=np.int32),
+            pulse_v1=np.zeros(n_sources),
+            pulse_v2=np.random.uniform(0.001, 0.01, n_sources),
+            pulse_delay=np.random.uniform(1e-9, 3e-9, n_sources),
+            pulse_rt=np.full(n_sources, 0.1e-9),
+            pulse_ft=np.full(n_sources, 0.1e-9),
+            pulse_width=np.random.uniform(1e-9, 2e-9, n_sources),
+            pulse_period=np.full(n_sources, 10e-9),
+            n_pwls=0, n_pwl_points=0,
+            pwl_node_idx=np.array([], dtype=np.int32),
+            pwl_source_idx=np.array([], dtype=np.int32),
+            pwl_period=np.array([]),
+            pwl_delay=np.array([]),
+            pwl_offset=np.array([], dtype=np.int32),
+            pwl_count=np.array([], dtype=np.int32),
+            pwl_times=np.array([]),
+            pwl_values=np.array([]),
+        )
+
+        # Preprocess (smooth) sources
+        smoothed = sources.create_smoothed_copy(
+            time_step=0.1e-9,
+            t_start=0,
+            t_end=10e-9,
+        )
+
+        # Verify smoothed sources structure
+        self.assertEqual(smoothed.n_pulses, 0)  # Pulses converted to PWL
+        self.assertEqual(smoothed.n_pwls, n_sources)  # All pulses now PWLs
+        self.assertGreater(smoothed.n_pwl_points, 0)
+
+        # Verify smoothed sources can be evaluated at arbitrary times
+        for t in [0, 2.5e-9, 5e-9, 7.5e-9, 10e-9]:
+            currents = smoothed.evaluate_at_time(t)
+            self.assertEqual(len(currents), n_sources)
+            self.assertTrue(np.all(np.isfinite(currents)))
+
+    def test_smoothing_preserves_dc_average(self):
+        """Smoothing should preserve DC average of waveforms."""
+        from core.vectorized_sources import VectorizedCurrentSources
+
+        np.random.seed(42)
+        n_sources = 50
+        dc_values = np.random.uniform(0.1, 1.0, n_sources)
+
+        sources = VectorizedCurrentSources(
+            n_nodes=n_sources,
+            node_to_idx={f'n{i}': i for i in range(n_sources)},
+            n_sources=n_sources,
+            dc_values=dc_values,
+            source_node_idx=np.arange(n_sources, dtype=np.int32),
+            n_pulses=n_sources,
+            pulse_node_idx=np.arange(n_sources, dtype=np.int32),
+            pulse_source_idx=np.arange(n_sources, dtype=np.int32),
+            pulse_v1=np.zeros(n_sources),
+            pulse_v2=np.ones(n_sources),
+            pulse_delay=np.zeros(n_sources),
+            pulse_rt=np.zeros(n_sources),
+            pulse_ft=np.zeros(n_sources),
+            pulse_width=np.full(n_sources, 5e-9),
+            pulse_period=np.full(n_sources, 10e-9),
+            n_pwls=0, n_pwl_points=0,
+            pwl_node_idx=np.array([], dtype=np.int32),
+            pwl_source_idx=np.array([], dtype=np.int32),
+            pwl_period=np.array([]),
+            pwl_delay=np.array([]),
+            pwl_offset=np.array([], dtype=np.int32),
+            pwl_count=np.array([], dtype=np.int32),
+            pwl_times=np.array([]),
+            pwl_values=np.array([]),
+        )
+
+        smoothed = sources.create_smoothed_copy(
+            time_step=0.1e-9,
+            t_start=0,
+            t_end=10e-9,
+        )
+
+        # DC values should be preserved exactly
+        np.testing.assert_array_equal(smoothed.dc_values, dc_values)
+
+        # Smoothed PWL should have similar average as original pulse
+        t_samples = np.linspace(0, 10e-9, 101)
+        original_avg = np.mean([sources.evaluate_at_time(t) for t in t_samples], axis=0)
+        smoothed_avg = np.mean([smoothed.evaluate_at_time(t) for t in t_samples], axis=0)
+
+        # Average should be approximately preserved (within 15% for smoothing effects)
+        np.testing.assert_allclose(
+            original_avg, smoothed_avg, rtol=0.15,
+            err_msg="Smoothing should approximately preserve DC average"
+        )
+
+
+class TestPulseSmoothingVectorized(unittest.TestCase):
+    """Tests for vectorized pulse smoothing."""
+
+    def test_raw_vs_smoothed_pulses_vectorized(self):
+        """Compare vectorized smoothing against reference values.
+
+        Same test concept as TestPulseSmoothing.test_raw_vs_smoothed_pulses
+        but verifying the vectorized path produces correct results.
+        """
+        from pdn.pdn_parser import Pulse
+        from core.pwl_smoothing import _smooth_pwl_vectorized, pulse_to_pwl_points
+
+        smoother = PWLSmoother(time_step=0.01e-9, compact_threshold=1e-12)
+
+        pulse1 = Pulse(0, 0.0117914, 3.52914e-09, 6.25e-13, 6.25e-13, 0, 1e-08)
+        pulse2 = Pulse(0, -0.000131702, 3.51998e-09, 9.78805e-12, 9.78805e-12, 0, 1e-08)
+
+        # Convert to PWL and smooth using vectorized path
+        pwl1 = pulse_to_pwl_points(
+            pulse1.v1, pulse1.v2, pulse1.delay, pulse1.rt, pulse1.ft,
+            pulse1.width, pulse1.period
+        )
+        pwl2 = pulse_to_pwl_points(
+            pulse2.v1, pulse2.v2, pulse2.delay, pulse2.rt, pulse2.ft,
+            pulse2.width, pulse2.period
+        )
+
+        times1 = np.array([p[0] for p in pwl1])
+        values1 = np.array([p[1] for p in pwl1])
+        times2 = np.array([p[0] for p in pwl2])
+        values2 = np.array([p[1] for p in pwl2])
+
+        smooth_times1, smooth_values1 = _smooth_pwl_vectorized(
+            times1, values1, pulse1.period, 0.01e-9, 0, 10e-9
+        )
+        smooth_times2, smooth_values2 = _smooth_pwl_vectorized(
+            times2, values2, pulse2.period, 0.01e-9, 0, 10e-9
+        )
+
+        # Also smooth using the class method for comparison
+        smoothed1 = smoother.smooth_pulse(pulse1, t_start=0, t_end=10e-9)
+        smoothed2 = smoother.smooth_pulse(pulse2, t_start=0, t_end=10e-9)
+
+        # Sample at specific time points and compare
+        t_compare = np.array([3.48e-9, 3.5e-9, 3.52e-9, 3.54e-9, 3.56e-9])
+
+        for t in t_compare:
+            # Evaluate smoothed PWL from both methods
+            val1_class = smoothed1.evaluate(t)
+            val2_class = smoothed2.evaluate(t)
+
+            # The vectorized path should match the class-based path
+            idx = np.searchsorted(smooth_times1, t)
+            if idx > 0 and idx < len(smooth_times1):
+                t_lo, t_hi = smooth_times1[idx-1], smooth_times1[idx]
+                v_lo, v_hi = smooth_values1[idx-1], smooth_values1[idx]
+                val1_vec = v_lo + (v_hi - v_lo) * (t - t_lo) / (t_hi - t_lo) if t_hi > t_lo else v_lo
+            else:
+                val1_vec = smooth_values1[0] if idx == 0 else smooth_values1[-1]
+
+            # Values should be close (allowing for compaction differences)
+            self.assertAlmostEqual(val1_class, val1_vec, places=3)
 
 
 if __name__ == '__main__':

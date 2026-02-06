@@ -273,6 +273,7 @@ class DynamicIRDropSolver:
         t_start: float,
         t_end: float,
         compact_threshold: float = 1e-12,
+        chunk_size: int = 10000,
     ) -> VectorizedCurrentSources:
         """Preprocess and return smoothed current sources for reuse.
 
@@ -281,11 +282,16 @@ class DynamicIRDropSolver:
         sources can be passed to solve_quasi_static() for reuse across
         multiple analyses.
 
+        Uses chunked batch processing for high performance with controllable
+        memory usage.
+
         Args:
             time_step: Simulation time step (filter window = 2 * time_step)
             t_start: Simulation start time
             t_end: Simulation end time
             compact_threshold: Slope change threshold for compaction
+            chunk_size: Number of waveforms to process per chunk (default 10000).
+                       Controls memory/speed tradeoff. Larger = faster but more memory.
 
         Returns:
             VectorizedCurrentSources with smoothed waveforms
@@ -304,6 +310,7 @@ class DynamicIRDropSolver:
             t_start=t_start,
             t_end=t_end,
             compact_threshold=compact_threshold,
+            chunk_size=chunk_size,
         )
 
     def _evaluate_currents_at_time(self, t: float) -> Dict[Any, float]:

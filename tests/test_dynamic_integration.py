@@ -620,5 +620,215 @@ class TestIntegrationMethodComparison(unittest.TestCase):
         self.assertEqual(len(result_be.t_array), len(result_trap.t_array))
 
 
+class TestSmoothingPreprocessingIntegration(unittest.TestCase):
+    """Integration tests for current smoothing preprocessing with reuse."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+
+    def test_preprocess_and_reuse_quasi_static(self):
+        """Preprocessed smoothed sources should be reusable in quasi-static."""
+        # Enable vectorized mode for preprocessing
+        solver = DynamicIRDropSolver(self.model, self.graph, vectorize_threshold=0)
+
+        # Preprocess sources once
+        smoothed = solver.preprocess_sources(
+            time_step=1e-9,
+            t_start=0.0,
+            t_end=50e-9,
+            chunk_size=1000,  # Test chunked processing
+        )
+
+        # Verify smoothed sources structure
+        self.assertIsNotNone(smoothed)
+        self.assertEqual(smoothed.n_pulses, 0)  # Pulses converted to PWL
+
+        # Reuse in first quasi-static analysis
+        result1 = solver.solve_quasi_static(
+            t_start=0.0,
+            t_end=50e-9,
+            n_points=11,
+            smoothed_sources=smoothed,
+        )
+
+        # Reuse in second quasi-static analysis (same time range)
+        result2 = solver.solve_quasi_static(
+            t_start=0.0,
+            t_end=50e-9,
+            n_points=11,
+            smoothed_sources=smoothed,
+        )
+
+        # Results should be identical (deterministic)
+        np.testing.assert_array_almost_equal(
+            result1.max_ir_drop_per_time,
+            result2.max_ir_drop_per_time,
+        )
+        self.assertAlmostEqual(result1.peak_ir_drop, result2.peak_ir_drop)
+
+    def test_preprocess_and_reuse_transient(self):
+        """Preprocessed smoothed sources should be reusable in transient."""
+        # Enable vectorized mode for preprocessing
+        solver = TransientIRDropSolver(self.model, self.graph, vectorize_threshold=0)
+
+        # Preprocess sources once
+        smoothed = solver.preprocess_sources(
+            dt=1e-9,
+            t_start=0.0,
+            t_end=30e-9,
+            chunk_size=1000,
+        )
+
+        # Verify smoothed sources structure
+        self.assertIsNotNone(smoothed)
+
+        # Reuse in first transient analysis
+        result1 = solver.solve_transient(
+            t_start=0.0,
+            t_end=30e-9,
+            dt=1e-9,
+            smoothed_sources=smoothed,
+        )
+
+        # Reuse in second transient analysis
+        result2 = solver.solve_transient(
+            t_start=0.0,
+            t_end=30e-9,
+            dt=1e-9,
+            smoothed_sources=smoothed,
+        )
+
+        # Results should be identical
+        np.testing.assert_array_almost_equal(
+            result1.max_ir_drop_per_time,
+            result2.max_ir_drop_per_time,
+        )
+
+    def test_smoothed_vs_raw_results_similar(self):
+        """Smoothed and raw sources should produce similar peak IR-drop."""
+        # Enable vectorized mode for preprocessing
+        solver = DynamicIRDropSolver(self.model, self.graph, vectorize_threshold=0)
+
+        # Solve without smoothing
+        result_raw = solver.solve_quasi_static(
+            t_start=0.0,
+            t_end=50e-9,
+            n_points=11,
+        )
+
+        # Preprocess and solve with smoothing
+        smoothed = solver.preprocess_sources(
+            time_step=1e-9,
+            t_start=0.0,
+            t_end=50e-9,
+        )
+        result_smoothed = solver.solve_quasi_static(
+            t_start=0.0,
+            t_end=50e-9,
+            n_points=11,
+            smoothed_sources=smoothed,
+        )
+
+        # Peak IR-drop should be similar (smoothing reduces high-freq noise)
+        # Allow up to 20% difference since smoothing removes transients
+        if result_raw.peak_ir_drop > 1e-6:
+            rel_diff = abs(result_raw.peak_ir_drop - result_smoothed.peak_ir_drop) / result_raw.peak_ir_drop
+            self.assertLess(rel_diff, 0.2)
+
+    def test_chunk_size_does_not_affect_results(self):
+        """Different chunk sizes should produce identical results."""
+        # Enable vectorized mode for preprocessing
+        solver = DynamicIRDropSolver(self.model, self.graph, vectorize_threshold=0)
+
+        # Preprocess with small chunks
+        smoothed_small = solver.preprocess_sources(
+            time_step=1e-9,
+            t_start=0.0,
+            t_end=30e-9,
+            chunk_size=10,  # Very small chunks
+        )
+
+        # Preprocess with large chunks
+        smoothed_large = solver.preprocess_sources(
+            time_step=1e-9,
+            t_start=0.0,
+            t_end=30e-9,
+            chunk_size=10000,  # Large chunks
+        )
+
+        # Solve with both
+        result_small = solver.solve_quasi_static(
+            t_start=0.0,
+            t_end=30e-9,
+            n_points=7,
+            smoothed_sources=smoothed_small,
+        )
+
+        result_large = solver.solve_quasi_static(
+            t_start=0.0,
+            t_end=30e-9,
+            n_points=7,
+            smoothed_sources=smoothed_large,
+        )
+
+        # Results should be identical regardless of chunk size
+        np.testing.assert_array_almost_equal(
+            result_small.max_ir_drop_per_time,
+            result_large.max_ir_drop_per_time,
+            decimal=10,
+        )
+
+    def test_transient_with_different_integration_methods_smoothed(self):
+        """Smoothed sources should work with both BE and Trapezoidal."""
+        # Enable vectorized mode for preprocessing
+        solver = TransientIRDropSolver(self.model, self.graph, vectorize_threshold=0)
+
+        # Preprocess once
+        smoothed = solver.preprocess_sources(
+            dt=1e-9,
+            t_start=0.0,
+            t_end=20e-9,
+        )
+
+        # Solve with Backward Euler
+        result_be = solver.solve_transient(
+            t_start=0.0,
+            t_end=20e-9,
+            dt=1e-9,
+            method=IntegrationMethod.BACKWARD_EULER,
+            smoothed_sources=smoothed,
+        )
+
+        # Solve with Trapezoidal
+        result_trap = solver.solve_transient(
+            t_start=0.0,
+            t_end=20e-9,
+            dt=1e-9,
+            method=IntegrationMethod.TRAPEZOIDAL,
+            smoothed_sources=smoothed,
+        )
+
+        # Both should produce valid results
+        self.assertGreaterEqual(result_be.peak_ir_drop, 0)
+        self.assertGreaterEqual(result_trap.peak_ir_drop, 0)
+        self.assertEqual(len(result_be.t_array), len(result_trap.t_array))
+
+
 if __name__ == '__main__':
     unittest.main()
