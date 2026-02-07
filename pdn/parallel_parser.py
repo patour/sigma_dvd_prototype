@@ -92,7 +92,8 @@ class InstanceParseResult:
     stats: Dict[str, Any] = field(default_factory=lambda: {
         'total': 0,
         'with_waveforms': 0,
-        'total_static_current_ma': 0.0
+        'total_static_current_ma': 0.0,
+        'wscale_values': []
     })
 
     warnings: List[str] = field(default_factory=list)
@@ -769,6 +770,7 @@ def _parse_instance_worker(args: Tuple) -> InstanceParseResult:
                     result.stats['total'] += 1
                     if isrc.has_waveform_data():
                         result.stats['with_waveforms'] += 1
+                        result.stats['wscale_values'].append(isrc.wscale)
                     result.stats['total_static_current_ma'] += abs(isrc.get_static_current())
 
     except Exception as e:

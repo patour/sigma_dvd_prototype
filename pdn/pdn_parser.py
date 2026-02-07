@@ -55,6 +55,7 @@ import re
 import pickle
 import logging
 import time
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Set, TextIO, Union
 from dataclasses import dataclass, field
@@ -100,6 +101,34 @@ except ImportError:
 GMAX = 1e5  # Maximum conductance (from parser.cc line 1119)
 SHORT_THRESHOLD = 1e-6  # Resistance threshold for shorts (KOhm)
 INVALID_STATIC_CURRENT = -999.0
+
+# Thread-safe wscale control using ContextVar
+# Each thread/async context gets its own independent value
+# Default is True (wscale factors are applied to waveform evaluations)
+_apply_wscale: ContextVar[bool] = ContextVar('apply_wscale', default=True)
+
+
+def get_apply_wscale() -> bool:
+    """Get current wscale application setting (thread-safe).
+
+    Returns:
+        True if wscale factors should be applied to pulse/PWL evaluations,
+        False otherwise.
+    """
+    return _apply_wscale.get()
+
+
+def set_apply_wscale(enabled: bool) -> None:
+    """Set wscale application for current context (thread-safe).
+
+    Each thread/async context has its own independent value. Setting this
+    in one thread does not affect other threads.
+
+    Args:
+        enabled: If True, wscale factors are applied to pulse/PWL evaluations.
+                 If False, wscale is parsed but not applied.
+    """
+    _apply_wscale.set(enabled)
 
 # Unit conversions (matching C++ parser)
 R_TO_KOHM = 1e-3  # Ohm to KOhm
@@ -404,9 +433,12 @@ class PWL:
 class CurrentSource:
     """
     Current source instance with full waveform data.
-    
+
     All current values are stored in mA for consistency with the PDN parser.
     Use get_static_current() for DC analysis, get_current_at_time(t) for transient.
+
+    The wscale parameter scales pulse/PWL waveform values (but NOT dc_value).
+    This matches C++ SimPWL behavior where wscale is applied to waveform evaluations.
     """
     name: str
     node1: str
@@ -416,6 +448,7 @@ class CurrentSource:
     pulses: List[Pulse] = field(default_factory=list)
     pwls: List[PWL] = field(default_factory=list)
     info: Optional[InstanceInfo] = None
+    wscale: float = 1.0                             # Waveform scaling factor
 
     def has_waveform_data(self) -> bool:
         """Check if instance has any dynamic waveform data (Pulse or PWL)."""
@@ -428,23 +461,37 @@ class CurrentSource:
                 self.has_waveform_data())
 
     def get_static_current(self) -> float:
-        """Get static/DC current value (mA)."""
+        """Get static/DC current value (mA).
+
+        If static_value is set, returns dc_value + static_value (wscale not applied).
+        Otherwise, computes DC average from waveforms with wscale applied (if enabled).
+        """
         if self.static_value is not None:
             return self.dc_value + self.static_value
-        total = self.dc_value
+
+        # Apply wscale to waveform DC averages (not to dc_value)
+        scale = self.wscale if get_apply_wscale() else 1.0
+
+        total = self.dc_value  # DC NOT scaled (matches C++ behavior)
         for pulse in self.pulses:
-            total += pulse.get_dc()
+            total += pulse.get_dc() * scale
         for pwl in self.pwls:
-            total += pwl.get_dc()
+            total += pwl.get_dc() * scale
         return total
 
     def get_current_at_time(self, time: float) -> float:
-        """Get current value at specified time (mA)."""
-        total = self.dc_value
+        """Get current value at specified time (mA).
+
+        Applies wscale to pulse/PWL waveform evaluations (if enabled).
+        DC component is NOT scaled (matches C++ SimPWL behavior).
+        """
+        scale = self.wscale if get_apply_wscale() else 1.0
+
+        total = self.dc_value  # DC NOT scaled
         for pulse in self.pulses:
-            total += pulse.evaluate(time)
+            total += pulse.evaluate(time) * scale
         for pwl in self.pwls:
-            total += pwl.evaluate(time)
+            total += pwl.evaluate(time) * scale
         return total
     
     def to_dict(self) -> Dict:
@@ -457,9 +504,10 @@ class CurrentSource:
             'static_value': self.static_value,
             'pulses': [p.to_dict() for p in self.pulses],
             'pwls': [p.to_dict() for p in self.pwls],
-            'info': self.info.to_dict() if self.info else None
+            'info': self.info.to_dict() if self.info else None,
+            'wscale': self.wscale,
         }
-    
+
     @classmethod
     def from_dict(cls, d: Dict) -> 'CurrentSource':
         """Reconstruct from dictionary."""
@@ -471,7 +519,8 @@ class CurrentSource:
             static_value=d.get('static_value'),
             pulses=[Pulse.from_dict(p) for p in d.get('pulses', [])],
             pwls=[PWL.from_dict(p) for p in d.get('pwls', [])],
-            info=InstanceInfo.from_dict(d['info']) if d.get('info') else None
+            info=InstanceInfo.from_dict(d['info']) if d.get('info') else None,
+            wscale=d.get('wscale', 1.0),  # Default 1.0 for backward compat
         )
 
 
@@ -649,6 +698,9 @@ def _parse_current_source_line(line: str) -> Optional[CurrentSource]:
             for pulse in isrc.pulses:
                 if pulse.period == 0:
                     pulse.period = period
+        elif token_lower.startswith('wscale='):
+            # Waveform scaling factor (matches C++ SimPWL pwl_scaling)
+            isrc.wscale = _parse_spice_value(token.split('=')[1])
 
         i += 1
 
@@ -1049,6 +1101,7 @@ class GraphBuilder:
                         'vsources': 0,
                         'isources': 0,
                         'isources_with_waveforms': 0,
+                        'wscale_values': [],
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
@@ -1062,6 +1115,7 @@ class GraphBuilder:
                         'vsources': 0,
                         'isources': 0,
                         'isources_with_waveforms': 0,
+                        'wscale_values': [],
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
@@ -1075,13 +1129,14 @@ class GraphBuilder:
                         'vsources': 0,
                         'isources': 0,
                         'isources_with_waveforms': 0,
+                        'wscale_values': [],
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
                         'total_current': 0.0
                     }
                 }
-            
+
             net_stat = self.stats.net_stats[net_type][category]
             # Exclude node '0' from statistics
             if node1 != '0':
@@ -1115,6 +1170,7 @@ class GraphBuilder:
                         'vsources': 0,
                         'isources': 0,
                         'isources_with_waveforms': 0,
+                        'wscale_values': [],
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
@@ -1128,6 +1184,7 @@ class GraphBuilder:
                         'vsources': 0,
                         'isources': 0,
                         'isources_with_waveforms': 0,
+                        'wscale_values': [],
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
@@ -1141,13 +1198,14 @@ class GraphBuilder:
                         'vsources': 0,
                         'isources': 0,
                         'isources_with_waveforms': 0,
+                        'wscale_values': [],
                         'total_resistance': 0.0,
                         'total_capacitance': 0.0,
                         'total_inductance': 0.0,
                         'total_current': 0.0
                     }
                 }
-            
+
             # Determine if unmapped element is in package or die
             is_package_elem = self.current_file_type == 'package'
             category = 'package' if is_package_elem else 'unmapped'
@@ -2311,7 +2369,11 @@ class NetlistParser:
                         net_type = self.builder.node_net_map.get(node_pos) or self.builder.node_net_map.get(node_neg)
                         if net_type and net_type in self.builder.stats.net_stats:
                             if 'die' in self.builder.stats.net_stats[net_type]:
-                                self.builder.stats.net_stats[net_type]['die']['isources_with_waveforms'] += 1
+                                die_stats = self.builder.stats.net_stats[net_type]['die']
+                                die_stats['isources_with_waveforms'] += 1
+                                if 'wscale_values' not in die_stats:
+                                    die_stats['wscale_values'] = []
+                                die_stats['wscale_values'].append(isrc.wscale)
 
                     total_static_current += abs(static_current_ma)
 
@@ -2632,14 +2694,18 @@ class NetlistParser:
             # Update statistics
             if isrc.has_waveform_data():
                 self.builder.stats.instances_with_waveforms += 1
-                
+
                 # Update per-net waveform statistics
                 net_type = self.builder.node_net_map.get(node_pos) or self.builder.node_net_map.get(node_neg)
                 if net_type and net_type in self.builder.stats.net_stats:
                     # Current sources from instanceModels are always 'die' category
                     if 'die' in self.builder.stats.net_stats[net_type]:
-                        self.builder.stats.net_stats[net_type]['die']['isources_with_waveforms'] += 1
-                        
+                        die_stats = self.builder.stats.net_stats[net_type]['die']
+                        die_stats['isources_with_waveforms'] += 1
+                        if 'wscale_values' not in die_stats:
+                            die_stats['wscale_values'] = []
+                        die_stats['wscale_values'].append(isrc.wscale)
+
             self.builder.stats.total_static_current_ma += abs(static_current_ma)
             
     def _parse_controlled_source(self, line: str, source_type: str):
@@ -3096,6 +3162,20 @@ class NetlistParser:
                         waveform_count = net_stat.get('isources_with_waveforms', 0)
                         if waveform_count > 0:
                             print(f"        With Waveforms: {waveform_count:,}")
+                            # Display wscale distribution
+                            wscale_values = net_stat.get('wscale_values', [])
+                            if wscale_values:
+                                print(f"        Wscale Distribution:")
+                                # Count by unique wscale value
+                                wscale_counts = {}
+                                for ws in wscale_values:
+                                    wscale_counts[ws] = wscale_counts.get(ws, 0) + 1
+                                # Sort by wscale descending, print with percentages
+                                total = len(wscale_values)
+                                for ws in sorted(wscale_counts.keys(), reverse=True):
+                                    count = wscale_counts[ws]
+                                    pct = 100.0 * count / total
+                                    print(f"          {ws:.2f}: {count:,} ({pct:.1f}%)")
                         avg_i = net_stat['total_current'] / net_stat['isources']
                         print(f"        Total Current: {net_stat['total_current']:.3f} mA")
                         print(f"        Average: {avg_i:.6f} mA")
