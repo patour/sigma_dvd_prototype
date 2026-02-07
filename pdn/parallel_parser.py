@@ -34,6 +34,23 @@ from pdn.pdn_parser import (
     Pulse, PWL, CurrentSource, InstanceInfo
 )
 
+# Pre-interned strings for memory optimization in worker processes
+# Each worker process needs its own interned strings
+import sys
+_ELEM_R = sys.intern('R')
+_ELEM_C = sys.intern('C')
+_ELEM_L = sys.intern('L')
+_ELEM_V = sys.intern('V')
+_ELEM_I = sys.intern('I')
+
+# Interned edge attribute keys
+_KEY_NET_TYPE = sys.intern('net_type')
+_KEY_HAS_BOUNDARY = sys.intern('has_boundary')
+_KEY_BOUNDARY_NODE1 = sys.intern('boundary_node1')
+_KEY_BOUNDARY_NODE2 = sys.intern('boundary_node2')
+_KEY_DC = sys.intern('dc')
+_KEY_NLCAP_MODEL = sys.intern('nlcap_model')
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +59,7 @@ logger = logging.getLogger(__name__)
 # Result Data Classes (Pickle-Serializable)
 # =============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class TileParseResult:
     """
     Pickle-serializable result from parsing a single tile.
@@ -72,7 +89,7 @@ class TileParseResult:
     errors: List[str] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class InstanceParseResult:
     """
     Pickle-serializable result from parsing instance models.
@@ -470,11 +487,14 @@ def _parse_resistor_worker(
     value = _parse_spice_value(value_token) * R_TO_KOHM
 
     net_type = node_net_map.get(node1) or node_net_map.get(node2)
-    attrs = {'net_type': net_type}
+    attrs = {_KEY_NET_TYPE: net_type}
     if is_boundary1 or is_boundary2:
-        attrs['has_boundary'] = True
+        attrs[_KEY_HAS_BOUNDARY] = True
+        # Track which specific nodes are boundary nodes
+        attrs[_KEY_BOUNDARY_NODE1] = is_boundary1
+        attrs[_KEY_BOUNDARY_NODE2] = is_boundary2
 
-    return (node1, node2, 'R', value, name, attrs)
+    return (node1, node2, _ELEM_R, value, name, attrs)
 
 
 def _parse_capacitor_worker(
@@ -511,15 +531,17 @@ def _parse_capacitor_worker(
     value = _parse_spice_value(value_token) * C_TO_FF
 
     net_type = node_net_map.get(node1) or node_net_map.get(node2)
-    attrs = {'net_type': net_type}
+    attrs = {_KEY_NET_TYPE: net_type}
     if is_boundary1 or is_boundary2:
-        attrs['has_boundary'] = True
+        attrs[_KEY_HAS_BOUNDARY] = True
+        attrs[_KEY_BOUNDARY_NODE1] = is_boundary1
+        attrs[_KEY_BOUNDARY_NODE2] = is_boundary2
 
     # Check for nonlinear cap model
     if len(tokens) > model_idx and not tokens[model_idx].startswith('*'):
-        attrs['nlcap_model'] = tokens[model_idx]
+        attrs[_KEY_NLCAP_MODEL] = tokens[model_idx]
 
-    return (node1, node2, 'C', value, name, attrs)
+    return (node1, node2, _ELEM_C, value, name, attrs)
 
 
 def _parse_inductor_worker(
@@ -554,11 +576,13 @@ def _parse_inductor_worker(
     value = _parse_spice_value(value_token) * L_TO_NH
 
     net_type = node_net_map.get(node1) or node_net_map.get(node2)
-    attrs = {'net_type': net_type}
+    attrs = {_KEY_NET_TYPE: net_type}
     if is_boundary1 or is_boundary2:
-        attrs['has_boundary'] = True
+        attrs[_KEY_HAS_BOUNDARY] = True
+        attrs[_KEY_BOUNDARY_NODE1] = is_boundary1
+        attrs[_KEY_BOUNDARY_NODE2] = is_boundary2
 
-    return (node1, node2, 'L', value, name, attrs)
+    return (node1, node2, _ELEM_L, value, name, attrs)
 
 
 def _parse_vsource_worker(
@@ -583,9 +607,11 @@ def _parse_vsource_worker(
         return None
 
     net_type = node_net_map.get(node_pos) or node_net_map.get(node_neg)
-    attrs = {'net_type': net_type, 'dc': dc_value}
+    attrs = {_KEY_NET_TYPE: net_type, _KEY_DC: dc_value}
     if is_boundary1 or is_boundary2:
-        attrs['has_boundary'] = True
+        attrs[_KEY_HAS_BOUNDARY] = True
+        attrs[_KEY_BOUNDARY_NODE1] = is_boundary1
+        attrs[_KEY_BOUNDARY_NODE2] = is_boundary2
 
     # Parse additional parameters
     i = 4
@@ -605,7 +631,7 @@ def _parse_vsource_worker(
         else:
             i += 1
 
-    return (node_pos, node_neg, 'V', dc_value, name, attrs)
+    return (node_pos, node_neg, _ELEM_V, dc_value, name, attrs)
 
 
 def _parse_isource_worker(
@@ -639,11 +665,13 @@ def _parse_isource_worker(
     dc_value_ma = dc_value * I_TO_MA
 
     net_type = node_net_map.get(node_pos) or node_net_map.get(node_neg)
-    attrs = {'net_type': net_type, 'dc': dc_value_ma}
+    attrs = {_KEY_NET_TYPE: net_type, _KEY_DC: dc_value_ma}
     if is_boundary1 or is_boundary2:
-        attrs['has_boundary'] = True
+        attrs[_KEY_HAS_BOUNDARY] = True
+        attrs[_KEY_BOUNDARY_NODE1] = is_boundary1
+        attrs[_KEY_BOUNDARY_NODE2] = is_boundary2
 
-    return (node_pos, node_neg, 'I', dc_value_ma, name, attrs)
+    return (node_pos, node_neg, _ELEM_I, dc_value_ma, name, attrs)
 
 
 # =============================================================================
@@ -693,12 +721,12 @@ def _parse_tile_worker(args: Tuple) -> TileParseResult:
                         if node2 not in result.nodes:
                             result.nodes[node2] = {'tile_id': tile_id}
 
-                        # Track boundary nodes
+                        # Track boundary nodes - attrs tracks which specific nodes had '*' prefix
                         if attrs.get('has_boundary'):
-                            if node1.startswith('*'):
-                                result.boundary_nodes.append(node1[1:])
-                            if node2.startswith('*'):
-                                result.boundary_nodes.append(node2[1:])
+                            if attrs.get('boundary_node1'):
+                                result.boundary_nodes.append(node1)
+                            if attrs.get('boundary_node2'):
+                                result.boundary_nodes.append(node2)
 
     except Exception as e:
         result.errors.append(f"Error parsing tile {tile_id}: {str(e)}")

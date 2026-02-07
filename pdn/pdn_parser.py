@@ -136,8 +136,30 @@ C_TO_FF = 1e15   # Farad to fF
 L_TO_NH = 1e9    # Henry to nH
 I_TO_MA = 1e3    # Ampere to mA
 
+# Pre-interned strings for memory optimization
+# These strings are used millions of times in large netlists
+import sys
+_ELEM_R = sys.intern('R')
+_ELEM_C = sys.intern('C')
+_ELEM_L = sys.intern('L')
+_ELEM_V = sys.intern('V')
+_ELEM_I = sys.intern('I')
+_ELEM_TYPES = {'R': _ELEM_R, 'C': _ELEM_C, 'L': _ELEM_L, 'V': _ELEM_V, 'I': _ELEM_I}
 
-@dataclass
+# Interned edge attribute keys
+_KEY_TYPE = sys.intern('type')
+_KEY_VALUE = sys.intern('value')
+_KEY_ELEM_NAME = sys.intern('elem_name')
+_KEY_TILE_ID = sys.intern('tile_id')
+_KEY_NET_TYPE = sys.intern('net_type')
+
+# Interned category strings for statistics
+_CAT_DIE = sys.intern('die')
+_CAT_PACKAGE = sys.intern('package')
+_CAT_UNMAPPED = sys.intern('unmapped')
+
+
+@dataclass(slots=True)
 class ParseStats:
     """Statistics for parsed netlist"""
     nodes_before_cleanup: int = 0
@@ -159,6 +181,7 @@ class ParseStats:
     tiles_failed: int = 0
     layer_stats: Dict[str, Dict] = field(default_factory=dict)
     net_stats: Dict[str, Dict] = field(default_factory=dict)
+    layer_stats_by_net: Dict[str, Dict] = field(default_factory=dict)
     unmapped_nodes: int = 0
     # Instance current statistics
     instances_with_waveforms: int = 0
@@ -171,19 +194,20 @@ class ParseStats:
 # These classes support parsing and evaluation of time-domain current waveforms
 # from instanceModels*.sp files. All current values are stored in mA.
 
-@dataclass
+@dataclass(slots=True)
 class InstanceInfo:
     """
     Parsed instance name information.
-    
+
     Instance name format:
       i_<instance_name>:<vdd_net>:<vdd_pin>:<vss_net>:<vss_pin>:<tile_x>:<tile_y>[:<extra>]
-    
+
     Example:
       i_U123/cell:VDD_XLV:VDD:0:0:5:3:0
+
+    Note: instance_name is a computed property derived from full_name to save memory.
     """
     full_name: str
-    instance_name: str
     vdd_net: Optional[str] = None
     vdd_pin: Optional[str] = None
     vss_net: Optional[str] = None
@@ -191,20 +215,27 @@ class InstanceInfo:
     tile_x: int = 0
     tile_y: int = 0
 
+    @property
+    def instance_name(self) -> str:
+        """Derived from full_name by removing 'i_' prefix and splitting on ':'."""
+        name = self.full_name
+        if name.lower().startswith('i_'):
+            name = name[2:]
+        return name.split(':')[0]
+
     @classmethod
     def parse(cls, name: str, delimiter: str = ':') -> 'InstanceInfo':
         """Parse instance name to extract net and location info."""
-        info = cls(full_name=name, instance_name=name)
-        
+        info = cls(full_name=name)
+
         # Remove 'i_' or 'I_' prefix for parsing
         parse_name = name
         if parse_name.lower().startswith('i_'):
             parse_name = parse_name[2:]
-        
+
         parts = parse_name.split(delimiter)
-        
-        if len(parts) >= 1:
-            info.instance_name = parts[0]
+
+        # instance_name is now a computed property (parts[0])
         if len(parts) >= 2:
             info.vdd_net = parts[1] if parts[1] != '0' else None
         if len(parts) >= 3:
@@ -223,14 +254,18 @@ class InstanceInfo:
                 info.tile_y = int(parts[6])
             except ValueError:
                 pass
-        
+
         return info
-    
+
     def to_dict(self) -> Dict:
-        """Serialize to dictionary for JSON-compatible storage."""
+        """Serialize to dictionary for JSON-compatible storage.
+
+        Note: instance_name is included for backward compatibility but
+        will be recomputed from full_name when deserializing.
+        """
         return {
             'full_name': self.full_name,
-            'instance_name': self.instance_name,
+            'instance_name': self.instance_name,  # Computed property, for backward compat
             'vdd_net': self.vdd_net,
             'vdd_pin': self.vdd_pin,
             'vss_net': self.vss_net,
@@ -238,13 +273,17 @@ class InstanceInfo:
             'tile_x': self.tile_x,
             'tile_y': self.tile_y
         }
-    
+
     @classmethod
     def from_dict(cls, d: Dict) -> 'InstanceInfo':
-        """Reconstruct from dictionary."""
+        """Reconstruct from dictionary.
+
+        Note: instance_name from dict is ignored - it will be recomputed
+        from full_name via the property.
+        """
         return cls(
             full_name=d.get('full_name', ''),
-            instance_name=d.get('instance_name', ''),
+            # instance_name is now a computed property, not stored
             vdd_net=d.get('vdd_net'),
             vdd_pin=d.get('vdd_pin'),
             vss_net=d.get('vss_net'),
@@ -254,7 +293,7 @@ class InstanceInfo:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class Pulse:
     """
     Pulse waveform definition.
@@ -342,7 +381,7 @@ class Pulse:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class PWL:
     """
     Piece-wise linear waveform.
@@ -429,7 +468,7 @@ class PWL:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class CurrentSource:
     """
     Current source instance with full waveform data.
@@ -1047,14 +1086,18 @@ class GraphBuilder:
         self.add_node(node1)
         self.add_node(node2)
         
-        # Create edge attributes
+        # Create edge attributes with interned keys for memory efficiency
+        # Only store elem_name for R and V types (needed for vsrc detection and shorts logging)
+        interned_type = _ELEM_TYPES.get(elem_type, elem_type)
         edge_attrs = {
-            'type': elem_type,
-            'value': value,
-            'elem_name': name,
-            'tile_id': self.current_tile_id,
-            'net_type': net_type
+            _KEY_TYPE: interned_type,
+            _KEY_VALUE: value,
+            _KEY_TILE_ID: self.current_tile_id,
+            _KEY_NET_TYPE: net_type
         }
+        # Only store elem_name for R and V types to save memory on C/L/I edges
+        if elem_type in ('R', 'V'):
+            edge_attrs[_KEY_ELEM_NAME] = name
         edge_attrs.update(attrs)
         
         # Add edge (MultiDiGraph allows multiple edges between same nodes)
@@ -1089,7 +1132,7 @@ class GraphBuilder:
             
             # Element is package if either node is a package node
             is_package_elem = node1_is_package or node2_is_package
-            category = 'package' if is_package_elem else 'die'
+            category = _CAT_PACKAGE if is_package_elem else _CAT_DIE
             
             if net_type not in self.stats.net_stats:
                 self.stats.net_stats[net_type] = {
@@ -1369,9 +1412,22 @@ class GraphBuilder:
             'total_static_current_ma': self.stats.total_static_current_ma
         }
         self.graph.graph['net_stats'] = net_stats_serializable
-        
+
         self.logger.info(f"Graph finalized: {self.stats.nodes_after_cleanup} nodes, "
                         f"{self.graph.number_of_edges()} edges")
+
+        # Memory optimization: Clear temporary data structures that are no longer needed
+        # These are only used during parsing and net connectivity propagation
+        self.node_net_map.clear()
+        self.node_net_map_lower.clear()
+        self.uf_parent.clear()
+        self.uf_net.clear()
+        self.package_edges.clear()
+        # Clear node attributes cache
+        self.node_attributes.clear()
+        # Note: instance_node_map and instance_sources are NOT cleared here because
+        # they are stored by reference in graph.graph. Clearing them would clear
+        # the graph's data as well. The graph now owns these data structures.
 
 
 class NetlistParser:
@@ -2116,10 +2172,12 @@ class NetlistParser:
                 edge_attrs = {
                     'type': elem_type,
                     'value': value,
-                    'elem_name': name,
                     'tile_id': result.tile_id,
                     **attrs
                 }
+                # Only store elem_name for R and V types to save memory
+                if elem_type in ('R', 'V'):
+                    edge_attrs['elem_name'] = name
                 all_edges.append((node1, node2, edge_attrs))
                 total_stats[elem_type] += 1
 
@@ -2199,23 +2257,23 @@ class NetlistParser:
                         'die': {
                             'nodes': set(), 'resistors': 0, 'capacitors': 0,
                             'inductors': 0, 'vsources': 0, 'isources': 0,
-                            'isources_with_waveforms': 0, 'total_resistance': 0.0,
-                            'total_capacitance': 0.0, 'total_inductance': 0.0,
-                            'total_current': 0.0
+                            'isources_with_waveforms': 0, 'wscale_values': [],
+                            'total_resistance': 0.0, 'total_capacitance': 0.0,
+                            'total_inductance': 0.0, 'total_current': 0.0
                         },
                         'package': {
                             'nodes': set(), 'resistors': 0, 'capacitors': 0,
                             'inductors': 0, 'vsources': 0, 'isources': 0,
-                            'isources_with_waveforms': 0, 'total_resistance': 0.0,
-                            'total_capacitance': 0.0, 'total_inductance': 0.0,
-                            'total_current': 0.0
+                            'isources_with_waveforms': 0, 'wscale_values': [],
+                            'total_resistance': 0.0, 'total_capacitance': 0.0,
+                            'total_inductance': 0.0, 'total_current': 0.0
                         },
                         'unmapped': {
                             'nodes': set(), 'resistors': 0, 'capacitors': 0,
                             'inductors': 0, 'vsources': 0, 'isources': 0,
-                            'isources_with_waveforms': 0, 'total_resistance': 0.0,
-                            'total_capacitance': 0.0, 'total_inductance': 0.0,
-                            'total_current': 0.0
+                            'isources_with_waveforms': 0, 'wscale_values': [],
+                            'total_resistance': 0.0, 'total_capacitance': 0.0,
+                            'total_inductance': 0.0, 'total_current': 0.0
                         }
                     }
 
@@ -2344,10 +2402,10 @@ class NetlistParser:
                 # Add edge to graph if nodes exist
                 if node_pos in self.builder.graph or node_neg in self.builder.graph:
                     static_current_ma = isrc.get_static_current()
+                    # Note: elem_name not stored for I-type edges to save memory
                     attrs = {
                         'type': 'I',
                         'value': static_current_ma,
-                        'elem_name': name,
                         'tile_id': result.tile_id,
                         'dc': static_current_ma,
                         'has_waveform': isrc.has_waveform_data(),
@@ -2379,10 +2437,7 @@ class NetlistParser:
 
                 total_instances += 1
 
-            # Accumulate statistics
-            total_with_waveforms += result.stats.get('with_waveforms', 0) - total_with_waveforms
-            total_static_current += result.stats.get('total_static_current_ma', 0.0) - total_static_current
-
+        # Statistics are already accumulated in the per-instance loop above
         self.builder.stats.instances_with_waveforms = total_with_waveforms
         self.builder.stats.total_static_current_ma = total_static_current
 

@@ -826,9 +826,9 @@ class TestInstanceInfo(unittest.TestCase):
     
     def test_serialization_roundtrip(self):
         """Test to_dict/from_dict roundtrip"""
+        # Note: instance_name is now a computed property derived from full_name
         original = InstanceInfo(
-            full_name="i_test",
-            instance_name="test",
+            full_name="i_test:VDD:vdd:VSS::2:4",
             vdd_net="VDD",
             vdd_pin="vdd",
             vss_net="VSS",
@@ -836,12 +836,15 @@ class TestInstanceInfo(unittest.TestCase):
             tile_x=2,
             tile_y=4
         )
-        
+
+        # Verify computed property works
+        self.assertEqual(original.instance_name, "test")
+
         d = original.to_dict()
         restored = InstanceInfo.from_dict(d)
-        
+
         self.assertEqual(original.full_name, restored.full_name)
-        self.assertEqual(original.instance_name, restored.instance_name)
+        self.assertEqual(original.instance_name, restored.instance_name)  # Computed property
         self.assertEqual(original.vdd_net, restored.vdd_net)
         self.assertEqual(original.tile_x, restored.tile_x)
         self.assertEqual(original.tile_y, restored.tile_y)
@@ -1185,7 +1188,7 @@ class TestCurrentSource(unittest.TestCase):
             static_value=2.0,
             pulses=[Pulse(v1=0, v2=1, period=10)],
             pwls=[PWL(points=[(0, 0), (1, 1)])],
-            info=InstanceInfo(full_name="i_test", instance_name="test")
+            info=InstanceInfo(full_name="i_test")  # instance_name is computed from full_name
         )
         
         d = original.to_dict()
