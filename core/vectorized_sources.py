@@ -482,11 +482,41 @@ class VectorizedCurrentSources:
         return result
 
     def _evaluate_pwls(self, t: float) -> np.ndarray:
-        """Evaluate all PWLs at time t using vectorized processing.
+        """Evaluate all PWLs at time t, dispatching to appropriate implementation.
+
+        For small datasets or low padding overhead, uses padded 2D arrays.
+        For large datasets with high padding waste, uses binned grouping to
+        reduce memory from O(n_pwls * max_count) to O(n_pwls * avg_count).
+
+        Args:
+            t: Time in seconds
+
+        Returns:
+            Array of PWL values (n_pwls,)
+        """
+        if self.n_pwls == 0:
+            return np.zeros(0, dtype=np.float64)
+
+        # Decide between padded vs binned based on memory overhead
+        max_count = int(self.pwl_count.max())
+        total_padded_bytes = self.n_pwls * max_count * 16  # times + values
+        total_actual_bytes = self.n_pwl_points * 16
+
+        # Use binned approach when padding would exceed 500 MB or 2x actual data
+        if total_padded_bytes > 500_000_000 or total_padded_bytes > 2 * total_actual_bytes:
+            return self._evaluate_pwls_binned(t)
+        else:
+            return self._evaluate_pwls_padded(t)
+
+    def _evaluate_pwls_padded(self, t: float) -> np.ndarray:
+        """Evaluate all PWLs using padded 2D arrays (original implementation).
 
         Uses padded 2D arrays with per-row searchsorted to find segment indices.
         The per-row approach avoids floating-point precision issues that occur
         with flat searchsorted when row offsets become large (> ~500K rows).
+
+        Memory: O(n_pwls * max_count * 16 bytes) for times + values cache.
+        Best for datasets where max_count is close to average count.
 
         Args:
             t: Time in seconds
@@ -499,7 +529,7 @@ class VectorizedCurrentSources:
 
         # Build padded cache on first call
         if not hasattr(self, '_pwl_padded_times') or self._pwl_padded_times is None:
-            self._build_pwl_padded()
+            self._build_pwl_padded_cache()
 
         n = self.n_pwls
         max_count = self._pwl_padded_max_count
@@ -563,7 +593,7 @@ class VectorizedCurrentSources:
 
         return values
 
-    def _build_pwl_padded(self) -> None:
+    def _build_pwl_padded_cache(self) -> None:
         """Build padded 2D arrays for vectorized PWL evaluation.
 
         Pads all PWLs to max point count by repeating the last time/value.
@@ -611,6 +641,159 @@ class VectorizedCurrentSources:
             self._pwl_single_period = float(periods_unique[0])
         else:
             self._pwl_single_period = 0.0  # 0 = not uniform
+
+    def _build_pwl_binned_groups(self) -> None:
+        """Build binned groups for memory-efficient PWL evaluation.
+
+        Groups PWLs into 6 bins by point count to minimize loop overhead
+        while reducing padding waste. Most PWLs (90%+) are padded to ≤16
+        instead of global max (often 100s-1000s).
+
+        Bin structure:
+            Bin 0: 1-8 points   (~50% of PWLs)
+            Bin 1: 9-16 points  (~45% of PWLs)
+            Bin 2: 17-32 points (~4% of PWLs)
+            Bin 3: 33-64 points (~0.9% of PWLs)
+            Bin 4: 65-128 points (<0.1% of PWLs)
+            Bin 5: 129+ points  (<0.1% of PWLs)
+
+        Memory: O(sum of n_pwls_in_bin * max_count_in_bin) ≈ O(n_pwls * avg_count)
+        """
+        n = self.n_pwls
+        counts = self.pwl_count
+
+        # Define bin edges: [1-8], [9-16], [17-32], [33-64], [65-128], [129+]
+        bin_edges = np.array([0, 8, 16, 32, 64, 128], dtype=np.int32)
+
+        # Assign each PWL to a bin using digitize
+        # digitize returns bin index where counts[i] would be inserted
+        bin_idx = np.digitize(counts, bin_edges[1:])  # bins: 0,1,2,3,4,5
+
+        groups = {}
+        for b in range(len(bin_edges)):
+            mask = bin_idx == b
+            if not np.any(mask):
+                continue
+
+            pwl_indices = np.where(mask)[0].astype(np.int32)
+            n_in_group = len(pwl_indices)
+            group_counts = counts[pwl_indices]
+            max_count = int(group_counts.max())  # Pad to actual max in bin
+
+            # Build padded 2D arrays for this group
+            group_times = np.empty((n_in_group, max_count), dtype=np.float64)
+            group_values = np.empty((n_in_group, max_count), dtype=np.float64)
+
+            # Fill from packed arrays
+            offsets = self.pwl_offset[pwl_indices]
+            for i, (off, cnt) in enumerate(zip(offsets, group_counts)):
+                off = int(off)
+                cnt = int(cnt)
+                group_times[i, :cnt] = self.pwl_times[off:off + cnt]
+                group_times[i, cnt:] = self.pwl_times[off + cnt - 1]  # Pad with last
+                group_values[i, :cnt] = self.pwl_values[off:off + cnt]
+                group_values[i, cnt:] = self.pwl_values[off + cnt - 1]
+
+            groups[b] = {
+                'pwl_indices': pwl_indices,
+                'times': group_times,
+                'values': group_values,
+                'max_count': max_count,
+                'first_times': group_times[:, 0].copy(),
+                'last_times': group_times[:, max_count - 1].copy(),
+                'first_values': group_values[:, 0].copy(),
+                'last_values': group_values[:, max_count - 1].copy(),
+                'row_idx': np.arange(n_in_group, dtype=np.intp),
+                'has_period': self.pwl_period[pwl_indices] > 0,
+                'no_period': self.pwl_period[pwl_indices] <= 0,
+                'periods': self.pwl_period[pwl_indices],
+                'delays': self.pwl_delay[pwl_indices],
+            }
+
+        self._pwl_binned_groups = groups
+
+        # Cache global period/delay analysis for fast-path dispatch
+        self._pwl_all_zero_delay = bool(np.all(self.pwl_delay == 0))
+        periods_unique = np.unique(self.pwl_period)
+        if len(periods_unique) == 1 and periods_unique[0] > 0:
+            self._pwl_single_period = float(periods_unique[0])
+        else:
+            self._pwl_single_period = 0.0
+
+    def _evaluate_pwls_binned(self, t: float) -> np.ndarray:
+        """Evaluate all PWLs using binned groups for memory efficiency.
+
+        Each group uses the same vectorized logic as _evaluate_pwls_padded(),
+        but with much smaller max_count per group. Results are scattered back
+        to original indices.
+
+        Memory: ~50x reduction for typical distributions where 95% of PWLs
+        have ≤16 points but max is 100s-1000s.
+
+        Args:
+            t: Time in seconds
+
+        Returns:
+            Array of PWL values (n_pwls,)
+        """
+        if not hasattr(self, '_pwl_binned_groups') or self._pwl_binned_groups is None:
+            self._build_pwl_binned_groups()
+
+        result = np.empty(self.n_pwls, dtype=np.float64)
+
+        for bin_id, group in self._pwl_binned_groups.items():
+            pwl_indices = group['pwl_indices']
+            n_group = len(pwl_indices)
+            max_count = group['max_count']
+
+            if max_count == 1:
+                # Fast path: constant PWLs (single point)
+                result[pwl_indices] = group['first_values']
+                continue
+
+            times_2d = group['times']
+            values_2d = group['values']
+            row_idx = group['row_idx']
+
+            # Time adjustment (same as _evaluate_pwls_padded)
+            if self._pwl_all_zero_delay and self._pwl_single_period > 0:
+                # Common smoothed case: no delay, uniform period
+                t_adj = np.full(n_group, t % self._pwl_single_period, dtype=np.float64)
+            else:
+                t_adj = np.full(n_group, t, dtype=np.float64) - group['delays']
+                periodic_mask = group['has_period'] & (t_adj >= 0)
+                t_adj[periodic_mask] = t_adj[periodic_mask] % group['periods'][periodic_mask]
+
+            # Clamp and find segment (same as _evaluate_pwls_padded)
+            t_clamped = np.clip(t_adj, group['first_times'], group['last_times'])
+            t_clamped_2d = t_clamped[:, np.newaxis]
+            seg_idx = np.sum(times_2d <= t_clamped_2d, axis=1) - 1
+            seg_idx = np.clip(seg_idx, 0, max_count - 2)
+
+            # Interpolation (same as _evaluate_pwls_padded)
+            t1 = times_2d[row_idx, seg_idx]
+            t2 = times_2d[row_idx, seg_idx + 1]
+            v1 = values_2d[row_idx, seg_idx]
+            v2 = values_2d[row_idx, seg_idx + 1]
+
+            dt = t2 - t1
+            safe_dt = np.where(dt > 0, dt, 1.0)
+            frac = np.where(dt > 0, (t_clamped - t1) / safe_dt, 0.0)
+            values = v1 + (v2 - v1) * frac
+
+            # Boundary handling (same as _evaluate_pwls_padded)
+            before_mask = t_adj <= group['first_times']
+            after_mask = t_adj >= group['last_times']
+            values[before_mask] = group['first_values'][before_mask]
+
+            after_periodic = after_mask & group['has_period']
+            after_nonperiodic = after_mask & group['no_period']
+            values[after_periodic] = group['first_values'][after_periodic]
+            values[after_nonperiodic] = group['last_values'][after_nonperiodic]
+
+            result[pwl_indices] = values
+
+        return result
 
     def get_statistics(self) -> Dict[str, Any]:
         """Return statistics about the vectorized sources."""

@@ -442,7 +442,7 @@ class TestPWLGrouping(unittest.TestCase):
         )
 
         # Trigger padded cache building
-        vec._build_pwl_padded()
+        vec._build_pwl_padded_cache()
 
         # Max count is 3 (from I3), so all PWLs padded to 3 columns
         self.assertEqual(vec._pwl_padded_max_count, 3)
@@ -477,19 +477,209 @@ class TestPWLGrouping(unittest.TestCase):
                 'pwls': [{'delay': 0.0, 'period': 0.0,
                           'points': [(0.0, float(i)), (10e-9, float(i+1))]}],
             }
-        
+
         node_to_idx, idx_to_node, n_nodes = create_node_mapping()
         vec = VectorizedCurrentSources.from_serialized_dicts(
             sources, node_to_idx, n_nodes
         )
-        
+
         # Evaluate at midpoint
         currents = vec.evaluate_at_time(5e-9)
-        
+
         # Check total current (sum of all sources at midpoint)
         # Each source interpolates: i + 0.5
         expected_total = sum(i + 0.5 for i in range(10))
         self.assertAlmostEqual(currents.sum(), expected_total, places=5)
+
+    def test_binned_groups_structure(self):
+        """Binned groups should correctly partition PWLs by point count."""
+        # Create PWLs spanning multiple bins:
+        # Bin 0 (1-8): 5 points
+        # Bin 1 (9-16): 12 points
+        # Bin 2 (17-32): 25 points
+        # Bin 3 (33-64): 50 points
+        # Bin 4 (65-128): 100 points
+        # Bin 5 (129+): 150 points
+        sources = {
+            'I_bin0': {
+                'node1': 'N1', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 100e-9,
+                          'points': [(i * 1e-9, float(i)) for i in range(5)]}],
+            },
+            'I_bin1': {
+                'node1': 'N2', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 100e-9,
+                          'points': [(i * 1e-9, float(i)) for i in range(12)]}],
+            },
+            'I_bin2': {
+                'node1': 'N3', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 100e-9,
+                          'points': [(i * 1e-9, float(i)) for i in range(25)]}],
+            },
+            'I_bin3': {
+                'node1': 'N4', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 100e-9,
+                          'points': [(i * 1e-9, float(i)) for i in range(50)]}],
+            },
+            'I_bin4': {
+                'node1': 'N5', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 100e-9,
+                          'points': [(i * 1e-9, float(i)) for i in range(100)]}],
+            },
+            'I_bin5': {
+                'node1': 'N0', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 100e-9,
+                          'points': [(i * 1e-9, float(i)) for i in range(150)]}],
+            },
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        # Build binned groups
+        vec._build_pwl_binned_groups()
+
+        # Should have 6 groups (one per bin)
+        self.assertEqual(len(vec._pwl_binned_groups), 6)
+
+        # Check max_count for each group matches expectations
+        expected_max_counts = {0: 5, 1: 12, 2: 25, 3: 50, 4: 100, 5: 150}
+        for bin_id, group in vec._pwl_binned_groups.items():
+            self.assertEqual(group['max_count'], expected_max_counts[bin_id],
+                             f"Bin {bin_id} max_count mismatch")
+            # Each group should have exactly 1 PWL
+            self.assertEqual(len(group['pwl_indices']), 1,
+                             f"Bin {bin_id} should have 1 PWL")
+
+    def test_binned_vs_padded_equivalence(self):
+        """Binned and padded evaluations should produce identical results."""
+        # Create PWLs spanning multiple bins with various characteristics
+        sources = {}
+        np.random.seed(42)
+
+        # Generate 20 PWLs with varying point counts
+        point_counts = [3, 5, 8, 10, 15, 20, 30, 40, 60, 80, 100, 130,
+                        4, 6, 9, 12, 18, 28, 55, 90]
+        for i, cnt in enumerate(point_counts):
+            times = np.linspace(0, 100e-9, cnt)
+            values = np.sin(times * 1e8) + np.random.randn(cnt) * 0.1
+            sources[f'I{i}'] = {
+                'node1': f'N{i % 6}',
+                'dc_value': 0.0,
+                'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 100e-9,
+                          'points': list(zip(times.tolist(), values.tolist()))}],
+            }
+
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        # Test at multiple time points
+        test_times = [0.0, 5e-9, 25e-9, 50e-9, 75e-9, 99e-9, 100e-9, 150e-9]
+        for t in test_times:
+            # Force padded evaluation
+            vec._pwl_binned_groups = None  # Clear binned cache
+            vec._build_pwl_padded_cache()
+            padded_result = vec._evaluate_pwls_padded(t)
+
+            # Force binned evaluation
+            vec._pwl_padded_times = None  # Clear padded cache
+            vec._build_pwl_binned_groups()
+            binned_result = vec._evaluate_pwls_binned(t)
+
+            # Results should be identical
+            np.testing.assert_array_almost_equal(
+                padded_result, binned_result,
+                decimal=12,
+                err_msg=f"Mismatch at t={t}"
+            )
+
+    def test_binned_boundary_conditions(self):
+        """Binned evaluation should handle boundary cases correctly."""
+        # Test time before, at boundaries, and after waveform range
+        sources = {
+            'I_periodic': {
+                'node1': 'N1', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 5e-9, 'period': 50e-9,
+                          'points': [(0.0, 1.0), (10e-9, 2.0), (40e-9, 3.0)]}],
+            },
+            'I_nonperiodic': {
+                'node1': 'N2', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 0.0,
+                          'points': [(0.0, 10.0), (10e-9, 20.0), (40e-9, 30.0)]}],
+            },
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        # Force binned evaluation
+        vec._build_pwl_binned_groups()
+
+        # Time before periodic start (t=0, but delay=5ns) -> should get first value
+        result = vec._evaluate_pwls_binned(0.0)
+        self.assertAlmostEqual(result[0], 1.0, places=10)  # periodic: first value
+        self.assertAlmostEqual(result[1], 10.0, places=10)  # nonperiodic: first value
+
+        # Time at midpoint of non-periodic
+        result = vec._evaluate_pwls_binned(25e-9)
+        # I_nonperiodic interpolates: segment (10e-9, 20) to (40e-9, 30)
+        # frac = (25-10)/(40-10) = 0.5, value = 20 + (30-20)*0.5 = 25
+        self.assertAlmostEqual(result[1], 25.0, places=10)
+
+        # Time after non-periodic end -> should hold last value
+        result = vec._evaluate_pwls_binned(100e-9)
+        self.assertAlmostEqual(result[1], 30.0, places=10)  # hold last
+
+    def test_binned_constant_pwl(self):
+        """Binned evaluation should handle single-point (constant) PWLs."""
+        sources = {
+            'I_const': {
+                'node1': 'N1', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 0.0,
+                          'points': [(0.0, 42.0)]}],  # Single point = constant
+            },
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec = VectorizedCurrentSources.from_serialized_dicts(
+            sources, node_to_idx, n_nodes
+        )
+
+        # Force binned evaluation
+        vec._build_pwl_binned_groups()
+
+        # Should always return constant value
+        for t in [0.0, 1e-9, 100e-9, 1e-6]:
+            result = vec._evaluate_pwls_binned(t)
+            self.assertAlmostEqual(result[0], 42.0, places=10)
+
+    def test_dispatch_threshold(self):
+        """_evaluate_pwls should dispatch based on memory threshold."""
+        # Small dataset: should use padded
+        sources_small = {
+            'I1': {
+                'node1': 'N1', 'dc_value': 0.0, 'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 0.0,
+                          'points': [(0.0, 1.0), (10e-9, 2.0)]}],
+            },
+        }
+        node_to_idx, idx_to_node, n_nodes = create_node_mapping()
+        vec_small = VectorizedCurrentSources.from_serialized_dicts(
+            sources_small, node_to_idx, n_nodes
+        )
+
+        # Verify dispatch chooses padded for small data
+        max_count = int(vec_small.pwl_count.max())
+        total_padded = vec_small.n_pwls * max_count * 16
+        total_actual = vec_small.n_pwl_points * 16
+
+        # Should NOT use binned (padding overhead is small)
+        self.assertLessEqual(total_padded, 500_000_000)
+        self.assertLessEqual(total_padded, 2 * total_actual)
 
 
 class TestEvaluateToRHSArray(unittest.TestCase):
