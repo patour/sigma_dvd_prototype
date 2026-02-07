@@ -64,6 +64,7 @@ from .transient_solver import TransientIRDropSolver, RCSystem, IntegrationMethod
 from .vectorized_sources import VectorizedCurrentSources
 
 
+
 @dataclass
 class AggressorContribution:
     """Contribution of an aggressor node to the victim's IR-drop.
@@ -173,6 +174,10 @@ class AdjointSensitivitySolver:
                    If None, will try to use model.graph.
             vectorize_threshold: Use vectorized evaluation when source count
                                  exceeds this threshold. Default 10000.
+
+        Note:
+            To control wscale application, use pdn.pdn_parser.set_apply_wscale()
+            before calling solver methods. This is thread-safe.
         """
         self.model = model
         self._graph = graph if graph is not None else model.graph
@@ -1155,6 +1160,8 @@ class AdjointSensitivitySolver:
             return {}
 
         result: Dict[str, float] = {}
+
+        # wscale is controlled by the thread-safe ContextVar (get_apply_wscale)
         for src_name in candidate_sources:
             if src_name not in raw_sources:
                 continue

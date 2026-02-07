@@ -543,13 +543,22 @@ class TestTrapezoidalMethod(unittest.TestCase):
         """Skip if test netlist not available."""
         if self.model is None:
             self.skipTest("Test netlist not available")
+        # Disable wscale for backward compatibility with existing tests
+        from pdn.pdn_parser import set_apply_wscale
+        set_apply_wscale(False)
         self.solver = TransientIRDropSolver(self.model, self.graph)
+
+    def tearDown(self):
+        """Restore default wscale setting."""
+        from pdn.pdn_parser import set_apply_wscale
+        set_apply_wscale(True)
 
     def test_trapezoidal_produces_valid_results(self):
         """Trapezoidal method should produce valid results with appropriate step size.
-        
+
         Note: Trapezoidal can exhibit oscillations with large step sizes on stiff
         RC systems. Using 100ps step size avoids numerical oscillations.
+        Note: wscale is disabled for this test to maintain backward compatibility.
         """
         result = self.solver.solve_transient(
             t_start=0.0,
@@ -560,7 +569,7 @@ class TestTrapezoidalMethod(unittest.TestCase):
 
         self.assertTrue(np.all(result.max_ir_drop_per_time >= 0))
         self.assertGreater(len(result.t_array), 0)
-        # Verify expected IR-drop range for this netlist
+        # Verify expected IR-drop range for this netlist (wscale disabled for backward compat)
         self.assertAlmostEqual(result.max_ir_drop_per_time.min() * 1000, 0.4063, places=2)
         self.assertAlmostEqual(result.max_ir_drop_per_time.max() * 1000, 0.7743, places=2)
 
@@ -592,6 +601,107 @@ class TestTrapezoidalMethod(unittest.TestCase):
         self.assertTrue(np.all(result_be.max_ir_drop_per_time >= -1e-10))
         # Trapezoidal may have oscillations but IR-drop should be bounded
         self.assertTrue(np.all(result_trap.max_ir_drop_per_time < 2.0))  # Bounded by 2*Vdd
+
+
+class TestTrapezoidalMethodWithWscale(unittest.TestCase):
+    """Tests for Trapezoidal integration method with wscale enabled.
+
+    These tests verify wscale functionality in the transient solver.
+    The test netlist has wscale values of 1.0, 0.5, and 0.25 on various sources.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse test netlist once for all tests."""
+        test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not test_netlist.exists():
+            cls.graph = None
+            cls.model = None
+            return
+
+        from pdn.pdn_parser import NetlistParser
+        parser = NetlistParser(str(test_netlist))
+        cls.graph = parser.parse()
+        cls.model = create_model_from_pdn(cls.graph, 'VDD')
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if self.model is None:
+            self.skipTest("Test netlist not available")
+        # Enable wscale for these tests using ContextVar
+        from pdn.pdn_parser import set_apply_wscale
+        set_apply_wscale(True)
+        self.solver = TransientIRDropSolver(self.model, self.graph)
+
+    def tearDown(self):
+        """Restore default wscale setting."""
+        from pdn.pdn_parser import set_apply_wscale
+        set_apply_wscale(True)
+
+    def test_wscale_produces_valid_results(self):
+        """Wscale should produce valid results with reduced IR-drop.
+
+        Since wscale < 1.0 is applied to some sources, IR-drop should be
+        lower than when wscale is disabled.
+        """
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=50e-9,
+            dt=100e-12,
+            method=IntegrationMethod.TRAPEZOIDAL,
+        )
+
+        self.assertTrue(np.all(result.max_ir_drop_per_time >= 0))
+        self.assertGreater(len(result.t_array), 0)
+
+        # With wscale applied, IR-drop should be lower than without
+        # (since some sources have wscale < 1.0)
+        # Original values without wscale: min=0.4063mV, max=0.7743mV
+        # With wscale (some sources scaled by 0.5 and 0.25), expect lower values
+        self.assertLess(result.max_ir_drop_per_time.max() * 1000, 0.77)
+
+    def test_wscale_vs_no_wscale_difference(self):
+        """IR-drop with wscale should be less than or equal to without wscale.
+
+        Wscale values are <= 1.0, so applying them should not increase IR-drop.
+        """
+        from pdn.pdn_parser import set_apply_wscale
+
+        # Solver with wscale enabled (from setUp)
+        result_with = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=20e-9,
+            dt=100e-12,
+            method=IntegrationMethod.TRAPEZOIDAL,
+        )
+
+        # Disable wscale and create new solver
+        set_apply_wscale(False)
+        solver_without = TransientIRDropSolver(self.model, self.graph)
+        result_without = solver_without.solve_transient(
+            t_start=0.0,
+            t_end=20e-9,
+            dt=100e-12,
+            method=IntegrationMethod.TRAPEZOIDAL,
+        )
+
+        # With wscale (some < 1.0), peak should be <= without wscale
+        self.assertLessEqual(
+            result_with.max_ir_drop_per_time.max(),
+            result_without.max_ir_drop_per_time.max() + 1e-10  # Small tolerance
+        )
+
+    def test_backward_euler_with_wscale(self):
+        """Backward Euler should also work correctly with wscale."""
+        result = self.solver.solve_transient(
+            t_start=0.0,
+            t_end=20e-9,
+            dt=0.5e-9,
+            method=IntegrationMethod.BACKWARD_EULER,
+        )
+
+        self.assertTrue(np.all(result.max_ir_drop_per_time >= -1e-10))
+        self.assertGreater(len(result.t_array), 0)
 
 
 class TestCapacitiveSmoothing(unittest.TestCase):

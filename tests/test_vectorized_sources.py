@@ -1403,5 +1403,177 @@ class TestEvaluateToMultiRHS(unittest.TestCase):
         self.assertAlmostEqual(total_currents[0], 3.0)  # Total still counted
 
 
+class TestWscale(unittest.TestCase):
+    """Tests for wscale (waveform scaling) support."""
+
+    def setUp(self):
+        """Enable wscale by default for these tests."""
+        from pdn.pdn_parser import set_apply_wscale
+        set_apply_wscale(True)
+
+    def tearDown(self):
+        """Restore default wscale setting."""
+        from pdn.pdn_parser import set_apply_wscale
+        set_apply_wscale(True)
+
+    def test_wscale_default_in_from_serialized_dicts(self):
+        """Test that wscale defaults to 1.0 for backward compatibility."""
+        sources = {
+            'I_pulse': {
+                'node1': 'N1',
+                'dc_value': 0.0,
+                'pulses': [{'v1': 0.0, 'v2': 2.0, 'delay': 0.0, 'rt': 0.0, 'ft': 0.0,
+                           'width': 5e-9, 'period': 10e-9}],
+                'pwls': [],
+                # No wscale key
+            },
+        }
+        node_to_idx = {'N1': 0}
+
+        vec = VectorizedCurrentSources.from_serialized_dicts(sources, node_to_idx, 1)
+
+        # Should have pulse_wscale array with default 1.0
+        self.assertEqual(len(vec.pulse_wscale), 1)
+        self.assertEqual(vec.pulse_wscale[0], 1.0)
+
+    def test_wscale_propagated_from_source(self):
+        """Test wscale is correctly propagated from source dict."""
+        sources = {
+            'I_pulse': {
+                'node1': 'N1',
+                'dc_value': 1.0,
+                'wscale': 0.5,
+                'pulses': [{'v1': 0.0, 'v2': 4.0, 'delay': 0.0, 'rt': 0.0, 'ft': 0.0,
+                           'width': 5e-9, 'period': 10e-9}],
+                'pwls': [],
+            },
+            'I_pwl': {
+                'node1': 'N2',
+                'dc_value': 0.0,
+                'wscale': 0.25,
+                'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 10e-9, 'points': [(0, 0), (5e-9, 8.0), (10e-9, 0)]}],
+            },
+        }
+        node_to_idx = {'N1': 0, 'N2': 1}
+
+        vec = VectorizedCurrentSources.from_serialized_dicts(sources, node_to_idx, 2)
+
+        self.assertEqual(vec.pulse_wscale[0], 0.5)
+        self.assertEqual(vec.pwl_wscale[0], 0.25)
+
+    def test_wscale_applied_in_evaluation(self):
+        """Test wscale is applied during evaluate_at_time."""
+        from pdn.pdn_parser import set_apply_wscale
+        set_apply_wscale(True)
+
+        sources = {
+            'I_pulse': {
+                'node1': 'N1',
+                'dc_value': 1.0,  # DC should NOT be scaled
+                'wscale': 0.5,
+                'pulses': [{'v1': 0.0, 'v2': 4.0, 'delay': 0.0, 'rt': 0.0, 'ft': 0.0,
+                           'width': 5e-9, 'period': 10e-9}],
+                'pwls': [],
+            },
+        }
+        node_to_idx = {'N1': 0}
+
+        vec = VectorizedCurrentSources.from_serialized_dicts(sources, node_to_idx, 1)
+
+        # At t=2.5ns (during high phase): dc + pulse_v2 * wscale = 1.0 + 4.0 * 0.5 = 3.0
+        currents = vec.evaluate_at_time(2.5e-9)
+        self.assertAlmostEqual(currents[0], 3.0, places=5)
+
+        # At t=7.5ns (during low phase): dc + pulse_v1 * wscale = 1.0 + 0.0 * 0.5 = 1.0
+        currents = vec.evaluate_at_time(7.5e-9)
+        self.assertAlmostEqual(currents[0], 1.0, places=5)
+
+    def test_wscale_disabled(self):
+        """Test set_apply_wscale(False) disables wscale application."""
+        from pdn.pdn_parser import set_apply_wscale
+        set_apply_wscale(False)
+
+        sources = {
+            'I_pulse': {
+                'node1': 'N1',
+                'dc_value': 1.0,
+                'wscale': 0.5,
+                'pulses': [{'v1': 0.0, 'v2': 4.0, 'delay': 0.0, 'rt': 0.0, 'ft': 0.0,
+                           'width': 5e-9, 'period': 10e-9}],
+                'pwls': [],
+            },
+        }
+        node_to_idx = {'N1': 0}
+
+        vec = VectorizedCurrentSources.from_serialized_dicts(sources, node_to_idx, 1)
+
+        # At t=2.5ns (during high phase): dc + pulse_v2 (NO scaling) = 1.0 + 4.0 = 5.0
+        currents = vec.evaluate_at_time(2.5e-9)
+        self.assertAlmostEqual(currents[0], 5.0, places=5)
+
+    def test_wscale_not_applied_when_empty(self):
+        """Test no scaling when wscale arrays are empty (backward compat)."""
+        from pdn.pdn_parser import set_apply_wscale
+        set_apply_wscale(True)
+
+        # Create VectorizedCurrentSources with empty wscale arrays
+        vec = VectorizedCurrentSources(
+            n_nodes=1,
+            node_to_idx={'N1': 0},
+            n_sources=1,
+            dc_values=np.array([1.0]),
+            source_node_idx=np.array([0], dtype=np.int32),
+            n_pulses=1,
+            pulse_node_idx=np.array([0], dtype=np.int32),
+            pulse_source_idx=np.array([0], dtype=np.int32),
+            pulse_v1=np.array([0.0]),
+            pulse_v2=np.array([4.0]),
+            pulse_delay=np.array([0.0]),
+            pulse_rt=np.array([0.0]),
+            pulse_ft=np.array([0.0]),
+            pulse_width=np.array([5e-9]),
+            pulse_period=np.array([10e-9]),
+            pulse_wscale=np.array([]),  # Empty - no scaling
+            n_pwls=0,
+        )
+
+        # Should NOT scale (empty wscale array = backward compat)
+        currents = vec.evaluate_at_time(2.5e-9)
+        self.assertAlmostEqual(currents[0], 5.0, places=5)  # dc + pulse_v2 = 1.0 + 4.0
+
+    def test_per_source_evaluation_with_wscale(self):
+        """Test evaluate_per_source_at_time applies wscale."""
+        from pdn.pdn_parser import set_apply_wscale
+        set_apply_wscale(True)
+
+        sources = {
+            'I1': {
+                'node1': 'N1',
+                'dc_value': 1.0,
+                'wscale': 0.5,
+                'pulses': [{'v1': 0.0, 'v2': 4.0, 'delay': 0.0, 'rt': 0.0, 'ft': 0.0,
+                           'width': 5e-9, 'period': 10e-9}],
+                'pwls': [],
+            },
+            'I2': {
+                'node1': 'N2',
+                'dc_value': 2.0,
+                'wscale': 0.25,
+                'pulses': [],
+                'pwls': [{'delay': 0.0, 'period': 10e-9, 'points': [(0, 0), (5e-9, 8.0), (10e-9, 0)]}],
+            },
+        }
+        node_to_idx = {'N1': 0, 'N2': 1}
+
+        vec = VectorizedCurrentSources.from_serialized_dicts(sources, node_to_idx, 2)
+
+        # At t=2.5ns: I1 = dc + pulse_v2 * wscale = 1.0 + 4.0 * 0.5 = 3.0
+        #             I2 = dc + pwl_value * wscale = 2.0 + 4.0 * 0.25 = 3.0 (linear interp)
+        per_source = vec.evaluate_per_source_at_time(2.5e-9)
+        self.assertAlmostEqual(per_source[0], 3.0, places=5)
+        self.assertAlmostEqual(per_source[1], 3.0, places=5)
+
+
 if __name__ == '__main__':
     unittest.main()

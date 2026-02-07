@@ -29,7 +29,9 @@ from pdn_parser import (
     R_TO_KOHM, C_TO_FF, L_TO_NH, I_TO_MA, SHORT_THRESHOLD,
     # Waveform parsing classes and functions
     InstanceInfo, Pulse, PWL, CurrentSource,
-    _parse_spice_value, _parse_pulse, _parse_pwl, _parse_current_source_line
+    _parse_spice_value, _parse_pulse, _parse_pwl, _parse_current_source_line,
+    # Wscale control functions (thread-safe via ContextVar)
+    get_apply_wscale, set_apply_wscale
 )
 
 
@@ -1198,6 +1200,93 @@ class TestCurrentSource(unittest.TestCase):
         self.assertEqual(len(original.pwls), len(restored.pwls))
         self.assertEqual(original.info.full_name, restored.info.full_name)
 
+    def test_wscale_default(self):
+        """Test default wscale value is 1.0"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2", dc_value=1.0)
+        self.assertEqual(cs.wscale, 1.0)
+
+    def test_wscale_affects_get_current_at_time(self):
+        """Test wscale scales pulse/PWL values in get_current_at_time"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2", dc_value=1.0, wscale=0.5)
+        cs.pulses.append(Pulse(v1=0.0, v2=2.0, delay=0.0, rt=0.0, ft=0.0,
+                               width=5.0, period=10.0))
+
+        # During high: dc + pulse_high * wscale = 1.0 + 2.0 * 0.5 = 2.0
+        self.assertAlmostEqual(cs.get_current_at_time(2.5), 2.0, places=5)
+
+        # During low: dc + pulse_low * wscale = 1.0 + 0.0 * 0.5 = 1.0
+        self.assertAlmostEqual(cs.get_current_at_time(7.5), 1.0, places=5)
+
+    def test_wscale_not_applied_to_dc(self):
+        """Test wscale does NOT affect DC value (matches C++ behavior)"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2", dc_value=2.0, wscale=0.5)
+        # No waveforms, just DC - should be unscaled
+        self.assertAlmostEqual(cs.get_current_at_time(0.0), 2.0, places=5)
+
+    def test_wscale_affects_get_static_current(self):
+        """Test wscale scales pulse/PWL DC averages in get_static_current"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2", dc_value=1.0, wscale=0.5)
+        # 50% duty cycle pulse with amplitude 2.0 -> DC avg = 1.0
+        cs.pulses.append(Pulse(v1=0.0, v2=2.0, width=5.0, period=10.0))
+
+        # dc_value + pulse_dc * wscale = 1.0 + 1.0 * 0.5 = 1.5
+        self.assertAlmostEqual(cs.get_static_current(), 1.5, places=5)
+
+    def test_wscale_static_value_override(self):
+        """Test static_value override ignores wscale (as expected)"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2",
+                          dc_value=1.0, static_value=2.0, wscale=0.5)
+        cs.pulses.append(Pulse(v1=0.0, v2=4.0, width=5.0, period=10.0))
+
+        # With static_value set, wscale is ignored: dc + static = 1.0 + 2.0 = 3.0
+        self.assertAlmostEqual(cs.get_static_current(), 3.0, places=5)
+
+    def test_wscale_serialization_roundtrip(self):
+        """Test wscale is preserved through to_dict/from_dict"""
+        original = CurrentSource(
+            name="I_test",
+            node1="vdd_node",
+            node2="0",
+            dc_value=1.5,
+            wscale=0.25
+        )
+
+        d = original.to_dict()
+        self.assertEqual(d['wscale'], 0.25)
+
+        restored = CurrentSource.from_dict(d)
+        self.assertEqual(restored.wscale, 0.25)
+
+    def test_wscale_default_in_from_dict(self):
+        """Test from_dict defaults wscale to 1.0 for backward compat"""
+        d = {'name': 'I1', 'node1': 'n1', 'node2': 'n2', 'dc_value': 1.0}
+        # No wscale key in dict
+        restored = CurrentSource.from_dict(d)
+        self.assertEqual(restored.wscale, 1.0)
+
+    def test_global_apply_wscale_flag(self):
+        """Test set_apply_wscale() controls wscale application (thread-safe via ContextVar)"""
+        cs = CurrentSource(name="I1", node1="n1", node2="n2", dc_value=1.0, wscale=0.5)
+        cs.pulses.append(Pulse(v1=0.0, v2=4.0, delay=0.0, rt=0.0, ft=0.0,
+                               width=5.0, period=10.0))
+
+        # Save original state
+        original_state = get_apply_wscale()
+
+        try:
+            # With apply_wscale=True (default)
+            set_apply_wscale(True)
+            # dc + pulse * wscale = 1.0 + 4.0 * 0.5 = 3.0
+            self.assertAlmostEqual(cs.get_current_at_time(2.5), 3.0, places=5)
+
+            # With apply_wscale=False
+            set_apply_wscale(False)
+            # dc + pulse (no wscale) = 1.0 + 4.0 = 5.0
+            self.assertAlmostEqual(cs.get_current_at_time(2.5), 5.0, places=5)
+        finally:
+            # Restore original state
+            set_apply_wscale(original_state)
+
 
 class TestSpiceValueParsing(unittest.TestCase):
     """Test _parse_spice_value function"""
@@ -1392,11 +1481,55 @@ class TestCurrentSourceLineParsing(unittest.TestCase):
         """Test that InstanceInfo is extracted from name"""
         line = "i_U123/cell:VDD:vdd:VSS:0:5:3 node1 node2 1m"
         cs = _parse_current_source_line(line)
-        
+
         self.assertIsNotNone(cs)
         self.assertIsNotNone(cs.info)
         self.assertEqual(cs.info.instance_name, "U123/cell")
         self.assertEqual(cs.info.vdd_net, "VDD")
+
+    def test_parse_wscale_default(self):
+        """Test default wscale is 1.0 when not specified"""
+        line = "I_inst n1 n2 1e-3 pulse(0 1m 0 1n 1n 5n 10n)"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertEqual(cs.wscale, 1.0)
+
+    def test_parse_wscale_explicit(self):
+        """Test parsing wscale parameter"""
+        line = "I_inst n1 n2 1e-3 pulse(0 1m 0 1n 1n 5n 10n) wscale=0.5"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertEqual(cs.wscale, 0.5)
+
+    def test_parse_wscale_with_spice_suffix(self):
+        """Test parsing wscale with SPICE unit suffix"""
+        line = "I_inst n1 n2 1e-3 pulse(0 1m 0 1n 1n 5n 10n) wscale=250m"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertAlmostEqual(cs.wscale, 0.25, places=10)
+
+    def test_parse_wscale_with_pwl(self):
+        """Test parsing wscale with PWL waveform"""
+        line = "I_inst n1 n2 0 pwl(0 0 1n 1m 2n 0) pwl_period=10n wscale=0.25"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertEqual(cs.wscale, 0.25)
+        self.assertEqual(len(cs.pwls), 1)
+
+    def test_parse_wscale_complex_line(self):
+        """Test wscale parsing in complex current source line"""
+        line = "I_core:cluster1:2000_2000:vdd:0 node1 0 dc 1m static_value=5m pulse(0 2m 0 0.1n 0.1n 4.9n 10n) wscale=1.0"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertAlmostEqual(cs.dc_value, 1e-3, places=10)
+        self.assertAlmostEqual(cs.static_value, 5e-3, places=10)
+        self.assertEqual(len(cs.pulses), 1)
+        self.assertEqual(cs.wscale, 1.0)
 
 
 class TestInstanceSourcesIntegration(unittest.TestCase):

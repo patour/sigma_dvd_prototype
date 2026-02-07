@@ -81,6 +81,10 @@ class VectorizedCurrentSources:
     pwl_times: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     pwl_values: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
 
+    # Waveform scaling (per-pulse/per-pwl, from source's wscale)
+    pulse_wscale: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    pwl_wscale: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+
     @classmethod
     def from_current_sources(
         cls,
@@ -106,11 +110,11 @@ class VectorizedCurrentSources:
 
         pulse_data: Dict[str, List] = {
             'node_idx': [], 'source_idx': [], 'v1': [], 'v2': [], 'delay': [],
-            'rt': [], 'ft': [], 'width': [], 'period': []
+            'rt': [], 'ft': [], 'width': [], 'period': [], 'wscale': []
         }
 
         pwl_meta: Dict[str, List] = {
-            'node_idx': [], 'source_idx': [], 'period': [], 'delay': [], 'offset': [], 'count': []
+            'node_idx': [], 'source_idx': [], 'period': [], 'delay': [], 'offset': [], 'count': [], 'wscale': []
         }
         pwl_times_list: List[float] = []
         pwl_values_list: List[float] = []
@@ -125,6 +129,9 @@ class VectorizedCurrentSources:
             dc_list.append(src.dc_value)
             source_node_list.append(node_idx)
 
+            # Get wscale from source (default 1.0 if not present)
+            wscale_val = getattr(src, 'wscale', 1.0)
+
             # Collect pulses (track source index for masking)
             for pulse in src.pulses:
                 pulse_data['node_idx'].append(node_idx)
@@ -136,6 +143,7 @@ class VectorizedCurrentSources:
                 pulse_data['ft'].append(pulse.ft)
                 pulse_data['width'].append(pulse.width)
                 pulse_data['period'].append(pulse.period)
+                pulse_data['wscale'].append(wscale_val)
 
             # Collect PWLs (packed format, track source index for masking)
             for pwl in src.pwls:
@@ -145,6 +153,7 @@ class VectorizedCurrentSources:
                 pwl_meta['delay'].append(pwl.delay)
                 pwl_meta['offset'].append(len(pwl_times_list))
                 pwl_meta['count'].append(len(pwl.points))
+                pwl_meta['wscale'].append(wscale_val)
                 for t, v in pwl.points:
                     pwl_times_list.append(t)
                     pwl_values_list.append(v)
@@ -166,6 +175,7 @@ class VectorizedCurrentSources:
         obj.pulse_ft = np.array(pulse_data['ft'], dtype=np.float64)
         obj.pulse_width = np.array(pulse_data['width'], dtype=np.float64)
         obj.pulse_period = np.array(pulse_data['period'], dtype=np.float64)
+        obj.pulse_wscale = np.array(pulse_data['wscale'], dtype=np.float64)
 
         obj.n_pwls = len(pwl_meta['node_idx'])
         obj.n_pwl_points = len(pwl_times_list)
@@ -177,6 +187,7 @@ class VectorizedCurrentSources:
         obj.pwl_count = np.array(pwl_meta['count'], dtype=np.int32)
         obj.pwl_times = np.array(pwl_times_list, dtype=np.float64)
         obj.pwl_values = np.array(pwl_values_list, dtype=np.float64)
+        obj.pwl_wscale = np.array(pwl_meta['wscale'], dtype=np.float64)
 
         return obj
 
@@ -247,11 +258,11 @@ class VectorizedCurrentSources:
 
         pulse_data: Dict[str, List] = {
             'node_idx': [], 'source_idx': [], 'v1': [], 'v2': [], 'delay': [],
-            'rt': [], 'ft': [], 'width': [], 'period': []
+            'rt': [], 'ft': [], 'width': [], 'period': [], 'wscale': []
         }
 
         pwl_meta: Dict[str, List] = {
-            'node_idx': [], 'source_idx': [], 'period': [], 'delay': [], 'offset': [], 'count': []
+            'node_idx': [], 'source_idx': [], 'period': [], 'delay': [], 'offset': [], 'count': [], 'wscale': []
         }
         pwl_times_list: List[float] = []
         pwl_values_list: List[float] = []
@@ -268,6 +279,9 @@ class VectorizedCurrentSources:
             dc_list.append(data.get('dc_value', 0.0))
             source_node_list.append(node_idx)
 
+            # Get wscale from serialized dict (default 1.0 for backward compat)
+            wscale_val = data.get('wscale', 1.0)
+
             # Parse pulses directly from dict (track source index for masking)
             for pulse_dict in data.get('pulses', []):
                 pulse_data['node_idx'].append(node_idx)
@@ -279,6 +293,7 @@ class VectorizedCurrentSources:
                 pulse_data['ft'].append(pulse_dict.get('ft', 0.0))
                 pulse_data['width'].append(pulse_dict.get('width', 0.0))
                 pulse_data['period'].append(pulse_dict.get('period', 0.0))
+                pulse_data['wscale'].append(wscale_val)
 
             # Parse PWLs directly from dict (packed format, track source index for masking)
             for pwl_dict in data.get('pwls', []):
@@ -289,6 +304,7 @@ class VectorizedCurrentSources:
                 pwl_meta['delay'].append(pwl_dict.get('delay', 0.0))
                 pwl_meta['offset'].append(len(pwl_times_list))
                 pwl_meta['count'].append(len(points))
+                pwl_meta['wscale'].append(wscale_val)
                 for t, v in points:
                     pwl_times_list.append(t)
                     pwl_values_list.append(v)
@@ -310,6 +326,7 @@ class VectorizedCurrentSources:
         obj.pulse_ft = np.array(pulse_data['ft'], dtype=np.float64)
         obj.pulse_width = np.array(pulse_data['width'], dtype=np.float64)
         obj.pulse_period = np.array(pulse_data['period'], dtype=np.float64)
+        obj.pulse_wscale = np.array(pulse_data['wscale'], dtype=np.float64)
 
         obj.n_pwls = len(pwl_meta['node_idx'])
         obj.n_pwl_points = len(pwl_times_list)
@@ -321,6 +338,7 @@ class VectorizedCurrentSources:
         obj.pwl_count = np.array(pwl_meta['count'], dtype=np.int32)
         obj.pwl_times = np.array(pwl_times_list, dtype=np.float64)
         obj.pwl_values = np.array(pwl_values_list, dtype=np.float64)
+        obj.pwl_wscale = np.array(pwl_meta['wscale'], dtype=np.float64)
 
         return obj
 
@@ -330,9 +348,9 @@ class VectorizedCurrentSources:
             self.dc_values, self.source_node_idx,
             self.pulse_node_idx, self.pulse_source_idx, self.pulse_v1, self.pulse_v2,
             self.pulse_delay, self.pulse_rt, self.pulse_ft,
-            self.pulse_width, self.pulse_period,
+            self.pulse_width, self.pulse_period, self.pulse_wscale,
             self.pwl_node_idx, self.pwl_source_idx, self.pwl_period, self.pwl_delay,
-            self.pwl_offset, self.pwl_count, self.pwl_times, self.pwl_values
+            self.pwl_offset, self.pwl_count, self.pwl_times, self.pwl_values, self.pwl_wscale
         ]
         return sum(arr.nbytes for arr in arrays)
 
@@ -345,20 +363,31 @@ class VectorizedCurrentSources:
         Returns:
             np.ndarray of shape (n_nodes,) with total current at each node (mA)
         """
+        # Check wscale setting from ContextVar (thread-safe)
+        try:
+            from pdn.pdn_parser import get_apply_wscale
+            apply_wscale = get_apply_wscale()
+        except ImportError:
+            apply_wscale = True
+
         currents = np.zeros(self.n_nodes, dtype=np.float64)
 
-        # Add DC values
+        # Add DC values (NOT scaled by wscale - matches C++ behavior)
         if self.n_sources > 0:
             np.add.at(currents, self.source_node_idx, self.dc_values)
 
-        # Evaluate and accumulate pulses
+        # Evaluate and accumulate pulses (with wscale if enabled and present)
         if self.n_pulses > 0:
             pulse_values = self._evaluate_pulses(t)
+            if apply_wscale and len(self.pulse_wscale) == self.n_pulses:
+                pulse_values = pulse_values * self.pulse_wscale
             np.add.at(currents, self.pulse_node_idx, pulse_values)
 
-        # Evaluate and accumulate PWLs
+        # Evaluate and accumulate PWLs (with wscale if enabled and present)
         if self.n_pwls > 0:
             pwl_values = self._evaluate_pwls(t)
+            if apply_wscale and len(self.pwl_wscale) == self.n_pwls:
+                pwl_values = pwl_values * self.pwl_wscale
             np.add.at(currents, self.pwl_node_idx, pwl_values)
 
         return currents
@@ -380,17 +409,28 @@ class VectorizedCurrentSources:
         if self.n_sources == 0:
             return np.array([], dtype=np.float64)
 
-        # Start with DC values (one per source)
+        # Check wscale setting from ContextVar (thread-safe)
+        try:
+            from pdn.pdn_parser import get_apply_wscale
+            apply_wscale = get_apply_wscale()
+        except ImportError:
+            apply_wscale = True
+
+        # Start with DC values (one per source, NOT scaled by wscale)
         per_source = self.dc_values.copy()
 
         # Add pulse contributions (accumulate to the source each pulse belongs to)
         if self.n_pulses > 0:
             pulse_values = self._evaluate_pulses(t)
+            if apply_wscale and len(self.pulse_wscale) == self.n_pulses:
+                pulse_values = pulse_values * self.pulse_wscale
             np.add.at(per_source, self.pulse_source_idx, pulse_values)
 
         # Add PWL contributions (accumulate to the source each PWL belongs to)
         if self.n_pwls > 0:
             pwl_values = self._evaluate_pwls(t)
+            if apply_wscale and len(self.pwl_wscale) == self.n_pwls:
+                pwl_values = pwl_values * self.pwl_wscale
             np.add.at(per_source, self.pwl_source_idx, pwl_values)
 
         return per_source
@@ -1060,6 +1100,14 @@ class VectorizedCurrentSources:
         """
         from .pwl_smoothing import SmoothedWaveformCache
 
+        # Get wscale from cache if present, otherwise empty array (no scaling)
+        pwl_wscale = getattr(cache, 'pwl_wscale', None)
+        if pwl_wscale is not None and len(pwl_wscale) == cache.n_pwls:
+            pwl_wscale = pwl_wscale.copy()
+        else:
+            # No wscale in cache - use empty array so no scaling is applied
+            pwl_wscale = np.array([], dtype=np.float64)
+
         return cls(
             n_nodes=original.n_nodes,
             node_to_idx=original.node_to_idx,
@@ -1077,6 +1125,7 @@ class VectorizedCurrentSources:
             pulse_ft=np.array([], dtype=np.float64),
             pulse_width=np.array([], dtype=np.float64),
             pulse_period=np.array([], dtype=np.float64),
+            pulse_wscale=np.array([], dtype=np.float64),
             # Use smoothed PWL data from cache
             n_pwls=cache.n_pwls,
             n_pwl_points=cache.n_pwl_points,
@@ -1088,4 +1137,5 @@ class VectorizedCurrentSources:
             pwl_count=cache.pwl_count.copy(),
             pwl_times=cache.pwl_times.copy(),
             pwl_values=cache.pwl_values.copy(),
+            pwl_wscale=pwl_wscale,
         )

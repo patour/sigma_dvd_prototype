@@ -159,6 +159,10 @@ class TransientIRDropSolver:
             clear_graph_metadata: If True and vectorized mode is used, clear the
                                   serialized instance_sources from graph metadata
                                   after vectorization to save memory. Default False.
+
+        Note:
+            To control wscale application, use pdn.pdn_parser.set_apply_wscale()
+            before calling solver methods. This is thread-safe.
         """
         self.model = model
         self._graph = graph if graph is not None else model.graph
@@ -367,6 +371,7 @@ class TransientIRDropSolver:
             return self._vec_sources.evaluate_at_time_as_dict(t, edge_cache.idx_to_node)
 
         # Use object-based sequential evaluation
+        # wscale is controlled by the thread-safe ContextVar (get_apply_wscale)
         if self._current_sources:
             current_injections: Dict[Any, float] = {}
             valid_nodes = self.model.valid_nodes
