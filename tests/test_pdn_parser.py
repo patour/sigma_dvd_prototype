@@ -113,26 +113,59 @@ class TestGraphBuilder(unittest.TestCase):
         self.builder = GraphBuilder()
     
     def test_add_node(self):
-        """Test node addition with attributes"""
-        self.builder.add_node("n1", x=1000, y=2000, layer="M1")
-        self.assertIn("n1", self.builder.graph)
-        self.assertEqual(self.builder.graph.nodes_dict["n1"]["x"], 1000)
-        self.assertEqual(self.builder.graph.nodes_dict["n1"]["y"], 2000)
-        self.assertEqual(self.builder.graph.nodes_dict["n1"]["layer"], "M1")
+        """Test node addition with attributes.
+
+        Note: x, y, layer are computed from node name (X_Y_LAYER pattern) and cannot be set directly.
+        """
+        # Test die node with X_Y_LAYER pattern - coordinates extracted from name
+        self.builder.add_node("1000_2000_M1")
+        self.assertIn("1000_2000_M1", self.builder.graph)
+        attrs = self.builder.graph.nodes_dict["1000_2000_M1"]
+        self.assertEqual(attrs.x, 1000)
+        self.assertEqual(attrs.y, 2000)
+        self.assertEqual(attrs.layer, "M1")
+        self.assertTrue(attrs.is_die)
+
+        # Test package node (no coordinate extraction)
+        self.builder.current_file_type = 'package'
+        self.builder.add_node("VDD_vsrc")
+        self.assertIn("VDD_vsrc", self.builder.graph)
+        pkg_attrs = self.builder.graph.nodes_dict["VDD_vsrc"]
+        self.assertIsNone(pkg_attrs.x)
+        self.assertIsNone(pkg_attrs.y)
+        self.assertIsNone(pkg_attrs.layer)
+        self.assertTrue(pkg_attrs.is_package)
     
     def test_coordinate_extraction(self):
-        """Test coordinate extraction from node names"""
+        """Test coordinate extraction from node names via PDNNodeAttrs properties.
+
+        Coordinates are now computed on-demand from node name, not stored.
+        """
+        from pdn.pdn_parser import PDNNodeAttrs
+
         # 3D pattern: X_Y_LAYER
-        coords = self.builder._extract_coordinates("1000_2000_M1")
-        self.assertEqual(coords, {'x': 1000, 'y': 2000, 'layer': 'M1'})
-        
-        # 2D pattern: X_Y
-        coords = self.builder._extract_coordinates("1000_2000")
-        self.assertEqual(coords, {'x': 1000, 'y': 2000})
-        
+        attrs = PDNNodeAttrs(name="1000_2000_M1", flags=PDNNodeAttrs.FLAG_DIE)
+        self.assertEqual(attrs.x, 1000)
+        self.assertEqual(attrs.y, 2000)
+        self.assertEqual(attrs.layer, 'M1')
+
+        # 2D pattern: X_Y (no layer)
+        attrs_2d = PDNNodeAttrs(name="1000_2000", flags=PDNNodeAttrs.FLAG_DIE)
+        self.assertEqual(attrs_2d.x, 1000)
+        self.assertEqual(attrs_2d.y, 2000)
+        self.assertIsNone(attrs_2d.layer)
+
         # Numeric layer
-        coords = self.builder._extract_coordinates("1000_2000_5")
-        self.assertEqual(coords, {'x': 1000, 'y': 2000, 'layer': '5'})
+        attrs_num = PDNNodeAttrs(name="1000_2000_5", flags=PDNNodeAttrs.FLAG_DIE)
+        self.assertEqual(attrs_num.x, 1000)
+        self.assertEqual(attrs_num.y, 2000)
+        self.assertEqual(attrs_num.layer, '5')
+
+        # Package node (not die) - no coordinate extraction
+        pkg_attrs = PDNNodeAttrs(name="VDD_vsrc", flags=PDNNodeAttrs.FLAG_PACKAGE)
+        self.assertIsNone(pkg_attrs.x)
+        self.assertIsNone(pkg_attrs.y)
+        self.assertIsNone(pkg_attrs.layer)
     
     def test_add_resistor(self):
         """Test resistor element addition"""

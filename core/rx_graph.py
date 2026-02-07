@@ -57,28 +57,45 @@ class RustworkxGraphWrapper:
     # Node Operations
     # =========================================================================
 
-    def add_node(self, node: Any, **attrs) -> int:
+    def add_node(self, node: Any, attrs_obj: Any = None, **attrs) -> int:
         """Add a node with optional attributes.
 
         If node already exists, updates its attributes.
+        Supports both dict-style kwargs and direct attribute objects (e.g., PDNNodeAttrs).
 
         Args:
             node: Node key (any hashable)
-            **attrs: Node attributes
+            attrs_obj: Optional attribute object (e.g., PDNNodeAttrs dataclass).
+                       If provided, stored directly instead of creating a dict.
+            **attrs: Node attributes (only used if attrs_obj is None)
 
         Returns:
             rustworkx index of the node
         """
         if node in self._node_to_idx:
-            # Update existing node attrs
-            self._node_attrs[node].update(attrs)
+            # Update existing node
+            existing = self._node_attrs[node]
+            if attrs_obj is not None:
+                # Replace with new object
+                self._node_attrs[node] = attrs_obj
+            elif hasattr(existing, 'update'):
+                existing.update(attrs)
+            else:
+                # Existing is a non-dict object with setattr support
+                for k, v in attrs.items():
+                    if hasattr(existing, k):
+                        setattr(existing, k, v)
             return self._node_to_idx[node]
 
         # Add new node
         idx = self._graph.add_node(node)  # Store key as payload
         self._node_to_idx[node] = idx
         self._idx_to_node[idx] = node
-        self._node_attrs[node] = dict(attrs)
+        # Store attribute object directly if provided, otherwise create dict
+        if attrs_obj is not None:
+            self._node_attrs[node] = attrs_obj
+        else:
+            self._node_attrs[node] = dict(attrs)
         return idx
 
     def remove_node(self, node: Any) -> None:
@@ -469,16 +486,43 @@ class RustworkxMultiDiGraphWrapper:
     # Node Operations
     # =========================================================================
 
-    def add_node(self, node: Any, **attrs) -> int:
-        """Add a node with optional attributes."""
+    def add_node(self, node: Any, attrs_obj: Any = None, **attrs) -> int:
+        """Add a node with optional attributes.
+
+        Supports both dict-style kwargs and direct attribute objects (e.g., PDNNodeAttrs).
+
+        Args:
+            node: Node key (any hashable)
+            attrs_obj: Optional attribute object (e.g., PDNNodeAttrs dataclass).
+                       If provided, stored directly instead of creating a dict.
+            **attrs: Keyword arguments for attributes (only used if attrs_obj is None)
+
+        Returns:
+            rustworkx index of the node
+        """
         if node in self._node_to_idx:
-            self._node_attrs[node].update(attrs)
+            # Update existing node
+            existing = self._node_attrs[node]
+            if attrs_obj is not None:
+                # Replace with new object
+                self._node_attrs[node] = attrs_obj
+            elif hasattr(existing, 'update'):
+                existing.update(attrs)
+            else:
+                # Existing is a non-dict object with setattr support
+                for k, v in attrs.items():
+                    if hasattr(existing, k):
+                        setattr(existing, k, v)
             return self._node_to_idx[node]
 
         idx = self._graph.add_node(node)
         self._node_to_idx[node] = idx
         self._idx_to_node[idx] = node
-        self._node_attrs[node] = dict(attrs)
+        # Store attribute object directly if provided, otherwise create dict
+        if attrs_obj is not None:
+            self._node_attrs[node] = attrs_obj
+        else:
+            self._node_attrs[node] = dict(attrs)
         return idx
 
     def remove_node(self, node: Any) -> None:
@@ -955,7 +999,11 @@ class RustworkxMultiDiGraphWrapper:
         undirected._metadata = dict(self._metadata)
 
         for node, attrs in self._node_attrs.items():
-            undirected.add_node(node, **attrs)
+            # Handle both dict and dataclass-style attributes
+            if isinstance(attrs, dict):
+                undirected.add_node(node, **attrs)
+            else:
+                undirected.add_node(node, attrs)
 
         for edge_idx in self._graph.edge_indices():
             u_idx, v_idx = self._graph.get_edge_endpoints_by_index(edge_idx)
