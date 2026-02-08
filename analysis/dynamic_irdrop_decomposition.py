@@ -1063,6 +1063,7 @@ def generate_plots(
 
 def load_pdn_graph(
     netlist_dir: str,
+    net: Optional[str] = None,
     use_cache: bool = True,
     verbose: bool = False,
 ) -> Tuple[Any, float]:
@@ -1073,15 +1074,15 @@ def load_pdn_graph(
 
     Args:
         netlist_dir: Path to PDN netlist directory
+        net: Optional net name to filter during parsing (ignored when loading from cache)
         use_cache: If True, load from pdn_graph.pkl if available
         verbose: Print progress
 
     Returns:
         Tuple of (graph, load_time_seconds)
     """
-    import pickle
     from pathlib import Path
-    from pdn.pdn_parser import NetlistParser
+    from pdn.pdn_parser import NetlistParser, load_pdn_pickle
     from core.graph_converter import detect_graph_type, ensure_rustworkx_graph
 
     netlist_path = Path(netlist_dir)
@@ -1092,8 +1093,7 @@ def load_pdn_graph(
     if use_cache and pkl_path.exists():
         if verbose:
             print(f"Loading cached graph from {pkl_path}...")
-        with open(pkl_path, 'rb') as f:
-            graph = pickle.load(f)
+        graph = load_pdn_pickle(str(pkl_path))
 
         # Detect graph type and convert if needed
         graph_type = detect_graph_type(graph)
@@ -1115,7 +1115,9 @@ def load_pdn_graph(
                 print(f"No cached graph found, parsing netlist: {netlist_dir}")
             else:
                 print(f"Parsing netlist: {netlist_dir}")
-        parser = NetlistParser(netlist_dir)
+            if net:
+                print(f"  Filtering for net: {net}")
+        parser = NetlistParser(netlist_dir, net_filter=net)
         graph = parser.parse()
 
     load_time = time_module.perf_counter() - t0
@@ -1179,7 +1181,7 @@ def analyze_dynamic_irdrop_decomposition(
     from core.adjoint_sensitivity import AdjointSensitivitySolver
 
     # Load graph (from cache or parse)
-    graph, load_time = load_pdn_graph(netlist_dir, use_cache=use_cache, verbose=verbose)
+    graph, load_time = load_pdn_graph(netlist_dir, net=net, use_cache=use_cache, verbose=verbose)
     timings['parse'] = load_time
 
     # Create model

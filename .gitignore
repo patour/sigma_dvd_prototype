@@ -10,5 +10,8 @@ venv/
 *.egg-info/
 .ipynb_checkpoints/
 pdn/netlist_test/*.pkl
+pdn/netlist_minion/
 netlist_data/
 results/
+parser/
+sim/

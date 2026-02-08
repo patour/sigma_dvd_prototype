@@ -915,9 +915,8 @@ Config file example (YAML):
         print(f"Loading graph from {args.input}...")
 
         if args.input.endswith('.pkl'):
-            import pickle
-            with open(args.input, 'rb') as f:
-                graph = pickle.load(f)
+            from pdn_parser import load_pdn_pickle
+            graph = load_pdn_pickle(args.input)
         else:
             print(f"ERROR: Unsupported input format. Use .pkl")
             return 1
