@@ -12,7 +12,6 @@ Features:
 - Instance-to-node mapping for current source tracking
 - Sanity validation (short detection, floating nodes, merged nodes)
 - Package model support with node marking
-- FSDB waveform metadata extraction
 
 Usage Examples:
     # Basic parsing
@@ -130,6 +129,37 @@ def set_apply_wscale(enabled: bool) -> None:
     """
     _apply_wscale.set(enabled)
 
+
+# Thread-safe DC-only optimization control using ContextVar
+# When enabled (default), DC-only current sources use lightweight _DCOnlyCurrentSource
+# instead of full CurrentSource dataclass, saving ~75% memory per instance
+_optimize_dc_only: ContextVar[bool] = ContextVar('_optimize_dc_only', default=True)
+
+
+def get_optimize_dc_only() -> bool:
+    """Return whether DC-only current sources use the lightweight representation.
+
+    Returns:
+        True if DC-only sources use _DCOnlyCurrentSource (default),
+        False if all sources use full CurrentSource dataclass.
+    """
+    return _optimize_dc_only.get()
+
+
+def set_optimize_dc_only(value: bool) -> None:
+    """Enable/disable lightweight DC-only current source optimization.
+
+    When enabled (default), current sources with only a DC value (no pulse/PWL
+    waveforms) use _DCOnlyCurrentSource with 4 slots instead of CurrentSource
+    with 9+ attributes, saving ~400 bytes per instance.
+
+    Args:
+        value: If True, use lightweight representation for DC-only sources.
+               If False, use full CurrentSource for all sources.
+    """
+    _optimize_dc_only.set(value)
+
+
 # Unit conversions (matching C++ parser)
 R_TO_KOHM = 1e-3  # Ohm to KOhm
 C_TO_FF = 1e15   # Farad to fF
@@ -157,6 +187,17 @@ _KEY_NET_TYPE = sys.intern('net_type')
 _CAT_DIE = sys.intern('die')
 _CAT_PACKAGE = sys.intern('package')
 _CAT_UNMAPPED = sys.intern('unmapped')
+
+# =============================================================================
+# Pre-compiled Regex Patterns for Parsing Performance
+# =============================================================================
+# Compiling regex once at module load avoids per-call compilation overhead
+_RE_SPICE_VALUE = re.compile(r'^([+-]?[\d.]+(?:e[+-]?\d+)?)\s*(\w*)$', re.IGNORECASE)
+_RE_PULSE = re.compile(r'pulse\s*\(\s*([^)]+)\)', re.IGNORECASE)
+_RE_PWL = re.compile(r'pwl\s*\(\s*([^)]+)\)', re.IGNORECASE)
+_RE_COORD_EXTRACT = re.compile(r':(\d+)_(\d+):')
+_RE_TILE_FILE = re.compile(r'tile_(\d+)_(\d+)\.(ckt|sp)')
+_RE_INST_FILE = re.compile(r'instanceModels_(\d+)_(\d+)\.sp')
 
 # =============================================================================
 # PDN Node Attributes - Memory-Optimized Slotted Dataclass
@@ -754,29 +795,114 @@ class CurrentSource:
         )
 
 
+class _DCOnlyCurrentSource:
+    """Lightweight stand-in for CurrentSource when only a DC value exists.
+
+    Uses plain __slots__ (4 attrs) instead of @dataclass(slots=True) with 9+
+    attributes. Provides the same duck-typed interface consumed by
+    vectorized_sources, transient_solver, and adjoint_sensitivity.
+
+    Note: wscale is NOT stored because it only applies to waveforms, and
+    DC-only sources have no waveforms. The wscale property returns 1.0.
+
+    Memory savings: ~400 bytes per instance vs full CurrentSource.
+    """
+    __slots__ = ('node1', 'node2', 'dc_value', 'info')
+
+    def __init__(self, node1: str, node2: str, dc_value: float,
+                 info: Optional[InstanceInfo] = None):
+        self.node1 = node1
+        self.node2 = node2
+        self.dc_value = dc_value
+        self.info = info
+
+    # --- Duck-typed interface expected by consumers ---
+
+    @property
+    def wscale(self) -> float:
+        """wscale only applies to waveforms; DC-only has none, so always 1.0."""
+        return 1.0
+
+    @property
+    def pulses(self) -> list:
+        return []
+
+    @property
+    def pwls(self) -> list:
+        return []
+
+    @property
+    def static_value(self) -> Optional[float]:
+        return None
+
+    @property
+    def name(self) -> str:
+        """Return name from info.full_name if available."""
+        return self.info.full_name if self.info else ''
+
+    def has_waveform_data(self) -> bool:
+        """DC-only sources have no waveforms."""
+        return False
+
+    def has_current_data(self) -> bool:
+        """Check if instance has any current data."""
+        return self.dc_value != 0.0
+
+    def get_static_current(self) -> float:
+        """Get static/DC current value (mA)."""
+        return self.dc_value
+
+    def get_current_at_time(self, t: float) -> float:
+        """DC-only: return dc_value (constant regardless of time)."""
+        return self.dc_value
+
+    def to_dict(self) -> dict:
+        """Serialize for IPC (parallel_parser) and finalize(store_instance_sources=True)."""
+        # Extract name from info.full_name if available (for parallel parser compatibility)
+        name = self.info.full_name if self.info else ''
+        return {
+            'name': name,
+            'node1': self.node1,
+            'node2': self.node2,
+            'dc_value': self.dc_value,
+            'wscale': 1.0,
+            'pulses': [],
+            'pwls': [],
+            'static_value': None,
+            'info': self.info.to_dict() if self.info else None,
+        }
+
+    def __repr__(self) -> str:
+        return (f"_DCOnlyCurrentSource(node1={self.node1!r}, node2={self.node2!r}, "
+                f"dc_value={self.dc_value})")
+
+
 # =============================================================================
 # Instance Current Source Parsing Helpers
 # =============================================================================
 
+# SPICE unit multipliers (hoisted to module level for performance)
+_SPICE_MULTIPLIERS: Dict[str, float] = {
+    'f': 1e-15, 'p': 1e-12, 'n': 1e-9, 'u': 1e-6,
+    'm': 1e-3, 'k': 1e3, 'meg': 1e6, 'g': 1e9, 't': 1e12
+}
+
+
 def _parse_spice_value(value_str: str) -> float:
     """
     Parse a numeric value with optional SPICE unit suffix.
-    
+
     Supports: f (femto), p (pico), n (nano), u (micro), m (milli),
               k (kilo), meg (mega), g (giga), t (tera)
     """
     value_str = value_str.strip().lower()
-    multipliers = {
-        'f': 1e-15, 'p': 1e-12, 'n': 1e-9, 'u': 1e-6,
-        'm': 1e-3, 'k': 1e3, 'meg': 1e6, 'g': 1e9, 't': 1e12
-    }
 
-    match = re.match(r'^([+-]?[\d.]+(?:e[+-]?\d+)?)\s*(\w*)$', value_str)
+    match = _RE_SPICE_VALUE.match(value_str)
     if match:
         num = float(match.group(1))
         unit = match.group(2)
-        if unit in multipliers:
-            return num * multipliers[unit]
+        if unit in _SPICE_MULTIPLIERS:
+            return num * _SPICE_MULTIPLIERS[unit]
         elif unit.startswith('meg'):
             return num * 1e6
         return num
@@ -786,12 +912,13 @@ def _parse_spice_value(value_str: str) -> float:
 
 def _parse_pulse(pulse_str: str) -> Pulse:
     """Parse pulse definition: pulse(v1, v2, delay, rt, ft, width, period)"""
-    match = re.search(r'pulse\s*\(\s*([^)]+)\)', pulse_str, re.IGNORECASE)
+    match = _RE_PULSE.search(pulse_str)
     if not match:
         return Pulse()
 
-    values = re.split(r'[,\s]+', match.group(1).strip())
-    values = [v for v in values if v]
+    # Use replace + split instead of re.split for better performance
+    content = match.group(1).strip().replace(',', ' ')
+    values = content.split()  # split() handles multiple whitespace natively
 
     pulse = Pulse()
     if len(values) >= 1:
@@ -814,12 +941,13 @@ def _parse_pulse(pulse_str: str) -> Pulse:
 
 def _parse_pwl(pwl_str: str) -> PWL:
     """Parse PWL definition: pwl(t1 v1 t2 v2 ...)"""
-    match = re.search(r'pwl\s*\(\s*([^)]+)\)', pwl_str, re.IGNORECASE)
+    match = _RE_PWL.search(pwl_str)
     if not match:
         return PWL()
 
-    values = re.split(r'[,\s]+', match.group(1).strip())
-    values = [v for v in values if v]
+    # Use replace + split instead of re.split for better performance
+    content = match.group(1).strip().replace(',', ' ')
+    values = content.split()  # split() handles multiple whitespace natively
 
     pwl = PWL()
     for i in range(0, len(values) - 1, 2):
@@ -827,48 +955,81 @@ def _parse_pwl(pwl_str: str) -> PWL:
         v = _parse_spice_value(values[i + 1])
         pwl.points.append((t, v))
 
-    pwl.points.sort(key=lambda x: x[0])
+    # Only sort if not already sorted (most PWLs are already in time order)
+    n = len(pwl.points)
+    if n > 1:
+        needs_sort = any(pwl.points[i][0] > pwl.points[i+1][0] for i in range(n-1))
+        if needs_sort:
+            pwl.points.sort(key=lambda x: x[0])
     return pwl
 
 
 def _parse_current_source_line(line: str) -> Optional[CurrentSource]:
     """
     Parse a current source line and return a CurrentSource object.
-    
+
     Handles complex formats including:
     - DC values with optional 'dc' prefix
     - static_value= parameter
     - pulse(...) waveforms
     - pwl(...) waveforms with pwl_period= and pwl_delay=
     - sp= (source period) parameter
-    
+
+    When get_optimize_dc_only() is True and the line has no waveforms or
+    static_value, returns a lightweight _DCOnlyCurrentSource instead.
+
     Note: Values are returned in base SPICE units (Amperes). Caller must convert to mA.
     """
     line = line.strip()
     if not line or not line[0].lower() == 'i':
         return None
 
+    # ── Fast path: DC-only with optimize flag ──
+    # Check if line contains waveform keywords before expensive tokenization
+    if get_optimize_dc_only():
+        line_lower = line.lower()
+        # Quick check: does line contain waveform keywords or static_value?
+        has_waveform = any(kw in line_lower for kw in ('pulse(', 'pwl(', 'sin(', 'exp('))
+
+        if not has_waveform and 'static_value=' not in line_lower:
+            # Simple split is safe - no parenthesized expressions to preserve
+            parts = line.split()
+            if len(parts) >= 4:
+                name, n1, n2, val_tok = parts[0], parts[1], parts[2], parts[3]
+                # Skip 'dc' prefix if present
+                if val_tok.lower() == 'dc' and len(parts) >= 5:
+                    val_tok = parts[4]
+                try:
+                    dc_val = _parse_spice_value(val_tok)
+                    info = InstanceInfo.parse(name)
+                    # Return lightweight DC-only source (wscale not stored - only applies to waveforms)
+                    return _DCOnlyCurrentSource(n1, n2, dc_val, info)
+                except (ValueError, IndexError):
+                    pass  # Fall through to full parser
+
+    # ── Full parser path for waveform sources ──
     # Tokenize preserving parenthesized expressions
+    # Use list accumulation instead of string concatenation for O(n) vs O(n²)
     tokens = []
-    current = ""
+    current = []
     paren_depth = 0
 
     for char in line:
         if char == '(':
             paren_depth += 1
-            current += char
+            current.append(char)
         elif char == ')':
             paren_depth -= 1
-            current += char
+            current.append(char)
         elif char in ' \t' and paren_depth == 0:
             if current:
-                tokens.append(current)
-                current = ""
+                tokens.append(''.join(current))
+                current = []
         else:
-            current += char
+            current.append(char)
 
     if current:
-        tokens.append(current)
+        tokens.append(''.join(current))
 
     if len(tokens) < 4:
         return None
@@ -900,6 +1061,7 @@ def _parse_current_source_line(line: str) -> Optional[CurrentSource]:
             pass
 
     # Parse remaining parameters
+    # Use partition() instead of split('=')[1] to avoid list allocation
     i = idx
     while i < len(tokens):
         token = tokens[i]
@@ -911,26 +1073,31 @@ def _parse_current_source_line(line: str) -> Optional[CurrentSource]:
             pwl = _parse_pwl(token)
             isrc.pwls.append(pwl)
         elif token_lower.startswith('pwl_period='):
-            period = _parse_spice_value(token.split('=')[1])
+            _, _, value = token.partition('=')
+            period = _parse_spice_value(value)
             for pwl in isrc.pwls:
                 if pwl.period == 0:
                     pwl.period = period
         elif token_lower.startswith('pwl_delay='):
-            delay = _parse_spice_value(token.split('=')[1])
+            _, _, value = token.partition('=')
+            delay = _parse_spice_value(value)
             for pwl in isrc.pwls:
                 if pwl.delay == 0:
                     pwl.delay = delay
         elif token_lower.startswith('static_value='):
-            isrc.static_value = _parse_spice_value(token.split('=')[1])
+            _, _, value = token.partition('=')
+            isrc.static_value = _parse_spice_value(value)
         elif token_lower.startswith('sp='):
             # Source period - apply to pulses
-            period = _parse_spice_value(token.split('=')[1])
+            _, _, value = token.partition('=')
+            period = _parse_spice_value(value)
             for pulse in isrc.pulses:
                 if pulse.period == 0:
                     pulse.period = period
         elif token_lower.startswith('wscale='):
             # Waveform scaling factor (matches C++ SimPWL pwl_scaling)
-            isrc.wscale = _parse_spice_value(token.split('=')[1])
+            _, _, value = token.partition('=')
+            isrc.wscale = _parse_spice_value(value)
 
         i += 1
 
@@ -1901,15 +2068,15 @@ class NetlistParser:
         filename = full_path.name
         
         # Pattern: tile_X_Y.ckt or tile_X_Y.sp
-        tile_match = re.match(r'tile_(\d+)_(\d+)\.(ckt|sp)', filename)
+        tile_match = _RE_TILE_FILE.match(filename)
         if tile_match:
             x, y = int(tile_match.group(1)), int(tile_match.group(2))
             self.tile_queue.append((x, y, str(full_path)))
             self.logger.debug(f"Queued tile {x}_{y}: {full_path}")
             return
-            
+
         # Pattern: instanceModels_X_Y.sp
-        inst_match = re.match(r'instanceModels_(\d+)_(\d+)\.sp', filename)
+        inst_match = _RE_INST_FILE.match(filename)
         if inst_match:
             x, y = int(inst_match.group(1)), int(inst_match.group(2))
             self.instance_queue.append((x, y, str(full_path)))
@@ -2848,7 +3015,7 @@ class NetlistParser:
         Parse current source with full waveform support.
         
         Handles:
-        - I<name> <node+> <node-> <dc_value> [static_value=...] [pulse(...)] [pwl(...)] [fsdb ...]
+        - I<name> <node+> <node-> <dc_value> [static_value=...] [pulse(...)] [pwl(...)]
         
         All current values are converted to mA and stored in CurrentSource objects
         for both static DC analysis and time-domain evaluation.
@@ -2888,7 +3055,12 @@ class NetlistParser:
         # Convert PWL waveform values to mA
         for pwl in isrc.pwls:
             pwl.points = [(t, v * I_TO_MA) for t, v in pwl.points]
-        
+
+        # Skip current sources with no actual current data (zero dc, no static_value, no waveforms)
+        # These are placeholder entries like: "i_tapfiller:... 0 0 wstart=0 wstop=0 dv=0.66"
+        if not isrc.has_current_data():
+            return
+
         # Calculate static current value (mA) for DC analysis
         static_current_ma = isrc.get_static_current()
         
@@ -2898,25 +3070,8 @@ class NetlistParser:
             'has_waveform': isrc.has_waveform_data()
         }
         
-        # Parse FSDB reference if present (legacy support)
-        tokens = line.split()
-        for i, token in enumerate(tokens):
-            if token.lower() == 'fsdb' and i + 1 < len(tokens):
-                attrs['fsdb_path'] = tokens[i + 1]
-                if i + 2 < len(tokens):
-                    try:
-                        attrs['fsdb_coeff'] = float(tokens[i + 2])
-                    except ValueError:
-                        pass
-                if i + 3 < len(tokens):
-                    try:
-                        attrs['fsdb_shift'] = float(tokens[i + 3])
-                    except ValueError:
-                        pass
-                break
-        
         # Extract coordinates from instance name (e.g., i_cell:1000_2000:vdd)
-        coord_match = re.search(r':(\d+)_(\d+):', name)
+        coord_match = _RE_COORD_EXTRACT.search(name)
         if coord_match:
             attrs['inst_x'] = int(coord_match.group(1))
             attrs['inst_y'] = int(coord_match.group(2))

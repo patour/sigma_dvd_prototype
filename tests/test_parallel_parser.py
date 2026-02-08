@@ -33,7 +33,10 @@ from pdn.parallel_parser import (
     _load_nd_file_worker,
     _parse_element_line,
 )
-from pdn.pdn_parser import NetlistParser
+from pdn.pdn_parser import (
+    NetlistParser, CurrentSource, _DCOnlyCurrentSource,
+    get_optimize_dc_only, set_optimize_dc_only
+)
 
 
 class TestMMapSpiceLineReader(unittest.TestCase):
@@ -708,6 +711,286 @@ class TestDataClassSerialization(unittest.TestCase):
 
         self.assertEqual(restored.tile_id, (0, 0))
         self.assertEqual(restored.stats['total'], 1)
+
+
+class TestDCOnlyParallelParsing(unittest.TestCase):
+    """Test DC-only current source optimization in parallel parsing flow."""
+
+    def setUp(self):
+        """Create temp directory and save original optimization flag."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.original_flag = get_optimize_dc_only()
+
+    def tearDown(self):
+        """Clean up temp directory and restore original flag."""
+        shutil.rmtree(self.temp_dir)
+        set_optimize_dc_only(self.original_flag)
+
+    def test_dc_only_instance_worker_parsing(self):
+        """Test that DC-only sources are correctly parsed by instance worker."""
+        set_optimize_dc_only(True)
+
+        inst_path = Path(self.temp_dir) / "instanceModels_0_0.sp"
+        with open(inst_path, 'w') as f:
+            # Write multiple DC-only sources
+            f.write("I_dc1 node1 node2 1e-3\n")   # 1 mA
+            f.write("I_dc2 node3 node4 2.5m\n")   # 2.5 mA
+            f.write("I_dc3 node5 0 dc 0.5e-3\n")  # 0.5 mA with 'dc' prefix
+
+        args = (0, 0, str(inst_path), None, 1000, {})
+        result = _parse_instance_worker(args)
+
+        # Verify all sources were parsed
+        self.assertEqual(result.stats['total'], 3)
+        self.assertEqual(result.stats['with_waveforms'], 0)  # No waveforms
+
+        # Verify source names are correct (extracted from info.full_name)
+        self.assertIn('I_dc1', result.current_sources)
+        self.assertIn('I_dc2', result.current_sources)
+        self.assertIn('I_dc3', result.current_sources)
+
+        # Verify DC values were converted to mA
+        self.assertAlmostEqual(result.current_sources['I_dc1']['dc_value'], 1.0, places=6)
+        self.assertAlmostEqual(result.current_sources['I_dc2']['dc_value'], 2.5, places=6)
+        self.assertAlmostEqual(result.current_sources['I_dc3']['dc_value'], 0.5, places=6)
+
+    def test_dc_only_instance_node_map(self):
+        """Test that DC-only sources have correct node mappings."""
+        set_optimize_dc_only(True)
+
+        inst_path = Path(self.temp_dir) / "instanceModels_0_0.sp"
+        with open(inst_path, 'w') as f:
+            f.write("I_test nodeA nodeB 1e-3\n")
+
+        args = (0, 0, str(inst_path), None, 1000, {})
+        result = _parse_instance_worker(args)
+
+        self.assertIn('I_test', result.instance_node_map)
+        self.assertEqual(result.instance_node_map['I_test'], ['nodeA', 'nodeB'])
+
+    def test_dc_only_with_boundary_nodes(self):
+        """Test DC-only sources with boundary node markers (*prefix)."""
+        set_optimize_dc_only(True)
+
+        inst_path = Path(self.temp_dir) / "instanceModels_0_0.sp"
+        with open(inst_path, 'w') as f:
+            # Boundary nodes have * prefix
+            f.write("I_boundary *boundary_node internal_node 1e-3\n")
+
+        args = (0, 0, str(inst_path), None, 1000, {})
+        result = _parse_instance_worker(args)
+
+        # Verify boundary marker was stripped
+        self.assertEqual(result.instance_node_map['I_boundary'],
+                        ['boundary_node', 'internal_node'])
+
+    def test_dc_only_static_current_calculation(self):
+        """Test that static current statistics are correct for DC-only sources."""
+        set_optimize_dc_only(True)
+
+        inst_path = Path(self.temp_dir) / "instanceModels_0_0.sp"
+        with open(inst_path, 'w') as f:
+            f.write("I_a n1 n2 1e-3\n")    # 1 mA
+            f.write("I_b n3 n4 2e-3\n")    # 2 mA
+            f.write("I_c n5 n6 -0.5e-3\n") # -0.5 mA (negative is valid)
+
+        args = (0, 0, str(inst_path), None, 1000, {})
+        result = _parse_instance_worker(args)
+
+        # Total static current should be sum of absolute values
+        expected_total = 1.0 + 2.0 + 0.5  # mA
+        self.assertAlmostEqual(result.stats['total_static_current_ma'],
+                              expected_total, places=6)
+
+    def test_dc_only_mixed_with_waveform_sources(self):
+        """Test parsing mix of DC-only and waveform sources."""
+        set_optimize_dc_only(True)
+
+        inst_path = Path(self.temp_dir) / "instanceModels_0_0.sp"
+        with open(inst_path, 'w') as f:
+            # DC-only sources
+            f.write("I_dc1 n1 n2 1e-3\n")
+            f.write("I_dc2 n3 n4 2e-3\n")
+            # Waveform source
+            f.write("I_pulse n5 n6 0 pulse(0, 1e-3, 0, 1n, 1n, 5n, 10n)\n")
+            # Another DC-only
+            f.write("I_dc3 n7 n8 3e-3\n")
+
+        args = (0, 0, str(inst_path), None, 1000, {})
+        result = _parse_instance_worker(args)
+
+        self.assertEqual(result.stats['total'], 4)
+        self.assertEqual(result.stats['with_waveforms'], 1)
+        self.assertEqual(len(result.stats['wscale_values']), 1)
+
+        # Verify all sources are present
+        self.assertIn('I_dc1', result.current_sources)
+        self.assertIn('I_dc2', result.current_sources)
+        self.assertIn('I_pulse', result.current_sources)
+        self.assertIn('I_dc3', result.current_sources)
+
+    def test_dc_only_to_dict_roundtrip(self):
+        """Test that DC-only sources serialize and deserialize correctly."""
+        set_optimize_dc_only(True)
+
+        inst_path = Path(self.temp_dir) / "instanceModels_0_0.sp"
+        with open(inst_path, 'w') as f:
+            f.write("I_test n1 n2 1e-3\n")
+
+        args = (0, 0, str(inst_path), None, 1000, {})
+        result = _parse_instance_worker(args)
+
+        # Get serialized dict
+        src_dict = result.current_sources['I_test']
+
+        # Reconstruct via CurrentSource.from_dict
+        reconstructed = CurrentSource.from_dict(src_dict)
+
+        # Verify reconstruction
+        self.assertEqual(reconstructed.name, 'I_test')
+        self.assertEqual(reconstructed.node1, 'n1')
+        self.assertEqual(reconstructed.node2, 'n2')
+        self.assertAlmostEqual(reconstructed.dc_value, 1.0, places=6)  # mA
+        self.assertEqual(reconstructed.wscale, 1.0)
+        self.assertEqual(len(reconstructed.pulses), 0)
+        self.assertEqual(len(reconstructed.pwls), 0)
+
+    def test_dc_only_optimization_disabled_still_works(self):
+        """Test that parallel parsing works with optimization disabled."""
+        set_optimize_dc_only(False)
+
+        inst_path = Path(self.temp_dir) / "instanceModels_0_0.sp"
+        with open(inst_path, 'w') as f:
+            f.write("I_test n1 n2 1e-3\n")
+
+        args = (0, 0, str(inst_path), None, 1000, {})
+        result = _parse_instance_worker(args)
+
+        self.assertEqual(result.stats['total'], 1)
+        self.assertIn('I_test', result.current_sources)
+        self.assertAlmostEqual(result.current_sources['I_test']['dc_value'], 1.0, places=6)
+
+    def test_dc_only_multi_tile_creation(self):
+        """Test creating multi-tile netlist with DC-only sources."""
+        # Create a minimal 2x2 tile structure
+        netlist_dir = Path(self.temp_dir) / "multi_tile_netlist"
+        netlist_dir.mkdir()
+
+        # Create ckt.sp (top-level) - must include tile AND instanceModels files
+        with open(netlist_dir / "ckt.sp", 'w') as f:
+            f.write("* Multi-tile test netlist\n")
+            for x in range(2):
+                for y in range(2):
+                    f.write(f".include tile_{x}_{y}.ckt\n")
+            # Include instance model files (discovered via .include)
+            for x in range(2):
+                for y in range(2):
+                    f.write(f".include instanceModels_{x}_{y}.sp\n")
+            f.write(".include package.ckt\n")
+
+        # Create tile files and instance models with DC-only sources
+        for x in range(2):
+            for y in range(2):
+                node_base = x * 1000 + y * 100
+                # Tile circuit file
+                with open(netlist_dir / f"tile_{x}_{y}.ckt", 'w') as f:
+                    f.write(f"R_{x}_{y}_1 {node_base}_M1 {node_base + 10}_M1 0.001\n")
+
+                # Node file - format: <node_name> <v1> <v2> <v3> <v4> <net_name>
+                with open(netlist_dir / f"tile_{x}_{y}.nd", 'w') as f:
+                    f.write(f"{node_base}_M1 0 0 0 0 VDD\n")
+                    f.write(f"{node_base + 10}_M1 0 0 0 0 VDD\n")
+
+                # Instance models with DC-only sources
+                with open(netlist_dir / f"instanceModels_{x}_{y}.sp", 'w') as f:
+                    f.write(f"I_tile{x}{y}_a {node_base}_M1 0 1e-3\n")
+                    f.write(f"I_tile{x}{y}_b {node_base + 10}_M1 0 2e-3\n")
+
+        # Create pg_net_voltage
+        with open(netlist_dir / "pg_net_voltage", 'w') as f:
+            f.write("VDD 1.0\n")
+
+        # Create package.ckt with voltage source
+        with open(netlist_dir / "package.ckt", 'w') as f:
+            f.write("VVDD VDD_vsrc 0 1.0\n")
+            f.write("Rvsrc VDD_vsrc 0_M1 0.001\n")
+
+        # Parse with parallel enabled
+        set_optimize_dc_only(True)
+        parser = NetlistParser(str(netlist_dir), parallel=True, n_workers=2)
+        graph = parser.parse()
+
+        # Verify all instance sources were parsed
+        instance_sources = graph.graph.get('_instance_sources_objects', {})
+
+        # Should have 8 current sources (2 per tile, 4 tiles)
+        self.assertEqual(len(instance_sources), 8)
+
+        # Verify specific sources exist
+        for x in range(2):
+            for y in range(2):
+                self.assertIn(f'I_tile{x}{y}_a', instance_sources)
+                self.assertIn(f'I_tile{x}{y}_b', instance_sources)
+
+    def test_dc_only_parallel_vs_sequential_equivalence(self):
+        """Test that DC-only sources produce equivalent results in parallel vs sequential."""
+        # Create test netlist with DC-only sources
+        netlist_dir = Path(self.temp_dir) / "equiv_test"
+        netlist_dir.mkdir()
+
+        # Create minimal structure with proper includes
+        with open(netlist_dir / "ckt.sp", 'w') as f:
+            f.write(".include tile_0_0.ckt\n")
+            f.write(".include instanceModels_0_0.sp\n")
+            f.write(".include package.ckt\n")
+
+        with open(netlist_dir / "tile_0_0.ckt", 'w') as f:
+            f.write("R1 1000_M1 2000_M1 0.001\n")
+
+        # .nd format: <node_name> <v1> <v2> <v3> <v4> <net_name>
+        with open(netlist_dir / "tile_0_0.nd", 'w') as f:
+            f.write("1000_M1 0 0 0 0 VDD\n")
+            f.write("2000_M1 0 0 0 0 VDD\n")
+
+        with open(netlist_dir / "instanceModels_0_0.sp", 'w') as f:
+            f.write("I_a 1000_M1 0 1e-3\n")
+            f.write("I_b 2000_M1 0 2e-3\n")
+
+        with open(netlist_dir / "pg_net_voltage", 'w') as f:
+            f.write("VDD 1.0\n")
+
+        with open(netlist_dir / "package.ckt", 'w') as f:
+            f.write("VVDD VDD_vsrc 0 1.0\n")
+            f.write("Rvsrc VDD_vsrc 1000_M1 0.001\n")
+
+        set_optimize_dc_only(True)
+
+        # Sequential parse
+        parser_seq = NetlistParser(str(netlist_dir), parallel=False)
+        graph_seq = parser_seq.parse()
+
+        # Parallel parse
+        parser_par = NetlistParser(str(netlist_dir), parallel=True, n_workers=2)
+        graph_par = parser_par.parse()
+
+        # Compare instance sources
+        sources_seq = graph_seq.graph.get('_instance_sources_objects', {})
+        sources_par = graph_par.graph.get('_instance_sources_objects', {})
+
+        self.assertEqual(set(sources_seq.keys()), set(sources_par.keys()))
+
+        for name in sources_seq.keys():
+            src_seq = sources_seq[name]
+            src_par = sources_par[name]
+
+            # Compare DC values
+            self.assertAlmostEqual(src_seq.dc_value, src_par.dc_value, places=6,
+                                  msg=f"DC value mismatch for {name}")
+
+            # Compare static current
+            self.assertAlmostEqual(src_seq.get_static_current(),
+                                  src_par.get_static_current(), places=6,
+                                  msg=f"Static current mismatch for {name}")
 
 
 if __name__ == '__main__':

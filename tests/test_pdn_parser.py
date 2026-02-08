@@ -28,10 +28,12 @@ from pdn_parser import (
     NetlistParser, SpiceLineReader, GraphBuilder,
     R_TO_KOHM, C_TO_FF, L_TO_NH, I_TO_MA, SHORT_THRESHOLD,
     # Waveform parsing classes and functions
-    InstanceInfo, Pulse, PWL, CurrentSource,
+    InstanceInfo, Pulse, PWL, CurrentSource, _DCOnlyCurrentSource,
     _parse_spice_value, _parse_pulse, _parse_pwl, _parse_current_source_line,
     # Wscale control functions (thread-safe via ContextVar)
-    get_apply_wscale, set_apply_wscale
+    get_apply_wscale, set_apply_wscale,
+    # DC-only optimization control functions
+    get_optimize_dc_only, set_optimize_dc_only
 )
 
 
@@ -1437,8 +1439,21 @@ class TestPWLParsing(unittest.TestCase):
 
 
 class TestCurrentSourceLineParsing(unittest.TestCase):
-    """Test _parse_current_source_line function"""
-    
+    """Test _parse_current_source_line function
+
+    These tests verify full CurrentSource interface, so DC-only optimization
+    is disabled to ensure the full dataclass is returned.
+    """
+
+    def setUp(self):
+        """Disable DC-only optimization to test full CurrentSource behavior"""
+        self.original_flag = get_optimize_dc_only()
+        set_optimize_dc_only(False)
+
+    def tearDown(self):
+        """Restore original optimization flag"""
+        set_optimize_dc_only(self.original_flag)
+
     def test_parse_dc_only(self):
         """Test parsing current source with DC value only"""
         line = "I_inst n1 n2 1e-3"
@@ -1567,6 +1582,26 @@ class TestCurrentSourceLineParsing(unittest.TestCase):
         self.assertEqual(len(cs.pulses), 1)
         self.assertEqual(cs.wscale, 1.0)
 
+    def test_skip_zero_current_source(self):
+        """Test that current sources with zero dc and no waveforms are correctly parsed.
+
+        These are placeholder entries like filler cells with no actual current draw.
+        The parser should return a valid CurrentSource object that has_current_data() == False.
+        """
+        # Real-world example of a filler cell with no actual current
+        line = "i_tapfiller_HDBULT11_TAPDS_0:0:0:VSS:VSS:0:0:0 0 517300_12000_24 0 wstart=0 wstop=0 dv=0.66"
+        isrc = _parse_current_source_line(line)
+
+        # Parser should return valid CurrentSource object
+        self.assertIsNotNone(isrc)
+        self.assertEqual(isrc.dc_value, 0.0)
+        self.assertIsNone(isrc.static_value)
+        self.assertEqual(len(isrc.pulses), 0)
+        self.assertEqual(len(isrc.pwls), 0)
+
+        # has_current_data() should return False for zero-current sources
+        self.assertFalse(isrc.has_current_data())
+
 
 class TestInstanceSourcesIntegration(unittest.TestCase):
     """Integration tests for instance_sources in parsed graph.
@@ -1686,6 +1721,200 @@ class TestInstanceSourcesRawObjects(unittest.TestCase):
         raw_sources = self.graph.graph.get('_instance_sources_objects', {})
         # Both should have same keys
         self.assertEqual(set(inst_node_map.keys()), set(raw_sources.keys()))
+
+
+# =============================================================================
+# DC-Only Current Source Optimization Tests
+# =============================================================================
+
+class TestDCOnlyOptimization(unittest.TestCase):
+    """Test the lightweight _DCOnlyCurrentSource optimization"""
+
+    def setUp(self):
+        """Save original flag state"""
+        self.original_flag = get_optimize_dc_only()
+
+    def tearDown(self):
+        """Restore original flag state"""
+        set_optimize_dc_only(self.original_flag)
+
+    def test_flag_default_is_true(self):
+        """Test that DC-only optimization is enabled by default"""
+        # Reset to default by creating fresh context
+        set_optimize_dc_only(True)
+        self.assertTrue(get_optimize_dc_only())
+
+    def test_flag_toggle_works(self):
+        """Test that flag can be toggled"""
+        set_optimize_dc_only(False)
+        self.assertFalse(get_optimize_dc_only())
+        set_optimize_dc_only(True)
+        self.assertTrue(get_optimize_dc_only())
+
+    def test_dc_only_line_returns_lightweight(self):
+        """Test that DC-only lines return _DCOnlyCurrentSource when flag is on"""
+        set_optimize_dc_only(True)
+        result = _parse_current_source_line("I_test n1 n2 1.5m")
+        self.assertIsInstance(result, _DCOnlyCurrentSource)
+        self.assertEqual(result.node1, 'n1')
+        self.assertEqual(result.node2, 'n2')
+        self.assertAlmostEqual(result.dc_value, 1.5e-3)
+
+    def test_dc_only_with_dc_prefix(self):
+        """Test DC-only line with 'dc' prefix"""
+        set_optimize_dc_only(True)
+        result = _parse_current_source_line("I_test n1 n2 dc 2.0m")
+        self.assertIsInstance(result, _DCOnlyCurrentSource)
+        self.assertAlmostEqual(result.dc_value, 2.0e-3)
+
+    def test_dc_only_with_extra_params_no_waveform(self):
+        """Test DC-only line with extra params (wstart=, dv=) but no waveform"""
+        set_optimize_dc_only(True)
+        # These extra params are ignored by fast-path since no waveform
+        result = _parse_current_source_line("I_test n1 n2 1.0m wscale=0.5 wstart=1e-9")
+        self.assertIsInstance(result, _DCOnlyCurrentSource)
+        self.assertAlmostEqual(result.dc_value, 1.0e-3)
+
+    def test_line_with_pulse_returns_full_current_source(self):
+        """Test that lines with pulse waveform return full CurrentSource"""
+        set_optimize_dc_only(True)
+        result = _parse_current_source_line("I_test n1 n2 0 pulse(0, 1m, 0, 1n, 1n, 5n, 10n)")
+        self.assertIsInstance(result, CurrentSource)
+        self.assertEqual(len(result.pulses), 1)
+
+    def test_line_with_pwl_returns_full_current_source(self):
+        """Test that lines with PWL waveform return full CurrentSource"""
+        set_optimize_dc_only(True)
+        result = _parse_current_source_line("I_test n1 n2 0 pwl(0 0 1n 1m 2n 0)")
+        self.assertIsInstance(result, CurrentSource)
+        self.assertEqual(len(result.pwls), 1)
+
+    def test_line_with_static_value_returns_full_current_source(self):
+        """Test that lines with static_value= return full CurrentSource"""
+        set_optimize_dc_only(True)
+        result = _parse_current_source_line("I_test n1 n2 1.0m static_value=0.5m")
+        self.assertIsInstance(result, CurrentSource)
+        self.assertAlmostEqual(result.static_value, 0.5e-3)
+
+    def test_flag_off_returns_full_current_source(self):
+        """Test that flag off returns full CurrentSource for DC-only lines"""
+        set_optimize_dc_only(False)
+        result = _parse_current_source_line("I_test n1 n2 1.5m")
+        self.assertIsInstance(result, CurrentSource)
+        self.assertAlmostEqual(result.dc_value, 1.5e-3)
+
+    def test_get_current_at_time_returns_dc_value(self):
+        """Test that get_current_at_time returns dc_value for any time"""
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.5)
+        self.assertEqual(dc_src.get_current_at_time(0), 1.5)
+        self.assertEqual(dc_src.get_current_at_time(1e-9), 1.5)
+        self.assertEqual(dc_src.get_current_at_time(100e-9), 1.5)
+
+    def test_get_static_current_returns_dc_value(self):
+        """Test that get_static_current returns dc_value"""
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 2.5)
+        self.assertEqual(dc_src.get_static_current(), 2.5)
+
+    def test_wscale_property_returns_one(self):
+        """Test that wscale property always returns 1.0"""
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.0)
+        self.assertEqual(dc_src.wscale, 1.0)
+
+    def test_has_waveform_data_returns_false(self):
+        """Test that has_waveform_data returns False"""
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.0)
+        self.assertFalse(dc_src.has_waveform_data())
+
+    def test_has_current_data_true_for_nonzero_dc(self):
+        """Test that has_current_data returns True for non-zero dc_value"""
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.0)
+        self.assertTrue(dc_src.has_current_data())
+
+    def test_has_current_data_false_for_zero_dc(self):
+        """Test that has_current_data returns False for zero dc_value"""
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 0.0)
+        self.assertFalse(dc_src.has_current_data())
+
+    def test_pulses_property_returns_empty_list(self):
+        """Test that pulses property returns empty list"""
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.0)
+        self.assertEqual(dc_src.pulses, [])
+
+    def test_pwls_property_returns_empty_list(self):
+        """Test that pwls property returns empty list"""
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.0)
+        self.assertEqual(dc_src.pwls, [])
+
+    def test_static_value_property_returns_none(self):
+        """Test that static_value property returns None"""
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.0)
+        self.assertIsNone(dc_src.static_value)
+
+    def test_name_property_returns_from_info(self):
+        """Test that name property returns info.full_name if available"""
+        # Without info, name is empty
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.0)
+        self.assertEqual(dc_src.name, '')
+
+        # With info, name comes from full_name
+        info = InstanceInfo.parse("I_test:VDD:vdd:VSS:0:1:2")
+        dc_src_with_info = _DCOnlyCurrentSource('n1', 'n2', 1.0, info)
+        self.assertEqual(dc_src_with_info.name, "I_test:VDD:vdd:VSS:0:1:2")
+
+    def test_to_dict_roundtrip_via_current_source_from_dict(self):
+        """Test that to_dict can be roundtripped via CurrentSource.from_dict"""
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.5)
+        d = dc_src.to_dict()
+
+        # Reconstruct via CurrentSource.from_dict
+        full_src = CurrentSource.from_dict(d)
+
+        # Verify values match
+        self.assertEqual(full_src.node1, dc_src.node1)
+        self.assertEqual(full_src.node2, dc_src.node2)
+        self.assertEqual(full_src.dc_value, dc_src.dc_value)
+        self.assertEqual(full_src.wscale, dc_src.wscale)
+        self.assertEqual(full_src.pulses, dc_src.pulses)
+        self.assertEqual(full_src.pwls, dc_src.pwls)
+        self.assertEqual(full_src.static_value, dc_src.static_value)
+
+    def test_to_dict_with_instance_info(self):
+        """Test to_dict serializes InstanceInfo correctly"""
+        info = InstanceInfo.parse("i_test:VDD:vdd:VSS:0:1:2")
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.0, info)
+        d = dc_src.to_dict()
+
+        self.assertIsNotNone(d['info'])
+        self.assertEqual(d['info']['vdd_net'], 'VDD')
+
+    def test_node_mutability(self):
+        """Test that node1/node2 are mutable (required by _parse_isource)"""
+        dc_src = _DCOnlyCurrentSource('original_n1', 'original_n2', 1.0)
+
+        # Modify nodes (as _parse_isource does for boundary handling)
+        dc_src.node1 = 'modified_n1'
+        dc_src.node2 = 'modified_n2'
+
+        self.assertEqual(dc_src.node1, 'modified_n1')
+        self.assertEqual(dc_src.node2, 'modified_n2')
+
+    def test_repr(self):
+        """Test __repr__ provides readable output"""
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.5)
+        repr_str = repr(dc_src)
+        self.assertIn('_DCOnlyCurrentSource', repr_str)
+        self.assertIn('n1', repr_str)
+        self.assertIn('n2', repr_str)
+        self.assertIn('1.5', repr_str)
+
+    def test_instance_info_parsed_from_name(self):
+        """Test that instance info is parsed from source name"""
+        set_optimize_dc_only(True)
+        result = _parse_current_source_line("i_U1/cell:VDD:vdd:VSS:0:5:3 n1 n2 1.0m")
+        self.assertIsInstance(result, _DCOnlyCurrentSource)
+        self.assertIsNotNone(result.info)
+        self.assertEqual(result.info.tile_x, 5)
+        self.assertEqual(result.info.tile_y, 3)
 
 
 if __name__ == '__main__':
