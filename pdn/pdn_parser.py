@@ -160,6 +160,43 @@ def set_optimize_dc_only(value: bool) -> None:
     _optimize_dc_only.set(value)
 
 
+class _PDNUnpickler(pickle.Unpickler):
+    """Custom unpickler that resolves PDN classes from __main__ to pdn.pdn_parser.
+
+    This handles legacy pickle files created when pdn_parser.py was run directly
+    as __main__, which causes classes to be pickled with __main__ module reference.
+    """
+
+    def find_class(self, module: str, name: str):
+        # Remap __main__ references to pdn.pdn_parser
+        if module == '__main__':
+            import pdn.pdn_parser as pdn_module
+            if hasattr(pdn_module, name):
+                return getattr(pdn_module, name)
+        return super().find_class(module, name)
+
+
+def load_pdn_pickle(filepath: str):
+    """Load a pickled PDN graph with proper class resolution.
+
+    This function handles pickle files that contain PDNNodeAttrs,
+    _DCOnlyCurrentSource, or other classes that were pickled from
+    __main__ context (when running pdn_parser.py directly).
+
+    Args:
+        filepath: Path to the pickle file
+
+    Returns:
+        The unpickled object (typically RustworkxMultiDiGraphWrapper)
+
+    Example:
+        from pdn.pdn_parser import load_pdn_pickle
+        graph = load_pdn_pickle('pdn_graph.pkl')
+    """
+    with open(filepath, 'rb') as f:
+        return _PDNUnpickler(f).load()
+
+
 # Unit conversions (matching C++ parser)
 R_TO_KOHM = 1e-3  # Ohm to KOhm
 C_TO_FF = 1e15   # Farad to fF
