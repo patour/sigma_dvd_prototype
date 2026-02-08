@@ -33,7 +33,9 @@ from pdn_parser import (
     # Wscale control functions (thread-safe via ContextVar)
     get_apply_wscale, set_apply_wscale,
     # DC-only optimization control functions
-    get_optimize_dc_only, set_optimize_dc_only
+    get_optimize_dc_only, set_optimize_dc_only,
+    # Node attributes class
+    PDNNodeAttrs
 )
 
 
@@ -1915,6 +1917,53 @@ class TestDCOnlyOptimization(unittest.TestCase):
         self.assertIsNotNone(result.info)
         self.assertEqual(result.info.tile_x, 5)
         self.assertEqual(result.info.tile_y, 3)
+
+    def test_pickle_roundtrip(self):
+        """Test that _DCOnlyCurrentSource pickles and unpickles correctly"""
+        import pickle
+
+        info = InstanceInfo.parse("i_test:VDD:vdd:VSS:0:1:2")
+        dc_src = _DCOnlyCurrentSource('n1', 'n2', 1.5, info)
+
+        # Pickle and unpickle
+        data = pickle.dumps(dc_src)
+        restored = pickle.loads(data)
+
+        # Verify restored object
+        self.assertIsInstance(restored, _DCOnlyCurrentSource)
+        self.assertEqual(restored.node1, 'n1')
+        self.assertEqual(restored.node2, 'n2')
+        self.assertEqual(restored.dc_value, 1.5)
+        self.assertIsNotNone(restored.info)
+        self.assertEqual(restored.info.tile_x, 1)
+
+
+class TestPDNNodeAttrsPickle(unittest.TestCase):
+    """Test PDNNodeAttrs pickle support"""
+
+    def test_pickle_roundtrip(self):
+        """Test that PDNNodeAttrs pickles and unpickles correctly"""
+        import pickle
+        from pdn_parser import PDNNodeAttrs
+
+        attrs = PDNNodeAttrs(
+            name='1000_2000_M1',
+            _net_type_idx=0,
+            tile_id=(1, 2),
+            flags=8,  # FLAG_DIE
+            voltage=0.95
+        )
+
+        # Pickle and unpickle
+        data = pickle.dumps(attrs)
+        restored = pickle.loads(data)
+
+        # Verify restored object
+        self.assertIsInstance(restored, PDNNodeAttrs)
+        self.assertEqual(restored.name, '1000_2000_M1')
+        self.assertEqual(restored.tile_id, (1, 2))
+        self.assertEqual(restored.flags, 8)
+        self.assertEqual(restored.voltage, 0.95)
 
 
 if __name__ == '__main__':

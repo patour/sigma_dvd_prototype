@@ -390,6 +390,11 @@ class PDNNodeAttrs:
             if k not in _readonly and hasattr(self, k) and not k.startswith('_'):
                 setattr(self, k, v)
 
+    def __reduce__(self):
+        """Custom pickle support - ensures class is resolved from pdn.pdn_parser module."""
+        return (PDNNodeAttrs, (self.name, self._net_type_idx, self.tile_id,
+                               self.flags, self.voltage))
+
 
 @dataclass(slots=True)
 class ParseStats:
@@ -875,6 +880,10 @@ class _DCOnlyCurrentSource:
     def __repr__(self) -> str:
         return (f"_DCOnlyCurrentSource(node1={self.node1!r}, node2={self.node2!r}, "
                 f"dc_value={self.dc_value})")
+
+    def __reduce__(self):
+        """Custom pickle support - ensures class is resolved from pdn.pdn_parser module."""
+        return (_DCOnlyCurrentSource, (self.node1, self.node2, self.dc_value, self.info))
 
 
 # =============================================================================
