@@ -1660,7 +1660,8 @@ Examples:
     parser.add_argument('--backend', choices=['auto', 'splu', 'cholmod'], help='Solver backend')
     parser.add_argument('--cholmod-ordering', type=str, help='CHOLMOD ordering method')
     parser.add_argument('--cholmod-mode', type=str, help='CHOLMOD factorization mode')
-    parser.add_argument('--cholmod-use-long', action='store_true', help='Use 64-bit indices for CHOLMOD')
+    parser.add_argument('--cholmod-use-long', action='store_true', default=None,
+                        help='Use 64-bit indices for CHOLMOD')
 
     # Output
     parser.add_argument('--output-dir', '-o', type=str,
