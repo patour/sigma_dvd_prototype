@@ -830,5 +830,196 @@ class TestSmoothingPreprocessingIntegration(unittest.TestCase):
         self.assertEqual(len(result_be.t_array), len(result_trap.t_array))
 
 
+class TestDecompositionWithSmoothedSources(unittest.TestCase):
+    """Integration tests for IR-drop decomposition with smoothed current sources."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up test netlist path."""
+        cls.test_netlist = Path(__file__).parent.parent / 'pdn' / 'netlist_test'
+        if not cls.test_netlist.exists():
+            cls.netlist_available = False
+        else:
+            cls.netlist_available = True
+
+    def setUp(self):
+        """Skip if test netlist not available."""
+        if not self.netlist_available:
+            self.skipTest("Test netlist not available")
+
+    def test_decomposition_with_smoothed_sources_basic(self):
+        """Test that decomposition analysis works with smoothed current sources."""
+        from analysis.dynamic_irdrop_decomposition import analyze_dynamic_irdrop_decomposition
+
+        # Run with smoothing enabled (default)
+        # use_cache=False to ensure fresh parse (cached pkl may be NetworkX without sources)
+        result, graph = analyze_dynamic_irdrop_decomposition(
+            netlist_dir=str(self.test_netlist),
+            net='VDD',
+            t_start=0.0,
+            t_end=10e-9,
+            dt=0.1e-9,
+            top_k=2,
+            window_percent=20.0,
+            smooth_sources=True,
+            use_cache=False,
+            verbose=False,
+        )
+
+        # Verify results are valid
+        self.assertEqual(len(result.worst_instances), 2)
+        self.assertGreater(result.worst_instances[0].peak_total_mV, 0)
+
+        # Verify smoothing timing is recorded
+        self.assertIn('preprocess_smoothing', result.timings)
+
+        # Verify smooth_sources flag is recorded
+        self.assertTrue(result.smooth_sources)
+
+    def test_decomposition_without_smoothing(self):
+        """Test decomposition analysis with smoothing disabled."""
+        from analysis.dynamic_irdrop_decomposition import analyze_dynamic_irdrop_decomposition
+
+        # Run without smoothing
+        # use_cache=False to ensure fresh parse (cached pkl may be NetworkX without sources)
+        result, graph = analyze_dynamic_irdrop_decomposition(
+            netlist_dir=str(self.test_netlist),
+            net='VDD',
+            t_start=0.0,
+            t_end=10e-9,
+            dt=0.1e-9,
+            top_k=1,
+            window_percent=20.0,
+            smooth_sources=False,
+            use_cache=False,
+            verbose=False,
+        )
+
+        # Verify results are valid
+        self.assertEqual(len(result.worst_instances), 1)
+        self.assertGreater(result.worst_instances[0].peak_total_mV, 0)
+
+        # Verify smoothing timing is NOT recorded
+        self.assertNotIn('preprocess_smoothing', result.timings)
+
+        # Verify smooth_sources flag is recorded
+        self.assertFalse(result.smooth_sources)
+
+    def test_decomposition_smoothed_vs_raw_similar_results(self):
+        """Smoothed decomposition should produce similar peak IR-drop to raw."""
+        from analysis.dynamic_irdrop_decomposition import analyze_dynamic_irdrop_decomposition
+
+        # use_cache=False to ensure fresh parse (cached pkl may be NetworkX without sources)
+        common_args = dict(
+            netlist_dir=str(self.test_netlist),
+            net='VDD',
+            t_start=0.0,
+            t_end=10e-9,
+            dt=0.1e-9,
+            top_k=1,
+            window_percent=20.0,
+            use_cache=False,
+            verbose=False,
+        )
+
+        # Run without smoothing
+        result_raw, _ = analyze_dynamic_irdrop_decomposition(**common_args, smooth_sources=False)
+
+        # Run with smoothing
+        result_smoothed, _ = analyze_dynamic_irdrop_decomposition(**common_args, smooth_sources=True)
+
+        # Peak IR-drop should be similar (within 25% for filtered signals)
+        peak_raw = result_raw.worst_instances[0].peak_total_mV
+        peak_smoothed = result_smoothed.worst_instances[0].peak_total_mV
+
+        if peak_raw > 0.01:  # Only check if significant
+            rel_diff = abs(peak_raw - peak_smoothed) / peak_raw
+            self.assertLess(rel_diff, 0.25,
+                f"Smoothed peak {peak_smoothed:.3f} mV differs too much from raw {peak_raw:.3f} mV")
+
+    def test_decomposition_near_far_linearity_preserved_with_smoothing(self):
+        """Near + Far decomposition should still approximately equal Total with smoothing."""
+        from analysis.dynamic_irdrop_decomposition import analyze_dynamic_irdrop_decomposition
+
+        # use_cache=False to ensure fresh parse (cached pkl may be NetworkX without sources)
+        result, _ = analyze_dynamic_irdrop_decomposition(
+            netlist_dir=str(self.test_netlist),
+            net='VDD',
+            t_start=0.0,
+            t_end=10e-9,
+            dt=0.1e-9,
+            top_k=1,
+            window_percent=20.0,
+            smooth_sources=True,
+            use_cache=False,
+            verbose=False,
+        )
+
+        inst = result.worst_instances[0]
+
+        # Near + far should sum to approximately 100%
+        total_frac = inst.near_fraction_at_peak + inst.far_fraction_at_peak
+
+        # Allow 5% tolerance (should be very close to 100%)
+        self.assertGreater(total_frac, 95.0,
+            f"Near ({inst.near_fraction_at_peak:.1f}%) + Far ({inst.far_fraction_at_peak:.1f}%) "
+            f"= {total_frac:.1f}% should be ~100%")
+        self.assertLess(total_frac, 105.0,
+            f"Near ({inst.near_fraction_at_peak:.1f}%) + Far ({inst.far_fraction_at_peak:.1f}%) "
+            f"= {total_frac:.1f}% should be ~100%")
+
+    def test_solve_transient_multi_rhs_accepts_smoothed_sources(self):
+        """Test solve_transient_multi_rhs accepts smoothed_sources parameter."""
+        from pdn.pdn_parser import NetlistParser
+        from core.transient_solver import TransientIRDropSolver, IntegrationMethod
+
+        parser = NetlistParser(str(self.test_netlist))
+        graph = parser.parse()
+        model = create_model_from_pdn(graph, 'VDD')
+
+        solver = TransientIRDropSolver(model, graph, vectorize_threshold=0)
+
+        # Preprocess sources
+        smoothed = solver.preprocess_sources(dt=1e-9, t_start=0, t_end=10e-9)
+
+        # Create simple mask
+        n_sources = solver._vec_sources.n_sources
+        mask_all = np.ones((1, n_sources), dtype=bool)
+
+        # Solve with smoothed sources
+        results = solver.solve_transient_multi_rhs(
+            t_start=0, t_end=10e-9, dt=1e-9,
+            source_masks=mask_all,
+            smoothed_sources=smoothed,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertGreater(results[0].peak_ir_drop, 0)
+
+    def test_solve_transient_multi_rhs_without_smoothed_sources(self):
+        """Test solve_transient_multi_rhs works without smoothed_sources (raw sources)."""
+        from pdn.pdn_parser import NetlistParser
+        from core.transient_solver import TransientIRDropSolver, IntegrationMethod
+
+        parser = NetlistParser(str(self.test_netlist))
+        graph = parser.parse()
+        model = create_model_from_pdn(graph, 'VDD')
+
+        solver = TransientIRDropSolver(model, graph, vectorize_threshold=0)
+
+        # Create simple mask
+        n_sources = solver._vec_sources.n_sources
+        mask_all = np.ones((1, n_sources), dtype=bool)
+
+        # Solve without smoothed sources (smoothed_sources=None, the default)
+        results = solver.solve_transient_multi_rhs(
+            t_start=0, t_end=10e-9, dt=1e-9,
+            source_masks=mask_all,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertGreater(results[0].peak_ir_drop, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

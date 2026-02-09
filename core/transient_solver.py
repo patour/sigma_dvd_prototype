@@ -1086,6 +1086,7 @@ class TransientIRDropSolver:
         n_worst_nodes: int = 10,
         verbose: bool = False,
         init_condition: str = 'dc',
+        smoothed_sources: Optional[VectorizedCurrentSources] = None,
     ) -> List[TransientResult]:
         """Solve transient with multiple RHS vectors (current source masks).
 
@@ -1111,6 +1112,8 @@ class TransientIRDropSolver:
             init_condition: Initial condition type:
                 - 'dc': Start from steady-state DC solution at t_start (default)
                 - 'vdd': Start from V = VDD (zero IR-drop, useful for adjoint validation)
+            smoothed_sources: Pre-smoothed VectorizedCurrentSources from preprocess_sources().
+                             If provided, uses these instead of raw sources.
 
         Returns:
             List of TransientResult objects, one per mask.
@@ -1143,6 +1146,33 @@ class TransientIRDropSolver:
             far = result_far.get_ir_drop_waveform(worst_node)
             np.testing.assert_allclose(total, near + far, rtol=1e-8)
         """
+        # Temporarily swap in smoothed sources if provided
+        original_sources = self._vec_sources
+        if smoothed_sources is not None:
+            self._vec_sources = smoothed_sources
+
+        try:
+            return self._solve_transient_multi_rhs_impl(
+                t_start, t_end, dt, source_masks, method,
+                track_nodes, n_worst_nodes, verbose, init_condition,
+            )
+        finally:
+            # Restore original sources
+            self._vec_sources = original_sources
+
+    def _solve_transient_multi_rhs_impl(
+        self,
+        t_start: float,
+        t_end: float,
+        dt: float,
+        source_masks: np.ndarray,
+        method: IntegrationMethod,
+        track_nodes: Optional[List[Any]],
+        n_worst_nodes: int,
+        verbose: bool,
+        init_condition: str,
+    ) -> List[TransientResult]:
+        """Internal implementation of solve_transient_multi_rhs."""
         timings: Dict[str, float] = {}
         t0_total = time_module.perf_counter()
 

@@ -260,6 +260,7 @@ class DecompositionResult:
     peak_ir_drop_per_node: Dict[str, float] = field(default_factory=dict)  # node -> peak IR-drop (V)
     total_current_waveform: np.ndarray = field(default_factory=lambda: np.array([]))  # Design-wide total current (mA)
     t_array: np.ndarray = field(default_factory=lambda: np.array([]))  # Time array for total current plot
+    smooth_sources: bool = True  # Whether PWL smoothing was applied to current sources
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to JSON-serializable dictionary.
@@ -274,6 +275,7 @@ class DecompositionResult:
             'net_name': self.net_name,
             'method': self.method,
             'integration_method': self.integration_method,
+            'smooth_sources': self.smooth_sources,
             't_start_ns': self.t_start_ns,
             't_end_ns': self.t_end_ns,
             'dt_ns': self.dt_ns,
@@ -1143,6 +1145,7 @@ def analyze_dynamic_irdrop_decomposition(
     aggressor_top_k: int = 0,
     adjoint_method: str = 'dynamic',
     adjoint_memory_window: int = 20,
+    smooth_sources: bool = True,
 ) -> Tuple[DecompositionResult, Any]:
     """Analyze dynamic IR-drop and decompose into near/far contributions.
 
@@ -1161,6 +1164,7 @@ def analyze_dynamic_irdrop_decomposition(
         aggressor_top_k: Number of top aggressors to identify per victim (0 = disabled)
         adjoint_method: 'dynamic' (default) or 'static' for adjoint analysis
         adjoint_memory_window: Number of time steps for dynamic adjoint memory
+        smooth_sources: If True (default), apply PWL smoothing to current source waveforms
 
     Returns:
         Tuple of (DecompositionResult, graph) where graph is the PDN graph for plotting.
@@ -1226,6 +1230,20 @@ def analyze_dynamic_irdrop_decomposition(
         clear_graph_metadata=(aggressor_top_k == 0),
     )
 
+    # Preprocess current sources for smoothing (reusable across all solves)
+    smoothed_sources = None
+    if smooth_sources:
+        if verbose:
+            print("Preprocessing current sources with waveform smoothing...")
+        t0_smooth = time_module.perf_counter()
+        smoothed_sources = solver.preprocess_sources(
+            dt=dt,
+            t_start=t_start,
+            t_end=t_end,
+            compact_threshold=1e-12,
+        )
+        timings['preprocess_smoothing'] = time_module.perf_counter() - t0_smooth
+
     # Build source name list and index mapping
     source_names = list(current_sources.keys())
     name_to_idx = {name: i for i, name in enumerate(source_names)}
@@ -1285,6 +1303,7 @@ def analyze_dynamic_irdrop_decomposition(
             method=method_enum,
             track_nodes=track_nodes_initial,
             verbose=verbose,
+            smoothed_sources=smoothed_sources,
         )
         initial_result = results[0]
 
@@ -1347,6 +1366,7 @@ def analyze_dynamic_irdrop_decomposition(
             method=method_enum,
             track_nodes=[node],
             verbose=verbose,
+            smoothed_sources=smoothed_sources,
         )
         result_full, result_near, result_far = results
 
@@ -1449,6 +1469,7 @@ def analyze_dynamic_irdrop_decomposition(
             peak_ir_drop_per_node=peak_ir_drop_per_node,
             total_current_waveform=total_current_waveform,
             t_array=result_t_array,
+            smooth_sources=smooth_sources,
         ),
         graph,
     )
@@ -1514,6 +1535,13 @@ def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> 
     result['aggressor_top_k'] = args.aggressor_top_k if args.aggressor_top_k != 0 else analysis_config.get('aggressor_top_k', 0)
     result['adjoint_method'] = args.adjoint_method or analysis_config.get('adjoint_method', 'dynamic')
     result['adjoint_memory_window'] = args.adjoint_memory_window if args.adjoint_memory_window != 20 else analysis_config.get('adjoint_memory_window', 20)
+
+    # Waveform smoothing (CLI takes precedence, then config, default True)
+    # args.smooth_sources is None when neither --smooth nor --no-smooth is specified
+    if args.smooth_sources is not None:
+        result['smooth_sources'] = args.smooth_sources
+    else:
+        result['smooth_sources'] = analysis_config.get('smooth_sources', True)
 
     # Instances
     if args.instances:
@@ -1613,6 +1641,13 @@ Examples:
     parser.add_argument('--adjoint-memory-window', type=int, default=20,
                         help='Memory window for dynamic adjoint (default: 20 time steps)')
 
+    # Waveform smoothing (default=None to allow config file to take effect)
+    parser.add_argument('--smooth', dest='smooth_sources', action='store_true',
+                        default=None,
+                        help='Enable current source waveform smoothing (default: enabled)')
+    parser.add_argument('--no-smooth', dest='smooth_sources', action='store_false',
+                        help='Disable current source waveform smoothing')
+
     # Pre-defined instances
     parser.add_argument('--instances', type=str, help='Comma-separated list of instance/node names')
     parser.add_argument('--instances-file', type=str, help='File with instance/node names (one per line)')
@@ -1673,6 +1708,7 @@ Examples:
             logger.log(f"  Net: {merged['net']}")
             logger.log(f"  Time: {merged['t_start']*1e9:.2f} ns to {merged['t_end']*1e9:.2f} ns, dt={merged['dt']*1e9:.3f} ns")
             logger.log(f"  Window: {merged['window_percent']}%")
+            logger.log(f"  Smoothing: {'enabled' if merged['smooth_sources'] else 'disabled'}")
             if merged['aggressor_top_k'] > 0:
                 logger.log(f"  Aggressor analysis: top-{merged['aggressor_top_k']} per victim ({merged['adjoint_method']} method)")
             logger.log(f"  Output dir: {output_dir}")
@@ -1693,6 +1729,7 @@ Examples:
             aggressor_top_k=merged['aggressor_top_k'],
             adjoint_method=merged['adjoint_method'],
             adjoint_memory_window=merged['adjoint_memory_window'],
+            smooth_sources=merged['smooth_sources'],
         )
 
         # Print results
