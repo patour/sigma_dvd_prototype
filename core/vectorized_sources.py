@@ -1130,7 +1130,7 @@ class VectorizedCurrentSources:
             n_pwls=cache.n_pwls,
             n_pwl_points=cache.n_pwl_points,
             pwl_node_idx=cache.pwl_node_idx.copy(),
-            pwl_source_idx=np.zeros(cache.n_pwls, dtype=np.int32),
+            pwl_source_idx=cache.pwl_source_idx.copy() if hasattr(cache, 'pwl_source_idx') and len(cache.pwl_source_idx) == cache.n_pwls else np.zeros(cache.n_pwls, dtype=np.int32),
             pwl_period=cache.pwl_period.copy(),
             pwl_delay=cache.pwl_delay.copy(),
             pwl_offset=cache.pwl_offset.copy(),

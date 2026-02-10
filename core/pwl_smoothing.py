@@ -1577,6 +1577,8 @@ def _compact_and_append_with_wscale(
     out_delays: List[float],
     out_node_indices: List[int],
     out_wscales: List[float],
+    source_indices: np.ndarray = None,
+    out_source_indices: List[int] = None,
 ) -> None:
     """Append compacted chunk results to output lists, including wscale.
 
@@ -1597,6 +1599,8 @@ def _compact_and_append_with_wscale(
         out_delays.append(0.0)  # Delay absorbed into points
         out_node_indices.append(int(node_indices[i]))
         out_wscales.append(float(wscale_arr[i]))
+        if out_source_indices is not None and source_indices is not None:
+            out_source_indices.append(int(source_indices[i]))
 
 
 def smooth_pwl_points(
@@ -2016,6 +2020,9 @@ class SmoothedWaveformCache:
     pwl_wscale: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=np.float64)
     )
+    pwl_source_idx: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=np.int32)
+    )
 
     # Statistics
     original_n_pulses: int = 0
@@ -2260,6 +2267,7 @@ class PWLSmoother:
                 pwl_delay=vec_sources.pwl_delay.copy(),
                 pwl_node_idx=vec_sources.pwl_node_idx.copy(),
                 pwl_wscale=pwl_wscale,
+                pwl_source_idx=vec_sources.pwl_source_idx.copy(),
                 original_n_pulses=vec_sources.n_pulses,
                 original_n_pwls=vec_sources.n_pwls,
                 n_pwls=vec_sources.n_pwls,
@@ -2278,6 +2286,7 @@ class PWLSmoother:
         delays: List[float] = []
         node_indices: List[int] = []
         wscales: List[float] = []
+        source_indices: List[int] = []
 
         # Get wscale arrays, defaulting to 1.0 if not present
         pwl_wscale_arr = getattr(vec_sources, 'pwl_wscale', None)
@@ -2290,6 +2299,7 @@ class PWLSmoother:
             period = float(vec_sources.pwl_period[i])
             delay = float(vec_sources.pwl_delay[i])
             node_idx = int(vec_sources.pwl_node_idx[i])
+            source_idx = int(vec_sources.pwl_source_idx[i])
             wscale = float(pwl_wscale_arr[i]) if pwl_wscale_arr is not None and len(pwl_wscale_arr) > i else 1.0
 
             # Extract original points as arrays
@@ -2323,6 +2333,7 @@ class PWLSmoother:
             delays.append(0.0)  # Delay absorbed into points
             node_indices.append(node_idx)
             wscales.append(wscale)
+            source_indices.append(source_idx)
 
             all_times.extend(comp_times.tolist())
             all_values.extend(comp_values.tolist())
@@ -2335,7 +2346,7 @@ class PWLSmoother:
                 self._process_pulses_sparse(
                     vec_sources, t_start, t_end, chunk_size,
                     all_times, all_values, offsets, counts, periods, delays, node_indices, wscales,
-                    pulse_wscale_arr
+                    pulse_wscale_arr, source_indices
                 )
             else:
                 # Dense path: use existing batch processing
@@ -2354,6 +2365,7 @@ class PWLSmoother:
                     chunk_width = vec_sources.pulse_width[chunk_start:chunk_end]
                     chunk_period = vec_sources.pulse_period[chunk_start:chunk_end]
                     chunk_node_idx = vec_sources.pulse_node_idx[chunk_start:chunk_end]
+                    chunk_source_idx = vec_sources.pulse_source_idx[chunk_start:chunk_end]
                     # Extract wscale for chunk (default 1.0 if not present)
                     if pulse_wscale_arr is not None and len(pulse_wscale_arr) > chunk_start:
                         chunk_wscale = pulse_wscale_arr[chunk_start:chunk_end]
@@ -2377,12 +2389,14 @@ class PWLSmoother:
                         sample_times, smoothed_values_2d, self.config.compact_threshold
                     )
 
-                    # Append to output (including wscale)
+                    # Append to output (including wscale and source indices)
                     _compact_and_append_with_wscale(
                         kept_t, kept_v, chunk_offsets, chunk_counts,
                         chunk_period, chunk_node_idx, chunk_wscale,
                         all_times, all_values, offsets, counts,
-                        periods, delays, node_indices, wscales
+                        periods, delays, node_indices, wscales,
+                        source_indices=chunk_source_idx,
+                        out_source_indices=source_indices,
                     )
 
         # Update stats
@@ -2408,6 +2422,7 @@ class PWLSmoother:
             pwl_delay=np.array(delays, dtype=np.float64),
             pwl_node_idx=np.array(node_indices, dtype=np.int32),
             pwl_wscale=np.array(wscales, dtype=np.float64),
+            pwl_source_idx=np.array(source_indices, dtype=np.int32),
             original_n_pulses=vec_sources.n_pulses,
             original_n_pwls=vec_sources.n_pwls,
             n_pwls=len(offsets),
@@ -2429,6 +2444,7 @@ class PWLSmoother:
         node_indices: List[int],
         wscales: List[float],
         pulse_wscale_arr: Optional[np.ndarray],
+        source_indices: Optional[List[int]] = None,
     ) -> None:
         """Process pulses using sparse sampling (internal method).
 
@@ -2448,6 +2464,7 @@ class PWLSmoother:
             chunk_width = vec_sources.pulse_width[chunk_start:chunk_end]
             chunk_period = vec_sources.pulse_period[chunk_start:chunk_end]
             chunk_node_idx = vec_sources.pulse_node_idx[chunk_start:chunk_end]
+            chunk_source_idx = vec_sources.pulse_source_idx[chunk_start:chunk_end]
             chunk_v1 = vec_sources.pulse_v1[chunk_start:chunk_end]
             chunk_v2 = vec_sources.pulse_v2[chunk_start:chunk_end]
             # Extract wscale for chunk (default 1.0 if not present)
@@ -2479,12 +2496,14 @@ class PWLSmoother:
                 sample_times, smoothed_values_2d, self.config.compact_threshold
             )
 
-            # Append to output (including wscale)
+            # Append to output (including wscale and source indices)
             _compact_and_append_with_wscale(
                 kept_t, kept_v, chunk_offsets, chunk_counts,
                 chunk_period, chunk_node_idx, chunk_wscale,
                 all_times, all_values, offsets, counts,
-                periods, delays, node_indices, wscales
+                periods, delays, node_indices, wscales,
+                source_indices=chunk_source_idx,
+                out_source_indices=source_indices,
             )
 
     def apply_cache_to_sources(
@@ -2538,7 +2557,7 @@ class PWLSmoother:
             n_pwls=cache.n_pwls,
             n_pwl_points=cache.n_pwl_points,
             pwl_node_idx=cache.pwl_node_idx.copy(),
-            pwl_source_idx=np.zeros(cache.n_pwls, dtype=np.int32),  # Not needed for evaluation
+            pwl_source_idx=cache.pwl_source_idx.copy() if len(cache.pwl_source_idx) == cache.n_pwls else np.zeros(cache.n_pwls, dtype=np.int32),
             pwl_period=cache.pwl_period.copy(),
             pwl_delay=cache.pwl_delay.copy(),
             pwl_offset=cache.pwl_offset.copy(),

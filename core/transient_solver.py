@@ -1377,6 +1377,8 @@ class TransientIRDropSolver:
             # Update spatial peaks
             t0_spatial = time_module.perf_counter()
             for m in range(n_masks):
+                V_u = V_u_all[m]
+                np.subtract(vdd, V_u, out=ir_drop_arr)
                 update_mask = ir_drop_arr > peak_ir_drop_all[m]
                 peak_ir_drop_all[m, update_mask] = ir_drop_arr[update_mask]
                 peak_time_all[m, update_mask] = t
