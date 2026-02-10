@@ -1035,7 +1035,8 @@ def _parse_current_source_line(line: str) -> Optional[CurrentSource]:
     if get_optimize_dc_only():
         line_lower = line.lower()
         # Quick check: does line contain waveform keywords or static_value?
-        has_waveform = any(kw in line_lower for kw in ('pulse(', 'pwl(', 'sin(', 'exp('))
+        # Check for waveform keywords (without '(' to handle 'pwl (' with space)
+        has_waveform = _RE_PWL.search(line_lower) is not None or _RE_PULSE.search(line_lower) is not None
 
         if not has_waveform and 'static_value=' not in line_lower:
             # Simple split is safe - no parenthesized expressions to preserve
@@ -1114,10 +1115,21 @@ def _parse_current_source_line(line: str) -> Optional[CurrentSource]:
         token_lower = token.lower()
 
         if token_lower.startswith('pulse'):
-            isrc.pulses.append(_parse_pulse(token))
+            # Handle space between 'pulse' and '(' - e.g., 'pulse (...)' becomes two tokens
+            pulse_token = token
+            if '(' not in token and i + 1 < len(tokens) and tokens[i + 1].startswith('('):
+                pulse_token = token + tokens[i + 1]
+                i += 1  # Skip the next token since we consumed it
+            isrc.pulses.append(_parse_pulse(pulse_token))
         elif token_lower.startswith('pwl') and not token_lower.startswith('pwl_'):
-            pwl = _parse_pwl(token)
-            isrc.pwls.append(pwl)
+            # Handle space between 'pwl' and '(' - e.g., 'pwl (t1 v1 ...)' becomes two tokens
+            pwl_token = token
+            if '(' not in token and i + 1 < len(tokens) and tokens[i + 1].startswith('('):
+                pwl_token = token + tokens[i + 1]
+                i += 1  # Skip the next token since we consumed it
+            pwl = _parse_pwl(pwl_token)
+            if pwl.points:  # Only add non-empty PWLs
+                isrc.pwls.append(pwl)
         elif token_lower.startswith('pwl_period='):
             _, _, value = token.partition('=')
             period = _parse_spice_value(value)

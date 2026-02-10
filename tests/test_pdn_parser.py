@@ -1604,6 +1604,157 @@ class TestCurrentSourceLineParsing(unittest.TestCase):
         # has_current_data() should return False for zero-current sources
         self.assertFalse(isrc.has_current_data())
 
+    # =========================================================================
+    # PWL and Pulse with space before parenthesis (regression tests)
+    # =========================================================================
+
+    def test_parse_pwl_with_space_before_paren(self):
+        """Test parsing PWL with space between 'pwl' and '(' - regression test.
+
+        Real netlists may have 'pwl (...)' instead of 'pwl(...)'.
+        """
+        line = "I_inst n1 n2 1.0 pwl (7.50042e-09, 0, 7.50911e-09, 0.000325075, 7.52287e-09, 0)"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertEqual(len(cs.pwls), 1)
+        self.assertEqual(len(cs.pwls[0].points), 3)
+        # Verify points are correctly parsed
+        self.assertAlmostEqual(cs.pwls[0].points[0][0], 7.50042e-09, places=15)
+        self.assertAlmostEqual(cs.pwls[0].points[1][1], 0.000325075, places=10)
+
+    def test_parse_pwl_with_space_and_static_value(self):
+        """Test PWL with space when static_value is also present.
+
+        This triggers the full parser path even with DC-only optimization on.
+        """
+        line = "I_inst n1 n2 1.0 static_value=2.0 pwl (0, 0, 1e-9, 1e-3, 2e-9, 0)"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertAlmostEqual(cs.static_value, 2.0, places=10)
+        self.assertEqual(len(cs.pwls), 1)
+        self.assertEqual(len(cs.pwls[0].points), 3)
+
+    def test_parse_pulse_with_space_before_paren(self):
+        """Test parsing pulse with space between 'pulse' and '(' - regression test.
+
+        Real netlists may have 'pulse (...)' instead of 'pulse(...)'.
+        """
+        line = "I_inst n1 n2 0 pulse (0 1e-3 1e-9 0.1e-9 0.1e-9 2e-9 10e-9)"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertEqual(len(cs.pulses), 1)
+        self.assertAlmostEqual(cs.pulses[0].v1, 0.0, places=10)
+        self.assertAlmostEqual(cs.pulses[0].v2, 1e-3, places=10)
+        self.assertAlmostEqual(cs.pulses[0].delay, 1e-9, places=15)
+        self.assertAlmostEqual(cs.pulses[0].period, 10e-9, places=15)
+
+    def test_parse_pulse_with_space_and_static_value(self):
+        """Test pulse with space when static_value is also present."""
+        line = "I_inst n1 n2 1.0 static_value=3.0 pulse (0 2e-3 0 1n 1n 5n 20n)"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertAlmostEqual(cs.static_value, 3.0, places=10)
+        self.assertEqual(len(cs.pulses), 1)
+        self.assertAlmostEqual(cs.pulses[0].v2, 2e-3, places=10)
+
+    # =========================================================================
+    # Negative tests for malformed PWL
+    # =========================================================================
+
+    def test_parse_empty_pwl_skipped(self):
+        """Test that empty pwl() creates no PWL entries."""
+        line = "I_inst n1 n2 1.0 pwl()"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        # Empty PWL should be skipped (0 points)
+        self.assertEqual(len(cs.pwls), 0)
+
+    def test_parse_pwl_single_point_skipped(self):
+        """Test that pwl with single value (incomplete point) is handled."""
+        line = "I_inst n1 n2 1.0 pwl(1e-9)"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        # Single value can't form a point (needs time,value pair)
+        self.assertEqual(len(cs.pwls), 0)
+
+    def test_parse_pwl_with_space_empty(self):
+        """Test that 'pwl ()' with space and empty content is handled."""
+        line = "I_inst n1 n2 1.0 pwl ()"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertEqual(len(cs.pwls), 0)
+
+    def test_parse_pwl_whitespace_only(self):
+        """Test that pwl with only whitespace inside is handled."""
+        line = "I_inst n1 n2 1.0 pwl(   )"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertEqual(len(cs.pwls), 0)
+
+    def test_parse_pwl_single_point_pair(self):
+        """Test PWL with single time-value pair (valid but minimal)."""
+        line = "I_inst n1 n2 1.0 pwl(1e-9, 1e-3)"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertEqual(len(cs.pwls), 1)
+        self.assertEqual(len(cs.pwls[0].points), 1)
+        self.assertAlmostEqual(cs.pwls[0].points[0][0], 1e-9, places=15)
+        self.assertAlmostEqual(cs.pwls[0].points[0][1], 1e-3, places=10)
+
+    # =========================================================================
+    # Negative tests for malformed pulse
+    # =========================================================================
+
+    def test_parse_empty_pulse_handled(self):
+        """Test that empty pulse() is handled gracefully."""
+        line = "I_inst n1 n2 1.0 pulse()"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        # Empty pulse should create pulse with default values
+        self.assertEqual(len(cs.pulses), 1)
+        # All values should be 0 (defaults from _parse_spice_value failure)
+        self.assertEqual(cs.pulses[0].v1, 0.0)
+        self.assertEqual(cs.pulses[0].v2, 0.0)
+
+    def test_parse_pulse_with_space_empty(self):
+        """Test that 'pulse ()' with space and empty content is handled."""
+        line = "I_inst n1 n2 1.0 pulse ()"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertEqual(len(cs.pulses), 1)
+
+    def test_parse_pulse_partial_params(self):
+        """Test pulse with partial parameters (missing some values)."""
+        line = "I_inst n1 n2 1.0 pulse(0 1e-3)"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertEqual(len(cs.pulses), 1)
+        self.assertAlmostEqual(cs.pulses[0].v1, 0.0, places=10)
+        self.assertAlmostEqual(cs.pulses[0].v2, 1e-3, places=10)
+        # Missing params should be 0
+        self.assertEqual(cs.pulses[0].delay, 0.0)
+        self.assertEqual(cs.pulses[0].rt, 0.0)
+
+    def test_parse_pulse_whitespace_only(self):
+        """Test that pulse with only whitespace inside is handled."""
+        line = "I_inst n1 n2 1.0 pulse(   )"
+        cs = _parse_current_source_line(line)
+
+        self.assertIsNotNone(cs)
+        self.assertEqual(len(cs.pulses), 1)
+
 
 class TestInstanceSourcesIntegration(unittest.TestCase):
     """Integration tests for instance_sources in parsed graph.
@@ -1936,6 +2087,58 @@ class TestDCOnlyOptimization(unittest.TestCase):
         self.assertEqual(restored.dc_value, 1.5)
         self.assertIsNotNone(restored.info)
         self.assertEqual(restored.info.tile_x, 1)
+
+    # =========================================================================
+    # Tests for space-separated PWL/pulse detection with DC-only optimization ON
+    # =========================================================================
+
+    def test_pwl_with_space_detected_with_dc_opt_on(self):
+        """Test that 'pwl (...)' with space is detected and returns full CurrentSource.
+
+        Regression test: DC-only fast path used to miss 'pwl (...)' with space.
+        """
+        set_optimize_dc_only(True)
+        result = _parse_current_source_line(
+            "I_test n1 n2 1.0 pwl (0, 0, 1e-9, 1e-3, 2e-9, 0)"
+        )
+        # Should return full CurrentSource, not _DCOnlyCurrentSource
+        self.assertIsInstance(result, CurrentSource)
+        self.assertEqual(len(result.pwls), 1)
+        self.assertEqual(len(result.pwls[0].points), 3)
+
+    def test_pulse_with_space_detected_with_dc_opt_on(self):
+        """Test that 'pulse (...)' with space is detected and returns full CurrentSource.
+
+        Regression test: DC-only fast path used to miss 'pulse (...)' with space.
+        """
+        set_optimize_dc_only(True)
+        result = _parse_current_source_line(
+            "I_test n1 n2 0 pulse (0 1e-3 1e-9 0.1e-9 0.1e-9 2e-9 10e-9)"
+        )
+        self.assertIsInstance(result, CurrentSource)
+        self.assertEqual(len(result.pulses), 1)
+        self.assertAlmostEqual(result.pulses[0].v2, 1e-3, places=10)
+
+    def test_pwl_with_space_and_multiple_spaces(self):
+        """Test PWL with multiple spaces between keyword and paren."""
+        set_optimize_dc_only(True)
+        result = _parse_current_source_line(
+            "I_test n1 n2 1.0 pwl   (0, 0, 1e-9, 1e-3)"
+        )
+        self.assertIsInstance(result, CurrentSource)
+        self.assertEqual(len(result.pwls), 1)
+
+    def test_empty_pwl_with_space_returns_dc_only(self):
+        """Test that empty 'pwl ()' with space returns DC-only (no valid waveform).
+
+        Empty pwl() has no valid waveform data, so it correctly doesn't trigger
+        the full parser path - the regex requires content inside parentheses.
+        """
+        set_optimize_dc_only(True)
+        result = _parse_current_source_line("I_test n1 n2 1.0 pwl ()")
+        # Empty pwl() doesn't match the waveform regex, so DC-only path is taken
+        self.assertIsInstance(result, _DCOnlyCurrentSource)
+        self.assertAlmostEqual(result.dc_value, 1.0, places=10)
 
 
 class TestPDNNodeAttrsPickle(unittest.TestCase):

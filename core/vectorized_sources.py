@@ -21,6 +21,7 @@ Example usage:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -118,6 +119,7 @@ class VectorizedCurrentSources:
         }
         pwl_times_list: List[float] = []
         pwl_values_list: List[float] = []
+        empty_pwl_count = 0
 
         source_idx = 0
         for name, src in sources.items():
@@ -146,7 +148,11 @@ class VectorizedCurrentSources:
                 pulse_data['wscale'].append(wscale_val)
 
             # Collect PWLs (packed format, track source index for masking)
+            # Skip PWLs with 0 points (can occur from malformed pwl() in netlist)
             for pwl in src.pwls:
+                if not pwl.points:
+                    empty_pwl_count += 1
+                    continue  # Skip empty PWLs
                 pwl_meta['node_idx'].append(node_idx)
                 pwl_meta['source_idx'].append(source_idx)
                 pwl_meta['period'].append(pwl.period)
@@ -159,6 +165,14 @@ class VectorizedCurrentSources:
                     pwl_values_list.append(v)
 
             source_idx += 1
+
+        if empty_pwl_count > 0:
+            warnings.warn(
+                f"Skipped {empty_pwl_count} PWL waveforms with 0 points "
+                "(possibly malformed 'pwl (...)' with space in netlist)",
+                UserWarning,
+                stacklevel=2
+            )
 
         # Convert to numpy arrays
         obj.n_sources = len(dc_list)
@@ -266,6 +280,7 @@ class VectorizedCurrentSources:
         }
         pwl_times_list: List[float] = []
         pwl_values_list: List[float] = []
+        empty_pwl_count = 0
 
         # Parse directly from serialized format
         source_idx = 0
@@ -296,8 +311,12 @@ class VectorizedCurrentSources:
                 pulse_data['wscale'].append(wscale_val)
 
             # Parse PWLs directly from dict (packed format, track source index for masking)
+            # Skip PWLs with 0 points (can occur from malformed pwl() in netlist)
             for pwl_dict in data.get('pwls', []):
                 points = pwl_dict.get('points', [])
+                if not points:
+                    empty_pwl_count += 1
+                    continue  # Skip empty PWLs
                 pwl_meta['node_idx'].append(node_idx)
                 pwl_meta['source_idx'].append(source_idx)
                 pwl_meta['period'].append(pwl_dict.get('period', 0.0))
@@ -310,6 +329,14 @@ class VectorizedCurrentSources:
                     pwl_values_list.append(v)
 
             source_idx += 1
+
+        if empty_pwl_count > 0:
+            warnings.warn(
+                f"Skipped {empty_pwl_count} PWL waveforms with 0 points "
+                "(possibly malformed 'pwl (...)' with space in netlist)",
+                UserWarning,
+                stacklevel=2
+            )
 
         # Convert to numpy arrays
         obj.n_sources = len(dc_list)
