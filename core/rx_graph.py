@@ -162,7 +162,7 @@ class RustworkxGraphWrapper:
     # Edge Operations
     # =========================================================================
 
-    def add_edge(self, u: Any, v: Any, **attrs) -> int:
+    def add_edge(self, u: Any, v: Any, edge_obj: Any = None, **attrs) -> int:
         """Add an edge between u and v with optional attributes.
 
         Nodes are automatically added if they don't exist.
@@ -170,7 +170,9 @@ class RustworkxGraphWrapper:
         Args:
             u: Source node key
             v: Target node key
-            **attrs: Edge attributes
+            edge_obj: Optional edge attribute object (e.g., ResistorEdge).
+                      If provided, stored directly instead of creating a dict.
+            **attrs: Edge attributes (only used if edge_obj is None)
 
         Returns:
             rustworkx edge index
@@ -184,7 +186,9 @@ class RustworkxGraphWrapper:
         u_idx = self._node_to_idx[u]
         v_idx = self._node_to_idx[v]
 
-        return self._graph.add_edge(u_idx, v_idx, attrs)
+        # Store edge_obj directly if provided, otherwise wrap attrs as dict
+        payload = edge_obj if edge_obj is not None else attrs
+        return self._graph.add_edge(u_idx, v_idx, payload)
 
     def remove_edge(self, u: Any, v: Any) -> None:
         """Remove edge between u and v.
@@ -583,7 +587,7 @@ class RustworkxMultiDiGraphWrapper:
     # Edge Operations
     # =========================================================================
 
-    def add_edge(self, u: Any, v: Any, **attrs) -> int:
+    def add_edge(self, u: Any, v: Any, edge_obj: Any = None, **attrs) -> int:
         """Add a directed edge from u to v.
 
         Multiple edges between same nodes are allowed (multigraph).
@@ -591,7 +595,9 @@ class RustworkxMultiDiGraphWrapper:
         Args:
             u: Source node
             v: Target node
-            **attrs: Edge attributes
+            edge_obj: Optional edge attribute object (e.g., ResistorEdge).
+                      If provided, stored directly instead of creating a dict.
+            **attrs: Edge attributes (only used if edge_obj is None)
 
         Returns:
             Edge index
@@ -604,7 +610,9 @@ class RustworkxMultiDiGraphWrapper:
         u_idx = self._node_to_idx[u]
         v_idx = self._node_to_idx[v]
 
-        return self._graph.add_edge(u_idx, v_idx, attrs)
+        # Store edge_obj directly if provided, otherwise wrap attrs as dict
+        payload = edge_obj if edge_obj is not None else attrs
+        return self._graph.add_edge(u_idx, v_idx, payload)
 
     def add_nodes_from(self, nodes_with_attrs: Iterable[Tuple[Any, Dict]]) -> List[int]:
         """

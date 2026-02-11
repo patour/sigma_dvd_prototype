@@ -140,6 +140,7 @@ graph = ensure_rustworkx_graph(graph)  # No-op if already Rustworkx
 - **PDNSolver**: Standalone DC solver (use if you don't need unified interface)
 - **PDNPlotter**: Layer-wise heatmap generation with advanced features
 - **parallel_parser.py**: Worker functions and data classes for parallel tile parsing
+- **edge_attrs.py**: Memory-optimized edge attribute classes (ResistorEdge, CapacitorEdge, etc.)
 
 **Current Source Data Structures (from instanceModels*.sp):**
 - `InstanceInfo`: Parsed instance name with net/pin/tile location info
@@ -166,6 +167,37 @@ instance_sources = graph.graph.get('instance_sources', {})  # Serialized dicts
 
 **Memory Optimization for Large Netlists:**
 The default `store_instance_sources=False` avoids serializing CurrentSource objects to dicts, saving ~60% parse-time memory for large netlists (1.7GB -> 1.1GB for 1M sources). The dynamic/transient solvers automatically handle both formats.
+
+**Edge Attribute Memory Optimization:**
+By default, edge attributes use specialized slotted dataclasses (`pdn/edge_attrs.py`) instead of dicts, reducing memory by ~95% per edge. Critical for 100M+ edge netlists (~65 GB → ~4 GB).
+
+```python
+from pdn.pdn_parser import get_use_optimized_edges, set_use_optimized_edges
+
+# Check current mode (default: True)
+print(get_use_optimized_edges())  # True
+
+# Disable for backward compatibility or small netlists
+set_use_optimized_edges(False)
+```
+
+**Edge Classes:**
+- `ResistorEdge`: Die resistors (no elem_name stored) - 99.9% of resistors
+- `ResistorEdgeWithName`: Package resistors matching `vsrc_resistor_pattern` (e.g., 'rs')
+- `CapacitorEdge`, `InductorEdge`, `CurrentSourceEdge`, `VoltageSourceEdge`
+
+**Important:** With optimized edges, `elem_name` is only stored for:
+- Voltage sources (always)
+- Resistors matching `vsrc_resistor_pattern` (default 'rs') for vsrc node identification
+
+Use `.get('elem_name', '')` instead of `['elem_name']` for safe access:
+```python
+for u, v, data in graph.edges(data=True):
+    elem_name = data.get('elem_name', '')  # Safe: returns '' if not stored
+    # NOT: data['elem_name']  # May raise KeyError for die resistors
+```
+
+**Runtime Trade-off:** Computed properties (`.tile_id`, `.net_type`) are ~4-5x slower than dict access due to on-the-fly unpacking. For hot loops accessing same edges repeatedly, either cache values locally or use `set_use_optimized_edges(False)` for small netlists.
 
 **Pickle Compatibility:**
 Both modes support pickle. The difference is portability:
@@ -216,6 +248,7 @@ Parallel parsing uses `multiprocessing.Pool` with:
 - **PDN current extraction**: Use `model.extract_current_sources()` to get load currents from I-type edges
 - **Headless plotting**: Use `show=False` for batch/headless runs. Matplotlib backend is set to `Agg` in test runners.
 - **Legacy pickle files**: Old `pdn_graph.pkl` files contain NetworkX graphs. Use `ensure_rustworkx_graph()` to convert before creating models.
+- **Edge elem_name access**: With optimized edges (default), `elem_name` is None for most resistors. Use `data.get('elem_name', '')` not `data['elem_name']`.
 
 ## Typical Workflow Patterns
 
@@ -674,7 +707,7 @@ for victim in victims:
 
 ## Testing
 
-**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`, `test_dynamic_solver.py`, `test_transient_solver.py`, `test_dynamic_integration.py`, `test_parallel_parser.py`, `test_adjoint_sensitivity.py`, `test_pwl_smoothing.py`
+**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`, `test_dynamic_solver.py`, `test_transient_solver.py`, `test_dynamic_integration.py`, `test_parallel_parser.py`, `test_adjoint_sensitivity.py`, `test_pwl_smoothing.py`, `test_edge_attrs.py`
 
 **Test fixtures:** `tests/fixtures.py` provides factory functions for edge case testing scenarios.
 

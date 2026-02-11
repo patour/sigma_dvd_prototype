@@ -68,6 +68,12 @@ if str(_project_root) not in sys.path:
 
 from core.rx_graph import RustworkxMultiDiGraphWrapper
 from core.rx_algorithms import contract_nodes, node_connected_component
+from pdn.edge_attrs import (
+    create_element_edge,
+    _get_net_type_index as _get_edge_net_type_index,
+    reset_net_type_table as reset_edge_net_type_table,
+    BaseElementEdge,
+)
 
 try:
     from tqdm import tqdm
@@ -158,6 +164,38 @@ def set_optimize_dc_only(value: bool) -> None:
                If False, use full CurrentSource for all sources.
     """
     _optimize_dc_only.set(value)
+
+
+# Thread-safe optimized edge storage control using ContextVar
+# When enabled (default True), edge attributes use specialized slotted dataclasses
+# from pdn.edge_attrs instead of dicts, reducing memory by ~90-95% per edge.
+_use_optimized_edges: ContextVar[bool] = ContextVar('_use_optimized_edges', default=True)
+
+
+def get_use_optimized_edges() -> bool:
+    """Return whether optimized edge attribute classes are used.
+
+    Returns:
+        True if edge attributes use specialized slotted dataclasses (default),
+        False if all edges use dict-based attributes (legacy mode).
+    """
+    return _use_optimized_edges.get()
+
+
+def set_use_optimized_edges(value: bool) -> None:
+    """Enable/disable optimized edge attribute storage.
+
+    When enabled (default), edge attributes use specialized slotted dataclasses
+    (ResistorEdge, CapacitorEdge, etc.) that reduce memory by ~90-95% per edge.
+    This is critical for 100M+ edge netlists.
+
+    When disabled, edges use dict-based attributes for backward compatibility.
+
+    Args:
+        value: If True, use memory-optimized edge classes.
+               If False, use legacy dict-based attributes.
+    """
+    _use_optimized_edges.set(value)
 
 
 class _PDNUnpickler(pickle.Unpickler):
@@ -1297,12 +1335,13 @@ class GraphBuilder:
     """
 
     def __init__(self, validate: bool = False, strict: bool = False, net_filter: Optional[str] = None,
-                 store_instance_sources: bool = False):
+                 store_instance_sources: bool = False, vsrc_resistor_pattern: str = 'rs'):
         self.graph = RustworkxMultiDiGraphWrapper()
         self.validate = validate
         self.strict = strict
         self.net_filter = net_filter.lower() if net_filter else None  # Store lowercase for case-insensitive comparison
         self.store_instance_sources = store_instance_sources
+        self.vsrc_resistor_pattern = vsrc_resistor_pattern  # For determining which R edges need elem_name
         # Union-Find structure for package/main netlist connectivity
         self.uf_parent: Dict[str, str] = {}  # Union-Find parent pointers for package nodes
         self.uf_net: Dict[str, str] = {}  # Net type for each union-find root
@@ -1483,23 +1522,44 @@ class GraphBuilder:
         # Ensure nodes exist
         self.add_node(node1)
         self.add_node(node2)
-        
-        # Create edge attributes with interned keys for memory efficiency
-        # Only store elem_name for R and V types (needed for vsrc detection and shorts logging)
-        interned_type = _ELEM_TYPES.get(elem_type, elem_type)
-        edge_attrs = {
-            _KEY_TYPE: interned_type,
-            _KEY_VALUE: value,
-            _KEY_TILE_ID: self.current_tile_id,
-            _KEY_NET_TYPE: net_type
-        }
-        # Only store elem_name for R and V types to save memory on C/L/I edges
-        if elem_type in ('R', 'V'):
-            edge_attrs[_KEY_ELEM_NAME] = name
-        edge_attrs.update(attrs)
-        
-        # Add edge (MultiDiGraph allows multiple edges between same nodes)
-        edge_idx = self.graph.add_edge(node1, node2, **edge_attrs)
+
+        # Determine if this resistor needs elem_name stored
+        # - Always for V (voltage sources)
+        # - For R only if it matches vsrc_resistor_pattern (for vsrc node identification)
+        # This optimization saves ~160 bytes per die resistor (99.9% of resistors)
+        needs_elem_name = (
+            elem_type == 'V' or  # Always for voltage sources
+            (elem_type == 'R' and name.lower() == self.vsrc_resistor_pattern.lower())
+        )
+
+        # Create edge attributes
+        if get_use_optimized_edges():
+            # Use memory-optimized edge attribute classes
+            edge_obj = create_element_edge(
+                elem_type=elem_type,
+                value=value,
+                elem_name=name if needs_elem_name else None,
+                tile_id=self.current_tile_id,
+                net_type=net_type,
+                needs_elem_name=needs_elem_name,
+            )
+            # Add edge with optimized object
+            edge_idx = self.graph.add_edge(node1, node2, edge_obj=edge_obj)
+        else:
+            # Legacy dict-based edge attributes with interned keys
+            interned_type = _ELEM_TYPES.get(elem_type, elem_type)
+            edge_attrs = {
+                _KEY_TYPE: interned_type,
+                _KEY_VALUE: value,
+                _KEY_TILE_ID: self.current_tile_id,
+                _KEY_NET_TYPE: net_type
+            }
+            # Only store elem_name for R and V types to save memory on C/L/I edges
+            if elem_type in ('R', 'V'):
+                edge_attrs[_KEY_ELEM_NAME] = name
+            edge_attrs.update(attrs)
+            # Add edge (MultiDiGraph allows multiple edges between same nodes)
+            edge_idx = self.graph.add_edge(node1, node2, **edge_attrs)
 
         # Track edge indices for efficient post-processing filtering
         if elem_type == 'V':
@@ -1888,7 +1948,8 @@ class NetlistParser:
 
         # Initialize graph builder
         self.builder = GraphBuilder(validate=validate, strict=strict, net_filter=net_filter,
-                                    store_instance_sources=store_instance_sources)
+                                    store_instance_sources=store_instance_sources,
+                                    vsrc_resistor_pattern=vsrc_resistor_pattern)
         
         # Parsing state
         self.subcircuits: Dict[str, Dict] = {}  # name -> {pins: [...], body: [...]}
@@ -2567,16 +2628,37 @@ class NetlistParser:
 
             # Collect edges
             for node1, node2, elem_type, value, name, attrs in result.edges:
-                edge_attrs = {
-                    'type': elem_type,
-                    'value': value,
-                    'tile_id': result.tile_id,
-                    **attrs
-                }
-                # Only store elem_name for R and V types to save memory
-                if elem_type in ('R', 'V'):
-                    edge_attrs['elem_name'] = name
-                all_edges.append((node1, node2, edge_attrs))
+                # Get net_type from attrs if present
+                net_type = attrs.get('net_type')
+
+                if get_use_optimized_edges():
+                    # Determine if this resistor needs elem_name
+                    needs_elem_name = (
+                        elem_type == 'V' or
+                        (elem_type == 'R' and name.lower() == self.vsrc_resistor_pattern.lower())
+                    )
+                    # Create optimized edge object
+                    edge_obj = create_element_edge(
+                        elem_type=elem_type,
+                        value=value,
+                        elem_name=name if needs_elem_name else None,
+                        tile_id=result.tile_id,
+                        net_type=net_type,
+                        needs_elem_name=needs_elem_name,
+                    )
+                    all_edges.append((node1, node2, edge_obj))
+                else:
+                    # Legacy dict-based edge attributes
+                    edge_attrs = {
+                        'type': elem_type,
+                        'value': value,
+                        'tile_id': result.tile_id,
+                        **attrs
+                    }
+                    # Only store elem_name for R and V types to save memory
+                    if elem_type in ('R', 'V'):
+                        edge_attrs['elem_name'] = name
+                    all_edges.append((node1, node2, edge_attrs))
                 total_stats[elem_type] += 1
 
             # Track boundary nodes
@@ -3310,7 +3392,8 @@ class NetlistParser:
         if shorts:
             msg = f"Found {len(shorts)} shorted resistors:\n"
             for u, v, name, value in shorts[:10]:  # Show first 10
-                msg += f"  {name}: {u} <-> {v} = {value:.2e} KOhm\n"
+                display_name = name if name else "(die resistor)"
+                msg += f"  {display_name}: {u} <-> {v} = {value:.2e} KOhm\n"
             if len(shorts) > 10:
                 msg += f"  ... and {len(shorts) - 10} more\n"
                 
