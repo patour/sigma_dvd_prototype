@@ -757,6 +757,18 @@ I_name node+ node- <dc_mA> [static_value=<mA>] [pulse(v1,v2,delay,rt,ft,width,pe
 
 **Node naming convention:** `<x>_<y>_<layer>` (e.g., `1000_2000_M1`)
 
+**Boundary nodes (multi-tile stitching):**
+Nodes shared across tile boundaries are marked with `*` prefix in `.ckt` files:
+```spice
+R_bnd_M1 *900_2000_M1 *1000_2000_M1 8    # Cross-tile resistor (both nodes starred)
+r 800_2000_M1 *900_2000_M1 8              # Internal-to-boundary resistor (one starred)
+```
+
+The `*` prefix signals the parser to track these nodes for tile stitching:
+- Parser strips the `*` prefix when creating graph nodes
+- Tracks `boundary_node1`/`boundary_node2` flags in edge attributes
+- Merges matching boundary nodes across tiles during graph construction
+
 ## PDNPlotter Advanced Features
 
 | Feature | Description |
