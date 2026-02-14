@@ -1,5 +1,5 @@
 * Sampled PDN netlist for VDD_XLV
-* Generated from netlist_minion/pdn_graph.pkl
+* Generated from /wv/bwdev1/patrasej/dev/sigma_dvd/prototype/pdn/netlist_minion/pdn_graph.pkl
 * 3x3 tile grid
 
 .partition_info 3 3

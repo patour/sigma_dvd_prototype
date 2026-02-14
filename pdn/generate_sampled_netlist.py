@@ -37,11 +37,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pdn.pdn_parser import load_pdn_pickle, CurrentSource, Pulse, PWL
 
 
+def _get_script_dir() -> str:
+    """Get the directory containing this script."""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 @dataclass
 class SamplingConfig:
     """Configuration for netlist sampling."""
-    source_pickle: str = 'netlist_minion/pdn_graph.pkl'
-    output_dir: str = 'netlist_sampled'
+    source_pickle: str = field(default_factory=lambda: os.path.join(_get_script_dir(), 'netlist_minion/pdn_graph.pkl'))
+    output_dir: str = field(default_factory=lambda: os.path.join(_get_script_dir(), 'netlist_sampled'))
     net_name: str = 'VDD_XLV'
     vdd_voltage: float = 0.66
 
@@ -64,8 +69,9 @@ class SamplingConfig:
     seed: int = 42
 
     # Island creation (for testing floating island handling)
+    # 3-5 islands with 100-200 nodes each = ~800 max total (< 1000)
     n_islands: int = 4  # Number of M0 islands to create
-    island_size_range: Tuple[int, int] = (100, 300)  # Min/max nodes per island
+    island_size_range: Tuple[int, int] = (100, 200)  # Min/max nodes per island
 
     # Layer rename map
     layer_rename: Dict[str, str] = field(default_factory=lambda: {
@@ -100,6 +106,7 @@ class SampledNetlistGenerator:
         self.sampled_current_sources: Dict[str, List[CurrentSource]] = defaultdict(list)
         self._nodes_with_resistors: Set[str] = set()  # Nodes that have resistor edges
         self._island_nodes: Set[str] = set()  # Nodes in floating islands
+        self._boundary_nodes: Set[str] = set()  # Nodes shared across tile boundaries
 
         # Bounds
         self.sample_x_min = 0
@@ -358,6 +365,34 @@ class SampledNetlistGenerator:
                 print(f"  Tile ({tile_x},{tile_y}): {len(self.tile_nodes[tile])} nodes, "
                       f"{len(self.tile_resistors[tile])} R, {len(self.tile_capacitors[tile])} C")
 
+    def _compute_boundary_nodes(self):
+        """Identify nodes that appear in cross-tile resistors.
+
+        These nodes need a '*' prefix in the .ckt files to signal the parser
+        that they are shared across tile boundaries and need to be stitched.
+        """
+        print("Computing boundary nodes...")
+
+        for tile, resistors in self.tile_resistors.items():
+            for u, v, _ in resistors:
+                tile_u = self.node_to_tile.get(u)
+                tile_v = self.node_to_tile.get(v)
+
+                # Check if this resistor crosses a tile boundary
+                if tile_u != tile_v:
+                    # Both nodes in a cross-tile resistor are boundary nodes
+                    self._boundary_nodes.add(u)
+                    self._boundary_nodes.add(v)
+                else:
+                    # Also mark if a node's home tile differs from resistor's tile
+                    # (node appears in a neighboring tile's resistor list)
+                    if tile_u is not None and tile_u != tile:
+                        self._boundary_nodes.add(u)
+                    if tile_v is not None and tile_v != tile:
+                        self._boundary_nodes.add(v)
+
+        print(f"  Found {len(self._boundary_nodes)} boundary nodes")
+
     def create_islands(self):
         """Create small floating islands on M0 by dropping resistors.
 
@@ -454,6 +489,65 @@ class SampledNetlistGenerator:
 
         self._island_nodes = island_nodes_set
         print(f"  Total island nodes: {total_island_nodes}")
+
+    def _verify_islands(self):
+        """Verify that created islands are truly disconnected from the main component.
+
+        This does a BFS from M13 (vsrc-connected) nodes to verify no island nodes
+        are reachable from the main connected component.
+        """
+        if not self._island_nodes:
+            print("No islands to verify")
+            return
+
+        print("Verifying island connectivity...")
+
+        # Build adjacency from all tile resistors (after island creation)
+        adj: Dict[str, Set[str]] = defaultdict(set)
+        for tile, resistors in self.tile_resistors.items():
+            for u, v, _ in resistors:
+                adj[u].add(v)
+                adj[v].add(u)
+
+        # Find M13 nodes (will have vsrc connections)
+        m13_nodes = []
+        for node in adj.keys():
+            parsed = self._parse_die_node(node)
+            if parsed and parsed[2] == '50':  # M13 layer
+                m13_nodes.append(node)
+
+        # BFS from M13 to find main connected component
+        main_component = set()
+        visited = set(m13_nodes)
+        queue = deque(m13_nodes)
+
+        while queue:
+            node = queue.popleft()
+            main_component.add(node)
+            for neighbor in adj.get(node, set()):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+
+        # Check for island nodes in main component
+        leaked_nodes = self._island_nodes & main_component
+        if leaked_nodes:
+            print(f"  WARNING: {len(leaked_nodes)} island nodes still connected to main!")
+            for node in list(leaked_nodes)[:5]:
+                print(f"    {node}")
+        else:
+            print(f"  ✓ All {len(self._island_nodes)} island nodes are disconnected")
+
+        # Count island distribution across tiles
+        island_by_tile: Dict[Tuple[int, int], int] = defaultdict(int)
+        for node in self._island_nodes:
+            tile = self.node_to_tile.get(node)
+            if tile:
+                island_by_tile[tile] += 1
+
+        print(f"  Island distribution across {len(island_by_tile)} tiles:")
+        for tile in sorted(island_by_tile.keys()):
+            print(f"    Tile {tile}: {island_by_tile[tile]} island nodes")
 
     def sample_voltage_sources(self):
         """Sample voltage sources connecting to M13 nodes in the sample region.
@@ -697,6 +791,13 @@ class SampledNetlistGenerator:
                 self._generate_single_tile_ckt(tile)
                 self._generate_single_tile_nd(tile)
 
+    def _format_node_for_ckt(self, orig_node: str) -> str:
+        """Format node name for .ckt file, adding '*' prefix for boundary nodes."""
+        renamed = self._rename_node(orig_node)
+        if orig_node in self._boundary_nodes:
+            return f"*{renamed}"
+        return renamed
+
     def _generate_single_tile_ckt(self, tile: Tuple[int, int]):
         """Generate a single tile .ckt file."""
         tile_x, tile_y = tile
@@ -712,8 +813,8 @@ class SampledNetlistGenerator:
         lines.append("* Resistors")
         KOHM_TO_OHM = 1e3  # kOhm to Ohms conversion
         for u, v, value in self.tile_resistors[tile]:
-            new_u = self._rename_node(u)
-            new_v = self._rename_node(v)
+            new_u = self._format_node_for_ckt(u)
+            new_v = self._format_node_for_ckt(v)
             # Graph stores values in kOhm, SPICE expects Ohms
             value_ohm = value * KOHM_TO_OHM
             lines.append(f"r {new_u} {new_v} {value_ohm:.6g}")
@@ -723,8 +824,8 @@ class SampledNetlistGenerator:
         # Write capacitors (convert from fF to Farads for SPICE format)
         lines.append("* Capacitors")
         for u, v, value in self.tile_capacitors[tile]:
-            new_u = self._rename_node(u)
-            new_v = '0' if v == '0' else self._rename_node(v)
+            new_u = self._format_node_for_ckt(u)
+            new_v = '0' if v == '0' else self._format_node_for_ckt(v)
             # Graph stores values in fF, SPICE expects Farads
             value_farads = value * 1e-15
             lines.append(f"c {new_u} {new_v} {value_farads:.6e}")
@@ -931,6 +1032,8 @@ class SampledNetlistGenerator:
             'waveform_ratio': waveform_count / total_isrcs if total_isrcs > 0 else 0,
             'total_current_mA': total_current,
             'total_capacitance_fF': total_capacitance,
+            'boundary_nodes': len(self._boundary_nodes),
+            'island_nodes': len(self._island_nodes),
         }
 
         print(f"  Nodes: {total_nodes:,}")
@@ -941,6 +1044,8 @@ class SampledNetlistGenerator:
         print(f"  Waveform ratio: {waveform_count/total_isrcs*100:.1f}%")
         print(f"  Total current: {total_current:.2f} mA")
         print(f"  Total capacitance: {total_capacitance:.2f} fF")
+        print(f"  Boundary nodes: {len(self._boundary_nodes):,}")
+        print(f"  Island nodes: {len(self._island_nodes):,}")
 
     def validate_output(self):
         """Validate the generated netlist by parsing and solving."""
@@ -1003,7 +1108,9 @@ class SampledNetlistGenerator:
         self.select_sampling_region()
         self.extract_sampled_subgraph()
         self.partition_into_tiles()
+        self._compute_boundary_nodes()
         self.create_islands()
+        self._verify_islands()
         self.sample_voltage_sources()
         self.sample_current_sources()
         self.generate_output_files()
