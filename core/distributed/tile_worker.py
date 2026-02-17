@@ -193,12 +193,17 @@ def _parse_tile_ckt(
 def _parse_instance_models(
     instance_path: str,
     net_filter: Optional[str],
+    nd_path: Optional[str] = None,
 ) -> Dict[str, float]:
     """Parse instanceModels file for current source DC values.
 
-    Uses _parse_current_source_line() from pdn.pdn_parser to parse each line
-    into a CurrentSource object, then calls get_static_current() for the DC
-    value. This ensures exact consistency with the flat parser.
+    Matches the flat parser's handling (pdn_parser.py _parse_current_source):
+    converts all values to mA, then calls get_static_current().
+
+    Args:
+        instance_path: Path to instanceModels*.sp file
+        net_filter: Optional lowercase net name to filter by
+        nd_path: Path to .nd file for net filtering (required when net_filter is set)
 
     Returns:
         Dict mapping node -> current in mA (positive = sink)
@@ -207,6 +212,9 @@ def _parse_instance_models(
     from pdn.pdn_parser import _parse_current_source_line
 
     current_injections: Dict[str, float] = {}
+
+    # Load node-net mapping for net filtering (mirrors flat parser's builder.node_net_map_lower)
+    _, node_net_map_lower = _load_nd_file(nd_path) if net_filter else ({}, {})
 
     open_fn = gzip.open if instance_path.endswith('.gz') else open
     mode = 'rt' if instance_path.endswith('.gz') else 'r'
@@ -221,16 +229,34 @@ def _parse_instance_models(
             if cs is None:
                 continue
 
-            # _parse_current_source_line returns values in Amperes.
-            # The flat parser converts to mA after parsing (pdn_parser.py:3186).
-            # get_static_current() logic:
-            #   If static_value set: dc_value + static_value
-            #   Else: dc_value + sum(pulse.get_dc()) + sum(pwl.get_dc())
-            dc_ma = cs.get_static_current() * I_TO_MA
-
             node_pos = cs.node1
+            node_neg = cs.node2
+
+            # Net filter (matches flat parser: pdn_parser.py:2884-2889)
+            if net_filter:
+                pos_net = node_net_map_lower.get(node_pos)
+                neg_net = node_net_map_lower.get(node_neg)
+                if pos_net != net_filter and neg_net != net_filter:
+                    continue
+
+            # Convert Ampere values to mA in-place, matching flat parser
+            # (pdn_parser.py:3186-3197) before calling get_static_current().
+            cs.dc_value = cs.dc_value * I_TO_MA
+            if cs.static_value is not None:
+                cs.static_value = cs.static_value * I_TO_MA
+            for pulse in cs.pulses:
+                pulse.v1 *= I_TO_MA
+                pulse.v2 *= I_TO_MA
+            for pwl in cs.pwls:
+                pwl.points = [(t, v * I_TO_MA) for t, v in pwl.points]
+
+            if not cs.has_current_data():
+                continue
+
+            static_current_ma = cs.get_static_current()
+
             if node_pos != '0':
-                current_injections[node_pos] = current_injections.get(node_pos, 0.0) + dc_ma
+                current_injections[node_pos] = current_injections.get(node_pos, 0.0) + static_current_ma
 
     return current_injections
 
@@ -273,7 +299,7 @@ class TileWorker:
         # Parse instance models for current injections
         if tc.get('instance_path'):
             inst_currents = _parse_instance_models(
-                tc['instance_path'], tc.get('net_filter'),
+                tc['instance_path'], tc.get('net_filter'), tc.get('nd_path'),
             )
             # Merge instance currents into tile data
             for node, current in inst_currents.items():
@@ -415,16 +441,24 @@ class TileWorker:
             self._block_system, current_injections, self._rhs_dirichlet,
         )
 
-    def get_interior_voltages(self, boundary_voltages_dict: Dict[str, float]) -> Dict[str, float]:
+    def get_interior_voltages(
+        self,
+        boundary_voltages_dict: Dict[str, float],
+        current_injections: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, float]:
         """Recover interior voltages from boundary voltages.
 
         Args:
             boundary_voltages_dict: Dict mapping boundary node -> voltage
+            current_injections: Optional override currents (node -> mA).
+                If None, uses tile's own current sources from parsing.
 
         Returns:
             Dict mapping all tile nodes (interior + boundary) -> voltage
         """
         from core.coupled_system import recover_bottom_voltages
+
+        currents = current_injections if current_injections is not None else self._tile_data.current_injections
 
         # Convert boundary dict to array in port_nodes order
         port_voltages = np.zeros(self._block_system.n_ports, dtype=np.float64)
@@ -436,7 +470,7 @@ class TileWorker:
         interior_voltages = recover_bottom_voltages(
             self._block_system,
             port_voltages,
-            self._tile_data.current_injections,
+            currents,
             self._rhs_dirichlet,
         )
 

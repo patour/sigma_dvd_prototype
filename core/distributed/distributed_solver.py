@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -117,7 +117,7 @@ class DistributedDDMSolver:
 
     def solve_dc(
         self,
-        current_injections: Optional[Dict[str, float]] = None,
+        per_tile_currents: Optional[List[Dict[str, float]]] = None,
         context: Optional[DistributedSolverContext] = None,
         verbose: bool = False,
     ) -> DistributedSolveResult:
@@ -126,8 +126,10 @@ class DistributedDDMSolver:
         If context is None, calls prepare() internally.
 
         Args:
-            current_injections: Optional override currents (node -> mA).
-                If None, uses each tile's own current sources from parsing.
+            per_tile_currents: Optional pre-partitioned currents, one dict per
+                tile (node -> mA). If None, uses each tile's own current
+                sources from parsing. Caller is responsible for partitioning
+                boundary node currents to exactly one tile.
             context: Pre-computed solver context (from prepare())
             verbose: Print timing info
 
@@ -144,34 +146,7 @@ class DistributedDDMSolver:
 
         # 1. Get reduced RHS from each tile (parallel on workers)
         t0 = time.perf_counter()
-        if current_injections is not None:
-            # Partition currents to avoid double-counting at boundary nodes.
-            # Interior nodes belong to exactly one tile (workers filter by own
-            # node set). Boundary nodes appear in multiple tiles' block systems,
-            # so each boundary node's current must be assigned to exactly one tile.
-            boundary_assigned: Set[str] = set()
-            per_tile_currents: List[Dict[str, float]] = [{} for _ in model.workers]
-            # Build per-tile boundary sets
-            tile_bnd_sets = []
-            for tc in model.metadata.tile_configs:
-                tile_bnd_sets.append(set(model.tile_boundary_nodes[tc.tile_id]))
-
-            for node, current in current_injections.items():
-                if current == 0.0:
-                    continue
-                is_boundary = node in model.interface_nodes
-                if is_boundary:
-                    # Assign to first tile that has this boundary node
-                    for i, bnd_set in enumerate(tile_bnd_sets):
-                        if node in bnd_set and node not in boundary_assigned:
-                            per_tile_currents[i][node] = current
-                            boundary_assigned.add(node)
-                            break
-                else:
-                    # Interior node: pass to all tiles (only its owner will use it)
-                    for i in range(len(model.workers)):
-                        per_tile_currents[i][node] = current
-
+        if per_tile_currents is not None:
             rhs_results = model.backend.call_all(
                 model.workers, 'get_reduced_rhs',
                 [(ptc,) for ptc in per_tile_currents],
@@ -214,13 +189,16 @@ class DistributedDDMSolver:
 
         # 4. Distribute boundary voltages and recover interior (parallel on workers)
         t0 = time.perf_counter()
-        # Build per-tile boundary voltage dicts
+        # Build per-tile boundary voltage dicts (+ optional current overrides)
         bv_per_tile = []
         for i, tc in enumerate(model.metadata.tile_configs):
             tid = tc.tile_id
             boundary_list = model.tile_boundary_nodes[tid]
             tile_bv = {n: interface_voltages.get(n, model.vdd) for n in boundary_list}
-            bv_per_tile.append((tile_bv,))
+            if per_tile_currents is not None:
+                bv_per_tile.append((tile_bv, per_tile_currents[i]))
+            else:
+                bv_per_tile.append((tile_bv,))
 
         interior_results = model.backend.call_all(
             model.workers, 'get_interior_voltages', bv_per_tile,

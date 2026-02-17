@@ -40,6 +40,34 @@ NETLIST_SMALL_DIR = os.path.join(
 NETLIST_SMALL_EXISTS = os.path.isdir(NETLIST_SMALL_DIR)
 
 
+def _partition_currents_for_tiles(model, flat_currents):
+    """Partition a flat current dict into per-tile dicts for solve_dc.
+
+    Boundary node currents are assigned to exactly one tile to avoid
+    double-counting. Interior node currents are broadcast to all tiles
+    (only the owning tile will use them).
+    """
+    boundary_assigned: Set[str] = set()
+    per_tile: List[Dict[str, float]] = [{} for _ in model.workers]
+    tile_bnd_sets = [
+        set(model.tile_boundary_nodes[tc.tile_id])
+        for tc in model.metadata.tile_configs
+    ]
+    for node, current in flat_currents.items():
+        if current == 0.0:
+            continue
+        if node in model.interface_nodes:
+            for i, bnd_set in enumerate(tile_bnd_sets):
+                if node in bnd_set and node not in boundary_assigned:
+                    per_tile[i][node] = current
+                    boundary_assigned.add(node)
+                    break
+        else:
+            for i in range(len(model.workers)):
+                per_tile[i][node] = current
+    return per_tile
+
+
 def _build_toy_graph():
     """Build a minimal 4-node graph for Schur complement unit tests.
 
@@ -569,17 +597,62 @@ class TestDistributedVsFlat(unittest.TestCase):
         for node in self.common_nodes:
             self.assertEqual(self.ddm_voltages[node], v2[node])
 
-    def test_external_current_injection(self):
-        """Solve with flat currents matches flat solve."""
-        result_ext = self.solver.solve_dc(
-            current_injections=self.load_currents, context=self.ctx,
+    def test_external_current_injection_scaled(self):
+        """Scaled override currents match flat solve (exposes interior recovery bug).
+
+        Uses 10x scaled currents so overrides differ significantly from
+        tile-local parsed currents.  If interior recovery ignores the
+        override and uses stale tile-local (1x) currents, the interior
+        voltages will be wrong by several mV.
+        """
+        from core import UnifiedIRDropSolver
+
+        scale = 10.0
+        scaled = {n: c * scale for n, c in self.load_currents.items()}
+
+        # DDM with scaled override
+        per_tile = _partition_currents_for_tiles(self.model, scaled)
+        ddm_result = self.solver.solve_dc(
+            per_tile_currents=per_tile, context=self.ctx,
         )
-        v_ext = result_ext.flatten()
+        v_ddm = ddm_result.flatten()
+
+        # Flat reference with same scaled currents
+        flat_result = UnifiedIRDropSolver(self.flat_model).solve(scaled)
+
         max_diff = max(
-            abs(v_ext[n] - self.flat_result.voltages[n])
+            abs(v_ddm[n] - flat_result.voltages[n])
             for n in self.common_nodes
         )
-        self.assertLess(max_diff, 1e-6, f"External current max diff {max_diff*1e6:.3f} µV")
+        # Confirm the scaled scenario has significant IR-drop (not vacuous)
+        vdd = self.metadata.vdd
+        max_drop = max(vdd - flat_result.voltages[n] for n in self.common_nodes)
+        self.assertGreater(max_drop, 0.005,
+                           f"Scaled IR-drop {max_drop*1e3:.2f} mV too small to be meaningful")
+
+        self.assertLess(max_diff, 1e-6,
+                        f"Scaled current max diff {max_diff*1e6:.3f} µV")
+
+    def test_zero_current_override_no_ir_drop(self):
+        """Zero override currents produce zero IR-drop.
+
+        With no injected current every node should sit at VDD.  If
+        interior recovery ignores the override and falls back to
+        tile-local parsed currents, interior nodes will show spurious
+        IR-drop (~1.6 mV for this netlist).
+        """
+        zero_per_tile = [{} for _ in self.model.workers]
+        result = self.solver.solve_dc(
+            per_tile_currents=zero_per_tile, context=self.ctx,
+        )
+        voltages = result.flatten()
+        vdd = self.metadata.vdd
+
+        max_drop = max(
+            abs(vdd - v) for n, v in voltages.items() if n != '0'
+        )
+        self.assertLess(max_drop, 1e-10,
+                        f"Zero-current IR-drop {max_drop*1e6:.3f} µV (expect 0)")
 
 
 @unittest.skipUnless(NETLIST_SAMPLED_EXISTS, "netlist_sampled not available")
@@ -847,6 +920,93 @@ class TestInstanceModelParsing(unittest.TestCase):
 
         try:
             currents = _parse_instance_models(temp, None)
+            self.assertEqual(len(currents), 0)
+        finally:
+            os.unlink(temp)
+
+    def test_pwl_dc_average_included(self):
+        """PWL DC average included when no static_value."""
+        from core.distributed.tile_worker import _parse_instance_models
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.sp', delete=False) as f:
+            # dc=0, pwl triangle: (0,0) -> (5ns,2mA) -> (10ns,0) with period=10ns
+            # Area = 0.5 * base * height = 0.5 * 10e-9 * 2e-3 = 1e-11
+            # DC avg = 1e-11 / 10e-9 = 1e-3 A = 1.0 mA
+            f.write("I_test n1 0 0 pwl(0 0 5e-9 2e-3 10e-9 0) pwl_period=10e-9\n")
+            temp = f.name
+
+        try:
+            currents = _parse_instance_models(temp, None)
+            self.assertIn('n1', currents)
+            self.assertAlmostEqual(currents['n1'], 1.0, places=4)
+        finally:
+            os.unlink(temp)
+
+    def test_pwl_dc_ignored_with_static(self):
+        """PWL DC average NOT included when static_value is set."""
+        from core.distributed.tile_worker import _parse_instance_models
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.sp', delete=False) as f:
+            # dc=1e-3, static_value=2e-3 → 3mA; PWL present but ignored
+            f.write("I_test n1 0 1e-3 static_value=2e-3 "
+                    "pwl(0 0 5e-9 2e-3 10e-9 0) pwl_period=10e-9\n")
+            temp = f.name
+
+        try:
+            currents = _parse_instance_models(temp, None)
+            self.assertAlmostEqual(currents['n1'], 3.0, places=4)
+        finally:
+            os.unlink(temp)
+
+    def test_net_filter_excludes_wrong_net(self):
+        """Sources on a different net are excluded when net_filter is set."""
+        from core.distributed.tile_worker import _parse_instance_models
+
+        # Instance models file with sources on both VDD and VSS nodes
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.sp', delete=False) as f:
+            f.write("I_vdd vdd_node 0 1e-3\n")
+            f.write("I_vss vss_node 0 2e-3\n")
+            temp_sp = f.name
+
+        # .nd file mapping nodes to nets
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.nd', delete=False) as f:
+            # Format: node_name x y layer tile_id net_name
+            f.write("vdd_node 100 200 M1 0_0 VDD\n")
+            f.write("vss_node 300 400 M1 0_0 VSS\n")
+            temp_nd = f.name
+
+        try:
+            # Filter for VDD only
+            currents = _parse_instance_models(temp_sp, 'vdd', temp_nd)
+            self.assertIn('vdd_node', currents)
+            self.assertAlmostEqual(currents['vdd_node'], 1.0, places=6)
+            self.assertNotIn('vss_node', currents)  # VSS source excluded
+
+            # Filter for VSS only
+            currents = _parse_instance_models(temp_sp, 'vss', temp_nd)
+            self.assertNotIn('vdd_node', currents)
+            self.assertIn('vss_node', currents)
+            self.assertAlmostEqual(currents['vss_node'], 2.0, places=6)
+
+            # No filter → both included
+            currents = _parse_instance_models(temp_sp, None)
+            self.assertIn('vdd_node', currents)
+            self.assertIn('vss_node', currents)
+        finally:
+            os.unlink(temp_sp)
+            os.unlink(temp_nd)
+
+    def test_net_filter_without_nd_file_includes_all(self):
+        """When net_filter is set but nd_path is None, no sources are matched."""
+        from core.distributed.tile_worker import _parse_instance_models
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.sp', delete=False) as f:
+            f.write("I_test n1 0 1e-3\n")
+            temp = f.name
+
+        try:
+            # net_filter set but no .nd file → node_net_map is empty → nothing matches
+            currents = _parse_instance_models(temp, 'vdd')
             self.assertEqual(len(currents), 0)
         finally:
             os.unlink(temp)
