@@ -43,6 +43,9 @@ from .coupled_system import (
     SchurComplementOperator,
     CoupledSystemOperator,
     extract_block_matrices,
+    compute_explicit_schur,
+    build_block_system_from_edges,
+    assemble_schur_complement_system,
     AMGPreconditioner,
     HAS_PYAMG,
 )
@@ -100,6 +103,18 @@ from .pwl_smoothing import (
     _compact_chunk_vectorized,
     _compact_and_append,
 )
+from .distributed import (
+    DistributedNetlistParser,
+    PowerGridMetaData,
+    TileConfig,
+    PackageData,
+    DistributedPowerGridModel,
+    create_distributed_model,
+    DistributedDDMSolver,
+    DistributedSolverContext,
+    DistributedSolveResult,
+    TileSolveResult,
+)
 
 __all__ = [
     # Node adapter
@@ -148,6 +163,9 @@ __all__ = [
     "SchurComplementOperator",
     "CoupledSystemOperator",
     "extract_block_matrices",
+    "compute_explicit_schur",
+    "build_block_system_from_edges",
+    "assemble_schur_complement_system",
     "AMGPreconditioner",
     "HAS_PYAMG",
     # Plotter
@@ -200,4 +218,15 @@ __all__ = [
     "pulse_to_pwl_points",
     "triangular_window",
     "analytical_triangle_pwl_integral",
+    # Distributed DDM
+    "DistributedNetlistParser",
+    "PowerGridMetaData",
+    "TileConfig",
+    "PackageData",
+    "DistributedPowerGridModel",
+    "create_distributed_model",
+    "DistributedDDMSolver",
+    "DistributedSolverContext",
+    "DistributedSolveResult",
+    "TileSolveResult",
 ]

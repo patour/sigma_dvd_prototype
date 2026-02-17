@@ -711,3 +711,353 @@ def recover_bottom_voltages(
         voltages[node] = float(v_i[i])
 
     return voltages
+
+
+def compute_explicit_schur(block_system: BlockMatrixSystem) -> np.ndarray:
+    """Compute explicit Schur complement S = G_pp - G_pi * inv(G_ii) * G_ip.
+
+    Multi-RHS solve: Z = inv(G_ii) @ G_ip.toarray(), then S = G_pp - G_pi @ Z.
+    Requires factor_interior() called first. Returns dense (n_ports, n_ports).
+
+    This is the explicit-form counterpart to SchurComplementOperator (matrix-free).
+    Use explicit form when S must be communicated (distributed assembly) or
+    when the interface system is solved directly.
+
+    Args:
+        block_system: BlockMatrixSystem with factored interior (lu_ii must be set)
+
+    Returns:
+        Dense Schur complement matrix of shape (n_ports, n_ports)
+
+    Raises:
+        ValueError: If interior not factored (call factor_interior first)
+    """
+    if block_system.lu_ii is None:
+        raise ValueError("Interior not factored. Call factor_interior() first.")
+
+    n_ports = block_system.n_ports
+    n_interior = block_system.n_interior
+
+    if n_interior == 0:
+        # No interior nodes: Schur complement is just G_pp
+        return block_system.G_pp.toarray()
+
+    # Batch multi-RHS solve: Z = inv(G_ii) @ G_ip (n_interior x n_ports)
+    G_ip_dense = block_system.G_ip.toarray()
+    Z = block_system.lu_ii(G_ip_dense)
+
+    # S = G_pp - G_pi @ Z
+    S = block_system.G_pp.toarray() - block_system.G_pi.toarray() @ Z
+    return S
+
+
+def build_block_system_from_edges(
+    edges,
+    port_nodes: Set[str],
+    dirichlet_nodes: Optional[Set[str]] = None,
+    dirichlet_voltage: float = 0.0,
+    ground_node: str = '0',
+) -> Tuple[BlockMatrixSystem, np.ndarray]:
+    """Build BlockMatrixSystem from raw (u, v, conductance) edge data.
+
+    Generalized variant of extract_block_matrices() that accepts edges directly
+    instead of requiring a UnifiedPowerGridModel. Same constants (GMAX,
+    SHORT_THRESHOLD), same ground handling (diagonal-only), same Dirichlet
+    elimination (-G_ud @ V_d), same port/interior ordering.
+
+    All non-port, non-Dirichlet, non-ground nodes are classified as interior.
+
+    Args:
+        edges: Iterable of (u, v, conductance) tuples. Conductance is g = 1/R.
+        port_nodes: Set of boundary/port node names
+        dirichlet_nodes: Set of nodes with fixed voltage (e.g., pads). Defaults to empty.
+        dirichlet_voltage: Voltage applied at Dirichlet nodes (default 0.0)
+        ground_node: Name of ground node (default '0'). Edges touching ground
+            add to diagonal only.
+
+    Returns:
+        Tuple of:
+        - BlockMatrixSystem with extracted block matrices
+        - rhs_dirichlet: Array of shape (n_ports + n_interior,) containing
+          Dirichlet contributions in [port_nodes, interior_nodes] ordering
+    """
+    if dirichlet_nodes is None:
+        dirichlet_nodes = set()
+
+    GMAX = 1e5
+    SHORT_THRESHOLD = 1e-6
+
+    # Collect all nodes from edges
+    all_nodes_set: Set[str] = set()
+    edge_list = []
+    for u, v, g in edges:
+        all_nodes_set.add(u)
+        all_nodes_set.add(v)
+        edge_list.append((u, v, g))
+
+    # Remove ground from classification (handled via diagonal-only)
+    all_nodes_set.discard(ground_node)
+
+    # Classify nodes
+    port_set = port_nodes & all_nodes_set
+    dirichlet_set = dirichlet_nodes & all_nodes_set
+    interior_nodes = all_nodes_set - port_set - dirichlet_set
+
+    # Order nodes: ports first, then interior, then Dirichlet
+    port_list = sorted(port_set)
+    interior_list = sorted(interior_nodes)
+    dirichlet_list = sorted(dirichlet_set)
+
+    all_nodes = port_list + interior_list + dirichlet_list
+    node_to_idx = {n: i for i, n in enumerate(all_nodes)}
+
+    n_ports = len(port_list)
+    n_interior = len(interior_list)
+    n_dirichlet = len(dirichlet_list)
+    n_unknown = n_ports + n_interior
+
+    if n_unknown == 0:
+        # Edge case: all nodes are Dirichlet (or no nodes)
+        block_system = BlockMatrixSystem(
+            G_pp=sp.csr_matrix((0, 0)),
+            G_pi=sp.csr_matrix((0, 0)),
+            G_ip=sp.csr_matrix((0, 0)),
+            G_ii=sp.csr_matrix((0, 0)),
+            port_nodes=[],
+            interior_nodes=[],
+            port_to_idx={},
+            interior_to_idx={},
+            lu_ii=None,
+        )
+        return block_system, np.zeros(0, dtype=np.float64)
+
+    # Build conductance matrix via COO
+    data, rows, cols = [], [], []
+    diag = np.zeros(len(all_nodes), dtype=np.float64)
+
+    for u, v, g in edge_list:
+        # Clamp conductance
+        if g <= 0 or g > GMAX:
+            g = min(max(g, 1.0 / GMAX), GMAX)
+        if 1.0 / g < SHORT_THRESHOLD:
+            g = GMAX
+
+        # Ground handling: only add to diagonal of the non-ground node
+        if u == ground_node:
+            if v in node_to_idx:
+                diag[node_to_idx[v]] += g
+            continue
+        if v == ground_node:
+            if u in node_to_idx:
+                diag[node_to_idx[u]] += g
+            continue
+
+        if u not in node_to_idx or v not in node_to_idx:
+            continue
+
+        iu, iv = node_to_idx[u], node_to_idx[v]
+        rows.extend([iu, iv])
+        cols.extend([iv, iu])
+        data.extend([-g, -g])
+        diag[iu] += g
+        diag[iv] += g
+
+    # Add diagonal entries
+    for i in range(len(all_nodes)):
+        rows.append(i)
+        cols.append(i)
+        data.append(diag[i])
+
+    n_total = len(all_nodes)
+    G_full = sp.csr_matrix((data, (rows, cols)), shape=(n_total, n_total))
+
+    # Extract block submatrices
+    p_idx = np.arange(n_ports)
+    i_idx = np.arange(n_ports, n_ports + n_interior)
+    d_idx = np.arange(n_unknown, n_total)
+    u_idx = np.arange(n_unknown)
+
+    G_pp = G_full[np.ix_(p_idx, p_idx)].tocsr() if n_ports > 0 else sp.csr_matrix((0, 0))
+    G_pi = G_full[np.ix_(p_idx, i_idx)].tocsr() if n_ports > 0 and n_interior > 0 else sp.csr_matrix((n_ports, 0))
+    G_ip = G_full[np.ix_(i_idx, p_idx)].tocsr() if n_interior > 0 and n_ports > 0 else sp.csr_matrix((0, n_ports))
+    G_ii = G_full[np.ix_(i_idx, i_idx)].tocsr() if n_interior > 0 else sp.csr_matrix((0, 0))
+
+    # Compute RHS contribution from Dirichlet nodes: rhs = -G_ud * V_d
+    if n_dirichlet > 0:
+        G_ud = G_full[np.ix_(u_idx, d_idx)].tocsr()
+        V_d = np.full(n_dirichlet, dirichlet_voltage, dtype=np.float64)
+        rhs_dirichlet = -(G_ud @ V_d)
+    else:
+        rhs_dirichlet = np.zeros(n_unknown, dtype=np.float64)
+
+    port_to_idx_map = {n: i for i, n in enumerate(port_list)}
+    interior_to_idx_map = {n: i for i, n in enumerate(interior_list)}
+
+    block_system = BlockMatrixSystem(
+        G_pp=G_pp,
+        G_pi=G_pi,
+        G_ip=G_ip,
+        G_ii=G_ii,
+        port_nodes=port_list,
+        interior_nodes=interior_list,
+        port_to_idx=port_to_idx_map,
+        interior_to_idx=interior_to_idx_map,
+        lu_ii=None,
+    )
+
+    return block_system, rhs_dirichlet
+
+
+def assemble_schur_complement_system(
+    tile_schur_complements: Dict[Any, np.ndarray],
+    tile_port_node_lists: Dict[Any, List[str]],
+    extra_edges: Optional[List[Tuple[str, str, float]]] = None,
+    dirichlet_nodes: Optional[Set[str]] = None,
+    dirichlet_voltage: float = 0.0,
+    ground_node: str = '0',
+) -> Tuple[sp.csr_matrix, np.ndarray, List[str], Dict[str, int]]:
+    """Assemble global Schur complement system from per-subdomain contributions.
+
+    Standard finite-element scatter-add:
+        S_global = sum_i P_i^T @ S_i @ P_i + G_extra
+
+    Where P_i maps tile-local port indices to global indices.
+    extra_edges adds conductance from non-tile sources (e.g., package resistors).
+    Dirichlet nodes are eliminated via RHS contribution.
+
+    Uses COO format for assembly, converts to CSR for factorization.
+
+    Args:
+        tile_schur_complements: Dict mapping tile_id -> dense Schur complement (n_ports_i x n_ports_i)
+        tile_port_node_lists: Dict mapping tile_id -> ordered list of port node names
+        extra_edges: Optional list of (u, v, conductance) for non-tile conductances
+        dirichlet_nodes: Optional set of nodes with fixed voltage
+        dirichlet_voltage: Voltage at Dirichlet nodes (default 0.0)
+        ground_node: Ground node name (default '0')
+
+    Returns:
+        Tuple of:
+        - S_global: CSR matrix of the assembled interface system (unknowns only)
+        - rhs_dirichlet: Dirichlet RHS contribution for unknowns
+        - ordered_node_list: Ordered list of unknown node names
+        - node_to_idx_map: Dict mapping node name -> index in unknowns
+    """
+    if dirichlet_nodes is None:
+        dirichlet_nodes = set()
+
+    # Collect all interface nodes from tiles and extra edges
+    all_interface_nodes: Set[str] = set()
+    for tile_id, node_list in tile_port_node_lists.items():
+        all_interface_nodes.update(node_list)
+
+    if extra_edges:
+        for u, v, g in extra_edges:
+            if u != ground_node:
+                all_interface_nodes.add(u)
+            if v != ground_node:
+                all_interface_nodes.add(v)
+
+    # Classify: unknowns vs Dirichlet
+    dirichlet_set = dirichlet_nodes & all_interface_nodes
+    unknown_nodes = all_interface_nodes - dirichlet_set
+
+    unknown_list = sorted(unknown_nodes)
+    dirichlet_list = sorted(dirichlet_set)
+
+    # Full ordering: unknowns first, then Dirichlet
+    all_ordered = unknown_list + dirichlet_list
+    full_node_to_idx = {n: i for i, n in enumerate(all_ordered)}
+
+    n_unknown = len(unknown_list)
+    n_dirichlet = len(dirichlet_list)
+    n_full = n_unknown + n_dirichlet
+
+    if n_full == 0:
+        return (
+            sp.csr_matrix((0, 0)),
+            np.zeros(0, dtype=np.float64),
+            [],
+            {},
+        )
+
+    # Build full system in COO format (unknowns + Dirichlet), then extract blocks
+    coo_rows, coo_cols, coo_data = [], [], []
+
+    # 1. Scatter-add tile Schur complements
+    for tile_id, S_i in tile_schur_complements.items():
+        node_list = tile_port_node_lists[tile_id]
+        n_local = len(node_list)
+        assert S_i.shape == (n_local, n_local), (
+            f"Tile {tile_id}: Schur shape {S_i.shape} != ({n_local}, {n_local})"
+        )
+
+        # Map local indices to global
+        local_to_global = np.array(
+            [full_node_to_idx[n] for n in node_list], dtype=np.int32
+        )
+
+        # Vectorized scatter: expand local_to_global into row/col index grids
+        gi_grid = np.repeat(local_to_global, n_local)
+        gj_grid = np.tile(local_to_global, n_local)
+        vals = S_i.ravel()
+
+        # Filter out zeros
+        nonzero = vals != 0.0
+        coo_rows.extend(gi_grid[nonzero].tolist())
+        coo_cols.extend(gj_grid[nonzero].tolist())
+        coo_data.extend(vals[nonzero].tolist())
+
+    # 2. Add extra edges (package conductances)
+    if extra_edges:
+        for u, v, g in extra_edges:
+            if g <= 0:
+                continue
+
+            # Ground handling: diagonal only
+            if u == ground_node:
+                if v in full_node_to_idx:
+                    iv = full_node_to_idx[v]
+                    coo_rows.append(iv)
+                    coo_cols.append(iv)
+                    coo_data.append(g)
+                continue
+            if v == ground_node:
+                if u in full_node_to_idx:
+                    iu = full_node_to_idx[u]
+                    coo_rows.append(iu)
+                    coo_cols.append(iu)
+                    coo_data.append(g)
+                continue
+
+            if u not in full_node_to_idx or v not in full_node_to_idx:
+                continue
+
+            iu, iv = full_node_to_idx[u], full_node_to_idx[v]
+            coo_rows.extend([iu, iv, iu, iv])
+            coo_cols.extend([iv, iu, iu, iv])
+            coo_data.extend([-g, -g, g, g])
+
+    # Build full matrix
+    if coo_data:
+        G_full = sp.coo_matrix(
+            (coo_data, (coo_rows, coo_cols)), shape=(n_full, n_full)
+        ).tocsr()
+    else:
+        G_full = sp.csr_matrix((n_full, n_full))
+
+    # Extract unknown-unknown block
+    u_idx = np.arange(n_unknown)
+    S_global = G_full[np.ix_(u_idx, u_idx)].tocsr()
+
+    # Dirichlet RHS: rhs = -G_ud * V_d
+    if n_dirichlet > 0:
+        d_idx = np.arange(n_unknown, n_full)
+        G_ud = G_full[np.ix_(u_idx, d_idx)].tocsr()
+        V_d = np.full(n_dirichlet, dirichlet_voltage, dtype=np.float64)
+        rhs_dirichlet = -(G_ud @ V_d)
+    else:
+        rhs_dirichlet = np.zeros(n_unknown, dtype=np.float64)
+
+    unknown_to_idx = {n: i for i, n in enumerate(unknown_list)}
+
+    return S_global, rhs_dirichlet, unknown_list, unknown_to_idx

@@ -2836,3 +2836,98 @@ class UnifiedIRDropSolver:
             f"Unknown preconditioner type: {preconditioner_type}. "
             "Use 'none', 'block_diagonal', 'ilu', or 'amg'."
         )
+
+    # ── Distributed DDM methods ──────────────────────────────────────
+
+    def prepare_distributed(
+        self,
+        metadata=None,
+        netlist_dir: Optional[str] = None,
+        net_filter: Optional[str] = None,
+        backend: str = 'local',
+        n_workers: Optional[int] = None,
+        verbose: bool = False,
+        **backend_kwargs,
+    ):
+        """Prepare distributed DDM context for the model's tile structure.
+
+        Internally creates DistributedPowerGridModel + DistributedDDMSolver.
+        Useful for validating DDM against flat solver on same parsed data.
+
+        Provide either ``metadata`` (pre-parsed PowerGridMetaData) or
+        ``netlist_dir`` (path to netlist directory for automatic parsing).
+
+        Args:
+            metadata: Pre-parsed PowerGridMetaData (from DistributedNetlistParser)
+            netlist_dir: Path to netlist directory (alternative to metadata)
+            net_filter: Net name filter when using netlist_dir (e.g. 'VDD_XLV').
+                Uses model.net_name if not specified.
+            backend: 'local' (in-process) or 'ray' (distributed)
+            n_workers: Number of workers (only for ray backend)
+            verbose: Print timing info
+            **backend_kwargs: Extra kwargs passed to backend.initialize()
+
+        Returns:
+            DistributedSolverContext with cached factorizations.
+            Also stores the distributed model and solver internally for
+            use by solve_distributed_prepared().
+
+        Example:
+            ctx = solver.prepare_distributed(netlist_dir='./pdn/netlist_sampled')
+            result = solver.solve_distributed_prepared(currents, ctx)
+        """
+        from core.distributed import (
+            DistributedNetlistParser,
+            create_distributed_model,
+            DistributedDDMSolver,
+        )
+
+        if metadata is None and netlist_dir is None:
+            raise ValueError(
+                "Provide either 'metadata' (PowerGridMetaData) or "
+                "'netlist_dir' (path to netlist directory)."
+            )
+
+        if metadata is None:
+            net = net_filter or self.model.net_name
+            parser = DistributedNetlistParser(netlist_dir, net_filter=net)
+            metadata = parser.parse_metadata()
+
+        self._distributed_model = create_distributed_model(
+            metadata, backend=backend, n_workers=n_workers, **backend_kwargs,
+        )
+        self._distributed_solver = DistributedDDMSolver(self._distributed_model)
+        ctx = self._distributed_solver.prepare(verbose=verbose)
+        return ctx
+
+    def solve_distributed_prepared(
+        self,
+        current_injections: Optional[Dict[Any, float]] = None,
+        context=None,
+        verbose: bool = False,
+    ):
+        """Solve using pre-computed distributed DDM context.
+
+        Args:
+            current_injections: Optional override currents (node -> mA).
+                If None, uses each tile's own current sources.
+            context: Pre-computed DistributedSolverContext (from prepare_distributed)
+            verbose: Print timing info
+
+        Returns:
+            DistributedSolveResult with per-tile voltages.
+
+        Example:
+            ctx = solver.prepare_distributed()
+            result = solver.solve_distributed_prepared(currents, ctx)
+            all_voltages = result.flatten()
+        """
+        if not hasattr(self, '_distributed_solver') or self._distributed_solver is None:
+            raise ValueError(
+                "No distributed solver available. Call prepare_distributed() first."
+            )
+        return self._distributed_solver.solve_dc(
+            current_injections=current_injections,
+            context=context,
+            verbose=verbose,
+        )
