@@ -34,19 +34,18 @@ class TileData:
     current_injections: Dict[str, float]  # node -> current in mA (positive = sink)
 
 
-def _load_nd_file(nd_path: str) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """Load .nd file for node-net mapping.
+def _load_nd_file(nd_path: str) -> Dict[str, str]:
+    """Load .nd file for node-net mapping (lowercase net names).
 
     Returns:
-        (node_net_map, node_net_map_lower) - node name -> net name, both original and lowercase
+        node -> lowercase net name mapping
     """
     import gzip
 
-    node_net_map: Dict[str, str] = {}
     node_net_map_lower: Dict[str, str] = {}
 
     if nd_path is None:
-        return node_net_map, node_net_map_lower
+        return node_net_map_lower
 
     open_fn = gzip.open if nd_path.endswith('.gz') else open
     mode = 'rt' if nd_path.endswith('.gz') else 'r'
@@ -56,12 +55,9 @@ def _load_nd_file(nd_path: str) -> Tuple[Dict[str, str], Dict[str, str]]:
             parts = line.strip().split()
             # Format: node_name x y layer tile_id net_name
             if len(parts) >= 6:
-                node_name = parts[0]
-                net_name = parts[5]
-                node_net_map[node_name] = net_name
-                node_net_map_lower[node_name] = net_name.lower()
+                node_net_map_lower[parts[0]] = parts[5].lower()
 
-    return node_net_map, node_net_map_lower
+    return node_net_map_lower
 
 
 def _parse_tile_ckt(
@@ -84,7 +80,7 @@ def _parse_tile_ckt(
     import gzip
     from pdn.pdn_parser import _parse_spice_value
 
-    node_net_map, node_net_map_lower = _load_nd_file(nd_path)
+    node_net_map_lower = _load_nd_file(nd_path)
 
     resistive_edges: List[Tuple[str, str, float]] = []
     current_injections: Dict[str, float] = {}
@@ -197,8 +193,8 @@ def _parse_instance_models(
 ) -> Dict[str, float]:
     """Parse instanceModels file for current source DC values.
 
-    Matches the flat parser's handling (pdn_parser.py _parse_current_source):
-    converts all values to mA, then calls get_static_current().
+    Uses shared _prepare_instance_source() for parsing + A→mA conversion,
+    matching the flat parser's handling exactly.
 
     Args:
         instance_path: Path to instanceModels*.sp file
@@ -209,12 +205,24 @@ def _parse_instance_models(
         Dict mapping node -> current in mA (positive = sink)
     """
     import gzip
-    from pdn.pdn_parser import _parse_current_source_line
+    from pdn.pdn_parser import (
+        _prepare_instance_source, _check_net_filter,
+        _fast_instance_net_filter, _has_structured_instance_names,
+    )
 
     current_injections: Dict[str, float] = {}
 
-    # Load node-net mapping for net filtering (mirrors flat parser's builder.node_net_map_lower)
-    _, node_net_map_lower = _load_nd_file(nd_path) if net_filter else ({}, {})
+    # Detect structured names for fast net filtering
+    use_fast_filter = (
+        net_filter is not None
+        and _has_structured_instance_names(instance_path)
+    )
+
+    # Only load .nd file when net_filter is set AND names are not structured
+    if net_filter and not use_fast_filter:
+        node_net_map_lower = _load_nd_file(nd_path)
+    else:
+        node_net_map_lower = {}
 
     open_fn = gzip.open if instance_path.endswith('.gz') else open
     mode = 'rt' if instance_path.endswith('.gz') else 'r'
@@ -225,38 +233,27 @@ def _parse_instance_models(
             if not line or line.startswith('*') or line.startswith('.'):
                 continue
 
-            cs = _parse_current_source_line(line)
-            if cs is None:
+            # Fast path: reject non-matching nets before expensive parsing
+            if use_fast_filter and not _fast_instance_net_filter(line, net_filter):
                 continue
 
-            node_pos = cs.node1
-            node_neg = cs.node2
+            prepared = _prepare_instance_source(line)
+            if prepared is None:
+                continue
 
-            # Net filter (matches flat parser: pdn_parser.py:2884-2889)
-            if net_filter:
-                pos_net = node_net_map_lower.get(node_pos)
-                neg_net = node_net_map_lower.get(node_neg)
-                if pos_net != net_filter and neg_net != net_filter:
+            # Slow path fallback: .nd-based filtering for unstructured names
+            if net_filter and not use_fast_filter:
+                if not _check_net_filter(prepared.node_pos, prepared.node_neg,
+                                         node_net_map_lower, net_filter):
                     continue
 
-            # Convert Ampere values to mA in-place, matching flat parser
-            # (pdn_parser.py:3186-3197) before calling get_static_current().
-            cs.dc_value = cs.dc_value * I_TO_MA
-            if cs.static_value is not None:
-                cs.static_value = cs.static_value * I_TO_MA
-            for pulse in cs.pulses:
-                pulse.v1 *= I_TO_MA
-                pulse.v2 *= I_TO_MA
-            for pwl in cs.pwls:
-                pwl.points = [(t, v * I_TO_MA) for t, v in pwl.points]
-
-            if not cs.has_current_data():
-                continue
-
-            static_current_ma = cs.get_static_current()
-
-            if node_pos != '0':
-                current_injections[node_pos] = current_injections.get(node_pos, 0.0) + static_current_ma
+            # Inject at positive terminal only: instance model current sources
+            # are always node+ -> ground ('0'), so the negative terminal is
+            # eliminated from the nodal system and needs no entry.
+            if prepared.node_pos != '0':
+                current_injections[prepared.node_pos] = (
+                    current_injections.get(prepared.node_pos, 0.0) + prepared.static_current_ma
+                )
 
     return current_injections
 

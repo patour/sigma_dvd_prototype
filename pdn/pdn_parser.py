@@ -56,7 +56,7 @@ import logging
 import time
 from contextvars import ContextVar
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional, Set, TextIO, Union
+from typing import Dict, List, NamedTuple, Tuple, Optional, Set, TextIO, Union
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections import defaultdict
@@ -1198,6 +1198,166 @@ def _parse_current_source_line(line: str) -> Optional[CurrentSource]:
         i += 1
 
     return isrc
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Shared helpers for instanceModels parsing (used by flat, parallel, distributed)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class PreparedSource(NamedTuple):
+    """Result of parsing + converting one instance model line."""
+
+    cs: CurrentSource          # Full object with values in mA
+    node_pos: str              # Boundary-stripped positive node
+    node_neg: str              # Boundary-stripped negative node
+    is_boundary_pos: bool      # Had '*' prefix
+    is_boundary_neg: bool      # Had '*' prefix
+    static_current_ma: float   # cs.get_static_current() (cached)
+
+
+def _prepare_instance_source(line: str) -> Optional[PreparedSource]:
+    """Parse an instance model current source line into mA-converted result.
+
+    Shared pipeline for flat, parallel, and distributed parsers:
+    1. _parse_current_source_line(line)
+    2. Strip '*' boundary markers from node names
+    3. Convert all values from Amperes to mA in-place
+    4. Skip zero-current placeholders
+    5. Compute static current
+
+    Returns None for invalid lines or lines with no current data.
+    """
+    cs = _parse_current_source_line(line)
+    if cs is None:
+        return None
+
+    node_pos = cs.node1
+    node_neg = cs.node2
+    bnd_pos = node_pos.startswith('*')
+    bnd_neg = node_neg.startswith('*')
+    if bnd_pos:
+        node_pos = node_pos[1:]
+    if bnd_neg:
+        node_neg = node_neg[1:]
+    cs.node1 = node_pos
+    cs.node2 = node_neg
+
+    # Convert A → mA
+    cs.dc_value *= I_TO_MA
+    if cs.static_value is not None:
+        cs.static_value *= I_TO_MA
+    for pulse in cs.pulses:
+        pulse.v1 *= I_TO_MA
+        pulse.v2 *= I_TO_MA
+    for pwl in cs.pwls:
+        pwl.points = [(t, v * I_TO_MA) for t, v in pwl.points]
+
+    if not cs.has_current_data():
+        return None
+
+    return PreparedSource(
+        cs=cs,
+        node_pos=node_pos,
+        node_neg=node_neg,
+        is_boundary_pos=bnd_pos,
+        is_boundary_neg=bnd_neg,
+        static_current_ma=cs.get_static_current(),
+    )
+
+
+def _check_net_filter(
+    node1: str,
+    node2: str,
+    node_net_map_lower: Dict[str, str],
+    net_filter: Optional[str],
+) -> bool:
+    """Check if element passes net filter.
+
+    Returns True if element should be included, False if filtered out.
+    """
+    if net_filter is None:
+        return True
+
+    node1_net = node_net_map_lower.get(node1)
+    node2_net = node_net_map_lower.get(node2)
+
+    return node1_net == net_filter or node2_net == net_filter
+
+
+def _fast_instance_net_filter(line: str, net_filter: str) -> bool:
+    """Fast net filter using structured instance name embedded net info.
+
+    Instance name format:
+        i_<inst>:<vdd_net>:<vdd_pin>:<vss_net>:<vss_pin>:<tile_x>:<tile_y>[:<extra>]
+
+    Extracts vdd_net (field 1) and vss_net (field 3) from the first token and
+    compares against net_filter (lowercase). Avoids expensive full-line parsing
+    for non-matching lines.
+
+    Args:
+        line: Raw SPICE line (must start with 'i'/'I')
+        net_filter: Lowercase net name to match
+
+    Returns:
+        True if line matches net_filter (should be parsed), False to skip.
+    """
+    # Extract first token (instance name) without splitting entire line
+    idx = line.find(' ')
+    tab = line.find('\t')
+    if tab >= 0 and (idx < 0 or tab < idx):
+        idx = tab
+    if idx < 0:
+        return True  # Malformed, let full parser handle
+
+    name = line[:idx]
+
+    # Split name on ':' — skip 'i_' prefix
+    start = 2 if (len(name) > 2 and name[1] == '_') else 0
+    parts = name[start:].split(':')
+
+    # Structured format has >= 7 fields: inst, vdd_net, vdd_pin, vss_net, vss_pin, tx, ty
+    if len(parts) < 7:
+        return True  # Not structured, include (caller falls back to .nd filtering)
+
+    return parts[1].lower() == net_filter or parts[3].lower() == net_filter
+
+
+def _has_structured_instance_names(filepath: str) -> bool:
+    """Detect whether instanceModels file uses structured instance names.
+
+    Reads lines until the first current source line (starts with 'i'/'I'),
+    then checks if its name has >= 7 colon-delimited fields.
+
+    Returns False for empty files or files with unstructured names.
+    """
+    open_fn = gzip.open if filepath.endswith('.gz') else open
+    mode = 'rt' if filepath.endswith('.gz') else 'r'
+
+    try:
+        with open_fn(filepath, mode) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line[0] == '*' or line[0] == '.':
+                    continue
+                if line[0].lower() != 'i':
+                    continue
+
+                # Found first current source line — check name format
+                idx = line.find(' ')
+                tab = line.find('\t')
+                if tab >= 0 and (idx < 0 or tab < idx):
+                    idx = tab
+                if idx < 0:
+                    return False
+
+                name = line[:idx]
+                start = 2 if (len(name) > 2 and name[1] == '_') else 0
+                parts = name[start:].split(':')
+                return len(parts) >= 7
+    except (OSError, IOError):
+        return False
+
+    return False
 
 
 class SpiceLineReader:
@@ -2806,6 +2966,13 @@ class NetlistParser:
         """Parse instance models sequentially (original implementation)"""
         self.logger.info(f"Parsing {len(self.instance_queue)} instance model files (sequential)...")
 
+        # Detect structured names from first instance file for fast net filtering
+        if self.net_filter and self.instance_queue:
+            _, _, first_path = self.instance_queue[0]
+            self._use_fast_instance_filter = _has_structured_instance_names(first_path)
+        else:
+            self._use_fast_instance_filter = False
+
         old_file_type = self.builder.current_file_type
         self.builder.current_file_type = 'instance'
 
@@ -3153,80 +3320,56 @@ class NetlistParser:
     def _parse_isource(self, line: str):
         """
         Parse current source with full waveform support.
-        
+
         Handles:
         - I<name> <node+> <node-> <dc_value> [static_value=...] [pulse(...)] [pwl(...)]
-        
+
         All current values are converted to mA and stored in CurrentSource objects
         for both static DC analysis and time-domain evaluation.
         """
-        # Use the enhanced parser to extract all waveform data
-        isrc = _parse_current_source_line(line)
-        if isrc is None:
-            self.logger.warning(f"Invalid current source line: {line}")
+        # Fast net pre-filter (avoids full parsing for wrong-net lines)
+        if (getattr(self, '_use_fast_instance_filter', False)
+                and not _fast_instance_net_filter(line, self.net_filter.lower())):
             return
-        
+
+        prepared = _prepare_instance_source(line)
+        if prepared is None:
+            return
+
+        isrc = prepared.cs
+        node_pos = prepared.node_pos
+        node_neg = prepared.node_neg
         name = isrc.name
-        node_pos = isrc.node1
-        node_neg = isrc.node2
-        
-        # Handle boundary nodes (marked with *)
-        if node_pos.startswith('*'):
-            node_pos = node_pos[1:]
+        static_current_ma = prepared.static_current_ma
+
+        if prepared.is_boundary_pos:
             self.builder.mark_boundary_node(node_pos)
-        if node_neg.startswith('*'):
-            node_neg = node_neg[1:]
+        if prepared.is_boundary_neg:
             self.builder.mark_boundary_node(node_neg)
-        
-        # Update node names in CurrentSource after boundary handling
-        isrc.node1 = node_pos
-        isrc.node2 = node_neg
-        
-        # Convert all current values from Amperes to mA
-        isrc.dc_value = isrc.dc_value * I_TO_MA
-        if isrc.static_value is not None:
-            isrc.static_value = isrc.static_value * I_TO_MA
-        
-        # Convert pulse waveform values to mA
-        for pulse in isrc.pulses:
-            pulse.v1 *= I_TO_MA
-            pulse.v2 *= I_TO_MA
-        
-        # Convert PWL waveform values to mA
-        for pwl in isrc.pwls:
-            pwl.points = [(t, v * I_TO_MA) for t, v in pwl.points]
 
-        # Skip current sources with no actual current data (zero dc, no static_value, no waveforms)
-        # These are placeholder entries like: "i_tapfiller:... 0 0 wstart=0 wstop=0 dv=0.66"
-        if not isrc.has_current_data():
-            return
-
-        # Calculate static current value (mA) for DC analysis
-        static_current_ma = isrc.get_static_current()
-        
         # Build edge attributes for graph element
         attrs = {
             'dc': static_current_ma,
             'has_waveform': isrc.has_waveform_data()
         }
-        
+
         # Extract coordinates from instance name (e.g., i_cell:1000_2000:vdd)
         coord_match = _RE_COORD_EXTRACT.search(name)
         if coord_match:
             attrs['inst_x'] = int(coord_match.group(1))
             attrs['inst_y'] = int(coord_match.group(2))
-        
+
         # Add element to graph
         added = self.builder.add_element('I', node_pos, node_neg, static_current_ma, name, **attrs)
-        
+
         # Only store if element was actually added (not filtered by net_filter)
         if added:
             # Backward compatibility: instance_node_map
             self.builder.instance_node_map[name] = [node_pos, node_neg]
-            
+
             # Store full CurrentSource for time-domain analysis
             self.builder.instance_sources[name] = isrc
-            
+
             # Update statistics
             if isrc.has_waveform_data():
                 self.builder.stats.instances_with_waveforms += 1

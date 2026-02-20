@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pdn.pdn_parser import (
     R_TO_KOHM, C_TO_FF, L_TO_NH, I_TO_MA,
     _parse_spice_value, _parse_pulse, _parse_pwl,
+    _prepare_instance_source, _check_net_filter,
     Pulse, PWL, CurrentSource, InstanceInfo
 )
 
@@ -428,26 +429,6 @@ def _parse_element_line(
     return None
 
 
-def _check_net_filter(
-    node1: str,
-    node2: str,
-    node_net_map_lower: Dict[str, str],
-    net_filter: Optional[str]
-) -> bool:
-    """
-    Check if element passes net filter.
-
-    Returns True if element should be included, False if filtered out.
-    """
-    if net_filter is None:
-        return True
-
-    node1_net = node_net_map_lower.get(node1)
-    node2_net = node_net_map_lower.get(node2)
-
-    return node1_net == net_filter or node2_net == net_filter
-
-
 def _handle_boundary_node(node: str) -> Tuple[str, bool]:
     """Handle boundary node marker (*prefix)."""
     if node.startswith('*'):
@@ -747,10 +728,18 @@ def _parse_instance_worker(args: Tuple) -> InstanceParseResult:
     Returns:
         InstanceParseResult with parsed current sources
     """
+    from pdn.pdn_parser import _fast_instance_net_filter, _has_structured_instance_names
+
     tile_x, tile_y, filepath, net_filter, chunk_size, config = args
     tile_id = (tile_x, tile_y)
 
     result = InstanceParseResult(tile_id=tile_id)
+
+    # Detect structured names for fast net filtering in worker
+    use_fast_filter = (
+        net_filter is not None
+        and _has_structured_instance_names(filepath)
+    )
 
     try:
         with MMapSpiceLineReader(filepath, chunk_size) as reader:
@@ -763,43 +752,24 @@ def _parse_instance_worker(args: Tuple) -> InstanceParseResult:
                     if not line or line[0].lower() != 'i':
                         continue
 
-                    # Parse current source using existing parser
-                    from pdn.pdn_parser import _parse_current_source_line
-                    isrc = _parse_current_source_line(line)
-                    if isrc is None:
+                    # Fast path: reject non-matching nets before expensive parsing
+                    if use_fast_filter and not _fast_instance_net_filter(line, net_filter):
                         continue
 
-                    # Handle boundary nodes
-                    node_pos = isrc.node1
-                    node_neg = isrc.node2
-                    if node_pos.startswith('*'):
-                        node_pos = node_pos[1:]
-                    if node_neg.startswith('*'):
-                        node_neg = node_neg[1:]
-
-                    isrc.node1 = node_pos
-                    isrc.node2 = node_neg
-
-                    # Convert values to mA
-                    isrc.dc_value *= I_TO_MA
-                    if isrc.static_value is not None:
-                        isrc.static_value *= I_TO_MA
-                    for pulse in isrc.pulses:
-                        pulse.v1 *= I_TO_MA
-                        pulse.v2 *= I_TO_MA
-                    for pwl in isrc.pwls:
-                        pwl.points = [(t, v * I_TO_MA) for t, v in pwl.points]
+                    prepared = _prepare_instance_source(line)
+                    if prepared is None:
+                        continue
 
                     # Store serialized current source
-                    result.current_sources[isrc.name] = isrc.to_dict()
-                    result.instance_node_map[isrc.name] = [node_pos, node_neg]
+                    result.current_sources[prepared.cs.name] = prepared.cs.to_dict()
+                    result.instance_node_map[prepared.cs.name] = [prepared.node_pos, prepared.node_neg]
 
                     # Update statistics
                     result.stats['total'] += 1
-                    if isrc.has_waveform_data():
+                    if prepared.cs.has_waveform_data():
                         result.stats['with_waveforms'] += 1
-                        result.stats['wscale_values'].append(isrc.wscale)
-                    result.stats['total_static_current_ma'] += abs(isrc.get_static_current())
+                        result.stats['wscale_values'].append(prepared.cs.wscale)
+                    result.stats['total_static_current_ma'] += abs(prepared.static_current_ma)
 
     except Exception as e:
         result.warnings.append(f"Error parsing instance models {tile_id}: {str(e)}")
