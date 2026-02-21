@@ -26,6 +26,7 @@ test_modules = [
     'tests.test_hierarchical_solver',
     'tests.test_irdrop',
     'tests.test_parallel_parser',
+    'tests.test_parser_regression',
     'tests.test_partitioner',
     'tests.test_pwl_smoothing',
     'tests.test_pdn_parser',
