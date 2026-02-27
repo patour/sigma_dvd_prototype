@@ -1,4 +1,6 @@
 __pycache__/
+_bmad/
+_bmad-output/
 *.pyc
 *.pyo
 *.swp
@@ -7,11 +9,13 @@ __pycache__/
 .env
 venv/
 .vscode/
+.claude/commands/
+.cursor/commands/
 *.egg-info/
 .ipynb_checkpoints/
-pdn/netlist_test/*.pkl
+netlist/netlist_test/*.pkl
 pdn/netlist_minion/
 netlist_data/
 results/
-parser/
+/parser/
 sim/

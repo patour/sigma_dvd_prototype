@@ -6,35 +6,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Static and dynamic IR-drop analysis prototype for multi-layer power grids. Supports both synthetic grids and real PDN netlists. Includes quasi-static (batch DC) and transient RC analysis.
 
-**Three Subsystems:**
-1. **`core/`** - Unified model supporting BOTH synthetic grids and PDN netlists (use this for new code)
-2. **`irdrop/`** - Original synthetic grid generation, solving, partitioning
-3. **`pdn/`** - SPICE-like netlist parsing (`NetlistParser`) and standalone DC solver (`PDNSolver`)
+**Source Layout (`src/` packages, installed via `pip install -e .`):**
+1. **`src/graph/`** - Rustworkx graph wrappers and conversion utilities
+2. **`src/model/`** - `UnifiedPowerGridModel`, adapters, factory functions
+3. **`src/solver/`** - Flat, hierarchical, coupled, and tiled solvers
+4. **`src/analysis/`** - Dynamic, transient, adjoint analysis; PWL smoothing
+5. **`src/parser/`** - SPICE-like netlist parsing (`NetlistParser`)
+6. **`src/distributed/`** - Distributed DDM solver (tile-based domain decomposition)
+7. **`src/visualization/`** - Plotters (`UnifiedPlotter`, `DynamicPlotter`, `PDNPlotter`)
+8. **`src/legacy/`** - Original synthetic grid modules (originally `irdrop/`)
 
 ## Commands
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install (editable)
+uv pip install -e ".[test]"
 
-# Run all tests (fast)
-python run_all_tests.py
+# Run all tests (fast, ~984 tests)
+pytest
 
 # Run slow integration tests
-python run_all_integration_tests.py
+pytest tests/solver/test_hierarchical_integration.py tests/analysis/test_dynamic_integration.py tests/parser/test_pdn_integration.py
 
 # Run specific test module
-python -m unittest tests.test_irdrop
-python -m unittest tests.test_hierarchical_solver
-python -m unittest tests.test_pdn_parser
+pytest tests/solver/test_hierarchical_solver.py
+pytest tests/parser/test_pdn_parser.py
+pytest tests/distributed/test_distributed_solver.py
 
 # Run single test
-python -m unittest tests.test_irdrop.TestIRDrop.test_no_load_currents_all_pad_voltage
+pytest tests/legacy/test_irdrop.py::TestIRDrop::test_no_load_currents_all_pad_voltage -v
 
-# Run examples
-python example_ir_drop.py
-python example_partitioning.py
-python example_effective_resistance.py
+# Run CLI tools
+python -m parser.pdn_parser ./netlist/netlist_test --net VDD
+python -m solver.pdn_solver --input graph.pkl --net VDD --output ./results
+python -m analysis.dynamic_irdrop_decomposition ./netlist/netlist_test --net VDD --end-time 100ns --dt 100ps
 ```
 
 ## Architecture
@@ -46,27 +51,64 @@ python example_effective_resistance.py
 
 **Key Constraint:** Pads (voltage sources) are Dirichlet BCs at Vdd, eliminated via Schur complement. LU factorization cached for batch solves.
 
-### Core Module (core/) - Preferred for New Code
+### Source Packages (src/) - Use These for New Code
 
 **Module Structure:**
 ```
-core/
-├── unified_model.py        # UnifiedPowerGridModel, grid decomposition
-├── unified_solver.py       # UnifiedIRDropSolver (orchestration)
-├── solver_results.py       # Result data classes (UnifiedSolveResult, etc.)
-├── coupled_system.py       # Block matrices, Schur complement for coupled solver
-├── current_aggregation.py  # CurrentAggregator for port current distribution
-├── tiling.py               # TileManager, solve_single_tile for parallel tiling
-├── dynamic_solver.py       # DynamicIRDropSolver, QuasiStaticResult (batch DC)
-├── transient_solver.py     # TransientIRDropSolver, TransientResult, RCSystem
-├── pwl_smoothing.py        # PWLSmoother, waveform preprocessing for dynamic analysis
-├── dynamic_plotter.py      # DynamicPlotter for time-domain results
-├── graph_converter.py      # NetworkX <-> Rustworkx conversion utilities
-├── factory.py              # create_model_from_* functions
-├── node_adapter.py         # NodeInfoExtractor
-├── edge_adapter.py         # EdgeInfoExtractor, ElementType
-├── rx_graph.py             # RustworkxMultiDiGraphWrapper
-└── __init__.py             # Public API exports
+src/
+├── graph/
+│   ├── rx_graph.py             # RustworkxMultiDiGraphWrapper
+│   ├── rx_algorithms.py        # Graph algorithms (dijkstra, components, etc.)
+│   └── converter.py            # NetworkX <-> Rustworkx conversion
+├── model/
+│   ├── unified_model.py        # UnifiedPowerGridModel, grid decomposition
+│   ├── factory.py              # create_model_from_* functions
+│   ├── node_adapter.py         # NodeInfoExtractor
+│   ├── edge_adapter.py         # EdgeInfoExtractor, ElementType
+│   └── solver_results.py       # Result/context data classes
+├── solver/
+│   ├── unified_solver.py       # UnifiedIRDropSolver (orchestration)
+│   ├── coupled_system.py       # Block matrices, Schur complement
+│   ├── current_aggregation.py  # CurrentAggregator
+│   ├── tiling.py               # TileManager for parallel tiling
+│   ├── unified_partitioner.py  # Layer/spatial partitioning
+│   ├── effective_resistance.py # Pairwise effective resistance
+│   ├── statistics.py           # Netlist statistics
+│   └── pdn_solver.py           # Standalone PDN DC solver CLI
+├── analysis/
+│   ├── dynamic_solver.py       # DynamicIRDropSolver (batch DC)
+│   ├── transient_solver.py     # TransientIRDropSolver (RC)
+│   ├── adjoint_sensitivity.py  # IR-drop attribution
+│   ├── pwl_smoothing.py        # PWLSmoother
+│   └── vectorized_sources.py   # VectorizedCurrentSources
+├── parser/
+│   ├── netlist.py              # NetlistParser (main entry point)
+│   ├── spice_lexer.py          # SPICE element line tokenizer
+│   ├── current_sources.py      # CurrentSource, Pulse, PWL
+│   ├── graph_builder.py        # Builds rustworkx graph from tokens
+│   ├── metadata.py             # Net voltage, vsrc metadata
+│   ├── parallel.py             # Parallel tile parsing
+│   └── edge_attrs.py           # Memory-optimized edge attributes
+├── distributed/
+│   ├── model.py                # DistributedPowerGridModel
+│   ├── solver.py               # DistributedDDMSolver
+│   ├── parser.py               # DistributedNetlistParser
+│   ├── tile_worker.py          # Per-tile BlockMatrixSystem actor
+│   ├── backend.py              # Local/Ray compute backends
+│   └── result.py               # Result/context dataclasses
+├── visualization/
+│   ├── unified_plotter.py      # UnifiedPlotter (voltage/IR-drop heatmaps)
+│   ├── dynamic_plotter.py      # DynamicPlotter (time-domain results)
+│   ├── pdn_plotter.py          # PDNPlotter (layer-wise heatmaps)
+│   └── stripe_heatmap.py       # Stripe-based heatmap visualization
+└── legacy/
+    ├── generate_power_grid.py  # Synthetic K-layer grid generator
+    ├── power_grid_model.py     # Original PowerGridModel
+    ├── solver.py               # IRDropSolver
+    ├── stimulus.py             # StimulusGenerator
+    ├── grid_partitioner.py     # GridPartitioner
+    ├── effective_resistance.py # EffectiveResistanceCalculator
+    └── plot.py                 # plot_voltage_map, plot_ir_drop_map
 ```
 
 **Key Classes:**
@@ -90,7 +132,7 @@ core/
 
 **Factory Functions:**
 ```python
-from core import create_model_from_synthetic, create_model_from_pdn, create_multi_net_models
+from model.factory import create_model_from_synthetic, create_model_from_pdn, create_multi_net_models
 
 # From synthetic grid
 model = create_model_from_synthetic(G, pads, vdd=1.0)
@@ -126,7 +168,7 @@ Model creation uses `lazy_factor=True` by default, deferring LU factorization un
 
 **Graph Converter (for legacy pickle files):**
 ```python
-from core import detect_graph_type, ensure_rustworkx_graph
+from graph.converter import detect_graph_type, ensure_rustworkx_graph
 
 # Detect graph type from pickle
 graph_type = detect_graph_type(graph)  # Returns 'networkx', 'rustworkx', or 'unknown'
@@ -135,12 +177,12 @@ graph_type = detect_graph_type(graph)  # Returns 'networkx', 'rustworkx', or 'un
 graph = ensure_rustworkx_graph(graph)  # No-op if already Rustworkx
 ```
 
-### PDN Module (pdn/)
-- **NetlistParser**: Parses SPICE-like tile-based netlists with gzip support (parallel parsing available)
-- **PDNSolver**: Standalone DC solver (use if you don't need unified interface)
-- **PDNPlotter**: Layer-wise heatmap generation with advanced features
-- **parallel_parser.py**: Worker functions and data classes for parallel tile parsing
-- **edge_attrs.py**: Memory-optimized edge attribute classes (ResistorEdge, CapacitorEdge, etc.)
+### Parser Module (src/parser/)
+- **NetlistParser** (`parser.netlist`): Parses SPICE-like tile-based netlists with gzip support (parallel parsing available)
+- **PDNSolver** (`solver.pdn_solver`): Standalone DC solver (use if you don't need unified interface)
+- **PDNPlotter** (`visualization.pdn_plotter`): Layer-wise heatmap generation with advanced features
+- **parallel.py** (`parser.parallel`): Worker functions and data classes for parallel tile parsing
+- **edge_attrs.py** (`parser.edge_attrs`): Memory-optimized edge attribute classes (ResistorEdge, CapacitorEdge, etc.)
 
 **Current Source Data Structures (from instanceModels*.sp):**
 - `InstanceInfo`: Parsed instance name with net/pin/tile location info
@@ -169,10 +211,10 @@ instance_sources = graph.graph.get('instance_sources', {})  # Serialized dicts
 The default `store_instance_sources=False` avoids serializing CurrentSource objects to dicts, saving ~60% parse-time memory for large netlists (1.7GB -> 1.1GB for 1M sources). The dynamic/transient solvers automatically handle both formats.
 
 **Edge Attribute Memory Optimization:**
-By default, edge attributes use specialized slotted dataclasses (`pdn/edge_attrs.py`) instead of dicts, reducing memory by ~95% per edge. Critical for 100M+ edge netlists (~65 GB → ~4 GB).
+By default, edge attributes use specialized slotted dataclasses (`parser/edge_attrs.py`) instead of dicts, reducing memory by ~95% per edge. Critical for 100M+ edge netlists (~65 GB → ~4 GB).
 
 ```python
-from pdn.pdn_parser import get_use_optimized_edges, set_use_optimized_edges
+from parser.graph_builder import get_use_optimized_edges, set_use_optimized_edges
 
 # Check current mode (default: True)
 print(get_use_optimized_edges())  # True
@@ -201,7 +243,7 @@ for u, v, data in graph.edges(data=True):
 
 **Pickle Compatibility:**
 Both modes support pickle. The difference is portability:
-- `store_instance_sources=False` (default): Pickle works but requires `pdn.pdn_parser` module when loading
+- `store_instance_sources=False` (default): Pickle works but requires `parser` module when loading
 - `store_instance_sources=True`: Pickle is portable (no module dependency), better for long-term storage/sharing
 
 **Parallel Parsing (for large netlists with many tiles):**
@@ -221,9 +263,9 @@ Parallel parsing uses `multiprocessing.Pool` with:
 - Bulk graph operations for efficient merge phase
 - Full equivalence with sequential parsing (same graph output)
 
-### IRDrop Module (irdrop/) - Original Synthetic
+### Legacy Module (src/legacy/)
 - `generate_power_grid()`: Creates K-layer resistor mesh with `NodeID` keys
-- `PowerGridModel`, `IRDropSolver`: Original classes (prefer `core/` unified versions)
+- `PowerGridModel`, `IRDropSolver`: Original classes (prefer unified versions in `src/solver/`)
 - `GridPartitioner`: Structured slab partitioning along via rows/columns
 
 ## Critical Conventions
@@ -254,10 +296,11 @@ Parallel parsing uses `multiprocessing.Pool` with:
 
 ### PDN Netlist Analysis (Recommended)
 ```python
-from pdn_parser import NetlistParser
-from core import create_model_from_pdn, UnifiedIRDropSolver
+from parser.netlist import NetlistParser
+from model.factory import create_model_from_pdn
+from solver.unified_solver import UnifiedIRDropSolver
 
-parser = NetlistParser('./pdn/netlist_test', validate=True)
+parser = NetlistParser('./netlist/netlist_test', validate=True)
 graph = parser.parse()
 model = create_model_from_pdn(graph, 'VDD')  # vdd auto-extracted
 load_currents = model.extract_current_sources()
@@ -358,9 +401,10 @@ print(f"Max diff vs flat: {tiled_result.validation_stats['max_diff']*1000:.3f} m
 
 ### Synthetic Grid Analysis
 ```python
-from generate_power_grid import generate_power_grid
-from core import create_model_from_synthetic, UnifiedIRDropSolver
-from irdrop import StimulusGenerator
+from legacy.generate_power_grid import generate_power_grid
+from model.factory import create_model_from_synthetic
+from solver.unified_solver import UnifiedIRDropSolver
+from legacy import StimulusGenerator
 
 G, loads, pads = generate_power_grid(K=3, N0=12, I_N=150, N_vsrc=4, seed=42)
 model = create_model_from_synthetic(G, pads, vdd=1.0)
@@ -376,7 +420,8 @@ result = solver.solve(meta.currents)
 For solving multiple current scenarios efficiently, use the prepare/solve_prepared pattern to cache expensive precomputation (LU factorization, block matrices, operators):
 
 ```python
-from core import UnifiedIRDropSolver, FlatSolverContext
+from solver.unified_solver import UnifiedIRDropSolver
+from model.solver_results import FlatSolverContext
 
 solver = UnifiedIRDropSolver(model)
 
@@ -425,8 +470,9 @@ For time-varying currents, use the dynamic solvers which evaluate current source
 
 #### Quasi-Static Analysis (Batch DC Solves)
 ```python
-from pdn.pdn_parser import NetlistParser
-from core import create_model_from_pdn, DynamicIRDropSolver
+from parser.netlist import NetlistParser
+from model.factory import create_model_from_pdn
+from analysis.dynamic_solver import DynamicIRDropSolver
 
 parser = NetlistParser('./netlist_dir')
 graph = parser.parse()
@@ -455,7 +501,7 @@ print(f"Peak node: {result.peak_ir_drop_node}")
 
 #### Transient RC Analysis (with Capacitance)
 ```python
-from core import TransientIRDropSolver, IntegrationMethod
+from analysis.transient_solver import TransientIRDropSolver, IntegrationMethod
 
 solver = TransientIRDropSolver(model, graph)
 result = solver.solve_transient(
@@ -479,7 +525,7 @@ print(f"Transient peak: {result.peak_ir_drop*1000:.2f} mV")
 
 #### Dynamic Analysis Plotting
 ```python
-from core import DynamicPlotter
+from visualization.dynamic_plotter import DynamicPlotter
 
 # Peak IR-drop heatmap (worst IR-drop each node saw across time)
 DynamicPlotter.plot_peak_ir_drop_heatmap(
@@ -515,7 +561,7 @@ Apply analytical triangular low-pass filter to current waveforms before dynamic/
 
 **Basic Usage (Automatic):**
 ```python
-from core import DynamicIRDropSolver
+from analysis.dynamic_solver import DynamicIRDropSolver
 
 solver = DynamicIRDropSolver(model, graph)
 
@@ -544,7 +590,7 @@ result1 = solver.solve_quasi_static(..., smoothed_sources=smoothed)
 result2 = solver.solve_quasi_static(..., smoothed_sources=smoothed)
 
 # Also works with transient solver
-from core import TransientIRDropSolver
+from analysis.transient_solver import TransientIRDropSolver
 trans = TransientIRDropSolver(model, graph)
 trans_smoothed = trans.preprocess_sources(time_step=0.1e-9, t_start=0, t_end=100e-9)
 result3 = trans.solve_transient(..., smoothed_sources=trans_smoothed)
@@ -552,8 +598,8 @@ result3 = trans.solve_transient(..., smoothed_sources=trans_smoothed)
 
 **Manual Smoothing (Low-Level API):**
 ```python
-from core import PWLSmoother, smooth_pwl_points, compact_pwl, pulse_to_pwl_points
-from pdn.pdn_parser import PWL, Pulse
+from analysis.pwl_smoothing import PWLSmoother, smooth_pwl_points, compact_pwl, pulse_to_pwl_points
+from parser.current_sources import PWL, Pulse
 
 smoother = PWLSmoother(time_step=0.1e-9, compact_threshold=1e-12)
 
@@ -601,7 +647,8 @@ if cache.is_compatible(time_step=0.1e-9, t_start=0, t_end=100e-9):
 For identifying which aggressor current sources contribute most to IR-drop at a victim node:
 
 ```python
-from core import TransientIRDropSolver, AdjointSensitivitySolver
+from analysis.transient_solver import TransientIRDropSolver
+from analysis.adjoint_sensitivity import AdjointSensitivitySolver
 
 trans = TransientIRDropSolver(model, graph)
 result = trans.solve_transient(t_start=0, t_end=100e-9, dt=1e-9)
@@ -707,11 +754,26 @@ for victim in victims:
 
 ## Testing
 
-**Test modules:** `test_irdrop.py`, `test_partitioner.py`, `test_pdn_parser.py`, `test_pdn_solver.py`, `test_pdn_plotter.py`, `test_unified_core.py`, `test_hierarchical_solver.py`, `test_coupled_hierarchical_solver.py`, `test_hierarchical_integration.py` (slow), `test_regional_solver.py`, `test_batch_solving.py`, `test_dynamic_solver.py`, `test_transient_solver.py`, `test_dynamic_integration.py`, `test_parallel_parser.py`, `test_adjoint_sensitivity.py`, `test_pwl_smoothing.py`, `test_edge_attrs.py`
+**Test layout mirrors `src/`:**
+```
+tests/
+├── graph/          # test_rx_graph, test_rx_algorithms
+├── model/          # test_unified_core
+├── solver/         # test_hierarchical_solver, test_coupled_hierarchical_solver,
+│                   # test_batch_solving, test_regional_solver, test_pdn_solver,
+│                   # test_hierarchical_integration (slow), test_tiled_accuracy
+├── analysis/       # test_dynamic_solver, test_transient_solver, test_transient_multi_rhs,
+│                   # test_adjoint_sensitivity, test_pwl_smoothing, test_vectorized_sources,
+│                   # test_smoothing_source_idx, test_dynamic_integration (slow)
+├── parser/         # test_pdn_parser, test_parallel_parser, test_edge_attrs,
+│                   # test_parser_regression, test_pdn_integration (slow)
+├── distributed/    # test_distributed_solver
+├── visualization/  # test_pdn_plotter, test_stripe_heatmap
+├── legacy/         # test_irdrop, test_partitioner
+└── fixtures.py     # Factory functions for edge case testing
+```
 
-**Test fixtures:** `tests/fixtures.py` provides factory functions for edge case testing scenarios.
-
-**Test netlists:** `pdn/netlist_test/` (small PDN), `pdn/netlist_small/` (minimal unit tests)
+**Test netlists:** `netlist/netlist_test/` (small PDN), `netlist/netlist_small/` (minimal unit tests).
 
 **Key invariants tested:**
 - Zero load -> all nodes at pad voltage
@@ -789,8 +851,8 @@ The `*` prefix signals the parser to track these nodes for tile stitching:
 
 ## File Landmarks
 
-- **Examples**: `example_ir_drop.py`, `example_partitioning.py`, `example_effective_resistance.py`, `example_regional_voltage.py`
-- **Notebooks**: `irdrop_decomposition_pdn.ipynb`, `irdrop_decomposition.ipynb`, `irdrop_decomposition_unified_model.ipynb`
-- **Tests**: `tests/test_*.py`, `test_tiled_accuracy.py` (standalone accuracy validation)
-- **API exports**: `core/__init__.py`, `irdrop/__init__.py`
-- **Documentation**: `REGIONAL_SOLVER_USAGE.md` (near-field/far-field decomposition guide)
+- **Notebooks**: `notebooks/irdrop_decomposition_pdn.ipynb`, `notebooks/irdrop_decomposition.ipynb`, `notebooks/irdrop_decomposition_unified_model.ipynb`
+- **Tests**: `tests/{graph,model,solver,analysis,parser,distributed,visualization,legacy}/test_*.py`
+- **API exports**: `src/*/__init__.py` (package-level public APIs)
+- **Scripts**: `scripts/analysis/`, `scripts/solver/`, `scripts/parser/`
+- **Reference**: `DEPRECATION.md` (historical old→new import mappings)

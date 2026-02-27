@@ -4,8 +4,16 @@ Provides factory functions to create minimal PDN graphs for specific
 edge case testing scenarios that cannot be triggered with netlist_small.
 """
 
+from pathlib import Path
 from typing import Dict, List, Set, Tuple, Any
-from core.rx_graph import RustworkxMultiDiGraphWrapper
+from graph.rx_graph import RustworkxMultiDiGraphWrapper
+
+# Canonical netlist paths (use these instead of hardcoding pdn/ paths)
+_PROJECT_ROOT = Path(__file__).parent.parent
+NETLIST_TEST = _PROJECT_ROOT / 'netlist' / 'netlist_test'
+NETLIST_SMALL = _PROJECT_ROOT / 'netlist' / 'netlist_small'
+NETLIST_MULTI_TILE = _PROJECT_ROOT / 'netlist' / 'netlist_multi_tile'
+NETLIST_SAMPLED = _PROJECT_ROOT / 'netlist' / 'netlist_sampled'
 
 
 def create_minimal_pdn_graph(

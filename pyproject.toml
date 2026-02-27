@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sigma-dvd-prototype"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "networkx",
+    "rustworkx>=0.14.0",
+    "matplotlib",
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+pdn-parse = "parser.pdn_parser:main"
+pdn-solve = "solver.pdn_solver:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = [
+    "--ignore=tests/solver/test_hierarchical_integration.py",
+    "--ignore=tests/analysis/test_dynamic_integration.py",
+    "--ignore=tests/parser/test_pdn_integration.py",
+    "--tb=short",
+]

@@ -4,57 +4,32 @@
 These tests are separated from unit tests because they take longer to run.
 For quick unit tests, run: python run_all_tests.py
 """
-import unittest
 import sys
 
 # Configure matplotlib before importing test modules
 import matplotlib
 matplotlib.use('Agg')
 
-loader = unittest.TestLoader()
+import pytest
 
-print("Running integration tests...")
+print("Running integration tests via pytest...")
 print("(These tests use real netlists and may take a while)")
-print("="*70)
+print("=" * 70)
 
-suite = unittest.TestSuite()
+# Note: pyproject.toml [tool.pytest.ini_options] addopts includes --ignore flags
+# for these integration files and --tb=short. When we pass explicit file paths
+# below, pytest still appends addopts, so:
+#   - The --ignore flags are harmless (they don't match the explicit paths).
+#   - The --tb=short from addopts applies automatically (no need to repeat it).
+# We use -o addopts= to clear the inherited addopts entirely, avoiding the
+# confusing presence of --ignore flags that contradict the explicit file list.
+exit_code = pytest.main([
+    "tests/solver/test_hierarchical_integration.py",
+    "tests/analysis/test_dynamic_integration.py",
+    "tests/parser/test_pdn_integration.py",
+    "-o", "addopts=",
+    "--tb=short",
+    "-v",
+])
 
-# Load integration test modules
-integration_modules = [
-    'tests.test_hierarchical_integration',
-    'tests.test_dynamic_integration',
-    'tests.test_pdn_integration',
-]
-
-for module in integration_modules:
-    try:
-        suite.addTests(loader.loadTestsFromName(module))
-    except Exception as e:
-        print(f"Warning: Could not load {module}: {e}")
-
-print(f"\nRunning {suite.countTestCases()} integration tests...")
-print("="*70)
-
-runner = unittest.TextTestRunner(verbosity=2)
-result = runner.run(suite)
-
-print("\n" + "="*70)
-print("INTEGRATION TEST SUMMARY")
-print("="*70)
-print(f"Tests run: {result.testsRun}")
-print(f"Successes: {result.testsRun - len(result.failures) - len(result.errors)}")
-print(f"Failures: {len(result.failures)}")
-print(f"Errors: {len(result.errors)}")
-
-if result.failures:
-    print("\nFAILED TESTS:")
-    for test, _ in result.failures:
-        print(f"  ❌ {test}")
-
-if result.errors:
-    print("\nERRORS:")
-    for test, _ in result.errors:
-        print(f"  ❌ {test}")
-
-print("="*70)
-sys.exit(0 if result.wasSuccessful() else 1)
+sys.exit(exit_code)

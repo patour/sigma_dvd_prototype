@@ -216,7 +216,7 @@ python run_pdn_tests.py
 
 ## Test Dependencies
 
-All tests use the small test netlist in `pdn/netlist_test/`:
+All tests use the small test netlist in `netlist/netlist_test/`:
 - 1×1 tile grid  
 - 56 nodes (25 M1 + 25 M2 + package)
 - 118 elements total
@@ -233,7 +233,7 @@ After bug fixes, all tests should **PASS**:
 
 ## Test Design Principles
 
-1. **Use real test netlist**: All tests use `pdn/netlist_test/` for realistic validation
+1. **Use real test netlist**: All tests use `netlist/netlist_test/` for realistic validation
 2. **Test edge cases**: Empty nets, single bins, small grids
 3. **Verify correctness**: Physics-based checks (SPD matrices, Ohm's law, current conservation)
 4. **Test all code paths**: Direct solve, CG, BiCGSTAB solvers
