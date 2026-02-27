@@ -259,6 +259,42 @@ def _parse_instance_models(
     return current_injections
 
 
+def parse_tile_with_instances(
+    ckt_path: str,
+    nd_path: Optional[str],
+    net_filter: Optional[str],
+    tile_id: Tuple[int, int],
+    instance_path: Optional[str] = None,
+) -> TileData:
+    """Parse a tile .ckt file and merge instance model current injections.
+
+    Combines _parse_tile_ckt() + _parse_instance_models() + merge into a
+    single call, eliminating duplication between TileWorker.setup() and
+    DistributedNetlistParser.parse_and_dump().
+
+    Args:
+        ckt_path: Path to tile .ckt file
+        nd_path: Path to tile .nd file (for net filtering)
+        net_filter: Optional lowercase net name to filter by
+        tile_id: Tile identifier tuple (x, y)
+        instance_path: Optional path to instanceModels*.sp file
+
+    Returns:
+        TileData with parsed edges, nodes, and merged current injections
+    """
+    tile_data = _parse_tile_ckt(ckt_path, nd_path, net_filter, tile_id)
+
+    if instance_path:
+        inst_currents = _parse_instance_models(instance_path, net_filter, nd_path)
+        for node, current in inst_currents.items():
+            if node in tile_data.all_nodes:
+                tile_data.current_injections[node] = (
+                    tile_data.current_injections.get(node, 0.0) + current
+                )
+
+    return tile_data
+
+
 class TileWorker:
     """Per-tile actor for distributed DDM. Thin wrapper that delegates
     all math to coupled_system.py building blocks.
@@ -289,23 +325,53 @@ class TileWorker:
         tc = tile_config_dict
         tile_id = tuple(tc['tile_id'])
 
-        # Parse tile .ckt file
-        self._tile_data = _parse_tile_ckt(
-            tc['ckt_path'], tc.get('nd_path'), tc.get('net_filter'), tile_id,
+        self._tile_data = parse_tile_with_instances(
+            ckt_path=tc['ckt_path'],
+            nd_path=tc.get('nd_path'),
+            net_filter=tc.get('net_filter'),
+            tile_id=tile_id,
+            instance_path=tc.get('instance_path'),
         )
 
-        # Parse instance models for current injections
-        if tc.get('instance_path'):
-            inst_currents = _parse_instance_models(
-                tc['instance_path'], tc.get('net_filter'), tc.get('nd_path'),
-            )
-            # Merge instance currents into tile data
-            for node, current in inst_currents.items():
-                if node in self._tile_data.all_nodes:
-                    self._tile_data.current_injections[node] = (
-                        self._tile_data.current_injections.get(node, 0.0) + current
-                    )
+        return self._build_block_system(interface_nodes)
 
+    def setup_from_tile_data(
+        self,
+        tile_data: TileData,
+        interface_nodes: Set[str],
+    ) -> Dict[str, Any]:
+        """Build block system from pre-parsed TileData (no file I/O).
+
+        Accepts a TileData that was previously produced by _parse_tile_ckt()
+        and _parse_instance_models() (e.g., loaded from a .pkl file).
+        Performs island detection and builds BlockMatrixSystem, identical to
+        the bottom half of setup().
+
+        Args:
+            tile_data: Pre-parsed tile data (edges, nodes, currents)
+            interface_nodes: Set of all global interface nodes (boundary + die attachment)
+
+        Returns:
+            Dict with tile metadata: {tile_id, boundary_nodes, n_interior, n_boundary, islands_removed}
+        """
+        self._tile_data = tile_data
+        return self._build_block_system(interface_nodes)
+
+    def _build_block_system(
+        self,
+        interface_nodes: Set[str],
+    ) -> Dict[str, Any]:
+        """Shared logic: island detection + BlockMatrixSystem construction.
+
+        Called by both setup() and setup_from_tile_data() after tile_data
+        has been populated.
+
+        Args:
+            interface_nodes: Set of all global interface nodes
+
+        Returns:
+            Dict with tile metadata: {tile_id, boundary_nodes, n_interior, n_boundary, islands_removed}
+        """
         self._interface_nodes = interface_nodes
 
         # Classify: port nodes = interface nodes present in this tile
@@ -327,7 +393,7 @@ class TileWorker:
         )
 
         return {
-            'tile_id': tile_id,
+            'tile_id': self._tile_data.tile_id,
             'boundary_nodes': self._block_system.port_nodes,
             'n_interior': self._block_system.n_interior,
             'n_boundary': self._block_system.n_ports,

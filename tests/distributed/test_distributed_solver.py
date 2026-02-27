@@ -1291,5 +1291,394 @@ class TestBenchmarkDDMVsFlat(unittest.TestCase):
         print(f"{'=' * 70}\n")
 
 
+# ──────────────────────────────────────────────────────────────────────
+# PKL Serialization Tests
+# ──────────────────────────────────────────────────────────────────────
+
+@unittest.skipUnless(NETLIST_SAMPLED_EXISTS, "netlist_sampled not available")
+class TestTileWorkerFromTileData(unittest.TestCase):
+    """Unit test: setup_from_tile_data() produces same block system as setup()."""
+
+    def test_same_block_system_as_setup(self):
+        """setup_from_tile_data() with pre-parsed TileData gives identical
+        boundary nodes, interior/boundary counts, and islands removed
+        as setup() which parses from file.
+        """
+        import logging
+        logging.disable(logging.WARNING)
+        from distributed.parser import DistributedNetlistParser
+        from distributed.tile_worker import (
+            TileWorker, TileData, _parse_tile_ckt, _parse_instance_models,
+        )
+
+        try:
+            parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
+            metadata = parser.parse_metadata()
+            boundary_nodes = parser.collect_boundary_nodes(metadata.tile_configs)
+            interface_nodes = boundary_nodes | metadata.package_data.die_attachment_nodes
+
+            # Pick the first tile config
+            tc = metadata.tile_configs[0]
+
+            # Path A: setup() from file
+            worker_file = TileWorker()
+            result_file = worker_file.setup(
+                {
+                    'tile_id': list(tc.tile_id),
+                    'ckt_path': tc.ckt_path,
+                    'nd_path': tc.nd_path,
+                    'instance_path': tc.instance_path,
+                    'net_filter': tc.net_filter,
+                },
+                interface_nodes=interface_nodes,
+            )
+
+            # Path B: pre-parse TileData, then setup_from_tile_data()
+            tile_data = _parse_tile_ckt(tc.ckt_path, tc.nd_path, tc.net_filter, tc.tile_id)
+            if tc.instance_path:
+                inst_currents = _parse_instance_models(tc.instance_path, tc.net_filter, tc.nd_path)
+                for node, current in inst_currents.items():
+                    if node in tile_data.all_nodes:
+                        tile_data.current_injections[node] = (
+                            tile_data.current_injections.get(node, 0.0) + current
+                        )
+
+            worker_data = TileWorker()
+            result_data = worker_data.setup_from_tile_data(tile_data, interface_nodes)
+
+            # Compare results
+            self.assertEqual(result_file['tile_id'], result_data['tile_id'])
+            self.assertEqual(
+                sorted(result_file['boundary_nodes']),
+                sorted(result_data['boundary_nodes']),
+            )
+            self.assertEqual(result_file['n_interior'], result_data['n_interior'])
+            self.assertEqual(result_file['n_boundary'], result_data['n_boundary'])
+            self.assertEqual(result_file['islands_removed'], result_data['islands_removed'])
+        finally:
+            logging.disable(logging.NOTSET)
+
+    def test_all_tiles_match(self):
+        """setup_from_tile_data() matches setup() for every tile in the netlist."""
+        import logging
+        logging.disable(logging.WARNING)
+        from distributed.parser import DistributedNetlistParser
+        from distributed.tile_worker import (
+            TileWorker, _parse_tile_ckt, _parse_instance_models,
+        )
+
+        try:
+            parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
+            metadata = parser.parse_metadata()
+            boundary_nodes = parser.collect_boundary_nodes(metadata.tile_configs)
+            interface_nodes = boundary_nodes | metadata.package_data.die_attachment_nodes
+
+            for tc in metadata.tile_configs:
+                with self.subTest(tile_id=tc.tile_id):
+                    # File-based setup
+                    w1 = TileWorker()
+                    r1 = w1.setup(
+                        {
+                            'tile_id': list(tc.tile_id),
+                            'ckt_path': tc.ckt_path,
+                            'nd_path': tc.nd_path,
+                            'instance_path': tc.instance_path,
+                            'net_filter': tc.net_filter,
+                        },
+                        interface_nodes=interface_nodes,
+                    )
+
+                    # TileData-based setup
+                    td = _parse_tile_ckt(tc.ckt_path, tc.nd_path, tc.net_filter, tc.tile_id)
+                    if tc.instance_path:
+                        inst = _parse_instance_models(tc.instance_path, tc.net_filter, tc.nd_path)
+                        for node, current in inst.items():
+                            if node in td.all_nodes:
+                                td.current_injections[node] = (
+                                    td.current_injections.get(node, 0.0) + current
+                                )
+
+                    w2 = TileWorker()
+                    r2 = w2.setup_from_tile_data(td, interface_nodes)
+
+                    self.assertEqual(r1['n_interior'], r2['n_interior'])
+                    self.assertEqual(r1['n_boundary'], r2['n_boundary'])
+                    self.assertEqual(
+                        sorted(r1['boundary_nodes']),
+                        sorted(r2['boundary_nodes']),
+                    )
+        finally:
+            logging.disable(logging.NOTSET)
+
+
+@unittest.skipUnless(NETLIST_SAMPLED_EXISTS, "netlist_sampled not available")
+class TestPklRoundTrip(unittest.TestCase):
+    """Integration test: parse_and_dump() creates expected files,
+    load_distributed_partitions() returns correct data."""
+
+    def test_round_trip_files_exist(self):
+        """parse_and_dump() creates metadata.pkl and tile_X_Y.pkl for each tile."""
+        import logging
+        logging.disable(logging.WARNING)
+        from distributed.parser import DistributedNetlistParser
+
+        try:
+            parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                parser.parse_and_dump(tmpdir)
+
+                # Check metadata.pkl exists
+                meta_pkl = Path(tmpdir) / 'metadata.pkl'
+                self.assertTrue(meta_pkl.exists(), "metadata.pkl not found")
+
+                # Check tile .pkl files exist (3x3 grid for netlist_sampled)
+                tile_files = sorted(Path(tmpdir).glob('tile_*.pkl'))
+                self.assertGreater(len(tile_files), 0, "No tile .pkl files found")
+
+                # Verify file names match expected tile grid
+                metadata = parser.parse_metadata()
+                expected_count = len(metadata.tile_configs)
+                self.assertEqual(
+                    len(tile_files), expected_count,
+                    f"Expected {expected_count} tile files, found {len(tile_files)}",
+                )
+        finally:
+            logging.disable(logging.NOTSET)
+
+    def test_round_trip_metadata_correct(self):
+        """Loaded metadata matches original parsed metadata."""
+        import logging
+        logging.disable(logging.WARNING)
+        from distributed.parser import DistributedNetlistParser
+        from distributed.model import load_distributed_partitions
+
+        try:
+            parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
+            original_metadata = parser.parse_metadata()
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                parser.parse_and_dump(tmpdir)
+                loaded_meta, loaded_bnd, loaded_tiles = load_distributed_partitions(tmpdir)
+
+                # Metadata fields
+                self.assertEqual(loaded_meta.tile_grid, original_metadata.tile_grid)
+                self.assertEqual(loaded_meta.net_name, original_metadata.net_name)
+                self.assertAlmostEqual(loaded_meta.vdd, original_metadata.vdd, places=6)
+                self.assertEqual(
+                    len(loaded_meta.tile_configs),
+                    len(original_metadata.tile_configs),
+                )
+
+                # Boundary nodes should be non-empty
+                self.assertGreater(len(loaded_bnd), 0)
+
+                # Tile data dict keys match tile configs
+                expected_ids = {tc.tile_id for tc in original_metadata.tile_configs}
+                self.assertEqual(set(loaded_tiles.keys()), expected_ids)
+        finally:
+            logging.disable(logging.NOTSET)
+
+    def test_round_trip_tile_data_preserved(self):
+        """TileData round-trips through pickle without data loss."""
+        import logging
+        logging.disable(logging.WARNING)
+        from distributed.parser import DistributedNetlistParser
+        from distributed.model import load_distributed_partitions
+        from distributed.tile_worker import _parse_tile_ckt, _parse_instance_models
+
+        try:
+            parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
+            metadata = parser.parse_metadata()
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                parser.parse_and_dump(tmpdir)
+                _, _, loaded_tiles = load_distributed_partitions(tmpdir)
+
+                # Compare first tile's data
+                tc = metadata.tile_configs[0]
+                expected = _parse_tile_ckt(tc.ckt_path, tc.nd_path, tc.net_filter, tc.tile_id)
+                if tc.instance_path:
+                    inst = _parse_instance_models(tc.instance_path, tc.net_filter, tc.nd_path)
+                    for node, current in inst.items():
+                        if node in expected.all_nodes:
+                            expected.current_injections[node] = (
+                                expected.current_injections.get(node, 0.0) + current
+                            )
+
+                loaded = loaded_tiles[tc.tile_id]
+
+                self.assertEqual(loaded.tile_id, expected.tile_id)
+                self.assertEqual(loaded.all_nodes, expected.all_nodes)
+                self.assertEqual(loaded.boundary_nodes, expected.boundary_nodes)
+                self.assertEqual(len(loaded.resistive_edges), len(expected.resistive_edges))
+                self.assertEqual(
+                    set(loaded.current_injections.keys()),
+                    set(expected.current_injections.keys()),
+                )
+                for node in expected.current_injections:
+                    self.assertAlmostEqual(
+                        loaded.current_injections[node],
+                        expected.current_injections[node],
+                        places=10,
+                        msg=f"Current mismatch at node {node}",
+                    )
+        finally:
+            logging.disable(logging.NOTSET)
+
+    def test_load_missing_metadata_raises(self):
+        """load_distributed_partitions() raises FileNotFoundError on empty dir."""
+        from distributed.model import load_distributed_partitions
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(FileNotFoundError):
+                load_distributed_partitions(tmpdir)
+
+    def test_load_no_tiles_raises(self):
+        """load_distributed_partitions() raises ValueError if no tile pkls."""
+        import pickle
+        from distributed.model import load_distributed_partitions
+        from distributed.parser import PowerGridMetaData, PackageData
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Write a minimal metadata.pkl with no tile files
+            dummy_meta = PowerGridMetaData(
+                tile_grid=(1, 1),
+                parameters={},
+                tile_configs=[],
+                package_data=PackageData(
+                    vsrc_dict={}, package_edges=[], pad_nodes=set(),
+                    tap_nodes=set(), die_attachment_nodes=set(),
+                    vdd=1.0, net_name='VDD',
+                ),
+                net_name='VDD',
+                vdd=1.0,
+            )
+            meta_path = Path(tmpdir) / 'metadata.pkl'
+            with open(meta_path, 'wb') as f:
+                pickle.dump({'metadata': dummy_meta, 'boundary_nodes': set()}, f)
+
+            with self.assertRaises(ValueError):
+                load_distributed_partitions(tmpdir)
+
+
+@unittest.skipUnless(NETLIST_SAMPLED_EXISTS, "netlist_sampled not available")
+class TestPklSolveMatchesDirect(unittest.TestCase):
+    """End-to-end: solve from .pkl produces identical voltages as direct DDM solve."""
+
+    def test_pkl_solve_matches_direct(self):
+        """DDM solve from pkl files gives same voltages as DDM solve from .ckt files."""
+        import logging
+        logging.disable(logging.WARNING)
+        from distributed import (
+            DistributedNetlistParser,
+            create_distributed_model,
+            DistributedDDMSolver,
+        )
+        from distributed.model import load_distributed_partitions
+
+        try:
+            # Direct DDM solve (from .ckt files)
+            parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
+            metadata_direct = parser.parse_metadata()
+            model_direct = create_distributed_model(metadata_direct, backend='local')
+            solver_direct = DistributedDDMSolver(model_direct)
+            result_direct = solver_direct.solve_dc()
+            v_direct = result_direct.flatten()
+
+            # PKL-based DDM solve
+            with tempfile.TemporaryDirectory() as tmpdir:
+                parser.parse_and_dump(tmpdir)
+                metadata_pkl, bnd_nodes, tile_data = load_distributed_partitions(tmpdir)
+
+                model_pkl = create_distributed_model(
+                    metadata_pkl,
+                    backend='local',
+                    use_pkl=True,
+                    boundary_nodes=bnd_nodes,
+                    tile_data_dict=tile_data,
+                )
+                solver_pkl = DistributedDDMSolver(model_pkl)
+                result_pkl = solver_pkl.solve_dc()
+                v_pkl = result_pkl.flatten()
+
+                # Verify identical results
+                self.assertEqual(len(v_direct), len(v_pkl),
+                                 f"Node count mismatch: {len(v_direct)} vs {len(v_pkl)}")
+
+                common = set(v_direct) & set(v_pkl)
+                self.assertEqual(len(common), len(v_direct),
+                                 "Node sets differ between direct and pkl solves")
+
+                max_diff = max(abs(v_direct[n] - v_pkl[n]) for n in common)
+                self.assertLess(
+                    max_diff, 1e-10,
+                    f"Pkl vs direct max voltage diff: {max_diff:.2e} V "
+                    f"(expected < 1e-10)"
+                )
+
+                model_pkl.shutdown()
+
+            model_direct.shutdown()
+        finally:
+            logging.disable(logging.NOTSET)
+
+    def test_pkl_solve_matches_flat(self):
+        """DDM solve from pkl files matches flat solver to < 1 uV."""
+        import logging
+        logging.disable(logging.WARNING)
+        from parser.netlist import NetlistParser
+        from model.factory import create_model_from_pdn
+        from solver.unified_solver import UnifiedIRDropSolver
+        from distributed import (
+            DistributedNetlistParser,
+            create_distributed_model,
+            DistributedDDMSolver,
+        )
+        from distributed.model import load_distributed_partitions
+
+        try:
+            # Flat solver
+            flat_parser = NetlistParser(NETLIST_SAMPLED_DIR)
+            graph = flat_parser.parse()
+            model_flat = create_model_from_pdn(graph, 'VDD_XLV')
+            load_currents = model_flat.extract_current_sources()
+            solver_flat = UnifiedIRDropSolver(model_flat)
+            result_flat = solver_flat.solve(load_currents)
+            v_flat = result_flat.voltages
+
+            # PKL DDM
+            dist_parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                dist_parser.parse_and_dump(tmpdir)
+                metadata_pkl, bnd_nodes, tile_data = load_distributed_partitions(tmpdir)
+
+                model_pkl = create_distributed_model(
+                    metadata_pkl,
+                    backend='local',
+                    use_pkl=True,
+                    boundary_nodes=bnd_nodes,
+                    tile_data_dict=tile_data,
+                )
+                solver_pkl = DistributedDDMSolver(model_pkl)
+                result_pkl = solver_pkl.solve_dc()
+                v_pkl = result_pkl.flatten()
+
+                # Compare
+                common = set(v_flat) & set(v_pkl)
+                self.assertGreater(len(common), 100000)
+
+                max_diff = max(abs(v_flat[n] - v_pkl[n]) for n in common)
+                self.assertLess(
+                    max_diff, 1e-6,
+                    f"Pkl DDM vs flat max diff: {max_diff * 1e6:.3f} uV"
+                )
+
+                model_pkl.shutdown()
+        finally:
+            logging.disable(logging.NOTSET)
+
+
 if __name__ == '__main__':
     unittest.main()

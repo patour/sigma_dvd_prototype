@@ -23,10 +23,12 @@ from .parser import (
 from .tile_worker import (
     TileWorker,
     TileData,
+    parse_tile_with_instances,
 )
 from .model import (
     DistributedPowerGridModel,
     create_distributed_model,
+    load_distributed_partitions,
 )
 from .solver import (
     DistributedDDMSolver,
@@ -49,9 +51,11 @@ __all__ = [
     # Worker
     "TileWorker",
     "TileData",
+    "parse_tile_with_instances",
     # Model
     "DistributedPowerGridModel",
     "create_distributed_model",
+    "load_distributed_partitions",
     # Solver
     "DistributedDDMSolver",
 ]

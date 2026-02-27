@@ -323,6 +323,69 @@ class DistributedNetlistParser:
             net_name=net_name,
         )
 
+    def parse_and_dump(self, output_dir: str) -> Path:
+        """Parse netlist and dump per-tile TileData + metadata as .pkl files.
+
+        Creates output_dir (if needed) with:
+          - tile_X_Y.pkl  for each tile (pickled TileData)
+          - metadata.pkl  with {'metadata': PowerGridMetaData, 'boundary_nodes': Set[str]}
+
+        Args:
+            output_dir: Directory to write .pkl files into
+
+        Returns:
+            Path to output_dir
+        """
+        import pickle
+        from .tile_worker import parse_tile_with_instances
+
+        out_path = Path(output_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        # 1. Parse metadata (tile configs + package data)
+        metadata = self.parse_metadata()
+
+        # 2. Parse each tile and dump TileData
+        all_boundary_nodes: Set[str] = set()
+        for tc in metadata.tile_configs:
+            tile_data = parse_tile_with_instances(
+                ckt_path=tc.ckt_path,
+                nd_path=tc.nd_path,
+                net_filter=tc.net_filter,
+                tile_id=tc.tile_id,
+                instance_path=tc.instance_path,
+            )
+
+            all_boundary_nodes.update(tile_data.boundary_nodes)
+
+            # Dump tile data
+            x, y = tc.tile_id
+            tile_pkl_path = out_path / f'tile_{x}_{y}.pkl'
+            with open(tile_pkl_path, 'wb') as f:
+                pickle.dump(tile_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            logger.info(
+                f"Tile ({x},{y}): {len(tile_data.all_nodes)} nodes, "
+                f"{len(tile_data.resistive_edges)} edges, "
+                f"{len(tile_data.current_injections)} current sources -> {tile_pkl_path.name}"
+            )
+
+        # 3. Dump metadata + boundary nodes
+        meta_pkl_path = out_path / 'metadata.pkl'
+        with open(meta_pkl_path, 'wb') as f:
+            pickle.dump(
+                {'metadata': metadata, 'boundary_nodes': all_boundary_nodes},
+                f,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+
+        logger.info(
+            f"Metadata: {len(metadata.tile_configs)} tiles, "
+            f"{len(all_boundary_nodes)} boundary nodes -> {meta_pkl_path.name}"
+        )
+
+        return out_path
+
     def collect_boundary_nodes(self, tile_configs: List[TileConfig]) -> Set[str]:
         """Pre-scan all tile .ckt files to collect *-prefixed boundary nodes.
 

@@ -44,22 +44,28 @@
 
 # Usage function
 usage() {
-    echo "Usage: $0 -i INPUT_PKL -n NET_NAME [-o OUTPUT_DIR] [-c CONFIG_FILE] [-v]"
+    echo "Usage: $0 [-d] [-b BACKEND] -i INPUT_PKL -n NET_NAME [-o OUTPUT_DIR] [-c CONFIG_FILE] [-v]"
     echo ""
-    echo "Required arguments:"
-    echo "  -i INPUT_PKL    Path to input PDN graph pickle file"
+    echo "Required arguments (standard mode):"
+    echo "  -i INPUT_PKL    Path to input PDN graph pickle file (or .pkl dir for -d)"
     echo "  -n NET_NAME     Power net name (e.g., VDD, VSS)"
     echo ""
     echo "Optional arguments:"
     echo "  -o OUTPUT_DIR   Output directory (default: ./results)"
     echo "  -c CONFIG_FILE  Config file (.yaml, .yml, or .json) for solver parameters"
+    echo "  -d              Distributed DDM mode: load per-tile .pkl files and run DDM solver"
+    echo "  -b BACKEND      Compute backend for distributed mode: local or ray (default: local)"
     echo "  -v              Enable verbose output"
     echo ""
     echo "PRECEDENCE: Config file values OVERRIDE CLI arguments."
     echo ""
-    echo "Example:"
+    echo "Example (standard):"
     echo "  $0 -i ./netlist_data/pdn_graph.pkl -n VDD -o ./results"
     echo "  $0 -i ./netlist_data/pdn_graph.pkl -n VDD -c solver_config.yaml"
+    echo ""
+    echo "Example (distributed):"
+    echo "  $0 -d -i ./netlist_data/distributed_pkl -o ./results -v"
+    echo "  $0 -d -b ray -i ./netlist_data/distributed_pkl -o ./results"
     echo ""
     echo "See script header for full list of config file parameters."
     exit 1
@@ -69,9 +75,11 @@ usage() {
 OUTPUT_DIR="./results"
 CONFIG_FILE=""
 VERBOSE=""
+DISTRIBUTED=""
+BACKEND="local"
 
 # Parse command-line arguments
-while getopts "i:n:o:c:vh" opt; do
+while getopts "i:n:o:c:b:dvh" opt; do
     case $opt in
         i)
             INPUT_PKL="$OPTARG"
@@ -84,6 +92,12 @@ while getopts "i:n:o:c:vh" opt; do
             ;;
         c)
             CONFIG_FILE="$OPTARG"
+            ;;
+        d)
+            DISTRIBUTED="1"
+            ;;
+        b)
+            BACKEND="$OPTARG"
             ;;
         v)
             VERBOSE="--verbose"
@@ -102,7 +116,33 @@ while getopts "i:n:o:c:vh" opt; do
     esac
 done
 
-# Check required parameters
+# Distributed DDM mode
+if [ -n "$DISTRIBUTED" ]; then
+    if [ -z "$INPUT_PKL" ]; then
+        echo "Error: Input .pkl directory (-i) is required for distributed mode" >&2
+        usage
+    fi
+    if [ ! -d "$INPUT_PKL" ]; then
+        echo "Error: '$INPUT_PKL' is not a directory (expected .pkl directory for -d mode)" >&2
+        exit 1
+    fi
+
+    CMD_ARGS="solve \"$INPUT_PKL\" --backend \"$BACKEND\""
+    if [ -n "$OUTPUT_DIR" ]; then
+        CMD_ARGS="$CMD_ARGS --output \"$OUTPUT_DIR\""
+    fi
+    if [ -n "$VERBOSE" ]; then
+        CMD_ARGS="$CMD_ARGS --verbose"
+    fi
+
+    CMD="python -m distributed $CMD_ARGS"
+    echo "Running: $CMD"
+    echo ""
+    eval $CMD
+    exit $?
+fi
+
+# Standard mode: check required parameters
 if [ -z "$INPUT_PKL" ]; then
     echo "Error: Input pickle file (-i) is required" >&2
     usage
