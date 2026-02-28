@@ -379,8 +379,9 @@ class TileWorker:
 
         # Floating island detection: remove components not connected to any port/boundary
         islands_removed = 0
+        kept_nonlargest_iface: Set[str] = set()
         if port_nodes_local:
-            islands_removed = self._remove_floating_islands(port_nodes_local)
+            islands_removed, kept_nonlargest_iface = self._remove_floating_islands(port_nodes_local)
 
         # Build BlockMatrixSystem from edges (no factorization yet)
         from solver.coupled_system import build_block_system_from_edges
@@ -398,6 +399,7 @@ class TileWorker:
             'n_interior': self._block_system.n_interior,
             'n_boundary': self._block_system.n_ports,
             'islands_removed': islands_removed,
+            'kept_nonlargest_iface': sorted(kept_nonlargest_iface),
         }
 
     # Minimum interface node count for a non-largest component to be kept.
@@ -407,7 +409,7 @@ class TileWorker:
     # cross-tile strips that connect to the main network through other tiles.
     MIN_INTERFACE_NODES_KEEP = 5
 
-    def _remove_floating_islands(self, port_nodes: Set[str]) -> int:
+    def _remove_floating_islands(self, port_nodes: Set[str]) -> Tuple[int, Set[str]]:
         """Remove disconnected components that are isolated fragments.
 
         Keeps the largest component plus any component with enough interface
@@ -416,7 +418,10 @@ class TileWorker:
         boundary nodes would create near-singular interface blocks.
 
         Returns:
-            Number of islands removed
+            Tuple of (islands_removed, kept_nonlargest_iface) where
+            kept_nonlargest_iface is the set of interface node names from
+            non-largest components that were kept due to sufficient
+            interface connectivity.
         """
         # Build adjacency
         adj: Dict[str, Set[str]] = {}
@@ -446,23 +451,25 @@ class TileWorker:
             components.append(comp)
 
         if len(components) <= 1:
-            return 0
+            return 0, set()
 
         # Keep largest component + components with sufficient interface connectivity
         largest = max(components, key=len)
         removed_nodes: Set[str] = set()
+        kept_nonlargest_iface: Set[str] = set()
         islands_removed = 0
         for comp in components:
             if comp is largest:
                 continue
             n_interface = len(comp & port_nodes)
             if n_interface >= self.MIN_INTERFACE_NODES_KEEP:
+                kept_nonlargest_iface.update(comp & port_nodes)
                 continue  # Legitimate cross-tile strip
             removed_nodes.update(comp)
             islands_removed += 1
 
         if not removed_nodes:
-            return 0
+            return 0, kept_nonlargest_iface
 
         self._tile_data.all_nodes -= removed_nodes
         self._tile_data.boundary_nodes -= removed_nodes
@@ -473,7 +480,7 @@ class TileWorker:
         for node in removed_nodes:
             self._tile_data.current_injections.pop(node, None)
 
-        return islands_removed
+        return islands_removed, kept_nonlargest_iface
 
     def factor_and_compute_schur(self) -> Tuple[Any, List[str]]:
         """Factor interior and compute explicit Schur complement.

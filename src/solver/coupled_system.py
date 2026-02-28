@@ -1061,3 +1061,216 @@ def assemble_schur_complement_system(
     unknown_to_idx = {n: i for i, n in enumerate(unknown_list)}
 
     return S_global, rhs_dirichlet, unknown_list, unknown_to_idx
+
+
+def find_interface_islands(
+    S_global: sp.csr_matrix,
+    interface_nodes: List[str],
+    interface_node_to_idx: Dict[str, int],
+    pad_nodes: Set[str],
+    extra_edges: Optional[List[Tuple[str, str, float]]] = None,
+) -> Set[str]:
+    """Detect interface nodes with no resistive path to any pad node.
+
+    Builds an adjacency graph from the off-diagonal nonzeros of S_global
+    plus any virtual pad nodes reachable through extra_edges. Runs BFS
+    connected-component analysis and returns nodes in components that
+    contain no pad node (i.e., "islands" that would make S_global singular).
+
+    Args:
+        S_global: Assembled global Schur complement (CSR, n_unknown x n_unknown).
+        interface_nodes: Ordered list of unknown node names matching S_global rows.
+        interface_node_to_idx: Dict mapping node name -> index in interface_nodes.
+        pad_nodes: Set of pad (Dirichlet) node names. These are *not* in S_global
+            but may appear in extra_edges.
+        extra_edges: Optional list of (u, v, conductance) tuples from package
+            resistors or other non-tile sources. Pad endpoints create virtual
+            adjacency into the interface graph.
+
+    Returns:
+        Set of island node names (interface unknowns with no path to any pad).
+        Empty set if all interface nodes can reach at least one pad.
+    """
+    from collections import deque
+
+    n = len(interface_nodes)
+    if n == 0:
+        return set()
+
+    # Build adjacency list: interface unknowns + virtual pad nodes
+    adj: Dict[str, Set[str]] = {node: set() for node in interface_nodes}
+
+    # 1. Adjacency from S_global off-diagonal nonzeros
+    S_coo = S_global.tocoo()
+    for r, c in zip(S_coo.row, S_coo.col):
+        if r != c:
+            u_name = interface_nodes[r]
+            v_name = interface_nodes[c]
+            adj[u_name].add(v_name)
+            adj[v_name].add(u_name)
+
+    # 2. Adjacency from extra_edges (introduces virtual pad nodes)
+    virtual_pads: Set[str] = set()
+    if extra_edges:
+        for u, v, g in extra_edges:
+            if g <= 0:
+                continue
+            # Skip ground node (same pattern as tile_worker.py)
+            if u == '0' or v == '0':
+                continue
+
+            u_is_pad = u in pad_nodes
+            v_is_pad = v in pad_nodes
+            u_is_iface = u in interface_node_to_idx
+            v_is_iface = v in interface_node_to_idx
+
+            # Only add edge if it connects an interface unknown to a pad,
+            # or two interface unknowns (already covered by S_global but
+            # extra_edges may add additional connections).
+            if u_is_iface and v_is_iface:
+                adj[u].add(v)
+                adj[v].add(u)
+            elif u_is_iface and v_is_pad:
+                if v not in adj:
+                    adj[v] = set()
+                adj[u].add(v)
+                adj[v].add(u)
+                virtual_pads.add(v)
+            elif v_is_iface and u_is_pad:
+                if u not in adj:
+                    adj[u] = set()
+                adj[v].add(u)
+                adj[u].add(v)
+                virtual_pads.add(u)
+
+    # 3. BFS connected components
+    all_graph_nodes = set(interface_nodes) | virtual_pads
+    visited: Set[str] = set()
+    island_nodes: Set[str] = set()
+
+    for start in all_graph_nodes:
+        if start in visited:
+            continue
+
+        component: Set[str] = set()
+        has_pad = False
+        queue = deque([start])
+        visited.add(start)
+
+        while queue:
+            node = queue.popleft()
+            component.add(node)
+            if node in pad_nodes:
+                has_pad = True
+            for neighbor in adj.get(node, set()):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+
+        if not has_pad:
+            # All interface unknowns in this component are islands
+            # (exclude virtual pads, though a pad-only island is impossible here)
+            island_nodes.update(component & set(interface_nodes))
+
+    return island_nodes
+
+
+def apply_island_penalty(
+    S_global: sp.csr_matrix,
+    rhs_dirichlet: np.ndarray,
+    island_nodes: Set[str],
+    interface_node_to_idx: Dict[str, int],
+    dirichlet_voltage: float,
+    penalty_conductance: float = 1e5,
+) -> Tuple[sp.csr_matrix, np.ndarray]:
+    """Apply a diagonal penalty to island nodes to make S_global non-singular.
+
+    For each island node i, adds penalty_conductance to S_global[i, i] and
+    penalty_conductance * dirichlet_voltage to rhs_dirichlet[i]. This
+    effectively shorts the island nodes to the supply voltage through a
+    large conductance, preventing a singular interface matrix.
+
+    Args:
+        S_global: Assembled global Schur complement (CSR, n x n).
+        rhs_dirichlet: Right-hand side vector of shape (n,).
+        island_nodes: Set of island node names to penalise.
+        interface_node_to_idx: Dict mapping node name -> index in S_global.
+        dirichlet_voltage: Supply voltage to pin island nodes to (V).
+        penalty_conductance: Conductance added to diagonal (default 1e5,
+            matching GMAX used elsewhere in this module).
+
+    Returns:
+        Tuple of (S_fixed, rhs_fixed). If island_nodes is empty the inputs
+        are returned unchanged (zero-copy fast path).
+    """
+    if not island_nodes:
+        return S_global, rhs_dirichlet
+
+    # Build index array for island nodes
+    indices = np.array(
+        [interface_node_to_idx[n] for n in island_nodes], dtype=np.intp
+    )
+
+    n = S_global.shape[0]
+
+    # Diagonal penalty via COO -> CSR addition
+    penalty_vals = np.full(len(indices), penalty_conductance, dtype=np.float64)
+    penalty_matrix = sp.coo_matrix(
+        (penalty_vals, (indices, indices)), shape=(n, n)
+    ).tocsr()
+
+    S_fixed = S_global + penalty_matrix
+
+    # RHS contribution: penalty_conductance * V_dd at island indices
+    rhs_fixed = rhs_dirichlet.copy()
+    rhs_fixed[indices] += penalty_conductance * dirichlet_voltage
+
+    return S_fixed, rhs_fixed
+
+
+def detect_interface_islands(
+    S_global: sp.csr_matrix,
+    rhs_dirichlet: np.ndarray,
+    interface_nodes: List[str],
+    interface_node_to_idx: Dict[str, int],
+    pad_nodes: Set[str],
+    extra_edges: Optional[List[Tuple[str, str, float]]] = None,
+    *,
+    dirichlet_voltage: float,
+    penalty_conductance: float = 1e5,
+) -> Tuple[sp.csr_matrix, np.ndarray, Set[str]]:
+    """Detect interface islands and apply diagonal penalty in one call.
+
+    Convenience wrapper that calls :func:`find_interface_islands` followed
+    by :func:`apply_island_penalty`. If no islands are found the inputs are
+    returned unchanged (zero-copy fast path).
+
+    Args:
+        S_global: Assembled global Schur complement (CSR, n x n).
+        rhs_dirichlet: Right-hand side vector of shape (n,).
+        interface_nodes: Ordered list of unknown node names.
+        interface_node_to_idx: Dict mapping node name -> index.
+        pad_nodes: Set of pad (Dirichlet) node names.
+        extra_edges: Optional list of (u, v, conductance) tuples.
+        dirichlet_voltage: Voltage to pin island nodes to. Required;
+            callers must pass this explicitly (typically ``model.vdd``).
+        penalty_conductance: Conductance for diagonal penalty (default 1e5).
+
+    Returns:
+        Tuple of (S_fixed, rhs_fixed, island_nodes). island_nodes is the
+        set of detected island node names (empty if none found).
+    """
+    island_nodes = find_interface_islands(
+        S_global, interface_nodes, interface_node_to_idx,
+        pad_nodes, extra_edges,
+    )
+
+    if not island_nodes:
+        return S_global, rhs_dirichlet, set()
+
+    S_fixed, rhs_fixed = apply_island_penalty(
+        S_global, rhs_dirichlet, island_nodes,
+        interface_node_to_idx, dirichlet_voltage, penalty_conductance,
+    )
+
+    return S_fixed, rhs_fixed, island_nodes

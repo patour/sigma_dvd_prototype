@@ -43,6 +43,7 @@ class DistributedPowerGridModel:
     # Metadata
     metadata: PowerGridMetaData
     island_stats: Dict[Tuple[int, int], Dict] = field(default_factory=dict)
+    tile_kept_nonlargest_iface: Dict[Tuple[int, int], List[str]] = field(default_factory=dict)
 
     @property
     def tile_ids(self) -> List[Tuple[int, int]]:
@@ -263,12 +264,14 @@ def create_distributed_model(
     tile_boundary_nodes: Dict[Tuple[int, int], List[str]] = {}
     tile_interior_counts: Dict[Tuple[int, int], int] = {}
     island_stats: Dict[Tuple[int, int], Dict] = {}
+    tile_kept_nonlargest_iface: Dict[Tuple[int, int], List[str]] = {}
 
     for result in setup_results:
         tid = tuple(result['tile_id'])
         tile_boundary_nodes[tid] = result['boundary_nodes']
         tile_interior_counts[tid] = result['n_interior']
         island_stats[tid] = {'islands_removed': result['islands_removed']}
+        tile_kept_nonlargest_iface[tid] = result.get('kept_nonlargest_iface', [])
 
     total_interior = sum(tile_interior_counts.values())
     total_boundary = sum(len(v) for v in tile_boundary_nodes.values())
@@ -288,4 +291,5 @@ def create_distributed_model(
         package_data=metadata.package_data,
         metadata=metadata,
         island_stats=island_stats,
+        tile_kept_nonlargest_iface=tile_kept_nonlargest_iface,
     )

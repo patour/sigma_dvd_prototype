@@ -69,5 +69,8 @@ class DistributedSolverContext:
     # Per-tile index maps (local -> global for scatter-add assembly)
     tile_index_maps: Dict[Tuple[int, int], np.ndarray]
 
+    # Interface island nodes penalized during prepare (shorted to Vdd)
+    removed_interface_nodes: Set[str] = field(default_factory=set)
+
     # Timing breakdown
     timings: Dict[str, float] = field(default_factory=dict)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -77,6 +77,43 @@ class DistributedDDMSolver:
         )
         timings['assemble_interface'] = time.perf_counter() - t0
 
+        # 2b. Global interface island detection
+        t0 = time.perf_counter()
+        from solver.coupled_system import detect_interface_islands
+
+        S_global, rhs_dirichlet, island_nodes = detect_interface_islands(
+            S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
+            pad_nodes=model.pad_nodes,
+            extra_edges=model.package_data.package_edges,
+            dirichlet_voltage=model.vdd,
+        )
+        timings['detect_interface_islands'] = time.perf_counter() - t0
+
+        if island_nodes:
+            logger.warning(
+                "Penalized %d interface island nodes (shorted to %.3f V)",
+                len(island_nodes), model.vdd,
+            )
+
+        if verbose and island_nodes:
+            # Cross-check: tile-level kept non-largest components vs global islands
+            tile_flagged: Set[str] = set()
+            for nodes in model.tile_kept_nonlargest_iface.values():
+                tile_flagged.update(nodes)
+
+            confirmed = tile_flagged & island_nodes
+            saved = tile_flagged - island_nodes
+            if confirmed:
+                logger.info(
+                    "%d tile-flagged interface nodes confirmed as global islands",
+                    len(confirmed),
+                )
+            if saved:
+                logger.info(
+                    "%d tile-flagged interface nodes connected to pads through other tiles",
+                    len(saved),
+                )
+
         if verbose:
             logger.info(
                 f"Interface system: {len(interface_nodes)} unknowns, "
@@ -112,6 +149,7 @@ class DistributedDDMSolver:
             interface_node_to_idx=interface_node_to_idx,
             rhs_dirichlet_interface=rhs_dirichlet,
             tile_index_maps=tile_index_maps,
+            removed_interface_nodes=island_nodes,
             timings=timings,
         )
 

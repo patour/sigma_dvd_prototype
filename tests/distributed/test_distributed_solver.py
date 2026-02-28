@@ -1046,6 +1046,334 @@ class TestDistributedSolverContext(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Interface Island Detection Integration Tests
+# ──────────────────────────────────────────────────────────────────────
+
+class TestInterfaceIslandDetection(unittest.TestCase):
+    """Integration tests for interface island detection in the distributed pipeline.
+
+    Tests find_interface_islands(), apply_island_penalty(), and
+    detect_interface_islands() in the context of assembled Schur complement
+    systems (global interface level), complementing the unit-level tests
+    in tests/solver/test_interface_islands.py.
+    """
+
+    # ── helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_healthy_two_tile_system(vdd: float = 1.0):
+        """Build a small 2-tile system where all interface nodes reach a pad.
+
+        Tile A:  a1 ──[1]── I1 ──[2]── I2
+        Tile B:  I1 ──[3]── I2 ──[4]── b1
+
+        Interface (boundary): {I1, I2}
+        Package edge: I1 ── PAD1 (10 mS)  — connects interface to Dirichlet pad
+        Pad: PAD1 at vdd
+
+        Returns (S_global, rhs, nodes, idx, extra_edges, pad_nodes, vdd).
+        """
+        # Tile A: interior={a1}, ports={I1, I2}
+        tile_a_edges = [('a1', 'I1', 1.0), ('I1', 'I2', 2.0)]
+        # Tile B: interior={b1}, ports={I1, I2}
+        tile_b_edges = [('I1', 'I2', 3.0), ('I2', 'b1', 4.0)]
+
+        block_a, _ = build_block_system_from_edges(
+            tile_a_edges, {'I1', 'I2'}, ground_node='0',
+        )
+        block_a.factor_interior()
+        S_a = compute_explicit_schur(block_a)
+
+        block_b, _ = build_block_system_from_edges(
+            tile_b_edges, {'I1', 'I2'}, ground_node='0',
+        )
+        block_b.factor_interior()
+        S_b = compute_explicit_schur(block_b)
+
+        pad_nodes = {'PAD1'}
+        extra_edges = [('I1', 'PAD1', 10.0)]
+
+        S_global, rhs, nodes, idx = assemble_schur_complement_system(
+            tile_schur_complements={'A': S_a, 'B': S_b},
+            tile_port_node_lists={
+                'A': list(block_a.port_nodes),
+                'B': list(block_b.port_nodes),
+            },
+            extra_edges=extra_edges,
+            dirichlet_nodes=pad_nodes,
+            dirichlet_voltage=vdd,
+        )
+        return S_global, rhs, nodes, idx, extra_edges, pad_nodes, vdd
+
+    @staticmethod
+    def _make_island_two_tile_system(vdd: float = 1.0):
+        """Build a 2-tile system where group B is disconnected from any pad.
+
+        Tile A:  a1 ──[1]── I1 ──[2]── I2
+        Tile B:  I3 ──[3]── I4 ──[4]── b1
+
+        Interface (boundary): {I1, I2, I3, I4}
+        Package edge: I1 ── PAD1 (10 mS) — only I1-I2 group reaches pad
+        Group A: {I1, I2} — connected to PAD1
+        Group B: {I3, I4} — disconnected island
+
+        Returns (S_global, rhs, nodes, idx, extra_edges, pad_nodes, vdd).
+        """
+        tile_a_edges = [('a1', 'I1', 1.0), ('I1', 'I2', 2.0)]
+        tile_b_edges = [('I3', 'I4', 3.0), ('I4', 'b1', 4.0)]
+
+        block_a, _ = build_block_system_from_edges(
+            tile_a_edges, {'I1', 'I2'}, ground_node='0',
+        )
+        block_a.factor_interior()
+        S_a = compute_explicit_schur(block_a)
+
+        block_b, _ = build_block_system_from_edges(
+            tile_b_edges, {'I3', 'I4'}, ground_node='0',
+        )
+        block_b.factor_interior()
+        S_b = compute_explicit_schur(block_b)
+
+        pad_nodes = {'PAD1'}
+        extra_edges = [('I1', 'PAD1', 10.0)]
+
+        S_global, rhs, nodes, idx = assemble_schur_complement_system(
+            tile_schur_complements={'A': S_a, 'B': S_b},
+            tile_port_node_lists={
+                'A': list(block_a.port_nodes),
+                'B': list(block_b.port_nodes),
+            },
+            extra_edges=extra_edges,
+            dirichlet_nodes=pad_nodes,
+            dirichlet_voltage=vdd,
+        )
+        return S_global, rhs, nodes, idx, extra_edges, pad_nodes, vdd
+
+    # ── tests ────────────────────────────────────────────────────────
+
+    def test_no_islands_noop(self):
+        """Healthy system: detect_interface_islands returns inputs unchanged."""
+        from solver.coupled_system import detect_interface_islands
+
+        S_global, rhs, nodes, idx, extra, pads, vdd = (
+            self._make_healthy_two_tile_system()
+        )
+
+        S_fixed, rhs_fixed, islands = detect_interface_islands(
+            S_global, rhs, nodes, idx,
+            pad_nodes=pads, extra_edges=extra,
+            dirichlet_voltage=vdd,
+        )
+
+        # Zero-copy fast path: objects returned unchanged
+        self.assertIs(S_fixed, S_global)
+        self.assertIs(rhs_fixed, rhs)
+        self.assertEqual(islands, set())
+
+    def test_find_interface_islands_detects_disconnected(self):
+        """Group B (no pad path) detected as islands; group A not."""
+        from solver.coupled_system import find_interface_islands
+
+        S_global, rhs, nodes, idx, extra, pads, vdd = (
+            self._make_island_two_tile_system()
+        )
+
+        islands = find_interface_islands(
+            S_global, nodes, idx, pads, extra,
+        )
+
+        # Group B nodes are islands
+        self.assertIn('I3', islands)
+        self.assertIn('I4', islands)
+        # Group A nodes are NOT islands
+        self.assertNotIn('I1', islands)
+        self.assertNotIn('I2', islands)
+
+    def test_apply_island_penalty_modifies_diagonal_and_rhs(self):
+        """Island penalty adds GMAX to diagonal and GMAX*vdd to RHS."""
+        import scipy.sparse as sp
+        from solver.coupled_system import apply_island_penalty
+
+        GMAX = 1e5
+        vdd = 0.85
+
+        S_global, rhs, nodes, idx, extra, pads, _ = (
+            self._make_island_two_tile_system(vdd=vdd)
+        )
+
+        # Identify islands first
+        from solver.coupled_system import find_interface_islands
+        islands = find_interface_islands(S_global, nodes, idx, pads, extra)
+        self.assertGreater(len(islands), 0, "Need islands for this test")
+
+        S_orig_diag = S_global.toarray().diagonal().copy()
+        rhs_orig = rhs.copy()
+
+        S_fixed, rhs_fixed = apply_island_penalty(
+            S_global, rhs, islands, idx, vdd,
+        )
+
+        S_fixed_diag = S_fixed.toarray().diagonal()
+
+        for node in nodes:
+            i = idx[node]
+            if node in islands:
+                # Diagonal increased by GMAX
+                np.testing.assert_allclose(
+                    S_fixed_diag[i], S_orig_diag[i] + GMAX, rtol=1e-12,
+                    err_msg=f"Island node {node}: diagonal not increased by GMAX",
+                )
+                # RHS increased by GMAX * vdd
+                np.testing.assert_allclose(
+                    rhs_fixed[i], rhs_orig[i] + GMAX * vdd, rtol=1e-12,
+                    err_msg=f"Island node {node}: RHS not increased by GMAX*vdd",
+                )
+            else:
+                # Non-island entries unchanged (exact equality)
+                self.assertEqual(
+                    S_fixed_diag[i], S_orig_diag[i],
+                    f"Non-island node {node}: diagonal should be unchanged",
+                )
+                self.assertEqual(
+                    rhs_fixed[i], rhs_orig[i],
+                    f"Non-island node {node}: RHS should be unchanged",
+                )
+
+    def test_island_voltages_near_vdd(self):
+        """After penalty + solve, island nodes within 0.1% of VDD,
+        non-island voltages unperturbed by penalty (checked under load)."""
+        import scipy.sparse.linalg as spla
+        from solver.coupled_system import detect_interface_islands
+
+        vdd = 0.85
+        S_global, rhs, nodes, idx, extra, pads, _ = (
+            self._make_island_two_tile_system(vdd=vdd)
+        )
+
+        # Add load current at a non-island node so voltages deviate from Vdd
+        rhs_loaded = rhs.copy()
+        rhs_loaded[idx['I2']] -= 0.5  # 0.5 mA sink
+
+        S_fixed, rhs_fixed, islands = detect_interface_islands(
+            S_global, rhs_loaded, nodes, idx,
+            pad_nodes=pads, extra_edges=extra,
+            dirichlet_voltage=vdd,
+        )
+        self.assertGreater(len(islands), 0)
+
+        v = spla.spsolve(S_fixed.tocsc(), rhs_fixed)
+
+        # Island voltages close to Vdd
+        for node in islands:
+            self.assertAlmostEqual(
+                v[idx[node]], vdd, delta=vdd * 0.001,
+                msg=f"Island node {node}: {v[idx[node]]:.6f} not near Vdd",
+            )
+
+        # Non-island voltages: compare with-penalty vs without-penalty.
+        # Since islands are disconnected, the penalty only modifies the
+        # island diagonal block. Non-island submatrix is identical.
+        non_island_indices = np.array(
+            [idx[n] for n in nodes if n not in islands], dtype=np.int32,
+        )
+        S_sub = S_global[np.ix_(non_island_indices, non_island_indices)].tocsc()
+        rhs_sub = rhs_loaded[non_island_indices]
+        v_ref = spla.spsolve(S_sub, rhs_sub)
+
+        for i, gi in enumerate(non_island_indices):
+            np.testing.assert_allclose(
+                v[gi], v_ref[i], atol=1e-10,
+                err_msg=f"Non-island node {nodes[gi]}: perturbed by penalty",
+            )
+
+        # Verify non-island voltages actually differ from Vdd (test is non-trivial)
+        non_island_voltages = [v[gi] for gi in non_island_indices]
+        self.assertTrue(
+            any(abs(vi - vdd) > 1e-6 for vi in non_island_voltages),
+            "Non-island voltages should deviate from Vdd under load",
+        )
+
+    def test_default_penalty_is_gmax(self):
+        """apply_island_penalty default penalty_conductance equals 1e5 (GMAX)."""
+        import inspect
+        from solver.coupled_system import apply_island_penalty
+
+        sig = inspect.signature(apply_island_penalty)
+        default = sig.parameters['penalty_conductance'].default
+        self.assertEqual(default, 1e5)
+
+    def test_kept_nonlargest_iface_returned_by_worker(self):
+        """TileWorker returns kept_nonlargest_iface for qualifying components."""
+        from distributed.tile_worker import TileWorker
+
+        threshold = TileWorker.MIN_INTERFACE_NODES_KEEP
+
+        # Build two disconnected components:
+        # Main: m0-m1-...-m9 chain (10 nodes)
+        # Strip: s0-s1-...-s(threshold+1) chain, with all s-nodes as interface
+        lines = []
+        main_nodes = [f'm{i}' for i in range(10)]
+        for i in range(len(main_nodes) - 1):
+            lines.append(f"R{i} {main_nodes[i]} {main_nodes[i+1]} 1000\n")
+        lines.append(f"R_gnd {main_nodes[-1]} 0 1000\n")
+
+        strip_nodes = [f's{i}' for i in range(threshold + 2)]
+        for i in range(len(strip_nodes) - 1):
+            lines.append(f"R{100+i} {strip_nodes[i]} {strip_nodes[i+1]} 1000\n")
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.ckt', delete=False) as f:
+            f.writelines(lines)
+            temp_ckt = f.name
+
+        try:
+            worker = TileWorker()
+            interface = {'m0'} | set(strip_nodes)
+            result = worker.setup(
+                {'tile_id': [0, 0], 'ckt_path': temp_ckt, 'nd_path': None,
+                 'instance_path': None, 'net_filter': None},
+                interface_nodes=interface,
+            )
+
+            self.assertIn('kept_nonlargest_iface', result)
+            kept = set(result['kept_nonlargest_iface'])
+            # All strip nodes that are interface should be flagged
+            for sn in strip_nodes:
+                self.assertIn(sn, kept,
+                              f"Strip interface node {sn} should be in kept_nonlargest_iface")
+            # m0 belongs to the largest component — should NOT be flagged
+            self.assertNotIn('m0', kept)
+        finally:
+            os.unlink(temp_ckt)
+
+    @unittest.skipUnless(NETLIST_SAMPLED_EXISTS, "netlist_sampled not available")
+    def test_removed_nodes_on_context(self):
+        """prepare() populates removed_interface_nodes and timing key."""
+        import logging
+        logging.disable(logging.WARNING)
+        from distributed import (
+            DistributedNetlistParser,
+            create_distributed_model,
+            DistributedDDMSolver,
+        )
+        from distributed.result import DistributedSolverContext
+
+        parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
+        metadata = parser.parse_metadata()
+        model = create_distributed_model(metadata, backend='local')
+
+        try:
+            solver = DistributedDDMSolver(model)
+            ctx = solver.prepare()
+
+            self.assertIsInstance(ctx, DistributedSolverContext)
+            self.assertIsInstance(ctx.removed_interface_nodes, set)
+            self.assertIn('detect_interface_islands', ctx.timings)
+        finally:
+            model.shutdown()
+            logging.disable(logging.NOTSET)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Ray Backend Tests
 # ──────────────────────────────────────────────────────────────────────
 
