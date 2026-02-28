@@ -451,13 +451,169 @@ class TestDistributedParser(unittest.TestCase):
 
         parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
         metadata = parser.parse_metadata()
-        boundary_nodes = parser.collect_boundary_nodes(metadata.tile_configs)
+        boundary_nodes = parser.collect_shared_boundary_nodes(metadata.tile_configs)
 
-        # Multi-tile netlist should have many boundary nodes
+        # Multi-tile netlist should have many shared boundary nodes
         self.assertGreater(len(boundary_nodes), 100)
         # Boundary nodes should be string names
         for node in list(boundary_nodes)[:5]:
             self.assertIsInstance(node, str)
+
+    def test_shared_boundary_subset_of_all(self):
+        """Shared boundary nodes are a strict subset of all boundary nodes."""
+        from distributed import DistributedNetlistParser
+
+        parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
+        metadata = parser.parse_metadata()
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            all_boundary = parser.collect_boundary_nodes(metadata.tile_configs)
+        shared_boundary = parser.collect_shared_boundary_nodes(metadata.tile_configs)
+
+        # Shared must be a subset of all
+        self.assertTrue(shared_boundary.issubset(all_boundary))
+        # There should be some single-tile-only nodes filtered out
+        self.assertGreater(len(all_boundary), len(shared_boundary),
+                           "Expected some single-tile-only nodes to be filtered")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Boundary Node Filtering Tests
+# ──────────────────────────────────────────────────────────────────────
+
+class TestBoundaryNodeFiltering(unittest.TestCase):
+    """Test single-tile-only boundary node filtering in parser."""
+
+    def test_single_tile_boundary_nodes_filtered(self):
+        """collect_shared_boundary_nodes returns only nodes in 2+ tiles."""
+        from distributed.parser import DistributedNetlistParser
+
+        # Create two tile .ckt files:
+        #   Tile A: has boundary nodes *shared1, *shared2, *only_a
+        #   Tile B: has boundary nodes *shared1, *shared2, *only_b
+        # Expected shared: {shared1, shared2}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tile_a = os.path.join(tmpdir, 'tile_0_0.ckt')
+            with open(tile_a, 'w') as f:
+                f.write("R1 a1 *shared1 1000\n")
+                f.write("R2 *shared1 *shared2 2000\n")
+                f.write("R3 *shared2 *only_a 500\n")
+                f.write("R4 *only_a 0 1000\n")
+
+            tile_b = os.path.join(tmpdir, 'tile_0_1.ckt')
+            with open(tile_b, 'w') as f:
+                f.write("R1 b1 *shared1 1000\n")
+                f.write("R2 *shared1 *shared2 2000\n")
+                f.write("R3 *shared2 *only_b 500\n")
+                f.write("R4 *only_b 0 1000\n")
+
+            from distributed.parser import TileConfig
+            tile_configs = [
+                TileConfig(tile_id=(0, 0), ckt_path=tile_a, nd_path=None,
+                           instance_path=None, net_filter=None),
+                TileConfig(tile_id=(0, 1), ckt_path=tile_b, nd_path=None,
+                           instance_path=None, net_filter=None),
+            ]
+
+            parser = DistributedNetlistParser(tmpdir)
+
+            # Old API returns all boundary nodes (deprecated)
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                all_bnd = parser.collect_boundary_nodes(tile_configs)
+            self.assertEqual(all_bnd, {'shared1', 'shared2', 'only_a', 'only_b'})
+
+            # New API returns only shared nodes
+            shared_bnd = parser.collect_shared_boundary_nodes(tile_configs)
+            self.assertEqual(shared_bnd, {'shared1', 'shared2'})
+
+    def test_all_shared_returns_all(self):
+        """When all boundary nodes appear in 2+ tiles, nothing is filtered."""
+        from distributed.parser import DistributedNetlistParser, TileConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tile_a = os.path.join(tmpdir, 'tile_0_0.ckt')
+            with open(tile_a, 'w') as f:
+                f.write("R1 a1 *shared1 1000\n")
+                f.write("R2 *shared1 0 500\n")
+
+            tile_b = os.path.join(tmpdir, 'tile_0_1.ckt')
+            with open(tile_b, 'w') as f:
+                f.write("R1 b1 *shared1 1000\n")
+                f.write("R2 *shared1 0 500\n")
+
+            tile_configs = [
+                TileConfig(tile_id=(0, 0), ckt_path=tile_a, nd_path=None,
+                           instance_path=None, net_filter=None),
+                TileConfig(tile_id=(0, 1), ckt_path=tile_b, nd_path=None,
+                           instance_path=None, net_filter=None),
+            ]
+
+            parser = DistributedNetlistParser(tmpdir)
+            shared = parser.collect_shared_boundary_nodes(tile_configs)
+            self.assertEqual(shared, {'shared1'})
+
+    def test_no_boundary_nodes_returns_empty(self):
+        """Tiles with no boundary nodes return empty set."""
+        from distributed.parser import DistributedNetlistParser, TileConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tile_a = os.path.join(tmpdir, 'tile_0_0.ckt')
+            with open(tile_a, 'w') as f:
+                f.write("R1 a1 a2 1000\n")
+                f.write("R2 a2 0 500\n")
+
+            tile_configs = [
+                TileConfig(tile_id=(0, 0), ckt_path=tile_a, nd_path=None,
+                           instance_path=None, net_filter=None),
+            ]
+
+            parser = DistributedNetlistParser(tmpdir)
+            shared = parser.collect_shared_boundary_nodes(tile_configs)
+            self.assertEqual(shared, set())
+
+
+@unittest.skipUnless(NETLIST_SAMPLED_EXISTS, "netlist_sampled not available")
+class TestParseAndDumpFiltering(unittest.TestCase):
+    """Test that parse_and_dump stores only shared boundary nodes in metadata.pkl."""
+
+    def test_parse_and_dump_filters_single_tile_boundary(self):
+        """metadata.pkl boundary_nodes contains only shared (2+ tile) nodes."""
+        import logging
+        import pickle
+        logging.disable(logging.WARNING)
+        from distributed.parser import DistributedNetlistParser
+
+        try:
+            parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
+            metadata = parser.parse_metadata()
+
+            # Get reference counts from direct scanning
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                all_bnd = parser.collect_boundary_nodes(metadata.tile_configs)
+            shared_bnd = parser.collect_shared_boundary_nodes(metadata.tile_configs)
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                parser.parse_and_dump(tmpdir)
+
+                # Load metadata.pkl and check boundary nodes
+                meta_pkl = Path(tmpdir) / 'metadata.pkl'
+                with open(meta_pkl, 'rb') as f:
+                    meta_bundle = pickle.load(f)
+
+                pkl_bnd = meta_bundle['boundary_nodes']
+
+                # PKL should contain only shared nodes
+                self.assertEqual(pkl_bnd, shared_bnd)
+                # Should be strictly fewer than all boundary nodes
+                self.assertGreater(len(all_bnd), len(pkl_bnd),
+                                   "Expected filtering to remove some nodes")
+        finally:
+            logging.disable(logging.NOTSET)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1642,7 +1798,7 @@ class TestTileWorkerFromTileData(unittest.TestCase):
         try:
             parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
             metadata = parser.parse_metadata()
-            boundary_nodes = parser.collect_boundary_nodes(metadata.tile_configs)
+            boundary_nodes = parser.collect_shared_boundary_nodes(metadata.tile_configs)
             interface_nodes = boundary_nodes | metadata.package_data.die_attachment_nodes
 
             # Pick the first tile config
@@ -1698,7 +1854,7 @@ class TestTileWorkerFromTileData(unittest.TestCase):
         try:
             parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
             metadata = parser.parse_metadata()
-            boundary_nodes = parser.collect_boundary_nodes(metadata.tile_configs)
+            boundary_nodes = parser.collect_shared_boundary_nodes(metadata.tile_configs)
             interface_nodes = boundary_nodes | metadata.package_data.die_attachment_nodes
 
             for tc in metadata.tile_configs:

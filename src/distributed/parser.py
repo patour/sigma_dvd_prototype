@@ -328,7 +328,12 @@ class DistributedNetlistParser:
 
         Creates output_dir (if needed) with:
           - tile_X_Y.pkl  for each tile (pickled TileData)
-          - metadata.pkl  with {'metadata': PowerGridMetaData, 'boundary_nodes': Set[str]}
+          - metadata.pkl  with ``{'metadata': PowerGridMetaData,
+            'boundary_nodes': Set[str]}``
+
+        Boundary nodes stored in ``metadata.pkl`` are **shared** nodes only --
+        those appearing in 2 or more tiles.  Single-tile-only boundary nodes
+        are filtered out to reduce per-tile Schur complement cost.
 
         Args:
             output_dir: Directory to write .pkl files into
@@ -337,6 +342,7 @@ class DistributedNetlistParser:
             Path to output_dir
         """
         import pickle
+        from collections import Counter
         from .tile_worker import parse_tile_with_instances
 
         out_path = Path(output_dir)
@@ -345,8 +351,8 @@ class DistributedNetlistParser:
         # 1. Parse metadata (tile configs + package data)
         metadata = self.parse_metadata()
 
-        # 2. Parse each tile and dump TileData
-        all_boundary_nodes: Set[str] = set()
+        # 2. Parse each tile and dump TileData; track per-node tile counts
+        boundary_tile_count: Counter = Counter()
         for tc in metadata.tile_configs:
             tile_data = parse_tile_with_instances(
                 ckt_path=tc.ckt_path,
@@ -356,7 +362,8 @@ class DistributedNetlistParser:
                 instance_path=tc.instance_path,
             )
 
-            all_boundary_nodes.update(tile_data.boundary_nodes)
+            # Count each boundary node once per tile it appears in
+            boundary_tile_count.update(tile_data.boundary_nodes)
 
             # Dump tile data
             x, y = tc.tile_id
@@ -370,46 +377,118 @@ class DistributedNetlistParser:
                 f"{len(tile_data.current_injections)} current sources -> {tile_pkl_path.name}"
             )
 
-        # 3. Dump metadata + boundary nodes
+        # 3. Filter: keep only boundary nodes shared by 2+ tiles
+        all_boundary_count = len(boundary_tile_count)
+        shared_boundary_nodes = {
+            node for node, count in boundary_tile_count.items() if count >= 2
+        }
+        n_single = all_boundary_count - len(shared_boundary_nodes)
+
+        logger.info(
+            f"Boundary node filtering: {all_boundary_count} total, "
+            f"{len(shared_boundary_nodes)} shared (2+ tiles), "
+            f"{n_single} single-tile-only filtered"
+        )
+
+        # 4. Dump metadata + shared boundary nodes
         meta_pkl_path = out_path / 'metadata.pkl'
         with open(meta_pkl_path, 'wb') as f:
             pickle.dump(
-                {'metadata': metadata, 'boundary_nodes': all_boundary_nodes},
+                {'metadata': metadata, 'boundary_nodes': shared_boundary_nodes},
                 f,
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
 
         logger.info(
             f"Metadata: {len(metadata.tile_configs)} tiles, "
-            f"{len(all_boundary_nodes)} boundary nodes -> {meta_pkl_path.name}"
+            f"{len(shared_boundary_nodes)} shared boundary nodes -> {meta_pkl_path.name}"
         )
 
         return out_path
 
     def collect_boundary_nodes(self, tile_configs: List[TileConfig]) -> Set[str]:
-        """Pre-scan all tile .ckt files to collect *-prefixed boundary nodes.
+        """Pre-scan all tile .ckt files to collect *all* ``*``-prefixed boundary nodes.
 
-        This is a fast pass that only looks for the * prefix marker, without
-        full element parsing.
+        .. deprecated::
+            Use :meth:`collect_shared_boundary_nodes` instead, which filters
+            out nodes that appear in only one tile (no cross-tile coupling).
+
+        This is a fast pass that only looks for the ``*`` prefix marker,
+        without full element parsing.
+        """
+        import warnings
+        warnings.warn(
+            "collect_boundary_nodes() is deprecated. Use collect_shared_boundary_nodes() "
+            "which filters out single-tile-only nodes.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        boundary_nodes: Set[str] = set()
+        for tc in tile_configs:
+            boundary_nodes.update(self._scan_tile_boundary_nodes(tc.ckt_path))
+        return boundary_nodes
+
+    def collect_shared_boundary_nodes(self, tile_configs: List[TileConfig]) -> Set[str]:
+        """Pre-scan all tile .ckt files to collect shared boundary nodes.
+
+        Only returns ``*``-prefixed nodes that appear in 2 or more tiles.
+        Nodes appearing in a single tile have no cross-tile coupling and are
+        demoted to interior nodes, reducing per-tile Schur complement cost.
+
+        Parameters
+        ----------
+        tile_configs : List[TileConfig]
+            Tile configurations with ``ckt_path`` for each tile.
+
+        Returns
+        -------
+        Set[str]
+            Boundary node names (``*`` prefix stripped) appearing in 2+ tiles.
+        """
+        from collections import Counter
+
+        tile_count: Counter = Counter()
+        for tc in tile_configs:
+            tile_nodes = self._scan_tile_boundary_nodes(tc.ckt_path)
+            tile_count.update(tile_nodes)
+
+        all_boundary = set(tile_count.keys())
+        shared = {node for node, count in tile_count.items() if count >= 2}
+        n_single = len(all_boundary) - len(shared)
+
+        logger.info(
+            f"Boundary node filtering: {len(all_boundary)} total, "
+            f"{len(shared)} shared (2+ tiles), {n_single} single-tile-only filtered"
+        )
+
+        return shared
+
+    @staticmethod
+    def _scan_tile_boundary_nodes(ckt_path: str) -> Set[str]:
+        """Scan a single tile .ckt file for ``*``-prefixed boundary nodes.
+
+        Parameters
+        ----------
+        ckt_path : str
+            Path to the tile ``.ckt`` (or ``.ckt.gz``) file.
+
+        Returns
+        -------
+        Set[str]
+            Boundary node names with ``*`` prefix stripped.
         """
         boundary_nodes: Set[str] = set()
-
-        for tc in tile_configs:
-            with _open_file(tc.ckt_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('*'):
-                        continue
-                    # Look for *-prefixed nodes in element lines
-                    tokens = line.split()
-                    if len(tokens) < 4:
-                        continue
-                    # Element lines: type/name node1 node2 value ...
-                    first = tokens[0].lower()
-                    if first[0] in ('r', 'c', 'l', 'i', 'v'):
-                        # Check node tokens for * prefix
-                        for t in tokens[1:3]:
-                            if t.startswith('*'):
-                                boundary_nodes.add(t[1:])  # Strip *
-
+        with _open_file(ckt_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('*'):
+                    continue
+                tokens = line.split()
+                if len(tokens) < 4:
+                    continue
+                first = tokens[0].lower()
+                if first[0] == 'r':  # Match _parse_tile_ckt: only resistors
+                    for t in tokens[1:3]:
+                        if t.startswith('*'):
+                            boundary_nodes.add(t[1:])  # Strip *
         return boundary_nodes

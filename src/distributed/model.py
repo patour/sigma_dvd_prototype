@@ -212,7 +212,7 @@ def create_distributed_model(
         # Original path: pre-scan .ckt files for boundary nodes
         from .parser import DistributedNetlistParser
         parser = DistributedNetlistParser(str(metadata.tile_configs[0].ckt_path).rsplit('/', 1)[0])
-        boundary_nodes = parser.collect_boundary_nodes(metadata.tile_configs)
+        boundary_nodes = parser.collect_shared_boundary_nodes(metadata.tile_configs)
 
     # Interface = boundary nodes + die attachment nodes from package
     interface_nodes = boundary_nodes | metadata.package_data.die_attachment_nodes
