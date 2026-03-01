@@ -16,6 +16,7 @@ from visualization.stripe_heatmap import (
     aggregate_stripe_bins,
     aggregate_fast_imshow,
     plot_stripe_heatmap,
+    render_from_prebinned_stripe_data,
 )
 
 
@@ -558,6 +559,176 @@ class TestFastImshow(unittest.TestCase):
         # Min value should be 2
         min_val = np.nanmin(grid)
         self.assertEqual(min_val, 2)
+
+
+class TestRenderFromPrebinnedStripeData(unittest.TestCase):
+    """Tests for render_from_prebinned_stripe_data."""
+
+    def _make_stripe_data(self, n_stripes=2, n_bins=5, with_nans=False):
+        """Build simple synthetic stripe data for testing.
+
+        Returns stripe_data list suitable for render_from_prebinned_stripe_data.
+        """
+        stripe_data = []
+        for si in range(n_stripes):
+            s_start = float(si * 100)
+            s_end = float((si + 1) * 100)
+            bin_edges = np.linspace(0.0, 500.0, n_bins + 1)
+            bin_values = np.linspace(10.0 + si * 5, 50.0 + si * 5, n_bins)
+            if with_nans:
+                # Set a couple of bins to NaN to simulate empty bins
+                bin_values[1] = np.nan
+                bin_values[3] = np.nan
+            stripe_data.append((s_start, s_end, bin_edges, bin_values))
+        return stripe_data
+
+    def test_horizontal_creates_png(self):
+        """H orientation should produce a non-empty PNG."""
+        stripe_data = self._make_stripe_data()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, 'test_h.png')
+            render_from_prebinned_stripe_data(
+                stripe_data=stripe_data,
+                orientation='H',
+                output_path=output_path,
+                layer='M1',
+            )
+            self.assertTrue(os.path.exists(output_path))
+            self.assertGreater(os.path.getsize(output_path), 0)
+
+    def test_vertical_creates_png(self):
+        """V orientation should produce a non-empty PNG."""
+        stripe_data = self._make_stripe_data()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, 'test_v.png')
+            render_from_prebinned_stripe_data(
+                stripe_data=stripe_data,
+                orientation='V',
+                output_path=output_path,
+                layer='M2',
+            )
+            self.assertTrue(os.path.exists(output_path))
+            self.assertGreater(os.path.getsize(output_path), 0)
+
+    def test_nan_bins_do_not_crash(self):
+        """Stripes with NaN bins should render without error."""
+        stripe_data = self._make_stripe_data(with_nans=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, 'test_nans.png')
+            render_from_prebinned_stripe_data(
+                stripe_data=stripe_data,
+                orientation='H',
+                output_path=output_path,
+                layer='M1',
+            )
+            self.assertTrue(os.path.exists(output_path))
+            self.assertGreater(os.path.getsize(output_path), 0)
+
+    def test_all_nan_produces_no_file(self):
+        """If every bin is NaN, no PNG should be produced."""
+        stripe_data = [
+            (0.0, 100.0, np.linspace(0.0, 500.0, 6), np.full(5, np.nan)),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, 'test_all_nan.png')
+            render_from_prebinned_stripe_data(
+                stripe_data=stripe_data,
+                orientation='H',
+                output_path=output_path,
+                layer='M1',
+            )
+            # Function returns early when all values are NaN
+            self.assertFalse(os.path.exists(output_path))
+
+    def test_custom_vmin_vmax(self):
+        """Explicit vmin/vmax should be honored (no crash)."""
+        stripe_data = self._make_stripe_data()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, 'test_vrange.png')
+            render_from_prebinned_stripe_data(
+                stripe_data=stripe_data,
+                orientation='H',
+                output_path=output_path,
+                layer='M1',
+                vmin=0.0,
+                vmax=100.0,
+            )
+            self.assertTrue(os.path.exists(output_path))
+            self.assertGreater(os.path.getsize(output_path), 0)
+
+    def test_n_nodes_in_title(self):
+        """n_nodes > 0 should appear in the plot title (smoke test)."""
+        stripe_data = self._make_stripe_data(n_stripes=1, n_bins=3)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, 'test_nodes.png')
+            render_from_prebinned_stripe_data(
+                stripe_data=stripe_data,
+                orientation='V',
+                output_path=output_path,
+                layer='M3',
+                n_nodes=42000,
+                title_prefix='Current',
+                value_label='Current (mA)',
+            )
+            self.assertTrue(os.path.exists(output_path))
+            self.assertGreater(os.path.getsize(output_path), 0)
+
+    def test_custom_cmap_and_labels(self):
+        """Custom cmap, title_prefix, value_label should not crash."""
+        stripe_data = self._make_stripe_data(n_stripes=1, n_bins=4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, 'test_custom.png')
+            render_from_prebinned_stripe_data(
+                stripe_data=stripe_data,
+                orientation='H',
+                output_path=output_path,
+                layer='M5',
+                cmap='viridis',
+                title_prefix='Voltage',
+                value_label='Voltage (V)',
+            )
+            self.assertTrue(os.path.exists(output_path))
+
+    def test_empty_stripe_data_produces_no_file(self):
+        """Empty stripe_data list should produce no PNG."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, 'test_empty.png')
+            render_from_prebinned_stripe_data(
+                stripe_data=[],
+                orientation='H',
+                output_path=output_path,
+                layer='M1',
+            )
+            self.assertFalse(os.path.exists(output_path))
+
+    def test_single_bin_stripe(self):
+        """Single bin per stripe should render without error."""
+        stripe_data = [
+            (0.0, 100.0, np.array([0.0, 500.0]), np.array([42.0])),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, 'test_single_bin.png')
+            render_from_prebinned_stripe_data(
+                stripe_data=stripe_data,
+                orientation='H',
+                output_path=output_path,
+                layer='M1',
+            )
+            self.assertTrue(os.path.exists(output_path))
+            self.assertGreater(os.path.getsize(output_path), 0)
+
+    def test_output_dir_created_automatically(self):
+        """Output directory should be created if it does not exist."""
+        stripe_data = self._make_stripe_data(n_stripes=1, n_bins=3)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nested_path = os.path.join(tmpdir, 'sub', 'dir', 'test.png')
+            render_from_prebinned_stripe_data(
+                stripe_data=stripe_data,
+                orientation='H',
+                output_path=nested_path,
+                layer='M1',
+            )
+            self.assertTrue(os.path.exists(nested_path))
 
 
 if __name__ == "__main__":

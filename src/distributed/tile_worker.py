@@ -553,6 +553,111 @@ class TileWorker:
 
         return all_voltages
 
+    def get_layer_metadata(self) -> Dict[str, Dict]:
+        """Per-layer spatial extents, orientation, and stripe coordinates.
+
+        Parses coordinates from node names (``X_Y_LAYER`` format) in a single
+        pass over ``all_nodes``, then scans ``resistive_edges`` for same-layer
+        edge orientation (horizontal / vertical / diagonal).
+
+        Returns
+        -------
+        dict
+            ``layer -> { 'bbox': (x_min, x_max, y_min, y_max),
+            'n_nodes': int,
+            'stripe_coords_h': sorted unique Y values,
+            'stripe_coords_v': sorted unique X values,
+            'edge_orientation': (h_count, v_count, d_count) }``
+
+        Raises
+        ------
+        RuntimeError
+            If called before ``setup()`` or ``setup_from_tile_data()``.
+        """
+        if self._tile_data is None:
+            raise RuntimeError(
+                "get_layer_metadata() called before setup(); no tile data loaded"
+            )
+
+        from visualization.stripe_heatmap import parse_node_info
+
+        # --- Pass 1: classify nodes by layer, collect coords ---------------
+        # node -> (x, y, layer) for later edge classification
+        node_info: Dict[str, Tuple[float, float, str]] = {}
+        # layer -> lists of (x, y)
+        layer_xs: Dict[str, List[float]] = {}
+        layer_ys: Dict[str, List[float]] = {}
+
+        for node in self._tile_data.all_nodes:
+            x, y, layer = parse_node_info(node)
+            if x is None:
+                continue
+            node_info[node] = (x, y, layer)
+            layer_xs.setdefault(layer, []).append(x)
+            layer_ys.setdefault(layer, []).append(y)
+
+        # --- Pass 2: classify same-layer edge orientation ------------------
+        layer_h: Dict[str, int] = {}
+        layer_v: Dict[str, int] = {}
+        layer_d: Dict[str, int] = {}
+
+        for u, v, _g in self._tile_data.resistive_edges:
+            u_info = node_info.get(u)
+            v_info = node_info.get(v)
+            if u_info is None or v_info is None:
+                continue
+            ux, uy, u_layer = u_info
+            vx, vy, v_layer = v_info
+            if u_layer != v_layer:
+                continue  # via / cross-layer edge — skip
+
+            dx = abs(vx - ux)
+            dy = abs(vy - uy)
+            if dx == 0 and dy == 0:
+                continue  # degenerate zero-length edge
+
+            if dy == 0:
+                layer_h[u_layer] = layer_h.get(u_layer, 0) + 1
+            elif dx == 0:
+                layer_v[u_layer] = layer_v.get(u_layer, 0) + 1
+            else:
+                layer_d[u_layer] = layer_d.get(u_layer, 0) + 1
+
+        # --- Build result dict ---------------------------------------------
+        result: Dict[str, Dict] = {}
+        for layer in sorted(layer_xs):
+            xs = layer_xs[layer]
+            ys = layer_ys[layer]
+            result[layer] = {
+                'bbox': (min(xs), max(xs), min(ys), max(ys)),
+                'n_nodes': len(xs),
+                'stripe_coords_h': sorted(set(ys)),
+                'stripe_coords_v': sorted(set(xs)),
+                'edge_orientation': (
+                    layer_h.get(layer, 0),
+                    layer_v.get(layer, 0),
+                    layer_d.get(layer, 0),
+                ),
+            }
+
+        return result
+
+    def get_current_injections(self) -> Dict[str, float]:
+        """Return per-tile current injection dict ``{node: mA}``.
+
+        Returns a *copy* so callers cannot accidentally mutate tile state.
+
+        Raises
+        ------
+        RuntimeError
+            If called before ``setup()`` or ``setup_from_tile_data()``.
+        """
+        if self._tile_data is None:
+            raise RuntimeError(
+                "get_current_injections() called before setup(); no tile data loaded"
+            )
+        return dict(self._tile_data.current_injections)
+
     @property
     def tile_id(self) -> Tuple[int, int]:
         return self._tile_data.tile_id if self._tile_data else None

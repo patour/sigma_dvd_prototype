@@ -878,3 +878,143 @@ def plot_stripe_heatmap(
 
     if verbose:
         print("Done generating heatmaps")
+
+
+# =============================================================================
+# Rendering from Pre-Binned Stripe Data
+# =============================================================================
+
+def render_from_prebinned_stripe_data(
+    stripe_data: List[Tuple[float, float, np.ndarray, np.ndarray]],
+    orientation: str,
+    output_path: str,
+    layer: str,
+    cmap: str = 'hot_r',
+    title_prefix: str = 'IR Drop',
+    value_label: str = 'IR Drop (mV)',
+    n_nodes: int = 0,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+) -> None:
+    """Render pre-binned stripe data to a PNG file using PatchCollection.
+
+    This function accepts stripe data that has already been binned and
+    aggregated (e.g., output of ``merge_tile_prebins()`` in the distributed
+    pipeline) and renders it directly, bypassing the node-parsing and
+    binning stages of ``plot_stripe_heatmap()``.
+
+    Parameters
+    ----------
+    stripe_data : list of (stripe_start, stripe_end, bin_edges, bin_values)
+        Pre-merged stripe data.  Each tuple contains:
+
+        - ``stripe_start`` / ``stripe_end``: perpendicular-axis boundaries
+          of this display stripe.
+        - ``bin_edges``: 1-D array of bin edges along the parallel axis
+          (length ``n_bins + 1``).
+        - ``bin_values``: 1-D array of aggregated values per bin.
+          ``NaN`` entries indicate empty bins (no rectangle is drawn).
+    orientation : str
+        ``'H'`` (stripes run along Y, bins along X) or
+        ``'V'`` (stripes run along X, bins along Y).
+    output_path : str
+        File path to save the PNG.
+    layer : str
+        Layer name shown in the title.
+    cmap : str
+        Matplotlib colormap name (default ``'hot_r'``).
+    title_prefix : str
+        Prefix for the plot title (e.g., ``'IR Drop'``, ``'Current'``).
+    value_label : str
+        Colorbar label.
+    n_nodes : int
+        Optional node count shown in the title.  ``0`` omits it.
+    vmin, vmax : float or None
+        Optional colorbar range.  If ``None``, auto-computed from the
+        non-NaN values in *stripe_data*.
+    """
+    try:
+        import matplotlib
+        if matplotlib.get_backend().lower() != 'agg':
+            matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+        from matplotlib.collections import PatchCollection
+    except ImportError:
+        print("Warning: matplotlib not available, skipping rendering")
+        return
+
+    # Collect all valid (non-NaN) values for auto colorbar range
+    all_vals: List[float] = []
+    for _s_start, _s_end, _bin_edges, bin_values in stripe_data:
+        valid = bin_values[~np.isnan(bin_values)]
+        if len(valid) > 0:
+            all_vals.extend(valid.tolist())
+
+    if not all_vals:
+        return  # nothing to render
+
+    # Determine colorbar range
+    if vmin is None:
+        vmin = min(all_vals)
+    if vmax is None:
+        vmax = max(all_vals)
+    if vmin == vmax:
+        vmax = vmin + 1.0
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    norm = plt.Normalize(vmin=vmin, vmax=vmax)
+
+    rects: List[Rectangle] = []
+    colors: List[float] = []
+
+    for s_start, s_end, bin_edges, bin_values in stripe_data:
+        stripe_size = s_end - s_start
+        for bi in range(len(bin_edges) - 1):
+            if np.isnan(bin_values[bi]):
+                continue
+            b_start = bin_edges[bi]
+            b_end = bin_edges[bi + 1]
+
+            if orientation == 'H':
+                rect = Rectangle(
+                    (b_start, s_start), b_end - b_start, stripe_size
+                )
+            else:  # 'V'
+                rect = Rectangle(
+                    (s_start, b_start), stripe_size, b_end - b_start
+                )
+            rects.append(rect)
+            colors.append(bin_values[bi])
+
+    if rects:
+        pc = PatchCollection(rects, cmap=cmap, norm=norm, edgecolors='none')
+        pc.set_array(np.array(colors))
+        ax.add_collection(pc)
+
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        plt.colorbar(sm, ax=ax, label=value_label)
+
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+
+    # Build title
+    if n_nodes > 0:
+        title = f'{title_prefix} - Layer {layer} ({n_nodes} nodes, {orientation})'
+    else:
+        title = f'{title_prefix} - Layer {layer} ({orientation})'
+    ax.set_title(title)
+
+    ax.set_aspect('equal', adjustable='box')
+    ax.autoscale_view()
+
+    plt.tight_layout()
+
+    # Ensure output directory exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)

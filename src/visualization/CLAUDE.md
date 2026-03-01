@@ -8,6 +8,8 @@ Plotting utilities for IR-drop analysis results.
 - **DynamicPlotter** (`dynamic_plotter.py`): Heatmap and time series plotting for dynamic/transient results (see `src/analysis/CLAUDE.md` for usage)
 - **PDNPlotter** (`pdn_plotter.py`): Layer-wise heatmap generation with advanced features
 - **stripe_heatmap.py**: Stripe-based heatmap visualization
+  - `parse_node_info(node)`: Parse `X_Y_LAYER` node name → `(x, y, layer)`. Reuse this, don't reimplement.
+  - `render_from_prebinned_stripe_data()`: Render pre-merged bin arrays to PNG (used by distributed heatmap pipeline)
 
 ## Headless Plotting
 

@@ -33,6 +33,15 @@ from .model import (
 from .solver import (
     DistributedDDMSolver,
 )
+from .heatmap import (
+    LayerBinSpec,
+    GlobalBinSpec,
+    build_global_bin_spec,
+    prebin_tile,
+    merge_tile_prebins,
+    compute_boundary_ownership,
+    plot_distributed_heatmaps,
+)
 
 __all__ = [
     # Result / Context
@@ -58,4 +67,12 @@ __all__ = [
     "load_distributed_partitions",
     # Solver
     "DistributedDDMSolver",
+    # Heatmap
+    "LayerBinSpec",
+    "GlobalBinSpec",
+    "build_global_bin_spec",
+    "prebin_tile",
+    "merge_tile_prebins",
+    "compute_boundary_ownership",
+    "plot_distributed_heatmaps",
 ]

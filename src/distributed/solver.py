@@ -273,3 +273,57 @@ class DistributedDDMSolver:
             interface_size=n_interface,
             solve_metadata={'timings': timings},
         )
+
+    def generate_reports(
+        self,
+        result: DistributedSolveResult,
+        output_dir: str = './results',
+        plot_layers: Optional[List[str]] = None,
+        max_stripes: int = 2000,
+        stripe_bin_size: Optional[int] = None,
+        show_irdrop: bool = True,
+        verbose: bool = False,
+    ) -> None:
+        """Generate per-layer stripe heatmaps from distributed solve results.
+
+        Delegates to ``plot_distributed_heatmaps()`` from the heatmap module.
+        When ``show_irdrop`` is True, generates IR-drop heatmaps (max
+        aggregation). Always generates current heatmaps (sum aggregation).
+
+        Parameters
+        ----------
+        result : DistributedSolveResult
+            Per-tile solve result from ``solve_dc()``.
+        output_dir : str
+            Directory to write PNG files.
+        plot_layers : list of str or None
+            Layers to plot. ``None`` = all detected layers.
+        max_stripes : int
+            Maximum display stripes before consolidation.
+        stripe_bin_size : int or None
+            Bins per stripe along the parallel axis. ``None`` = auto.
+        show_irdrop : bool
+            If True (default), generate IR-drop heatmaps in addition to
+            current heatmaps.
+        verbose : bool
+            Log progress during heatmap generation.
+        """
+        from .heatmap import plot_distributed_heatmaps
+
+        common_kwargs = dict(
+            model=self.model,
+            output_dir=output_dir,
+            plot_layers=plot_layers,
+            max_stripes=max_stripes,
+            stripe_bin_size=stripe_bin_size,
+            verbose=verbose,
+        )
+
+        if show_irdrop:
+            plot_distributed_heatmaps(
+                result=result, is_current=False, **common_kwargs
+            )
+
+        plot_distributed_heatmaps(
+            result=result, is_current=True, **common_kwargs
+        )

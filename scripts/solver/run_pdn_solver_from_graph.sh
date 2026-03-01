@@ -127,13 +127,14 @@ if [ -n "$DISTRIBUTED" ]; then
         exit 1
     fi
 
-    CMD_ARGS="solve \"$INPUT_PKL\" --backend \"$BACKEND\""
+    CMD_ARGS="solve \"$INPUT_PKL\" --backend \"$BACKEND\" --plot"
     if [ -n "$OUTPUT_DIR" ]; then
         CMD_ARGS="$CMD_ARGS --output \"$OUTPUT_DIR\""
     fi
     if [ -n "$VERBOSE" ]; then
         CMD_ARGS="$CMD_ARGS --verbose"
     fi
+    CMD_ARGS="$CMD_ARGS --max-stripes 2000"
 
     CMD="python -m distributed $CMD_ARGS"
     echo "Running: $CMD"

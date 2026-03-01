@@ -2270,5 +2270,272 @@ class TestPklSolveMatchesDirect(unittest.TestCase):
             logging.disable(logging.NOTSET)
 
 
+class TestTileWorkerGetLayerMetadata(unittest.TestCase):
+    """Tests for TileWorker.get_layer_metadata()."""
+
+    def _make_worker(self, tile_data):
+        """Create a TileWorker with pre-loaded TileData (no block system needed)."""
+        from distributed.tile_worker import TileWorker
+        worker = TileWorker()
+        worker._tile_data = tile_data
+        return worker
+
+    def test_single_layer_horizontal_edges(self):
+        """Single layer with horizontal edges returns correct bbox and orientation."""
+        from distributed.tile_worker import TileData
+
+        td = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[
+                ('100_200_M1', '200_200_M1', 1.0),  # horizontal
+                ('200_200_M1', '300_200_M1', 1.0),  # horizontal
+            ],
+            all_nodes={'100_200_M1', '200_200_M1', '300_200_M1'},
+            boundary_nodes=set(),
+            current_injections={},
+        )
+        worker = self._make_worker(td)
+        result = worker.get_layer_metadata()
+
+        self.assertIn('M1', result)
+        m1 = result['M1']
+        self.assertEqual(m1['bbox'], (100.0, 300.0, 200.0, 200.0))
+        self.assertEqual(m1['n_nodes'], 3)
+        # 2 horizontal edges, 0 vertical, 0 diagonal
+        self.assertEqual(m1['edge_orientation'], (2, 0, 0))
+        # stripe_coords_h: sorted unique Y values
+        self.assertEqual(list(m1['stripe_coords_h']), [200.0])
+        # stripe_coords_v: sorted unique X values
+        self.assertEqual(list(m1['stripe_coords_v']), [100.0, 200.0, 300.0])
+
+    def test_single_layer_vertical_edges(self):
+        """Single layer with vertical edges returns correct orientation."""
+        from distributed.tile_worker import TileData
+
+        td = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[
+                ('100_200_M2', '100_300_M2', 1.0),  # vertical
+                ('100_300_M2', '100_400_M2', 1.0),  # vertical
+            ],
+            all_nodes={'100_200_M2', '100_300_M2', '100_400_M2'},
+            boundary_nodes=set(),
+            current_injections={},
+        )
+        worker = self._make_worker(td)
+        result = worker.get_layer_metadata()
+
+        self.assertIn('M2', result)
+        m2 = result['M2']
+        self.assertEqual(m2['bbox'], (100.0, 100.0, 200.0, 400.0))
+        self.assertEqual(m2['n_nodes'], 3)
+        self.assertEqual(m2['edge_orientation'], (0, 2, 0))
+
+    def test_multi_layer(self):
+        """Multiple layers each get separate metadata."""
+        from distributed.tile_worker import TileData
+
+        td = TileData(
+            tile_id=(1, 2),
+            resistive_edges=[
+                ('10_20_M1', '20_20_M1', 1.0),
+                ('10_20_M3', '10_30_M3', 2.0),
+            ],
+            all_nodes={'10_20_M1', '20_20_M1', '10_20_M3', '10_30_M3'},
+            boundary_nodes=set(),
+            current_injections={},
+        )
+        worker = self._make_worker(td)
+        result = worker.get_layer_metadata()
+
+        self.assertEqual(set(result.keys()), {'M1', 'M3'})
+        self.assertEqual(result['M1']['n_nodes'], 2)
+        self.assertEqual(result['M3']['n_nodes'], 2)
+
+    def test_diagonal_edges_counted(self):
+        """Edges where both X and Y differ are classified as diagonal."""
+        from distributed.tile_worker import TileData
+
+        td = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[
+                ('100_200_M1', '200_300_M1', 1.0),  # diagonal
+            ],
+            all_nodes={'100_200_M1', '200_300_M1'},
+            boundary_nodes=set(),
+            current_injections={},
+        )
+        worker = self._make_worker(td)
+        result = worker.get_layer_metadata()
+
+        self.assertEqual(result['M1']['edge_orientation'], (0, 0, 1))
+
+    def test_cross_layer_edges_ignored_in_orientation(self):
+        """Edges between different layers (vias) are not counted in orientation."""
+        from distributed.tile_worker import TileData
+
+        td = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[
+                ('100_200_M1', '100_200_M2', 5.0),  # via: same X,Y, different layer
+                ('100_200_M1', '200_200_M1', 1.0),  # horizontal M1 edge
+            ],
+            all_nodes={'100_200_M1', '100_200_M2', '200_200_M1'},
+            boundary_nodes=set(),
+            current_injections={},
+        )
+        worker = self._make_worker(td)
+        result = worker.get_layer_metadata()
+
+        # Via should NOT be counted in either layer's orientation
+        self.assertEqual(result['M1']['edge_orientation'], (1, 0, 0))
+        # M2 has no same-layer edges
+        self.assertEqual(result['M2']['edge_orientation'], (0, 0, 0))
+
+    def test_unparseable_nodes_excluded(self):
+        """Nodes that don't match X_Y_LAYER format are silently skipped."""
+        from distributed.tile_worker import TileData
+
+        td = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[
+                ('100_200_M1', 'VDD_vsrc', 1.0),
+                ('100_200_M1', '0', 0.5),
+            ],
+            all_nodes={'100_200_M1', 'VDD_vsrc', '0'},
+            boundary_nodes=set(),
+            current_injections={},
+        )
+        worker = self._make_worker(td)
+        result = worker.get_layer_metadata()
+
+        self.assertIn('M1', result)
+        self.assertEqual(result['M1']['n_nodes'], 1)
+        # No same-layer edges (VDD_vsrc and 0 don't parse to any layer)
+        self.assertEqual(result['M1']['edge_orientation'], (0, 0, 0))
+
+    def test_empty_tile(self):
+        """Empty tile returns empty dict."""
+        from distributed.tile_worker import TileData
+
+        td = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[],
+            all_nodes=set(),
+            boundary_nodes=set(),
+            current_injections={},
+        )
+        worker = self._make_worker(td)
+        result = worker.get_layer_metadata()
+
+        self.assertEqual(result, {})
+
+    def test_stripe_coords_sorted_unique(self):
+        """Stripe coords are sorted and deduplicated."""
+        from distributed.tile_worker import TileData
+
+        td = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[
+                ('100_200_M1', '200_200_M1', 1.0),
+                ('100_300_M1', '200_300_M1', 1.0),
+                ('100_200_M1', '100_300_M1', 1.0),
+            ],
+            all_nodes={
+                '100_200_M1', '200_200_M1',
+                '100_300_M1', '200_300_M1',
+            },
+            boundary_nodes=set(),
+            current_injections={},
+        )
+        worker = self._make_worker(td)
+        result = worker.get_layer_metadata()
+
+        m1 = result['M1']
+        self.assertEqual(list(m1['stripe_coords_h']), [200.0, 300.0])
+        self.assertEqual(list(m1['stripe_coords_v']), [100.0, 200.0])
+
+    def test_not_setup_raises(self):
+        """Calling get_layer_metadata before setup raises RuntimeError."""
+        from distributed.tile_worker import TileWorker
+
+        worker = TileWorker()
+        with self.assertRaises(RuntimeError):
+            worker.get_layer_metadata()
+
+
+class TestTileWorkerGetCurrentInjections(unittest.TestCase):
+    """Tests for TileWorker.get_current_injections()."""
+
+    def _make_worker(self, tile_data):
+        from distributed.tile_worker import TileWorker
+        worker = TileWorker()
+        worker._tile_data = tile_data
+        return worker
+
+    def test_returns_copy(self):
+        """get_current_injections returns a new dict (not a reference)."""
+        from distributed.tile_worker import TileData
+
+        td = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[],
+            all_nodes={'a'},
+            boundary_nodes=set(),
+            current_injections={'a': 1.5},
+        )
+        worker = self._make_worker(td)
+        result = worker.get_current_injections()
+
+        self.assertEqual(result, {'a': 1.5})
+        # Mutating the returned dict should not affect the tile data
+        result['a'] = 999.0
+        self.assertEqual(worker.get_current_injections(), {'a': 1.5})
+
+    def test_empty_injections(self):
+        """Tile with no current sources returns empty dict."""
+        from distributed.tile_worker import TileData
+
+        td = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[],
+            all_nodes=set(),
+            boundary_nodes=set(),
+            current_injections={},
+        )
+        worker = self._make_worker(td)
+        self.assertEqual(worker.get_current_injections(), {})
+
+    def test_not_setup_raises(self):
+        """Calling get_current_injections before setup raises RuntimeError."""
+        from distributed.tile_worker import TileWorker
+
+        worker = TileWorker()
+        with self.assertRaises(RuntimeError):
+            worker.get_current_injections()
+
+    def test_preserves_values(self):
+        """Returned dict preserves exact injection values."""
+        from distributed.tile_worker import TileData
+
+        injections = {
+            '100_200_M1': 0.5,
+            '200_300_M1': -0.123,
+            '300_400_M2': 42.0,
+        }
+        td = TileData(
+            tile_id=(1, 1),
+            resistive_edges=[],
+            all_nodes=set(injections.keys()),
+            boundary_nodes=set(),
+            current_injections=injections,
+        )
+        worker = self._make_worker(td)
+        result = worker.get_current_injections()
+
+        for node, expected_val in injections.items():
+            self.assertEqual(result[node], expected_val)
+
+
 if __name__ == '__main__':
     unittest.main()

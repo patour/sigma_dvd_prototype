@@ -12,7 +12,7 @@ Static and dynamic IR-drop analysis prototype for multi-layer power grids. Suppo
 3. **`src/solver/`** - Flat, hierarchical, coupled, and tiled solvers
 4. **`src/analysis/`** - Dynamic, transient, adjoint analysis; PWL smoothing
 5. **`src/parser/`** - SPICE-like netlist parsing (`NetlistParser`)
-6. **`src/distributed/`** - Distributed DDM solver (tile-based domain decomposition)
+6. **`src/distributed/`** - Distributed DDM solver (tile-based domain decomposition), includes `heatmap.py` for tile-parallel pre-binned stripe heatmaps
 7. **`src/visualization/`** - Plotters (`UnifiedPlotter`, `DynamicPlotter`, `PDNPlotter`)
 8. **`src/legacy/`** - Original synthetic grid modules (originally `irdrop/`)
 
@@ -40,6 +40,9 @@ pytest tests/legacy/test_irdrop.py::TestIRDrop::test_no_load_currents_all_pad_vo
 python -m parser.pdn_parser ./netlist/netlist_test --net VDD
 python -m solver.pdn_solver --input graph.pkl --net VDD --output ./results
 python -m analysis.dynamic_irdrop_decomposition ./netlist/netlist_test --net VDD --end-time 100ns --dt 100ps
+
+# Run distributed solver with heatmaps
+python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --backend ray --plot --verbose
 ```
 
 ## Architecture
@@ -94,6 +97,8 @@ src/
 │   ├── parser.py               # DistributedNetlistParser
 │   ├── tile_worker.py          # Per-tile BlockMatrixSystem actor
 │   ├── backend.py              # Local/Ray compute backends
+│   ├── heatmap.py              # Distributed stripe heatmap pipeline (prebin/merge/render)
+│   ├── cli.py                  # CLI: python -m distributed {solve,run,parse}
 │   └── result.py               # Result/context dataclasses
 ├── visualization/
 │   ├── unified_plotter.py      # UnifiedPlotter (voltage/IR-drop heatmaps)
@@ -151,6 +156,8 @@ src/
 - **Headless plotting**: Use `show=False` for batch/headless runs. Matplotlib backend is set to `Agg` in test runners.
 - **Legacy pickle files**: Old `pdn_graph.pkl` files contain NetworkX graphs. Use `ensure_rustworkx_graph()` to convert before creating models.
 - **Edge elem_name access**: With optimized edges (default), `elem_name` is None for most resistors. Use `data.get('elem_name', '')` not `data['elem_name']`.
+- **np.digitize binning**: Use `valid_mask` filter for out-of-range indices, NOT `np.clip`. Clamping corrupts edge bin values.
+- **Current heatmaps**: Only plot layers that have current sources (check for non-zero bins). Upper metal layers typically have none.
 
 ## Typical Workflow Patterns
 

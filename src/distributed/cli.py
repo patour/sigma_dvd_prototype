@@ -110,6 +110,19 @@ def cmd_solve(args: argparse.Namespace) -> None:
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
             logger.info(f"Results saved to {result_pkl}")
+
+        # Optionally generate heatmaps (must happen before model.shutdown())
+        if args.plot:
+            plot_layers = args.plot_layers.split(',') if args.plot_layers else None
+            solver.generate_reports(
+                result,
+                output_dir=args.output or './results',
+                plot_layers=plot_layers,
+                max_stripes=args.max_stripes,
+                stripe_bin_size=args.stripe_bin_size,
+                show_irdrop=args.show_irdrop,
+                verbose=args.verbose,
+            )
     finally:
         model.shutdown()
 
@@ -197,6 +210,19 @@ def cmd_run(args: argparse.Namespace) -> None:
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
             logger.info(f"Results saved to {result_pkl}")
+
+        # Optionally generate heatmaps (must happen before model.shutdown())
+        if args.plot:
+            plot_layers = args.plot_layers.split(',') if args.plot_layers else None
+            solver.generate_reports(
+                result,
+                output_dir=args.output or './results',
+                plot_layers=plot_layers,
+                max_stripes=args.max_stripes,
+                stripe_bin_size=args.stripe_bin_size,
+                show_irdrop=args.show_irdrop,
+                verbose=args.verbose,
+            )
     finally:
         model.shutdown()
 
@@ -226,6 +252,15 @@ def build_parser() -> argparse.ArgumentParser:
                          help='Compute backend (default: local)')
     p_solve.add_argument('--output', '-o', default=None, help='Output directory for results')
     p_solve.add_argument('--verbose', '-v', action='store_true')
+    p_solve.add_argument('--plot', action='store_true', help='Generate heatmaps after solve')
+    p_solve.add_argument('--plot-layers', type=str, default=None,
+                         help='Layers to plot (comma-separated, e.g. M1,M2)')
+    p_solve.add_argument('--max-stripes', type=int, default=2000,
+                         help='Maximum number of stripes per heatmap')
+    p_solve.add_argument('--stripe-bin-size', type=int, default=None,
+                         help='Number of bins per stripe (auto if not set)')
+    p_solve.add_argument('--show-voltage', dest='show_irdrop', action='store_false',
+                         default=True, help='Show voltage instead of IR-drop')
     p_solve.set_defaults(func=cmd_solve)
 
     # ── run ────────────────────────────────────────────────────────
@@ -238,6 +273,15 @@ def build_parser() -> argparse.ArgumentParser:
                        help='Directory for intermediate .pkl files (default: <netlist_dir>/distributed_pkl)')
     p_run.add_argument('--output', '-o', default=None, help='Output directory for results')
     p_run.add_argument('--verbose', '-v', action='store_true')
+    p_run.add_argument('--plot', action='store_true', help='Generate heatmaps after solve')
+    p_run.add_argument('--plot-layers', type=str, default=None,
+                       help='Layers to plot (comma-separated, e.g. M1,M2)')
+    p_run.add_argument('--max-stripes', type=int, default=2000,
+                       help='Maximum number of stripes per heatmap')
+    p_run.add_argument('--stripe-bin-size', type=int, default=None,
+                       help='Number of bins per stripe (auto if not set)')
+    p_run.add_argument('--show-voltage', dest='show_irdrop', action='store_false',
+                       default=True, help='Show voltage instead of IR-drop')
     p_run.set_defaults(func=cmd_run)
 
     return top
