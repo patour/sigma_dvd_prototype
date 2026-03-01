@@ -131,6 +131,9 @@ if [ -n "$DISTRIBUTED" ]; then
     if [ -n "$OUTPUT_DIR" ]; then
         CMD_ARGS="$CMD_ARGS --output \"$OUTPUT_DIR\""
     fi
+    if [ -n "$CONFIG_FILE" ]; then
+        CMD_ARGS="$CMD_ARGS --config \"$CONFIG_FILE\""
+    fi
     if [ -n "$VERBOSE" ]; then
         CMD_ARGS="$CMD_ARGS --verbose"
     fi

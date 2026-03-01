@@ -54,6 +54,7 @@ def cmd_solve(args: argparse.Namespace) -> None:
     from .solver import DistributedDDMSolver
 
     _setup_logging(args.verbose)
+    args = _load_and_apply_config(args)
     t0 = time.perf_counter()
 
     metadata, boundary_nodes, tile_data_dict = load_distributed_partitions(args.pkl_dir)
@@ -134,6 +135,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     from .solver import DistributedDDMSolver
 
     _setup_logging(args.verbose)
+    args = _load_and_apply_config(args)
     t_total = time.perf_counter()
 
     # Parse and dump
@@ -227,6 +229,124 @@ def cmd_run(args: argparse.Namespace) -> None:
         model.shutdown()
 
 
+def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
+    """Add --config, cholmod backend, and profiling flags to a subparser.
+
+    Shared between the ``solve`` and ``run`` subcommands so the flag set is
+    consistent with ``pdn_solver.py``'s CLI.
+    """
+    # Config file
+    parser.add_argument('--config', '-c', type=str, default=None,
+                        help='Config file path (.yaml, .yml, or .json)')
+
+    # Solver backend (cholmod / splu)
+    parser.add_argument('--use-cholmod', action='store_true', default=None,
+                        help='Force cholmod backend (requires sksparse)')
+    parser.add_argument('--use-splu', action='store_true',
+                        help='Force splu backend (scipy)')
+    parser.add_argument('--cholmod-mode', type=str, default='auto',
+                        choices=['auto', 'simplicial', 'supernodal'],
+                        help='Cholmod factorization mode (default: auto)')
+    parser.add_argument('--cholmod-ordering', type=str, default='default',
+                        choices=['default', 'natural', 'amd', 'metis',
+                                 'nesdis', 'colamd', 'best'],
+                        help='Cholmod fill-reducing ordering (default: default)')
+    parser.add_argument('--cholmod-use-long', action='store_true', default=None,
+                        help='Force 64-bit indices in cholmod')
+
+    # Reporting / profiling
+    parser.add_argument('--top-k', type=int, default=100,
+                        help='Number of worst nodes to report (default: 100)')
+    parser.add_argument('--profile-memory', action='store_true',
+                        help='Enable memory profiling (slower)')
+
+
+def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
+    """Load config file (if specified) and apply cholmod backend settings.
+
+    Reuses ``load_config`` / ``merge_config_with_args`` from
+    ``solver.pdn_solver`` and the global cholmod setters from
+    ``solver.unified_solver``, mirroring ``PDNSolver._configure_solver_backend``.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments (may be mutated).
+
+    Returns
+    -------
+    argparse.Namespace
+        The (potentially merged) arguments.
+    """
+    # -- config file --------------------------------------------------------
+    if getattr(args, 'config', None):
+        from solver.pdn_solver import load_config, merge_config_with_args
+
+        try:
+            config = load_config(args.config)
+        except FileNotFoundError:
+            logger.error("Config file not found: %s", args.config)
+            raise SystemExit(1)
+        except (ValueError, Exception) as exc:
+            logger.error("Failed to load config %s: %s", args.config, exc)
+            raise SystemExit(1)
+        args = merge_config_with_args(config, args)
+        logger.info("Loaded config from: %s", args.config)
+
+    # -- cholmod backend ----------------------------------------------------
+    from solver.unified_solver import (
+        set_use_cholmod,
+        set_cholmod_mode,
+        set_cholmod_ordering,
+        set_cholmod_use_long,
+        get_active_backend,
+    )
+
+    # Resolve --use-cholmod / --use-splu into a single value
+    use_cholmod = None
+    if getattr(args, 'use_cholmod', None) is True:
+        use_cholmod = True
+    elif getattr(args, 'use_splu', False) is True:
+        use_cholmod = False
+    elif getattr(args, 'use_cholmod', None) is False:
+        use_cholmod = False
+
+    if use_cholmod is not None:
+        try:
+            set_use_cholmod(use_cholmod)
+        except ImportError:
+            if use_cholmod:
+                raise  # user explicitly asked for cholmod but it is missing
+
+    cholmod_mode = getattr(args, 'cholmod_mode', 'auto')
+    if cholmod_mode != 'auto':
+        set_cholmod_mode(cholmod_mode)
+
+    cholmod_ordering = getattr(args, 'cholmod_ordering', 'default')
+    if cholmod_ordering != 'default':
+        set_cholmod_ordering(cholmod_ordering)
+
+    cholmod_use_long = getattr(args, 'cholmod_use_long', None)
+    if cholmod_use_long is not None:
+        set_cholmod_use_long(cholmod_use_long)
+
+    backend_name = get_active_backend()
+    logger.info("Solver backend: %s", backend_name)
+
+    # Cholmod globals only affect the driver process; Ray workers inherit
+    # their own defaults.  Warn if the user explicitly set cholmod options
+    # with a Ray backend so they aren't surprised.
+    backend_arg = getattr(args, 'backend', 'local')
+    if backend_arg == 'ray' and use_cholmod is not None:
+        logger.warning(
+            "Cholmod settings are applied to the driver process only. "
+            "Ray tile workers use their own defaults and may not inherit "
+            "these settings."
+        )
+
+    return args
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser with subcommands."""
     top = argparse.ArgumentParser(
@@ -261,6 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help='Number of bins per stripe (auto if not set)')
     p_solve.add_argument('--show-voltage', dest='show_irdrop', action='store_false',
                          default=True, help='Show voltage instead of IR-drop')
+    _add_config_and_solver_args(p_solve)
     p_solve.set_defaults(func=cmd_solve)
 
     # ── run ────────────────────────────────────────────────────────
@@ -282,6 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help='Number of bins per stripe (auto if not set)')
     p_run.add_argument('--show-voltage', dest='show_irdrop', action='store_false',
                        default=True, help='Show voltage instead of IR-drop')
+    _add_config_and_solver_args(p_run)
     p_run.set_defaults(func=cmd_run)
 
     return top
