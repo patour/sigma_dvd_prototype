@@ -665,6 +665,32 @@ class TestLocalBackend(unittest.TestCase):
         self.assertEqual(results, [0])
         be.shutdown()
 
+    def test_map_func(self):
+        """map_func applies function sequentially to each args tuple."""
+        from distributed.backend import LocalBackend
+
+        def add(a, b):
+            return a + b
+
+        be = LocalBackend()
+        be.initialize()
+        results = be.map_func(add, [(1, 2), (3, 4), (10, 20)])
+        self.assertEqual(results, [3, 7, 30])
+        be.shutdown()
+
+    def test_map_func_empty(self):
+        """map_func with empty args_list returns empty list."""
+        from distributed.backend import LocalBackend
+
+        def noop():
+            return 42
+
+        be = LocalBackend()
+        be.initialize()
+        results = be.map_func(noop, [])
+        self.assertEqual(results, [])
+        be.shutdown()
+
 
 # ──────────────────────────────────────────────────────────────────────
 # End-to-End Validation Tests
@@ -1573,6 +1599,86 @@ class TestRayBackend(unittest.TestCase):
         finally:
             model_local.shutdown()
             model_ray.shutdown()
+            logging.disable(logging.NOTSET)
+
+
+@unittest.skipUnless(HAS_RAY, "ray not installed")
+class TestRayBackendMapFunc(unittest.TestCase):
+    """Test RayBackend.map_func for correctness."""
+
+    def test_map_func(self):
+        """RayBackend.map_func returns correct results via Ray."""
+        from distributed.backend import RayBackend
+
+        def multiply(a, b):
+            return a * b
+
+        be = RayBackend()
+        be.initialize()
+        results = be.map_func(multiply, [(2, 3), (5, 7), (10, 0)])
+        self.assertEqual(results, [6, 35, 0])
+
+
+@unittest.skipUnless(HAS_RAY, "ray not installed")
+@unittest.skipUnless(NETLIST_SAMPLED_EXISTS, "netlist_sampled not available")
+class TestParseAndDumpRay(unittest.TestCase):
+    """Test that Ray-based parse_and_dump matches local backend."""
+
+    def test_ray_parse_matches_local(self):
+        """parse_and_dump with backend='ray' produces identical results to 'local'."""
+        import logging
+        import pickle
+        logging.disable(logging.WARNING)
+        from distributed.parser import DistributedNetlistParser
+
+        try:
+            parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
+
+            with tempfile.TemporaryDirectory() as local_dir, \
+                 tempfile.TemporaryDirectory() as ray_dir:
+                parser.parse_and_dump(local_dir, backend='local')
+                parser.parse_and_dump(ray_dir, backend='ray')
+
+                # Load metadata.pkl from both
+                with open(os.path.join(local_dir, 'metadata.pkl'), 'rb') as f:
+                    meta_local = pickle.load(f)
+                with open(os.path.join(ray_dir, 'metadata.pkl'), 'rb') as f:
+                    meta_ray = pickle.load(f)
+
+                # Boundary nodes must match exactly
+                self.assertEqual(
+                    meta_local['boundary_nodes'],
+                    meta_ray['boundary_nodes'],
+                    "Boundary nodes differ between local and ray parse"
+                )
+
+                # Compare each tile's TileData
+                n_tiles = len(meta_local['metadata'].tile_configs)
+                for tc in meta_local['metadata'].tile_configs:
+                    x, y = tc.tile_id
+                    fname = f'tile_{x}_{y}.pkl'
+                    with open(os.path.join(local_dir, fname), 'rb') as f:
+                        td_local = pickle.load(f)
+                    with open(os.path.join(ray_dir, fname), 'rb') as f:
+                        td_ray = pickle.load(f)
+
+                    self.assertEqual(
+                        td_local.all_nodes, td_ray.all_nodes,
+                        f"Tile ({x},{y}): all_nodes differ"
+                    )
+                    self.assertEqual(
+                        td_local.boundary_nodes, td_ray.boundary_nodes,
+                        f"Tile ({x},{y}): boundary_nodes differ"
+                    )
+                    self.assertEqual(
+                        len(td_local.resistive_edges), len(td_ray.resistive_edges),
+                        f"Tile ({x},{y}): resistive_edges count differs"
+                    )
+                    self.assertEqual(
+                        len(td_local.current_injections), len(td_ray.current_injections),
+                        f"Tile ({x},{y}): current_injections count differs"
+                    )
+        finally:
             logging.disable(logging.NOTSET)
 
 

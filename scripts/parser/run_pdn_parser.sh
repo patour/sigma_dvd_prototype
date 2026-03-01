@@ -11,7 +11,8 @@
 #   ./run_pdn_parser.sh ./netlist/netlist_test VSS            # Custom dir and net name
 #   ./run_pdn_parser.sh -p ./netlist/netlist_multi_tile       # Enable parallel parsing
 #   ./run_pdn_parser.sh -p -w 8 ./netlist/netlist_multi_tile  # Parallel with 8 workers
-#   ./run_pdn_parser.sh -d ./netlist/netlist_sampled VDD_XLV  # Distributed per-tile pkl
+#   ./run_pdn_parser.sh -d ./netlist/netlist_sampled VDD_XLV  # Distributed parse only
+#   ./run_pdn_parser.sh -d -b ray ./netlist/netlist_sampled VDD_XLV  # Distributed with Ray
 #   ./run_pdn_parser.sh -d -o ./pkl_out ./netlist/netlist_sampled VDD_XLV
 #
 # Options:
@@ -19,6 +20,7 @@
 #   -w, --workers N      Number of parallel workers (default: auto, max 16)
 #   -c, --chunk-size N   Lines per chunk for parallel reading (default: 10000)
 #   -d, --distributed    Dump per-tile .pkl files via distributed parser (parse_and_dump)
+#   -b, --backend MODE   Compute backend for distributed mode: local or ray (default: local)
 #   -o, --output DIR     Output directory for distributed .pkl files (default: <netlist_dir>/distributed_pkl)
 #   -h, --help           Show this help message
 #
@@ -36,6 +38,7 @@ PARALLEL=""
 N_WORKERS=""
 CHUNK_SIZE=""
 DISTRIBUTED=""
+BACKEND=""
 OUTPUT_DIR=""
 NETLIST_DIR=""
 NET_NAME=""
@@ -58,6 +61,10 @@ while [[ $# -gt 0 ]]; do
         -d|--distributed)
             DISTRIBUTED="1"
             shift
+            ;;
+        -b|--backend)
+            BACKEND="$2"
+            shift 2
             ;;
         -o|--output)
             OUTPUT_DIR="$2"
@@ -91,9 +98,17 @@ done
 NETLIST_DIR="${NETLIST_DIR:-./netlist_data}"
 NET_NAME="${NET_NAME:-VDD}"
 
+if [[ -n "$BACKEND" && -z "$DISTRIBUTED" ]]; then
+    echo "Error: -b/--backend requires -d/--distributed mode"
+    exit 1
+fi
+
 if [[ -n "$DISTRIBUTED" ]]; then
     # Distributed mode: dump per-tile .pkl files
     CMD_ARGS="parse \"$NETLIST_DIR\" --net \"$NET_NAME\" -v"
+    if [[ -n "$BACKEND" ]]; then
+        CMD_ARGS="$CMD_ARGS -b \"$BACKEND\""
+    fi
     if [[ -n "$OUTPUT_DIR" ]]; then
         CMD_ARGS="$CMD_ARGS --output \"$OUTPUT_DIR\""
     fi

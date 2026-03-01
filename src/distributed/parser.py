@@ -323,7 +323,7 @@ class DistributedNetlistParser:
             net_name=net_name,
         )
 
-    def parse_and_dump(self, output_dir: str) -> Path:
+    def parse_and_dump(self, output_dir: str, backend: str = 'local') -> Path:
         """Parse netlist and dump per-tile TileData + metadata as .pkl files.
 
         Creates output_dir (if needed) with:
@@ -337,12 +337,14 @@ class DistributedNetlistParser:
 
         Args:
             output_dir: Directory to write .pkl files into
+            backend: Compute backend for tile parsing ('local' or 'ray')
 
         Returns:
             Path to output_dir
         """
         import pickle
         from collections import Counter
+        from .backend import LocalBackend, RayBackend
         from .tile_worker import parse_tile_with_instances
 
         out_path = Path(output_dir)
@@ -351,17 +353,19 @@ class DistributedNetlistParser:
         # 1. Parse metadata (tile configs + package data)
         metadata = self.parse_metadata()
 
-        # 2. Parse each tile and dump TileData; track per-node tile counts
-        boundary_tile_count: Counter = Counter()
-        for tc in metadata.tile_configs:
-            tile_data = parse_tile_with_instances(
-                ckt_path=tc.ckt_path,
-                nd_path=tc.nd_path,
-                net_filter=tc.net_filter,
-                tile_id=tc.tile_id,
-                instance_path=tc.instance_path,
-            )
+        # 2. Parse all tiles (locally or distributed via Ray)
+        be = RayBackend() if backend == 'ray' else LocalBackend()
+        be.initialize()
 
+        args_list = [
+            (tc.ckt_path, tc.nd_path, tc.net_filter, tc.tile_id, tc.instance_path)
+            for tc in metadata.tile_configs
+        ]
+        tile_results = be.map_func(parse_tile_with_instances, args_list)
+
+        # 3. Dump each TileData and track per-node tile counts
+        boundary_tile_count: Counter = Counter()
+        for tc, tile_data in zip(metadata.tile_configs, tile_results):
             # Count each boundary node once per tile it appears in
             boundary_tile_count.update(tile_data.boundary_nodes)
 

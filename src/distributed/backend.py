@@ -59,6 +59,18 @@ class ComputeBackend(ABC):
         """
 
     @abstractmethod
+    def map_func(self, func: Callable, args_list: List[Tuple]) -> List[Any]:
+        """Apply a stateless function to each args tuple in parallel.
+
+        Args:
+            func: A picklable function to call
+            args_list: List of argument tuples, one per invocation
+
+        Returns:
+            List of results, one per invocation
+        """
+
+    @abstractmethod
     def gather(self, futures: List[Any]) -> List[Any]:
         """Wait for and collect results from futures."""
 
@@ -94,6 +106,9 @@ class LocalBackend(ComputeBackend):
                 result = getattr(actor, method)()
             results.append(result)
         return results
+
+    def map_func(self, func: Callable, args_list: List[Tuple]) -> List[Any]:
+        return [func(*args) for args in args_list]
 
     def gather(self, futures: List[Any]) -> List[Any]:
         return futures  # Already resolved
@@ -144,6 +159,12 @@ class RayBackend(ComputeBackend):
             else:
                 future = getattr(actor, method).remote()
             futures.append(future)
+        return ray.get(futures)
+
+    def map_func(self, func: Callable, args_list: List[Tuple]) -> List[Any]:
+        ray = self._ray
+        remote_func = ray.remote(func)
+        futures = [remote_func.remote(*args) for args in args_list]
         return ray.get(futures)
 
     def gather(self, futures: List[Any]) -> List[Any]:

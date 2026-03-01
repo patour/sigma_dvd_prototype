@@ -42,7 +42,7 @@ def cmd_parse(args: argparse.Namespace) -> None:
 
     parser = DistributedNetlistParser(args.netlist_dir, net_filter=args.net)
     out_dir = args.output or str(Path(args.netlist_dir) / 'distributed_pkl')
-    parser.parse_and_dump(out_dir)
+    parser.parse_and_dump(out_dir, backend=args.backend)
 
     elapsed = time.perf_counter() - t0
     logger.info(f"parse_and_dump completed in {elapsed:.3f}s -> {out_dir}")
@@ -127,7 +127,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     t0 = time.perf_counter()
     parser = DistributedNetlistParser(args.netlist_dir, net_filter=args.net)
     pkl_dir = args.pkl_dir or str(Path(args.netlist_dir) / 'distributed_pkl')
-    parser.parse_and_dump(pkl_dir)
+    parser.parse_and_dump(pkl_dir, backend=args.backend)
     t_parse = time.perf_counter() - t0
     logger.info(f"Parse phase: {t_parse:.3f}s")
 
@@ -213,6 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_parse = sub.add_parser('parse', help='Parse netlist, dump per-tile .pkl files')
     p_parse.add_argument('netlist_dir', help='Path to netlist directory')
     p_parse.add_argument('--net', '-n', default=None, help='Net name to filter (e.g., VDD_XLV)')
+    p_parse.add_argument('--backend', '-b', default='local', choices=['local', 'ray'],
+                         help='Compute backend (default: local)')
     p_parse.add_argument('--output', '-o', default=None, help='Output directory for .pkl files')
     p_parse.add_argument('--verbose', '-v', action='store_true')
     p_parse.set_defaults(func=cmd_parse)
