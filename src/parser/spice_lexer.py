@@ -158,6 +158,12 @@ def _fast_instance_net_filter(line: str, net_filter: str) -> bool:
     return parts[1].lower() == net_filter or parts[3].lower() == net_filter
 
 
+def _is_gzip_file(path: str) -> bool:
+    """Check if file is gzip-compressed by magic bytes (0x1f 0x8b)."""
+    with open(path, 'rb') as f:
+        return f.read(2) == b'\x1f\x8b'
+
+
 def _has_structured_instance_names(filepath: str) -> bool:
     """Detect whether instanceModels file uses structured instance names.
 
@@ -166,8 +172,9 @@ def _has_structured_instance_names(filepath: str) -> bool:
 
     Returns False for empty files or files with unstructured names.
     """
-    open_fn = gzip.open if filepath.endswith('.gz') else open
-    mode = 'rt' if filepath.endswith('.gz') else 'r'
+    is_gzip = filepath.endswith('.gz') or _is_gzip_file(filepath)
+    open_fn = gzip.open if is_gzip else open
+    mode = 'rt' if is_gzip else 'r'
 
     try:
         with open_fn(filepath, mode) as f:

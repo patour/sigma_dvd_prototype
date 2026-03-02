@@ -34,6 +34,12 @@ class TileData:
     current_injections: Dict[str, float]  # node -> current in mA (positive = sink)
 
 
+def _is_gzip_file(path: str) -> bool:
+    """Check if file is gzip-compressed by magic bytes."""
+    with open(path, 'rb') as f:
+        return f.read(2) == b'\x1f\x8b'
+
+
 def _load_nd_file(nd_path: str) -> Dict[str, str]:
     """Load .nd file for node-net mapping (lowercase net names).
 
@@ -47,8 +53,9 @@ def _load_nd_file(nd_path: str) -> Dict[str, str]:
     if nd_path is None:
         return node_net_map_lower
 
-    open_fn = gzip.open if nd_path.endswith('.gz') else open
-    mode = 'rt' if nd_path.endswith('.gz') else 'r'
+    is_gzip = nd_path.endswith('.gz') or _is_gzip_file(nd_path)
+    open_fn = gzip.open if is_gzip else open
+    mode = 'rt' if is_gzip else 'r'
 
     with open_fn(nd_path, mode) as f:
         for line in f:
@@ -90,8 +97,9 @@ def _parse_tile_ckt(
     GMAX = 1e5
     SHORT_THRESHOLD = 1e-6
 
-    open_fn = gzip.open if ckt_path.endswith('.gz') else open
-    mode = 'rt' if ckt_path.endswith('.gz') else 'r'
+    is_gzip = ckt_path.endswith('.gz') or _is_gzip_file(ckt_path)
+    open_fn = gzip.open if is_gzip else open
+    mode = 'rt' if is_gzip else 'r'
 
     with open_fn(ckt_path, mode) as f:
         for line in f:
@@ -225,8 +233,9 @@ def _parse_instance_models(
     else:
         node_net_map_lower = {}
 
-    open_fn = gzip.open if instance_path.endswith('.gz') else open
-    mode = 'rt' if instance_path.endswith('.gz') else 'r'
+    is_gzip = instance_path.endswith('.gz') or _is_gzip_file(instance_path)
+    open_fn = gzip.open if is_gzip else open
+    mode = 'rt' if is_gzip else 'r'
 
     with open_fn(instance_path, mode) as f:
         for line in f:

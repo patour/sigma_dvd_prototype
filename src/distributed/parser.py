@@ -75,9 +75,15 @@ class PowerGridMetaData:
     vdd: float
 
 
+def _is_gzip_file(path: str) -> bool:
+    """Check if file is gzip-compressed by magic bytes (0x1f 0x8b)."""
+    with open(path, 'rb') as f:
+        return f.read(2) == b'\x1f\x8b'
+
+
 def _open_file(path: str):
-    """Open a file, auto-detecting gzip compression."""
-    if path.endswith('.gz'):
+    """Open a file, auto-detecting gzip compression by magic bytes."""
+    if path.endswith('.gz') or _is_gzip_file(path):
         return gzip.open(path, 'rt')
     return open(path, 'r')
 
