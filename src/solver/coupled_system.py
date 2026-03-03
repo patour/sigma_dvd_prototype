@@ -713,11 +713,21 @@ def recover_bottom_voltages(
     return voltages
 
 
-def compute_explicit_schur(block_system: BlockMatrixSystem) -> np.ndarray:
+def _ensure_dense(x):
+    """Convert sparse matrix to dense array if needed."""
+    return x.toarray() if sp.issparse(x) else x
+
+
+def compute_explicit_schur(
+    block_system: BlockMatrixSystem,
+    max_memory_gb: float = 4.0,
+) -> np.ndarray:
     """Compute explicit Schur complement S = G_pp - G_pi * inv(G_ii) * G_ip.
 
-    Multi-RHS solve: Z = inv(G_ii) @ G_ip.toarray(), then S = G_pp - G_pi @ Z.
-    Requires factor_interior() called first. Returns dense (n_ports, n_ports).
+    Memory-efficient: keeps G_ip sparse, processes columns in chunks.
+    Chunk size auto-computed from memory budget, CHOLMOD index limits, and BLAS
+    efficiency. For large tiles (millions of interior nodes), this reduces peak
+    memory from O(n_interior * n_ports) dense to O(n_interior * chunk_size).
 
     This is the explicit-form counterpart to SchurComplementOperator (matrix-free).
     Use explicit form when S must be communicated (distributed assembly) or
@@ -725,6 +735,8 @@ def compute_explicit_schur(block_system: BlockMatrixSystem) -> np.ndarray:
 
     Args:
         block_system: BlockMatrixSystem with factored interior (lu_ii must be set)
+        max_memory_gb: Memory budget for Z_chunk (default 4.0 GB). Chunk size is
+            computed to keep Z_chunk within this limit.
 
     Returns:
         Dense Schur complement matrix of shape (n_ports, n_ports)
@@ -742,12 +754,28 @@ def compute_explicit_schur(block_system: BlockMatrixSystem) -> np.ndarray:
         # No interior nodes: Schur complement is just G_pp
         return block_system.G_pp.toarray()
 
-    # Batch multi-RHS solve: Z = inv(G_ii) @ G_ip (n_interior x n_ports)
-    G_ip_dense = block_system.G_ip.toarray()
-    Z = block_system.lu_ii(G_ip_dense)
+    # Compute optimal chunk size balancing memory, CHOLMOD limits, and BLAS efficiency
+    INT_MAX = 2**31 - 1
+    # Assume ~50% fill for Z_chunk (sparse RHS -> partially dense solution)
+    bytes_per_col = n_interior * 8 * 0.5
+    memory_chunk = max(1, int(max_memory_gb * 1e9 / bytes_per_col))
+    index_chunk = max(1, INT_MAX // max(n_interior, 1))
+    # Cap at 256 for BLAS efficiency (diminishing returns beyond), floor at 32
+    chunk_size = min(memory_chunk, index_chunk, n_ports, 256)
+    chunk_size = max(chunk_size, min(32, n_ports))
 
-    # S = G_pp - G_pi @ Z
-    S = block_system.G_pp.toarray() - block_system.G_pi.toarray() @ Z
+    # S starts as G_pp (dense copy)
+    S = block_system.G_pp.toarray()
+
+    # Chunked sparse solve (CHOLMOD accepts sparse RHS)
+    # When chunk_size >= n_ports, loop runs once processing all columns
+    G_ip_csc = block_system.G_ip.tocsc()
+    for start in range(0, n_ports, chunk_size):
+        end = min(start + chunk_size, n_ports)
+        G_ip_chunk = G_ip_csc[:, start:end]  # Sparse slice (no toarray!)
+        Z_chunk = block_system.lu_ii(G_ip_chunk)
+        S[:, start:end] -= _ensure_dense(block_system.G_pi @ Z_chunk)
+
     return S
 
 

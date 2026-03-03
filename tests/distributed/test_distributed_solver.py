@@ -155,6 +155,61 @@ class TestComputeExplicitSchur(unittest.TestCase):
         S = compute_explicit_schur(block)
         np.testing.assert_allclose(S, S.T, atol=1e-12)
 
+    def test_chunked_path_matches_single_solve(self):
+        """Force chunked path via tiny memory budget; result must match single solve."""
+        # Build 20x20 grid: 400 nodes, 76 ports on perimeter, 324 interior
+        # Need n_ports > 32 so the BLAS floor (32) allows chunking
+        N = 20
+        edges = []
+        for i in range(N):
+            for j in range(N):
+                node = f'n{i}_{j}'
+                if j < N - 1:
+                    edges.append((node, f'n{i}_{j+1}', 1.0))
+                if i < N - 1:
+                    edges.append((node, f'n{i+1}_{j}', 1.0))
+        edges.append((f'n{N//2}_{N//2}', '0', 0.1))  # Ground at center
+
+        # Perimeter as ports: 4*N - 4 = 76 nodes
+        port_nodes = set()
+        for i in range(N):
+            port_nodes.add(f'n0_{i}')
+            port_nodes.add(f'n{N-1}_{i}')
+            port_nodes.add(f'n{i}_0')
+            port_nodes.add(f'n{i}_{N-1}')
+
+        block, _ = build_block_system_from_edges(edges, port_nodes, ground_node='0')
+        block.factor_interior()
+
+        n_ports = block.n_ports
+        n_interior = block.n_interior
+        self.assertGreater(n_ports, 32, "Need >32 ports for chunked path test")
+
+        # Single solve (large memory budget)
+        S_single = compute_explicit_schur(block, max_memory_gb=100.0)
+
+        # Force chunked path: tiny memory budget -> chunk_size = 32 (BLAS floor)
+        # With 76 ports and chunk_size=32, we get 3 chunks
+        S_chunked = compute_explicit_schur(block, max_memory_gb=1e-9)
+
+        # Verify chunked path was actually taken
+        # chunk_size = max(min(memory_chunk, ..., 256), 32) = 32 < 76 = n_ports
+        INT_MAX = 2**31 - 1
+        bytes_per_col = n_interior * 8 * 0.5
+        memory_chunk = max(1, int(1e-9 * 1e9 / bytes_per_col))
+        index_chunk = max(1, INT_MAX // max(n_interior, 1))
+        chunk_size = min(memory_chunk, index_chunk, n_ports, 256)
+        chunk_size = max(chunk_size, min(32, n_ports))
+        self.assertLess(chunk_size, n_ports,
+                        f"Expected chunked path: chunk_size={chunk_size}, n_ports={n_ports}")
+
+        np.testing.assert_allclose(S_chunked, S_single, atol=1e-12,
+                                   err_msg="Chunked path result differs from single solve")
+        np.testing.assert_allclose(S_chunked, S_chunked.T, atol=1e-12,
+                                   err_msg="Chunked Schur complement not symmetric")
+
+
+
 
 class TestBuildBlockSystemFromEdges(unittest.TestCase):
     """Test build_block_system_from_edges against extract_block_matrices."""
