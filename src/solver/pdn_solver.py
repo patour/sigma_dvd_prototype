@@ -84,6 +84,9 @@ except ImportError:
 # Import plotter module
 from visualization.pdn_plotter import PDNPlotter
 
+# Import reports module
+from reports.floating_nodes import collect_floating_nodes_flat, generate_floating_nodes_report
+
 
 # ============================================================================
 # Data Classes
@@ -179,6 +182,9 @@ class PDNSolveResult(UnifiedSolveResult):
     timings: TimingStats = field(default_factory=TimingStats)
     memory: MemoryStats = field(default_factory=MemoryStats)
     backend: str = 'unknown'
+
+    # Model reference (for report generation)
+    model: Optional['UnifiedPowerGridModel'] = None
 
 
 @dataclass
@@ -509,6 +515,8 @@ class PDNSolver:
             timings=timings,
             memory=memory,
             backend=get_active_backend(),
+            # Model reference
+            model=model,
         )
 
     def _create_empty_result(self, net_name: str) -> PDNSolveResult:
@@ -612,6 +620,18 @@ class PDNSolver:
 
             # Top-K worst IR-drop report
             self._generate_topk_report(net_name, result, output_path, top_k)
+
+            # Floating nodes report
+            if result.model is not None:
+                try:
+                    self.logger.info("  Generating floating nodes report...")
+                    floating_data = collect_floating_nodes_flat(result.model, net_name=net_name)
+                    generate_floating_nodes_report(floating_data, output_path, verbose=self._verbose)
+                    if floating_data.total_floating > 0:
+                        self.logger.info(f"    Removed {floating_data.total_floating:,} floating nodes "
+                                       f"({100.0 * floating_data.total_floating / floating_data.total_nodes:.2f}%)")
+                except Exception as e:
+                    self.logger.warning(f"  Failed to generate floating nodes report: {e}")
 
             if stripe_mode:
                 plotter.generate_stripe_heatmaps(

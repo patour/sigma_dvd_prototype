@@ -277,6 +277,7 @@ class DistributedDDMSolver:
     def generate_reports(
         self,
         result: DistributedSolveResult,
+        context: Optional[DistributedSolverContext] = None,
         output_dir: str = './results',
         plot_layers: Optional[List[str]] = None,
         max_stripes: int = 2000,
@@ -294,6 +295,9 @@ class DistributedDDMSolver:
         ----------
         result : DistributedSolveResult
             Per-tile solve result from ``solve_dc()``.
+        context : DistributedSolverContext or None
+            Solver context from ``prepare()``. If provided, floating nodes
+            report will be generated. If None, no floating nodes report.
         output_dir : str
             Directory to write PNG files.
         plot_layers : list of str or None
@@ -308,7 +312,24 @@ class DistributedDDMSolver:
         verbose : bool
             Log progress during heatmap generation.
         """
+        from pathlib import Path
         from .heatmap import plot_distributed_heatmaps
+        from reports.floating_nodes import (
+            collect_floating_nodes_distributed,
+            generate_floating_nodes_report,
+        )
+
+        # Generate floating nodes report if context is provided
+        if context is None:
+            logger.warning(
+                "No solver context provided. Skipping floating nodes report."
+            )
+        else:
+            floating_data = collect_floating_nodes_distributed(
+                self.model, context, self.model.workers,
+                net_name=self.model.net_name,
+            )
+            generate_floating_nodes_report(floating_data, Path(output_dir), verbose=verbose)
 
         common_kwargs = dict(
             model=self.model,

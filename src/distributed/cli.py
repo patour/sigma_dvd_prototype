@@ -117,6 +117,7 @@ def cmd_solve(args: argparse.Namespace) -> None:
             plot_layers = args.plot_layers.split(',') if args.plot_layers else None
             solver.generate_reports(
                 result,
+                context=ctx,
                 output_dir=args.output or './results',
                 plot_layers=plot_layers,
                 max_stripes=args.max_stripes,
@@ -218,6 +219,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             plot_layers = args.plot_layers.split(',') if args.plot_layers else None
             solver.generate_reports(
                 result,
+                context=ctx,
                 output_dir=args.output or './results',
                 plot_layers=plot_layers,
                 max_stripes=args.max_stripes,

@@ -128,7 +128,12 @@ class RayBackend(ComputeBackend):
         import ray
         self._ray = ray
         if not ray.is_initialized():
-            ray.init(**kwargs)
+            # Increase health check timeout for long-running Schur complement computations
+            # Default is 30s which is too short for large tiles (~2.78M nodes)
+            system_config = kwargs.pop('_system_config', {})
+            system_config.setdefault('health_check_timeout_ms', 1200000)  # 20 minutes
+            system_config.setdefault('health_check_period_ms', 60000)     # 1 minute
+            ray.init(_system_config=system_config, **kwargs)
         self._initialized = True
 
     def create_actors(self, actor_class: Type, configs: List[Any]) -> List[Any]:

@@ -316,6 +316,7 @@ class TileWorker:
         self._block_system = None
         self._rhs_dirichlet = None
         self._interface_nodes: Optional[Set[str]] = None
+        self._removed_island_nodes: Set[str] = set()
 
     def setup(
         self,
@@ -479,6 +480,9 @@ class TileWorker:
 
         if not removed_nodes:
             return 0, kept_nonlargest_iface
+
+        # Store removed nodes for report aggregation
+        self._removed_island_nodes = removed_nodes.copy()
 
         self._tile_data.all_nodes -= removed_nodes
         self._tile_data.boundary_nodes -= removed_nodes
@@ -678,3 +682,21 @@ class TileWorker:
     @property
     def n_boundary(self) -> int:
         return self._block_system.n_ports if self._block_system else 0
+
+    def get_floating_nodes_data(self) -> Dict[str, Any]:
+        """Return floating node data for report aggregation.
+
+        Returns:
+            Dict with removed_nodes and tile_id
+
+        Raises:
+            RuntimeError: If called before setup() or setup_from_tile_data()
+        """
+        if self._tile_data is None:
+            raise RuntimeError(
+                "get_floating_nodes_data() called before setup(); no tile data loaded"
+            )
+        return {
+            'removed_nodes': list(self._removed_island_nodes),
+            'tile_id': self._tile_data.tile_id,
+        }
