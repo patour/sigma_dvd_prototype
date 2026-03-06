@@ -2609,5 +2609,326 @@ class TestTileWorkerGetCurrentInjections(unittest.TestCase):
             self.assertEqual(result[node], expected_val)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Package Parsing Tests
+# ──────────────────────────────────────────────────────────────────────
+
+class TestPackageParsing(unittest.TestCase):
+    """Tests for _is_die_coordinate_node, _uf_find/_uf_union, and _parse_package."""
+
+    # ------------------------------------------------------------------
+    # Test 1: _is_die_coordinate_node
+    # ------------------------------------------------------------------
+
+    def test_is_die_coordinate_node(self):
+        """Verify die coordinate detection for various node name formats."""
+        from distributed.parser import _is_die_coordinate_node
+
+        # True cases: first two _-delimited parts are digits
+        self.assertTrue(_is_die_coordinate_node('1094400_1123200_M13'))  # sampled
+        self.assertTrue(_is_die_coordinate_node('1197000_449800_86'))    # brcm
+        self.assertTrue(_is_die_coordinate_node('0_0_M3'))              # multi_tile
+        self.assertTrue(_is_die_coordinate_node('123_456'))             # minimal
+
+        # False cases: non-coordinate patterns
+        self.assertFalse(_is_die_coordinate_node('bmpary_bmp_VDD_VAR_0_1'))  # brcm pkg infra
+        self.assertFalse(_is_die_coordinate_node('VDD_XLV_tap_00000'))       # sampled tap
+        self.assertFalse(_is_die_coordinate_node('VDD_XLV_vsrc'))            # sampled vsrc
+        self.assertFalse(_is_die_coordinate_node('0'))                       # ground
+        self.assertFalse(_is_die_coordinate_node(''))                        # empty
+
+    # ------------------------------------------------------------------
+    # Test 2: _uf_find and _uf_union
+    # ------------------------------------------------------------------
+
+    def test_uf_find_and_union(self):
+        """Union-find operations: find, union, net propagation, isolation, compression."""
+        from distributed.parser import _uf_find, _uf_union
+
+        parent = {}
+        uf_net = {}
+
+        # Basic find: new node returns itself as root
+        self.assertEqual(_uf_find(parent, 'A'), 'A')
+        self.assertIn('A', parent)
+        self.assertEqual(parent['A'], 'A')
+
+        # Union two nodes: they share the same root after union
+        _uf_find(parent, 'B')
+        _uf_union(parent, uf_net, 'A', 'B')
+        self.assertEqual(_uf_find(parent, 'A'), _uf_find(parent, 'B'))
+
+        # Net propagation: label one root, union propagates it
+        parent2 = {}
+        uf_net2 = {}
+        _uf_find(parent2, 'X')
+        uf_net2[_uf_find(parent2, 'X')] = 'VDD'
+        _uf_find(parent2, 'Y')
+        _uf_union(parent2, uf_net2, 'X', 'Y')
+        root_y = _uf_find(parent2, 'Y')
+        self.assertEqual(uf_net2.get(root_y), 'VDD')
+
+        # Multi-component isolation: two disconnected groups don't share roots
+        parent3 = {}
+        uf_net3 = {}
+        _uf_union(parent3, uf_net3, 'P', 'Q')
+        _uf_union(parent3, uf_net3, 'R', 'S')
+        self.assertNotEqual(_uf_find(parent3, 'P'), _uf_find(parent3, 'R'))
+
+        # Path compression: after find, parent points directly to root
+        parent4 = {}
+        uf_net4 = {}
+        # Build a chain: A -> B -> C -> D
+        _uf_find(parent4, 'D')
+        _uf_find(parent4, 'C')
+        _uf_find(parent4, 'B')
+        _uf_find(parent4, 'A')
+        _uf_union(parent4, uf_net4, 'C', 'D')
+        _uf_union(parent4, uf_net4, 'B', 'C')
+        _uf_union(parent4, uf_net4, 'A', 'B')
+        root = _uf_find(parent4, 'A')
+        # After find, A should point directly to root (path compression)
+        self.assertEqual(parent4['A'], root)
+
+        # Conflicting nets: first (root1) net wins, second is silently dropped
+        parent5 = {}
+        uf_net5 = {}
+        _uf_find(parent5, 'V')
+        uf_net5['V'] = 'VDD'
+        _uf_find(parent5, 'S')
+        uf_net5['S'] = 'VSS'
+        _uf_union(parent5, uf_net5, 'V', 'S')
+        merged_root = _uf_find(parent5, 'S')
+        self.assertEqual(uf_net5[merged_root], 'VDD')
+
+    # ------------------------------------------------------------------
+    # Helper: create parser + package.ckt in tmpdir
+    # ------------------------------------------------------------------
+
+    def _make_parser_with_package(self, package_content):
+        """Create a tmpdir with package.ckt and return (tmpdir, parser).
+
+        Caller must manage tmpdir lifetime (use as context manager or
+        call cleanup).
+        """
+        from distributed.parser import DistributedNetlistParser
+
+        tmpdir = tempfile.mkdtemp()
+        pkg_path = os.path.join(tmpdir, 'package.ckt')
+        with open(pkg_path, 'w') as f:
+            f.write(package_content)
+        parser = DistributedNetlistParser(tmpdir)
+        return tmpdir, parser
+
+    # ------------------------------------------------------------------
+    # Test 3: _parse_package — sampled format
+    # ------------------------------------------------------------------
+
+    def test_parse_package_sampled_format(self):
+        """Parse sampled-style package with vsrc -> tap -> die node chain."""
+        content = (
+            "* Package model for VDD_XLV\n"
+            "v_VDD_XLV VDD_XLV_vsrc 0 VDD_XLV\n"
+            "r VDD_XLV_vsrc VDD_XLV_tap_00000 0.001\n"
+            "r VDD_XLV_tap_00000 1094400_1123200_M13 0.001\n"
+        )
+        tmpdir, parser = self._make_parser_with_package(content)
+        try:
+            pkg = parser._parse_package('VDD_XLV', 0.66)
+
+            self.assertIn('VDD_XLV_vsrc', pkg.pad_nodes)
+            self.assertEqual(len(pkg.vsrc_dict), 1)
+            self.assertIn('v_VDD_XLV', pkg.vsrc_dict)
+            self.assertEqual(len(pkg.package_edges), 2)
+            self.assertIn('1094400_1123200_M13', pkg.die_attachment_nodes)
+            self.assertIn('VDD_XLV_tap_00000', pkg.tap_nodes)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    # ------------------------------------------------------------------
+    # Test 4: _parse_package — brcm format
+    # ------------------------------------------------------------------
+
+    def test_parse_package_brcm_format(self):
+        """Parse brcm-style package with probe/int/vsrc infra nodes."""
+        content = (
+            "v_bmpary_bmp_VDD_VAR_0_1 bmpary_bmp_VDD_VAR_0_1_vsrc 0 VDD_VAR\n"
+            "r bmpary_bmp_VDD_VAR_0_1 bmpary_bmp_VDD_VAR_0_1_probe 0\n"
+            "r bmpary_bmp_VDD_VAR_0_1_probe bmpary_bmp_VDD_VAR_0_1_int 0.001\n"
+            "r bmpary_bmp_VDD_VAR_0_1_int bmpary_bmp_VDD_VAR_0_1_vsrc 0\n"
+            "rs 1197000_449800_86 bmpary_bmp_VDD_VAR_0_1 0\n"
+        )
+        tmpdir, parser = self._make_parser_with_package(content)
+        try:
+            pkg = parser._parse_package('VDD_VAR', 0.75)
+
+            self.assertIn('bmpary_bmp_VDD_VAR_0_1_vsrc', pkg.pad_nodes)
+            self.assertIn('1197000_449800_86', pkg.die_attachment_nodes)
+            self.assertIn('bmpary_bmp_VDD_VAR_0_1_probe', pkg.tap_nodes)
+            self.assertIn('bmpary_bmp_VDD_VAR_0_1_int', pkg.tap_nodes)
+            self.assertIn('bmpary_bmp_VDD_VAR_0_1', pkg.tap_nodes)
+            self.assertEqual(len(pkg.package_edges), 4)  # 3 r + 1 rs
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    # ------------------------------------------------------------------
+    # Test 5: _parse_package — multi-net separation
+    # ------------------------------------------------------------------
+
+    def test_parse_package_multi_net_separation(self):
+        """VDD elements filtered; VSS excluded. Die nodes are global candidates."""
+        content = (
+            "v_VDD VDD_vsrc 0 VDD\n"
+            "r VDD_vsrc VDD_tap 0.001\n"
+            "r VDD_tap 100_200_M13 0.001\n"
+            "v_VSS VSS_vsrc 0 VSS\n"
+            "r VSS_vsrc VSS_tap 0.001\n"
+            "r VSS_tap 300_400_M13 0.001\n"
+        )
+        tmpdir, parser = self._make_parser_with_package(content)
+        try:
+            pkg = parser._parse_package('VDD', 1.0)
+
+            # Only VDD vsrc
+            self.assertEqual(pkg.pad_nodes, {'VDD_vsrc'})
+            # Only VDD resistor edges
+            self.assertEqual(len(pkg.package_edges), 2)
+            # Die attachment nodes are ALL coordinate nodes (global candidates)
+            self.assertIn('100_200_M13', pkg.die_attachment_nodes)
+            self.assertIn('300_400_M13', pkg.die_attachment_nodes)
+            # Tap nodes only from VDD
+            self.assertEqual(pkg.tap_nodes, {'VDD_tap'})
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    # ------------------------------------------------------------------
+    # Test 6: _parse_package — die_net_map fallback
+    # ------------------------------------------------------------------
+
+    def test_parse_package_die_net_map_seeding(self):
+        """die_net_map seeds net labels on vsrc-less components, enabling edge filtering."""
+        # Two disconnected components in the package:
+        #   Component A: vsrc for VDD -> VDD_vsrc -- 100_200_M13 (has net label)
+        #   Component B: extra_node -- 200_300_M13 (NO vsrc, no net label)
+        content = (
+            "v_VDD VDD_vsrc 0 VDD\n"
+            "r VDD_vsrc 100_200_M13 0.001\n"
+            "r extra_node 200_300_M13 0.001\n"
+        )
+        tmpdir, parser = self._make_parser_with_package(content)
+        try:
+            # Without die_net_map: only component A (VDD) edges are filtered
+            pkg_no_map = parser._parse_package('VDD', 1.0)
+            self.assertEqual(len(pkg_no_map.package_edges), 1)
+            self.assertIn('VDD_vsrc', pkg_no_map.pad_nodes)
+
+            # With die_net_map: component B's die node seeds VDD label,
+            # so component B's edge is now also included
+            pkg_with_map = parser._parse_package(
+                'VDD', 1.0,
+                die_net_map={'200_300_M13': 'VDD'},
+            )
+            self.assertEqual(len(pkg_with_map.package_edges), 2)
+            # Die attachment nodes include both coordinate nodes
+            self.assertIn('100_200_M13', pkg_with_map.die_attachment_nodes)
+            self.assertIn('200_300_M13', pkg_with_map.die_attachment_nodes)
+            # Tap nodes: extra_node is now filtered in (non-die, non-pad)
+            self.assertIn('extra_node', pkg_with_map.tap_nodes)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    # ------------------------------------------------------------------
+    # Test 6b: _parse_package — true zero-pads fallback with die_net_map
+    # ------------------------------------------------------------------
+
+    def test_parse_package_die_net_map_no_vsrc_fallback(self):
+        """When no vsrc matches the target net, die_net_map enables filtering."""
+        # vsrc declares VDD_CORE, but we're looking for VDD_IO
+        content = (
+            "v_VDD_CORE VDD_CORE_vsrc 0 VDD_CORE\n"
+            "r VDD_CORE_vsrc 100_200_M13 0.001\n"
+            "r pkg_node 300_400_M13 0.001\n"
+        )
+        tmpdir, parser = self._make_parser_with_package(content)
+        try:
+            # Without die_net_map: no VDD_IO pads or edges
+            pkg_no_map = parser._parse_package('VDD_IO', 1.0)
+            self.assertEqual(len(pkg_no_map.pad_nodes), 0)
+            self.assertEqual(len(pkg_no_map.package_edges), 0)
+
+            # With die_net_map seeding VDD_IO on component B
+            pkg_with_map = parser._parse_package(
+                'VDD_IO', 1.0,
+                die_net_map={'300_400_M13': 'VDD_IO'},
+            )
+            # Component B's edge is now included
+            self.assertEqual(len(pkg_with_map.package_edges), 1)
+            # Still no vsrc for VDD_IO, so pad_nodes remains empty
+            self.assertEqual(len(pkg_with_map.pad_nodes), 0)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    # ------------------------------------------------------------------
+    # Test 7: _parse_package — numeric vsrc value (4th token is float)
+    # ------------------------------------------------------------------
+
+    def test_parse_package_numeric_vsrc_value(self):
+        """Numeric 4th token on vsrc: net inferred from element name."""
+        content = (
+            "V_VDD VDD_vrm 0 0.75\n"
+            "R_vrm VDD_vrm VDD_pkg 0.001\n"
+            "R_conn VDD_pkg 0_0_M3 0.02\n"
+        )
+        tmpdir, parser = self._make_parser_with_package(content)
+        try:
+            pkg = parser._parse_package('VDD', 0.75)
+
+            self.assertIn('VDD_vrm', pkg.pad_nodes)
+            self.assertEqual(len(pkg.package_edges), 2)
+            self.assertIn('0_0_M3', pkg.die_attachment_nodes)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    # ------------------------------------------------------------------
+    # Test 8: _parse_package — inductor union-find propagation
+    # ------------------------------------------------------------------
+
+    def test_parse_package_inductor_union(self):
+        """Inductors participate in union-find and become GMAX shorts in package_edges."""
+        content = (
+            "V_VDD VDD_vrm 0 0.75\n"
+            "R_vrm VDD_vrm pkg_bump 0.001\n"
+            "L_bump pkg_bump pkg_bump_l 0.05e-9\n"
+            "R_bump pkg_bump_l 100_200_M3 0.02\n"
+        )
+        tmpdir, parser = self._make_parser_with_package(content)
+        try:
+            pkg = parser._parse_package('VDD', 0.75)
+
+            # 2 R + 1 L (as GMAX short)
+            self.assertEqual(len(pkg.package_edges), 3)
+            self.assertIn('100_200_M3', pkg.die_attachment_nodes)
+
+            # All nodes reachable from VDD_vrm through inductor
+            self.assertIn('VDD_vrm', pkg.pad_nodes)
+
+            # Verify inductor edge has GMAX conductance (1e5 mS)
+            inductor_edges = [
+                (u, v, g) for u, v, g in pkg.package_edges
+                if {u, v} == {'pkg_bump', 'pkg_bump_l'}
+            ]
+            self.assertEqual(len(inductor_edges), 1)
+            self.assertAlmostEqual(inductor_edges[0][2], 1e5)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+
 if __name__ == '__main__':
     unittest.main()

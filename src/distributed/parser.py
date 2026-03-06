@@ -89,6 +89,45 @@ def _open_file(path: str):
     return open(path, 'r')
 
 
+def _is_die_coordinate_node(node: str) -> bool:
+    """Detect X_Y_* die coordinate pattern (first two _-delimited parts are digits)."""
+    parts = node.split('_')
+    return len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit()
+
+
+def _uf_find(parent: dict, node: str) -> str:
+    """Union-Find: find root with iterative path compression."""
+    if node not in parent:
+        parent[node] = node
+        return node
+    # Walk to root
+    root = node
+    while parent[root] != root:
+        root = parent[root]
+    # Path compression
+    while parent[node] != root:
+        parent[node], node = root, parent[node]
+    return root
+
+
+def _uf_union(parent: dict, uf_net: dict, node1: str, node2: str) -> None:
+    """Union-Find: union two nodes, preferring root with known net type."""
+    root1 = _uf_find(parent, node1)
+    root2 = _uf_find(parent, node2)
+    if root1 == root2:
+        return
+    net1 = uf_net.get(root1)
+    net2 = uf_net.get(root2)
+    if net1:
+        parent[root2] = root1
+        uf_net[root1] = net1
+    elif net2:
+        parent[root1] = root2
+        uf_net[root2] = net2
+    else:
+        parent[root2] = root1
+
+
 def compute_shared_boundary_nodes(per_tile_boundaries):
     """Return nodes appearing in 2+ tile boundary sets."""
     from collections import Counter
@@ -240,8 +279,26 @@ class DistributedNetlistParser:
             f"Available parameters: {list(parameters.keys())}"
         )
 
-    def _parse_package(self, net_name: str, vdd: float) -> PackageData:
-        """Parse package.ckt for voltage sources and bump connections."""
+    def _parse_package(self, net_name: str, vdd: float,
+                       die_net_map: dict = None) -> PackageData:
+        """Parse package.ckt for voltage sources and bump connections.
+
+        Uses union-find to classify nodes by net, replacing brittle
+        name-based heuristics. Each voltage source seeds its positive
+        terminal with the declared net (4th token). Resistor edges
+        propagate net labels through the union-find structure. After
+        parsing, nodes are filtered to the target *net_name*.
+
+        Parameters
+        ----------
+        net_name : str
+            Target power net (e.g. ``'VDD_XLV'``, ``'VDD_VAR'``).
+        vdd : float
+            Supply voltage for this net.
+        die_net_map : dict, optional
+            Mapping of ``{node: net}`` from worker tiles. If provided,
+            seeds the union-find with die-side net labels after parsing.
+        """
         pkg_path = self.netlist_dir / 'package.ckt'
         if not pkg_path.exists():
             pkg_gz = self.netlist_dir / 'package.ckt.gz'
@@ -253,14 +310,16 @@ class DistributedNetlistParser:
                 )
             pkg_path = pkg_gz
 
-        vsrc_dict: Dict[str, Dict] = {}
-        package_edges: List[Tuple[str, str, float]] = []
-        pad_nodes: Set[str] = set()
-        tap_nodes: Set[str] = set()
-        die_attachment_nodes: Set[str] = set()
+        # ------------------------------------------------------------------
+        # Phase 1: Parse ALL elements without net filtering
+        # ------------------------------------------------------------------
+        parent: Dict[str, str] = {}   # union-find parent
+        uf_net: Dict[str, str] = {}   # root -> net label
 
-        net_upper = net_name.upper()
-        net_lower = net_name.lower()
+        # Collected raw elements (unfiltered)
+        vsrc_list: List[Tuple[str, str, str, str]] = []   # (name, node_pos, node_neg, vsrc_net)
+        resistor_list: List[Tuple[str, str, float]] = []   # (node1, node2, g)
+        all_resistor_nodes: Set[str] = set()               # every node seen in any resistor
 
         with _open_file(str(pkg_path)) as f:
             for line in f:
@@ -272,62 +331,122 @@ class DistributedNetlistParser:
                 first = tokens[0].lower()
 
                 # Voltage source: v_VDD_XLV VDD_XLV_vsrc 0 VDD_XLV
+                #             or: V_VDD VDD_vrm 0 0.75  (numeric 4th token)
                 if first.startswith('v') and len(tokens) >= 4:
                     name = tokens[0]
                     node_pos = tokens[1]
                     node_neg = tokens[2]
-                    # Check if this vsrc belongs to our net
-                    # The 4th token is the net name reference
-                    vsrc_net = tokens[3] if len(tokens) > 3 else ''
-                    if vsrc_net.upper() == net_upper or net_lower in name.lower():
-                        vsrc_dict[name] = {
-                            'node_pos': node_pos,
-                            'node_neg': node_neg,
-                            'net': vsrc_net,
-                            'value': vdd,
-                        }
-                        pad_nodes.add(node_pos)
+                    raw_net = tokens[3]
+                    try:
+                        float(raw_net)
+                        # Numeric voltage value — infer net from element name
+                        vsrc_net = name.split('_', 1)[1] if '_' in name else name[1:]
+                    except ValueError:
+                        vsrc_net = raw_net
+                    vsrc_list.append((name, node_pos, node_neg, vsrc_net))
+                    # Seed union-find: positive terminal belongs to declared net
+                    _uf_find(parent, node_pos)
+                    uf_net[_uf_find(parent, node_pos)] = vsrc_net
 
-                # Resistor: r VDD_XLV_vsrc VDD_XLV_tap_00000 0.001
+                # Resistor (r, rs, R_name, ...): r node1 node2 value
                 elif first.startswith('r') and len(tokens) >= 4:
-                    if first[0] == 'r' and len(first) == 1:
-                        # Unnamed: r node1 node2 value
-                        node1, node2 = tokens[1], tokens[2]
-                        try:
-                            r_value = _parse_spice_value(tokens[3])
-                        except (ValueError, IndexError):
-                            continue
-                    else:
-                        # Named: R_name node1 node2 value
-                        node1, node2 = tokens[1], tokens[2]
-                        try:
-                            r_value = _parse_spice_value(tokens[3])
-                        except (ValueError, IndexError):
-                            continue
+                    node1, node2 = tokens[1], tokens[2]
+                    try:
+                        r_value = _parse_spice_value(tokens[3])
+                    except (ValueError, IndexError):
+                        continue
 
                     # Convert to kOhm then conductance (mS)
                     r_kohm = r_value * R_TO_KOHM
                     if r_kohm <= 0 or r_kohm < 1e-6:
-                        g = 1e5  # GMAX
+                        g = 1e5  # GMAX for zero-ohm shorts
                     else:
                         g = 1.0 / r_kohm
 
-                    # Check if this edge belongs to our net
-                    is_net_node1 = net_lower in node1.lower()
-                    is_net_node2 = net_lower in node2.lower()
-                    if is_net_node1 or is_net_node2:
-                        package_edges.append((node1, node2, g))
+                    resistor_list.append((node1, node2, g))
+                    all_resistor_nodes.add(node1)
+                    all_resistor_nodes.add(node2)
 
-                        # Classify nodes
-                        if 'tap' in node1.lower():
-                            tap_nodes.add(node1)
-                        if 'tap' in node2.lower():
-                            tap_nodes.add(node2)
+                    # Union the two nodes (skip ground '0')
+                    if node1 != '0' and node2 != '0':
+                        _uf_union(parent, uf_net, node1, node2)
 
-                        # Die attachment nodes (M13 nodes connected to package)
-                        for node in (node1, node2):
-                            if '_M' in node and node not in pad_nodes and 'tap' not in node.lower() and 'vsrc' not in node.lower():
-                                die_attachment_nodes.add(node)
+                # Inductor: short circuit for DC analysis
+                elif first.startswith('l') and len(tokens) >= 4:
+                    node1, node2 = tokens[1], tokens[2]
+                    resistor_list.append((node1, node2, 1e5))  # GMAX
+                    all_resistor_nodes.add(node1)
+                    all_resistor_nodes.add(node2)
+                    if node1 != '0' and node2 != '0':
+                        _uf_union(parent, uf_net, node1, node2)
+
+                # Capacitor: open for DC, but union for net label propagation
+                elif first.startswith('c') and len(tokens) >= 4:
+                    node1, node2 = tokens[1], tokens[2]
+                    if node1 != '0' and node2 != '0':
+                        _uf_union(parent, uf_net, node1, node2)
+
+        # Seed union-find with external die_net_map (worker-validated)
+        if die_net_map:
+            for node, net in die_net_map.items():
+                if node in parent:
+                    root = _uf_find(parent, node)
+                    if root not in uf_net:
+                        uf_net[root] = net
+
+        # ------------------------------------------------------------------
+        # Phase 2: Filter by target net + classify
+        # ------------------------------------------------------------------
+        net_upper = net_name.upper()
+
+        vsrc_dict: Dict[str, Dict] = {}
+        pad_nodes: Set[str] = set()
+
+        for name, node_pos, node_neg, vsrc_net in vsrc_list:
+            root = _uf_find(parent, node_pos)
+            root_net = uf_net.get(root, '')
+            if root_net.upper() == net_upper:
+                vsrc_dict[name] = {
+                    'node_pos': node_pos,
+                    'node_neg': node_neg,
+                    'net': vsrc_net,
+                    'value': vdd,
+                }
+                pad_nodes.add(node_pos)
+
+        package_edges: List[Tuple[str, str, float]] = []
+        filtered_nodes: Set[str] = set()
+
+        for node1, node2, g in resistor_list:
+            # Check if EITHER non-ground node's root net matches target
+            match = False
+            for node in (node1, node2):
+                if node == '0':
+                    continue
+                root = _uf_find(parent, node)
+                if uf_net.get(root, '').upper() == net_upper:
+                    match = True
+                    break
+            if match:
+                package_edges.append((node1, node2, g))
+                filtered_nodes.add(node1)
+                filtered_nodes.add(node2)
+
+        # die_attachment_nodes: ALL nodes from ALL resistors with die coordinate pattern
+        die_attachment_nodes: Set[str] = {
+            node for node in all_resistor_nodes
+            if _is_die_coordinate_node(node)
+        }
+
+        # tap_nodes: net-filtered nodes that are NOT die coordinates,
+        # NOT pad nodes, NOT ground, and NOT vsrc nodes
+        tap_nodes: Set[str] = set()
+        for node in filtered_nodes:
+            if (node != '0'
+                    and not _is_die_coordinate_node(node)
+                    and node not in pad_nodes
+                    and 'vsrc' not in node.lower()):
+                tap_nodes.add(node)
 
         return PackageData(
             vsrc_dict=vsrc_dict,
@@ -392,9 +511,29 @@ class DistributedNetlistParser:
         for r in worker_results:
             merged_die_map.update(r.get('die_attachment_net_map', {}))
 
-        # Update package_data with worker-validated die attachment mapping
+        # Fallback: re-parse package with die_net_map if initial parse found no pads
+        if not metadata.package_data.pad_nodes and merged_die_map:
+            logger.info(
+                "No pad nodes from initial package parse; "
+                "re-parsing with worker-validated die_net_map (%d entries)",
+                len(merged_die_map),
+            )
+            metadata.package_data = self._parse_package(
+                metadata.net_name, metadata.vdd, die_net_map=merged_die_map,
+            )
+
+        # Set die_attachment_net_map and narrow die_attachment_nodes once
         if merged_die_map:
             metadata.package_data.die_attachment_net_map = merged_die_map
+            metadata.package_data.die_attachment_nodes = set(merged_die_map.keys())
+
+        if not metadata.package_data.pad_nodes:
+            logger.warning(
+                "No pad (voltage source) nodes found for net '%s' after package parse. "
+                "The solver will likely fail with a singular matrix. "
+                "Check that package.ckt contains voltage sources for this net.",
+                metadata.net_name,
+            )
 
         # Log stats
         all_boundary_count = len(set().union(*per_tile_boundaries)) if per_tile_boundaries else 0
