@@ -42,10 +42,10 @@ def cmd_parse(args: argparse.Namespace) -> None:
 
     parser = DistributedNetlistParser(args.netlist_dir, net_filter=args.net)
     out_dir = args.output or str(Path(args.netlist_dir) / 'distributed_pkl')
-    parser.parse_and_dump(out_dir, backend=args.backend)
+    out_path, _bundle = parser.parse_and_dump(out_dir, backend=args.backend)
 
     elapsed = time.perf_counter() - t0
-    logger.info(f"parse_and_dump completed in {elapsed:.3f}s -> {out_dir}")
+    logger.info(f"parse_and_dump completed in {elapsed:.3f}s -> {out_path}")
 
 
 def cmd_solve(args: argparse.Namespace) -> None:
@@ -57,14 +57,11 @@ def cmd_solve(args: argparse.Namespace) -> None:
     args = _load_and_apply_config(args)
     t0 = time.perf_counter()
 
-    metadata, boundary_nodes, tile_data_dict = load_distributed_partitions(args.pkl_dir)
+    bundle = load_distributed_partitions(args.pkl_dir)
 
     model = create_distributed_model(
-        metadata,
+        bundle,
         backend=args.backend,
-        use_pkl=True,
-        boundary_nodes=boundary_nodes,
-        tile_data_dict=tile_data_dict,
     )
 
     try:
@@ -131,7 +128,7 @@ def cmd_solve(args: argparse.Namespace) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     """Parse + dump + solve in one shot."""
-    from .model import create_distributed_model, load_distributed_partitions
+    from .model import create_distributed_model
     from .parser import DistributedNetlistParser
     from .solver import DistributedDDMSolver
 
@@ -143,20 +140,15 @@ def cmd_run(args: argparse.Namespace) -> None:
     t0 = time.perf_counter()
     parser = DistributedNetlistParser(args.netlist_dir, net_filter=args.net)
     pkl_dir = args.pkl_dir or str(Path(args.netlist_dir) / 'distributed_pkl')
-    parser.parse_and_dump(pkl_dir, backend=args.backend)
+    _out_path, bundle = parser.parse_and_dump(pkl_dir, backend=args.backend)
     t_parse = time.perf_counter() - t0
     logger.info(f"Parse phase: {t_parse:.3f}s")
 
-    # Load and solve
+    # Create model from bundle
     t0 = time.perf_counter()
-    metadata, boundary_nodes, tile_data_dict = load_distributed_partitions(pkl_dir)
-
     model = create_distributed_model(
-        metadata,
+        bundle,
         backend=args.backend,
-        use_pkl=True,
-        boundary_nodes=boundary_nodes,
-        tile_data_dict=tile_data_dict,
     )
     t_model = time.perf_counter() - t0
     logger.info(f"Model creation: {t_model:.3f}s")

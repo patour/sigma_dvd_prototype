@@ -2876,6 +2876,7 @@ class UnifiedIRDropSolver:
             ctx = solver.prepare_distributed(netlist_dir='./netlist/netlist_sampled')
             result = solver.solve_distributed_prepared(currents, ctx)
         """
+        import warnings
         from distributed import (
             DistributedNetlistParser,
             create_distributed_model,
@@ -2893,9 +2894,12 @@ class UnifiedIRDropSolver:
             parser = DistributedNetlistParser(netlist_dir, net_filter=net)
             metadata = parser.parse_metadata()
 
-        self._distributed_model = create_distributed_model(
-            metadata, backend=backend, n_workers=n_workers, **backend_kwargs,
-        )
+        # Legacy call site -- suppress the internal deprecation warning.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            self._distributed_model = create_distributed_model(
+                metadata, backend=backend, n_workers=n_workers, **backend_kwargs,
+            )
         self._distributed_solver = DistributedDDMSolver(self._distributed_model)
         ctx = self._distributed_solver.prepare(verbose=verbose)
         return ctx

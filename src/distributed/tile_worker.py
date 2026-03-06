@@ -304,6 +304,31 @@ def parse_tile_with_instances(
     return tile_data
 
 
+def parse_and_dump_tile(
+    ckt_path, nd_path, net_filter, tile_id, instance_path,
+    output_dir, die_attachment_candidates=None, net_name=None,
+):
+    """Parse tile, dump TileData to .pkl, return lightweight metadata."""
+    import pickle
+    from pathlib import Path
+    tile_data = parse_tile_with_instances(ckt_path, nd_path, net_filter, tile_id, instance_path)
+    x, y = tile_id
+    pkl_path = Path(output_dir) / f'tile_{x}_{y}.pkl'
+    with open(pkl_path, 'wb') as f:
+        pickle.dump(tile_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    die_found = {}
+    if die_attachment_candidates and net_name:
+        die_found = {n: net_name for n in die_attachment_candidates if n in tile_data.all_nodes}
+    return {
+        'tile_id': tile_id,
+        'boundary_nodes': tile_data.boundary_nodes,
+        'die_attachment_net_map': die_found,
+        'n_nodes': len(tile_data.all_nodes),
+        'n_edges': len(tile_data.resistive_edges),
+        'n_currents': len(tile_data.current_injections),
+    }
+
+
 class TileWorker:
     """Per-tile actor for distributed DDM. Thin wrapper that delegates
     all math to coupled_system.py building blocks.
@@ -343,6 +368,13 @@ class TileWorker:
             instance_path=tc.get('instance_path'),
         )
 
+        return self._build_block_system(interface_nodes)
+
+    def setup_from_pkl(self, pkl_path, interface_nodes):
+        """Load TileData from .pkl, build block system. Worker-side I/O."""
+        import pickle
+        with open(pkl_path, 'rb') as f:
+            self._tile_data = pickle.load(f)
         return self._build_block_system(interface_nodes)
 
     def setup_from_tile_data(

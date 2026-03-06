@@ -22,7 +22,7 @@ Static and dynamic IR-drop analysis prototype for multi-layer power grids. Suppo
 # Install (editable)
 uv pip install -e ".[test]"
 
-# Run all tests (fast, ~984 tests)
+# Run all tests (fast, ~1111 tests)
 pytest
 
 # Run slow integration tests
@@ -51,6 +51,7 @@ python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --backend 
 - **Synthetic**: `generate_power_grid()` -> `create_model_from_synthetic(G, pads, vdd)` -> `UnifiedIRDropSolver`
 - **PDN**: `NetlistParser.parse()` -> `create_model_from_pdn(graph, net_name)` -> `UnifiedIRDropSolver`
 - **Multi-Net**: `NetlistParser.parse()` -> `create_multi_net_models(graph)` -> iterate models
+- **Distributed**: `DistributedNetlistParser.parse_and_dump()` -> `ParsedTileBundle` -> `create_distributed_model(bundle)` -> `DistributedDDMSolver`
 
 **Key Constraint:** Pads (voltage sources) are Dirichlet BCs at Vdd, eliminated via Schur complement. LU factorization cached for batch solves.
 
@@ -92,7 +93,7 @@ src/
 │   ├── parallel.py             # Parallel tile parsing
 │   └── edge_attrs.py           # Memory-optimized edge attributes
 ├── distributed/
-│   ├── model.py                # DistributedPowerGridModel
+│   ├── model.py                # DistributedPowerGridModel, ParsedTileBundle
 │   ├── solver.py               # DistributedDDMSolver
 │   ├── parser.py               # DistributedNetlistParser
 │   ├── tile_worker.py          # Per-tile BlockMatrixSystem actor
@@ -127,6 +128,7 @@ src/
 - **AdjointSensitivitySolver**: IR-drop attribution to aggressor current sources
 - **PWLSmoother**: Analytical triangular low-pass filter for waveform preprocessing
 - **NetlistParser**: SPICE-like tile-based netlist parsing with parallel support
+- **ParsedTileBundle**: Lightweight coordinator-side metadata for distributed model creation (no tile data)
 
 ### Legacy Module (src/legacy/)
 - `generate_power_grid()`: Creates K-layer resistor mesh with `NodeID` keys
@@ -158,6 +160,7 @@ src/
 - **Edge elem_name access**: With optimized edges (default), `elem_name` is None for most resistors. Use `data.get('elem_name', '')` not `data['elem_name']`.
 - **np.digitize binning**: Use `valid_mask` filter for out-of-range indices, NOT `np.clip`. Clamping corrupts edge bin values.
 - **Current heatmaps**: Only plot layers that have current sources (check for non-zero bins). Upper metal layers typically have none.
+- **Distributed circular imports**: `distributed/parser.py` cannot import from `distributed/model.py` at module level (model.py already imports from parser.py). Use lazy imports inside functions.
 
 ## Typical Workflow Patterns
 

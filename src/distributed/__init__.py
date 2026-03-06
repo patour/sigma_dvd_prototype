@@ -24,8 +24,10 @@ from .tile_worker import (
     TileWorker,
     TileData,
     parse_tile_with_instances,
+    parse_and_dump_tile,
 )
 from .model import (
+    ParsedTileBundle,
     DistributedPowerGridModel,
     create_distributed_model,
     load_distributed_partitions,
@@ -61,7 +63,9 @@ __all__ = [
     "TileWorker",
     "TileData",
     "parse_tile_with_instances",
+    "parse_and_dump_tile",
     # Model
+    "ParsedTileBundle",
     "DistributedPowerGridModel",
     "create_distributed_model",
     "load_distributed_partitions",

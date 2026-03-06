@@ -653,7 +653,7 @@ class TestParseAndDumpFiltering(unittest.TestCase):
             shared_bnd = parser.collect_shared_boundary_nodes(metadata.tile_configs)
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                parser.parse_and_dump(tmpdir)
+                _out_path, _bundle = parser.parse_and_dump(tmpdir)
 
                 # Load metadata.pkl and check boundary nodes
                 meta_pkl = Path(tmpdir) / 'metadata.pkl'
@@ -762,10 +762,13 @@ class TestDistributedVsFlat(unittest.TestCase):
         logging.disable(logging.WARNING)
 
         # DDM
+        import warnings
         from distributed import DistributedNetlistParser, create_distributed_model, DistributedDDMSolver
         parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
         cls.metadata = parser.parse_metadata()
-        cls.model = create_distributed_model(cls.metadata, backend='local')
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cls.model = create_distributed_model(cls.metadata, backend='local')
         cls.solver = DistributedDDMSolver(cls.model)
         cls.ctx = cls.solver.prepare()
         cls.ddm_result = cls.solver.solve_dc(context=cls.ctx)
@@ -898,12 +901,15 @@ class TestDistributedModel(unittest.TestCase):
     def test_model_creation(self):
         """Model creates successfully with correct tile count."""
         import logging
+        import warnings
         logging.disable(logging.WARNING)
         from distributed import DistributedNetlistParser, create_distributed_model
 
         parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
         metadata = parser.parse_metadata()
-        model = create_distributed_model(metadata, backend='local')
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            model = create_distributed_model(metadata, backend='local')
 
         try:
             self.assertEqual(model.n_tiles, 9)
@@ -919,12 +925,15 @@ class TestDistributedModel(unittest.TestCase):
     def test_no_overlapping_interior_nodes(self):
         """Interior nodes should be unique across tiles."""
         import logging
+        import warnings
         logging.disable(logging.WARNING)
         from distributed import DistributedNetlistParser, create_distributed_model
 
         parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
         metadata = parser.parse_metadata()
-        model = create_distributed_model(metadata, backend='local')
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            model = create_distributed_model(metadata, backend='local')
 
         try:
             # Boundary nodes can overlap, but interior counts should be consistent
@@ -951,10 +960,13 @@ class TestDistributedResult(unittest.TestCase):
         import logging
         logging.disable(logging.WARNING)
 
+        import warnings
         from distributed import DistributedNetlistParser, create_distributed_model, DistributedDDMSolver
         parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
         metadata = parser.parse_metadata()
-        cls.model = create_distributed_model(metadata, backend='local')
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cls.model = create_distributed_model(metadata, backend='local')
         solver = DistributedDDMSolver(cls.model)
         cls.result = solver.solve_dc()
         logging.disable(logging.NOTSET)
@@ -1257,13 +1269,16 @@ class TestDistributedSolverContext(unittest.TestCase):
     def test_prepare_returns_context(self):
         """prepare() returns a DistributedSolverContext with expected fields."""
         import logging
+        import warnings
         logging.disable(logging.WARNING)
         from distributed import DistributedNetlistParser, create_distributed_model, DistributedDDMSolver
         from distributed.result import DistributedSolverContext
 
         parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
         metadata = parser.parse_metadata()
-        model = create_distributed_model(metadata, backend='local')
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            model = create_distributed_model(metadata, backend='local')
 
         try:
             solver = DistributedDDMSolver(model)
@@ -1586,6 +1601,7 @@ class TestInterfaceIslandDetection(unittest.TestCase):
     def test_removed_nodes_on_context(self):
         """prepare() populates removed_interface_nodes and timing key."""
         import logging
+        import warnings
         logging.disable(logging.WARNING)
         from distributed import (
             DistributedNetlistParser,
@@ -1596,7 +1612,9 @@ class TestInterfaceIslandDetection(unittest.TestCase):
 
         parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
         metadata = parser.parse_metadata()
-        model = create_distributed_model(metadata, backend='local')
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            model = create_distributed_model(metadata, backend='local')
 
         try:
             solver = DistributedDDMSolver(model)
@@ -1629,23 +1647,26 @@ class TestRayBackend(unittest.TestCase):
     def test_ray_solve_matches_local(self):
         """Ray backend gives same result as local backend."""
         import logging
+        import warnings
         logging.disable(logging.WARNING)
         from distributed import DistributedNetlistParser, create_distributed_model, DistributedDDMSolver
 
         parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
         metadata = parser.parse_metadata()
 
-        # Local solve
-        model_local = create_distributed_model(metadata, backend='local')
-        solver_local = DistributedDDMSolver(model_local)
-        result_local = solver_local.solve_dc()
-        v_local = result_local.flatten()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            # Local solve
+            model_local = create_distributed_model(metadata, backend='local')
+            solver_local = DistributedDDMSolver(model_local)
+            result_local = solver_local.solve_dc()
+            v_local = result_local.flatten()
 
-        # Ray solve
-        model_ray = create_distributed_model(metadata, backend='ray')
-        solver_ray = DistributedDDMSolver(model_ray)
-        result_ray = solver_ray.solve_dc()
-        v_ray = result_ray.flatten()
+            # Ray solve
+            model_ray = create_distributed_model(metadata, backend='ray')
+            solver_ray = DistributedDDMSolver(model_ray)
+            result_ray = solver_ray.solve_dc()
+            v_ray = result_ray.flatten()
 
         try:
             self.assertEqual(len(v_local), len(v_ray))
@@ -1691,7 +1712,7 @@ class TestParseAndDumpRay(unittest.TestCase):
 
             with tempfile.TemporaryDirectory() as local_dir, \
                  tempfile.TemporaryDirectory() as ray_dir:
-                parser.parse_and_dump(local_dir, backend='local')
+                parser.parse_and_dump(local_dir, backend='local')  # returns (Path, bundle)
                 parser.parse_and_dump(ray_dir, backend='ray')
 
                 # Load metadata.pkl from both
@@ -1786,6 +1807,7 @@ class TestBenchmarkDDMVsFlat(unittest.TestCase):
     def _run_ddm(backend='local'):
         """Run DDM pipeline. Returns (voltages_dict, timings_dict, model)."""
         import time
+        import warnings
         from distributed import DistributedNetlistParser, create_distributed_model, DistributedDDMSolver
 
         t0 = time.perf_counter()
@@ -1794,7 +1816,9 @@ class TestBenchmarkDDMVsFlat(unittest.TestCase):
         t_parse = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        model = create_distributed_model(metadata, backend=backend)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            model = create_distributed_model(metadata, backend=backend)
         t_model = time.perf_counter() - t0
 
         solver = DistributedDDMSolver(model)
@@ -2071,7 +2095,7 @@ class TestPklRoundTrip(unittest.TestCase):
             parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                parser.parse_and_dump(tmpdir)
+                _out_path, _bundle = parser.parse_and_dump(tmpdir)
 
                 # Check metadata.pkl exists
                 meta_pkl = Path(tmpdir) / 'metadata.pkl'
@@ -2103,45 +2127,48 @@ class TestPklRoundTrip(unittest.TestCase):
             original_metadata = parser.parse_metadata()
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                parser.parse_and_dump(tmpdir)
-                loaded_meta, loaded_bnd, loaded_tiles = load_distributed_partitions(tmpdir)
+                _out_path, _bundle = parser.parse_and_dump(tmpdir)
+                bundle = load_distributed_partitions(tmpdir)
 
                 # Metadata fields
-                self.assertEqual(loaded_meta.tile_grid, original_metadata.tile_grid)
-                self.assertEqual(loaded_meta.net_name, original_metadata.net_name)
-                self.assertAlmostEqual(loaded_meta.vdd, original_metadata.vdd, places=6)
+                self.assertEqual(bundle.metadata.tile_grid, original_metadata.tile_grid)
+                self.assertEqual(bundle.metadata.net_name, original_metadata.net_name)
+                self.assertAlmostEqual(bundle.metadata.vdd, original_metadata.vdd, places=6)
                 self.assertEqual(
-                    len(loaded_meta.tile_configs),
+                    len(bundle.metadata.tile_configs),
                     len(original_metadata.tile_configs),
                 )
 
                 # Boundary nodes should be non-empty
-                self.assertGreater(len(loaded_bnd), 0)
+                self.assertGreater(len(bundle.shared_boundary_nodes), 0)
 
-                # Tile data dict keys match tile configs
-                expected_ids = {tc.tile_id for tc in original_metadata.tile_configs}
-                self.assertEqual(set(loaded_tiles.keys()), expected_ids)
+                # pkl_dir should be set
+                self.assertEqual(bundle.pkl_dir, tmpdir)
         finally:
             logging.disable(logging.NOTSET)
 
     def test_round_trip_tile_data_preserved(self):
         """TileData round-trips through pickle without data loss."""
         import logging
+        import pickle
         logging.disable(logging.WARNING)
         from distributed.parser import DistributedNetlistParser
-        from distributed.model import load_distributed_partitions
-        from distributed.tile_worker import _parse_tile_ckt, _parse_instance_models
+        from distributed.tile_worker import TileData, _parse_tile_ckt, _parse_instance_models
 
         try:
             parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
             metadata = parser.parse_metadata()
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                parser.parse_and_dump(tmpdir)
-                _, _, loaded_tiles = load_distributed_partitions(tmpdir)
+                _out_path, _bundle = parser.parse_and_dump(tmpdir)
+
+                # Load first tile pkl directly
+                tc = metadata.tile_configs[0]
+                x, y = tc.tile_id
+                with open(Path(tmpdir) / f'tile_{x}_{y}.pkl', 'rb') as f:
+                    loaded = pickle.load(f)
 
                 # Compare first tile's data
-                tc = metadata.tile_configs[0]
                 expected = _parse_tile_ckt(tc.ckt_path, tc.nd_path, tc.net_filter, tc.tile_id)
                 if tc.instance_path:
                     inst = _parse_instance_models(tc.instance_path, tc.net_filter, tc.nd_path)
@@ -2151,8 +2178,7 @@ class TestPklRoundTrip(unittest.TestCase):
                                 expected.current_injections.get(node, 0.0) + current
                             )
 
-                loaded = loaded_tiles[tc.tile_id]
-
+                self.assertIsInstance(loaded, TileData)
                 self.assertEqual(loaded.tile_id, expected.tile_id)
                 self.assertEqual(loaded.all_nodes, expected.all_nodes)
                 self.assertEqual(loaded.boundary_nodes, expected.boundary_nodes)
@@ -2179,14 +2205,14 @@ class TestPklRoundTrip(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 load_distributed_partitions(tmpdir)
 
-    def test_load_no_tiles_raises(self):
-        """load_distributed_partitions() raises ValueError if no tile pkls."""
+    def test_load_returns_bundle(self):
+        """load_distributed_partitions() returns ParsedTileBundle from metadata.pkl."""
         import pickle
-        from distributed.model import load_distributed_partitions
+        from distributed.model import load_distributed_partitions, ParsedTileBundle
         from distributed.parser import PowerGridMetaData, PackageData
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Write a minimal metadata.pkl with no tile files
+            # Write a minimal metadata.pkl
             dummy_meta = PowerGridMetaData(
                 tile_grid=(1, 1),
                 parameters={},
@@ -2203,8 +2229,11 @@ class TestPklRoundTrip(unittest.TestCase):
             with open(meta_path, 'wb') as f:
                 pickle.dump({'metadata': dummy_meta, 'boundary_nodes': set()}, f)
 
-            with self.assertRaises(ValueError):
-                load_distributed_partitions(tmpdir)
+            bundle = load_distributed_partitions(tmpdir)
+            self.assertIsInstance(bundle, ParsedTileBundle)
+            self.assertEqual(bundle.metadata.net_name, 'VDD')
+            self.assertEqual(bundle.shared_boundary_nodes, set())
+            self.assertEqual(bundle.pkl_dir, tmpdir)
 
 
 @unittest.skipUnless(NETLIST_SAMPLED_EXISTS, "netlist_sampled not available")
@@ -2214,6 +2243,7 @@ class TestPklSolveMatchesDirect(unittest.TestCase):
     def test_pkl_solve_matches_direct(self):
         """DDM solve from pkl files gives same voltages as DDM solve from .ckt files."""
         import logging
+        import warnings
         logging.disable(logging.WARNING)
         from distributed import (
             DistributedNetlistParser,
@@ -2223,26 +2253,21 @@ class TestPklSolveMatchesDirect(unittest.TestCase):
         from distributed.model import load_distributed_partitions
 
         try:
-            # Direct DDM solve (from .ckt files)
+            # Direct DDM solve (from .ckt files, legacy path)
             parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
             metadata_direct = parser.parse_metadata()
-            model_direct = create_distributed_model(metadata_direct, backend='local')
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                model_direct = create_distributed_model(metadata_direct, backend='local')
             solver_direct = DistributedDDMSolver(model_direct)
             result_direct = solver_direct.solve_dc()
             v_direct = result_direct.flatten()
 
-            # PKL-based DDM solve
+            # PKL-based DDM solve (new ParsedTileBundle path)
             with tempfile.TemporaryDirectory() as tmpdir:
-                parser.parse_and_dump(tmpdir)
-                metadata_pkl, bnd_nodes, tile_data = load_distributed_partitions(tmpdir)
+                _out_path, bundle = parser.parse_and_dump(tmpdir)
 
-                model_pkl = create_distributed_model(
-                    metadata_pkl,
-                    backend='local',
-                    use_pkl=True,
-                    boundary_nodes=bnd_nodes,
-                    tile_data_dict=tile_data,
-                )
+                model_pkl = create_distributed_model(bundle, backend='local')
                 solver_pkl = DistributedDDMSolver(model_pkl)
                 result_pkl = solver_pkl.solve_dc()
                 v_pkl = result_pkl.flatten()
@@ -2280,7 +2305,6 @@ class TestPklSolveMatchesDirect(unittest.TestCase):
             create_distributed_model,
             DistributedDDMSolver,
         )
-        from distributed.model import load_distributed_partitions
 
         try:
             # Flat solver
@@ -2292,20 +2316,13 @@ class TestPklSolveMatchesDirect(unittest.TestCase):
             result_flat = solver_flat.solve(load_currents)
             v_flat = result_flat.voltages
 
-            # PKL DDM
+            # PKL DDM (new ParsedTileBundle path)
             dist_parser = DistributedNetlistParser(NETLIST_SAMPLED_DIR, net_filter='VDD_XLV')
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                dist_parser.parse_and_dump(tmpdir)
-                metadata_pkl, bnd_nodes, tile_data = load_distributed_partitions(tmpdir)
+                _out_path, bundle = dist_parser.parse_and_dump(tmpdir)
 
-                model_pkl = create_distributed_model(
-                    metadata_pkl,
-                    backend='local',
-                    use_pkl=True,
-                    boundary_nodes=bnd_nodes,
-                    tile_data_dict=tile_data,
-                )
+                model_pkl = create_distributed_model(bundle, backend='local')
                 solver_pkl = DistributedDDMSolver(model_pkl)
                 result_pkl = solver_pkl.solve_dc()
                 v_pkl = result_pkl.flatten()

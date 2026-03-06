@@ -125,16 +125,8 @@ class TestFlatVsDistributedConsistency:
         from distributed.model import create_distributed_model, load_distributed_partitions
         from distributed.solver import DistributedDDMSolver
 
-        metadata, boundary_nodes, tile_data_dict = load_distributed_partitions(
-            str(DISTRIBUTED_PKL_DIR)
-        )
-        model = create_distributed_model(
-            metadata,
-            backend='local',
-            use_pkl=True,
-            boundary_nodes=boundary_nodes,
-            tile_data_dict=tile_data_dict,
-        )
+        bundle = load_distributed_partitions(str(DISTRIBUTED_PKL_DIR))
+        model = create_distributed_model(bundle, backend='local')
 
         try:
             solver = DistributedDDMSolver(model)
@@ -160,16 +152,8 @@ class TestFlatVsDistributedConsistency:
         from distributed.solver import DistributedDDMSolver
         from reports.floating_nodes import collect_floating_nodes_distributed
 
-        metadata, boundary_nodes, tile_data_dict = load_distributed_partitions(
-            str(DISTRIBUTED_PKL_DIR)
-        )
-        model = create_distributed_model(
-            metadata,
-            backend='local',
-            use_pkl=True,
-            boundary_nodes=boundary_nodes,
-            tile_data_dict=tile_data_dict,
-        )
+        bundle = load_distributed_partitions(str(DISTRIBUTED_PKL_DIR))
+        model = create_distributed_model(bundle, backend='local')
 
         try:
             solver = DistributedDDMSolver(model)

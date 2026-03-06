@@ -21,6 +21,20 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class ParsedTileBundle:
+    """Lightweight coordinator-side metadata produced by parse_and_dump().
+
+    Contains only what the coordinator needs to orchestrate workers --
+    no per-tile graph data. Workers load their own TileData from pkl files
+    via ``setup_from_pkl()``.
+    """
+
+    metadata: PowerGridMetaData
+    shared_boundary_nodes: Set[str]
+    pkl_dir: str
+
+
+@dataclass
 class DistributedPowerGridModel:
     """Distributed power grid model. Holds workers, package, metadata.
 
@@ -44,6 +58,9 @@ class DistributedPowerGridModel:
     metadata: PowerGridMetaData
     island_stats: Dict[Tuple[int, int], Dict] = field(default_factory=dict)
     tile_kept_nonlargest_iface: Dict[Tuple[int, int], List[str]] = field(default_factory=dict)
+
+    # Internal: temp pkl_dir created by legacy shim (cleaned up in shutdown)
+    _owns_pkl_dir: Optional[str] = field(default=None, repr=False)
 
     @property
     def tile_ids(self) -> List[Tuple[int, int]]:
@@ -70,17 +87,21 @@ class DistributedPowerGridModel:
         return self.metadata.tile_grid
 
     def shutdown(self):
-        """Release backend resources."""
+        """Release backend resources and clean up temp directories."""
         self.backend.shutdown()
+        if self._owns_pkl_dir:
+            import shutil
+            shutil.rmtree(self._owns_pkl_dir, ignore_errors=True)
+            self._owns_pkl_dir = None
 
 
 def load_distributed_partitions(
     pkl_dir: str,
-) -> Tuple[PowerGridMetaData, Set[str], Dict[Tuple[int, int], TileData]]:
-    """Load pre-parsed tile partitions and metadata from .pkl files.
+) -> ParsedTileBundle:
+    """Load pre-parsed metadata from .pkl files and return a ParsedTileBundle.
 
-    Reads metadata.pkl (PowerGridMetaData + boundary_nodes) and all
-    tile_X_Y.pkl files (TileData) produced by parse_and_dump().
+    Reads only ``metadata.pkl`` (PowerGridMetaData + boundary_nodes).
+    Tile .pkl files are loaded lazily by workers via ``setup_from_pkl()``.
 
     .. warning::
         Uses ``pickle.load()`` which can execute arbitrary code. Only load
@@ -91,15 +112,12 @@ def load_distributed_partitions(
         pkl_dir: Directory containing metadata.pkl and tile_X_Y.pkl files
 
     Returns:
-        Tuple of (metadata, boundary_nodes, tile_data_dict) where
-        tile_data_dict maps tile_id -> TileData
+        ParsedTileBundle with metadata, shared_boundary_nodes, and pkl_dir.
 
     Raises:
         FileNotFoundError: If metadata.pkl is missing
         TypeError: If loaded objects have unexpected types
-        ValueError: If no tile .pkl files are found
     """
-    import re
     pkl_path = Path(pkl_dir)
 
     # Load metadata
@@ -127,140 +145,49 @@ def load_distributed_partitions(
     metadata: PowerGridMetaData = meta_bundle['metadata']
     boundary_nodes: Set[str] = meta_bundle['boundary_nodes']
 
-    # Discover and load tile .pkl files
-    tile_pkl_re = re.compile(r'tile_(\d+)_(\d+)\.pkl$')
-    tile_data_dict: Dict[Tuple[int, int], TileData] = {}
-
-    for p in sorted(pkl_path.glob('tile_*.pkl')):
-        m = tile_pkl_re.match(p.name)
-        if m:
-            tid = (int(m.group(1)), int(m.group(2)))
-            with open(p, 'rb') as f:
-                td = pickle.load(f)
-            if not isinstance(td, TileData):
-                raise TypeError(
-                    f"{p.name} must contain a TileData instance, "
-                    f"got {type(td).__name__}"
-                )
-            tile_data_dict[tid] = td
-
-    if not tile_data_dict:
-        raise ValueError(f"No tile_X_Y.pkl files found in {pkl_dir}")
-
     logger.info(
-        f"Loaded {len(tile_data_dict)} tile partitions + metadata from {pkl_dir}"
+        f"Loaded metadata from {pkl_dir}: {len(metadata.tile_configs)} tiles, "
+        f"{len(boundary_nodes)} shared boundary nodes"
     )
 
-    return metadata, boundary_nodes, tile_data_dict
+    return ParsedTileBundle(
+        metadata=metadata,
+        shared_boundary_nodes=boundary_nodes,
+        pkl_dir=str(pkl_path),
+    )
 
 
-def create_distributed_model(
-    metadata: PowerGridMetaData,
-    backend: str = 'local',
-    n_workers: Optional[int] = None,
-    use_pkl: bool = False,
-    pkl_dir: Optional[str] = None,
-    boundary_nodes: Optional[Set[str]] = None,
-    tile_data_dict: Optional[Dict[Tuple[int, int], TileData]] = None,
-    **backend_kwargs,
-) -> DistributedPowerGridModel:
-    """Factory function for distributed model (analogous to create_model_from_pdn).
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-    1. Create backend (LocalBackend or RayBackend)
-    2. Compute interface_nodes = boundary_nodes union package.die_attachment_nodes
-    3. Create TileWorker actors via backend
-    4. Workers parse tile files (or load TileData), classify boundary/interior, detect floating islands
-    5. Collect per-tile boundary node lists and metadata
-    6. Return DistributedPowerGridModel
-
-    Args:
-        metadata: PowerGridMetaData from DistributedNetlistParser
-        backend: 'local' or 'ray'
-        n_workers: Number of workers (only for ray backend)
-        use_pkl: If True, use pre-parsed TileData from pkl files instead of
-            re-parsing .ckt files. Requires either (pkl_dir) or
-            (boundary_nodes + tile_data_dict) to be provided.
-        pkl_dir: Directory containing tile_X_Y.pkl files (used when use_pkl=True).
-            If provided, boundary_nodes and tile_data_dict are loaded from it.
-        boundary_nodes: Pre-collected boundary nodes (used when use_pkl=True).
-            Alternative to pkl_dir when TileData is already in memory.
-        tile_data_dict: Pre-loaded tile data dict (used when use_pkl=True).
-            Alternative to pkl_dir when TileData is already in memory.
-        **backend_kwargs: Extra kwargs passed to backend.initialize()
-    """
-    t_start = time.perf_counter()
-
-    # 1. Create backend
+def _init_backend(
+    backend: str, backend_kwargs: Dict[str, Any],
+) -> ComputeBackend:
+    """Create and initialize compute backend."""
     if backend == 'ray':
         be = RayBackend()
         be.initialize(**backend_kwargs)
     else:
         be = LocalBackend()
         be.initialize()
+    return be
 
-    # 2. Collect boundary nodes
-    if use_pkl:
-        # Load from pkl if directory given but data not provided
-        if pkl_dir is not None and (boundary_nodes is None or tile_data_dict is None):
-            _, boundary_nodes, tile_data_dict = load_distributed_partitions(pkl_dir)
-        if boundary_nodes is None or tile_data_dict is None:
-            raise ValueError(
-                "use_pkl=True requires either pkl_dir or both "
-                "boundary_nodes and tile_data_dict"
-            )
-    else:
-        # Original path: pre-scan .ckt files for boundary nodes
-        from .parser import DistributedNetlistParser
-        parser = DistributedNetlistParser(str(metadata.tile_configs[0].ckt_path).rsplit('/', 1)[0])
-        boundary_nodes = parser.collect_shared_boundary_nodes(metadata.tile_configs)
 
-    # Interface = boundary nodes + die attachment nodes from package
-    interface_nodes = boundary_nodes | metadata.package_data.die_attachment_nodes
-    logger.info(
-        f"Interface: {len(interface_nodes)} nodes "
-        f"({len(boundary_nodes)} boundary + {len(metadata.package_data.die_attachment_nodes)} die attachment)"
-    )
+def _collect_setup_results(
+    setup_results: List[Dict[str, Any]],
+) -> Tuple[
+    Dict[Tuple[int, int], List[str]],
+    Dict[Tuple[int, int], int],
+    Dict[Tuple[int, int], Dict],
+    Dict[Tuple[int, int], List[str]],
+]:
+    """Parse worker setup results into per-tile dicts.
 
-    # 3. Create workers
-    workers = be.create_actors(TileWorker, metadata.tile_configs)
-
-    # 4. Setup workers
-    if use_pkl:
-        # Validate all expected tile IDs are present in tile_data_dict
-        expected_ids = {tc.tile_id for tc in metadata.tile_configs}
-        available_ids = set(tile_data_dict.keys())
-        missing_ids = expected_ids - available_ids
-        if missing_ids:
-            raise ValueError(
-                f"tile_data_dict is missing {len(missing_ids)} tile(s) "
-                f"expected by metadata.tile_configs: {sorted(missing_ids)}"
-            )
-
-        # Use pre-parsed TileData — no file I/O on workers
-        setup_args = [
-            (tile_data_dict[tc.tile_id], interface_nodes)
-            for tc in metadata.tile_configs
-        ]
-        setup_results = be.call_all(workers, 'setup_from_tile_data', setup_args)
-    else:
-        # Original path: parse tile files on each worker
-        tile_configs_as_dicts = [
-            {
-                'tile_id': list(tc.tile_id),
-                'ckt_path': tc.ckt_path,
-                'nd_path': tc.nd_path,
-                'instance_path': tc.instance_path,
-                'net_filter': tc.net_filter,
-            }
-            for tc in metadata.tile_configs
-        ]
-
-        setup_args = [
-            (cfg, interface_nodes) for cfg in tile_configs_as_dicts
-        ]
-        setup_results = be.call_all(workers, 'setup', setup_args)
-
-    # 5. Collect results
+    Returns:
+        (tile_boundary_nodes, tile_interior_counts, island_stats,
+         tile_kept_nonlargest_iface)
+    """
     tile_boundary_nodes: Dict[Tuple[int, int], List[str]] = {}
     tile_interior_counts: Dict[Tuple[int, int], int] = {}
     island_stats: Dict[Tuple[int, int], Dict] = {}
@@ -272,6 +199,211 @@ def create_distributed_model(
         tile_interior_counts[tid] = result['n_interior']
         island_stats[tid] = {'islands_removed': result['islands_removed']}
         tile_kept_nonlargest_iface[tid] = result.get('kept_nonlargest_iface', [])
+
+    return tile_boundary_nodes, tile_interior_counts, island_stats, tile_kept_nonlargest_iface
+
+
+def create_distributed_model(
+    bundle_or_metadata,
+    backend: str = 'local',
+    n_workers: Optional[int] = None,
+    # Legacy kwargs (deprecated -- use ParsedTileBundle instead)
+    use_pkl: bool = False,
+    pkl_dir: Optional[str] = None,
+    boundary_nodes: Optional[Set[str]] = None,
+    tile_data_dict: Optional[Dict[Tuple[int, int], TileData]] = None,
+    **backend_kwargs,
+) -> DistributedPowerGridModel:
+    """Factory function for distributed model (analogous to create_model_from_pdn).
+
+    Primary path (recommended):
+        Pass a ``ParsedTileBundle`` as the first argument. Workers load
+        their own TileData from pkl files via ``setup_from_pkl()``.
+
+    Legacy path (deprecated):
+        Pass a ``PowerGridMetaData`` as the first argument with optional
+        ``use_pkl``, ``pkl_dir``, ``boundary_nodes``, ``tile_data_dict``
+        kwargs. Emits ``DeprecationWarning``.
+
+    Args:
+        bundle_or_metadata: A ``ParsedTileBundle`` (new) or
+            ``PowerGridMetaData`` (legacy, deprecated).
+        backend: 'local' or 'ray'
+        n_workers: Number of workers (only for ray backend)
+        use_pkl: (Deprecated) If True, use pre-parsed TileData.
+        pkl_dir: (Deprecated) Directory containing tile_X_Y.pkl files.
+        boundary_nodes: (Deprecated) Pre-collected boundary nodes.
+        tile_data_dict: (Deprecated) Pre-loaded tile data dict.
+        **backend_kwargs: Extra kwargs passed to backend.initialize()
+    """
+    import warnings
+
+    # ── Backward-compat shim: adapt legacy PowerGridMetaData call ──
+    _legacy_temp_dir = None
+    if isinstance(bundle_or_metadata, PowerGridMetaData):
+        warnings.warn(
+            "Passing PowerGridMetaData to create_distributed_model() is "
+            "deprecated. Pass a ParsedTileBundle instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        bundle = _adapt_legacy_args(
+            bundle_or_metadata,
+            use_pkl=use_pkl,
+            pkl_dir=pkl_dir,
+            boundary_nodes=boundary_nodes,
+            tile_data_dict=tile_data_dict,
+        )
+        # Track temp dirs created by sub-cases 2 & 3 for cleanup
+        if bundle.pkl_dir != pkl_dir:
+            _legacy_temp_dir = bundle.pkl_dir
+    elif isinstance(bundle_or_metadata, ParsedTileBundle):
+        bundle = bundle_or_metadata
+    else:
+        raise TypeError(
+            f"Expected ParsedTileBundle or PowerGridMetaData, "
+            f"got {type(bundle_or_metadata).__name__}"
+        )
+
+    model = _create_distributed_model_from_bundle(bundle, backend, **backend_kwargs)
+    if _legacy_temp_dir:
+        model._owns_pkl_dir = _legacy_temp_dir
+    return model
+
+
+def _adapt_legacy_args(
+    metadata: PowerGridMetaData,
+    use_pkl: bool,
+    pkl_dir: Optional[str],
+    boundary_nodes: Optional[Set[str]],
+    tile_data_dict: Optional[Dict[Tuple[int, int], TileData]],
+) -> ParsedTileBundle:
+    """Convert legacy create_distributed_model() kwargs into a ParsedTileBundle.
+
+    Handles three sub-cases:
+    1. use_pkl + pkl_dir -> load metadata from pkl, return bundle
+    2. use_pkl + boundary_nodes + tile_data_dict -> dump to temp dir, return bundle
+    3. Not use_pkl -> scan .ckt for boundary nodes, dump tiles to temp dir, return bundle
+    """
+    import tempfile
+
+    if use_pkl and pkl_dir is not None:
+        # Sub-case 1: pkl_dir exists, just load metadata
+        loaded = load_distributed_partitions(pkl_dir)
+        return loaded
+
+    if use_pkl and boundary_nodes is not None and tile_data_dict is not None:
+        # Sub-case 2: in-memory TileData, dump to temp dir
+        tmp_dir = tempfile.mkdtemp(prefix='dist_model_')
+        _dump_tile_data_to_dir(metadata, boundary_nodes, tile_data_dict, tmp_dir)
+        return ParsedTileBundle(
+            metadata=metadata,
+            shared_boundary_nodes=boundary_nodes,
+            pkl_dir=tmp_dir,
+        )
+
+    if use_pkl:
+        raise ValueError(
+            "use_pkl=True requires either pkl_dir or both "
+            "boundary_nodes and tile_data_dict"
+        )
+
+    # Sub-case 3: no pkl, scan .ckt files
+    from .parser import DistributedNetlistParser
+    parser = DistributedNetlistParser(
+        str(metadata.tile_configs[0].ckt_path).rsplit('/', 1)[0]
+    )
+    bnd_nodes = parser.collect_shared_boundary_nodes(metadata.tile_configs)
+
+    # Need to dump tiles to a temp dir so workers can use setup_from_pkl
+    tmp_dir = tempfile.mkdtemp(prefix='dist_model_')
+    # Parse tiles and dump
+    from .backend import LocalBackend
+    from .tile_worker import parse_tile_with_instances
+    be = LocalBackend()
+    be.initialize()
+
+    args_list = [
+        (tc.ckt_path, tc.nd_path, tc.net_filter, tc.tile_id, tc.instance_path)
+        for tc in metadata.tile_configs
+    ]
+    tile_results = be.map_func(parse_tile_with_instances, args_list)
+    tile_data_dict_local = {}
+    for tc, td in zip(metadata.tile_configs, tile_results):
+        tile_data_dict_local[tc.tile_id] = td
+    _dump_tile_data_to_dir(metadata, bnd_nodes, tile_data_dict_local, tmp_dir)
+    return ParsedTileBundle(
+        metadata=metadata,
+        shared_boundary_nodes=bnd_nodes,
+        pkl_dir=tmp_dir,
+    )
+
+
+def _dump_tile_data_to_dir(
+    metadata: PowerGridMetaData,
+    boundary_nodes: Set[str],
+    tile_data_dict: Dict[Tuple[int, int], TileData],
+    output_dir: str,
+) -> None:
+    """Dump TileData + metadata to a directory (helper for legacy shim)."""
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    for tid, td in tile_data_dict.items():
+        x, y = tid
+        with open(out / f'tile_{x}_{y}.pkl', 'wb') as f:
+            pickle.dump(td, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with open(out / 'metadata.pkl', 'wb') as f:
+        pickle.dump(
+            {'metadata': metadata, 'boundary_nodes': boundary_nodes},
+            f, protocol=pickle.HIGHEST_PROTOCOL,
+        )
+
+
+def _create_distributed_model_from_bundle(
+    bundle: ParsedTileBundle,
+    backend: str = 'local',
+    **backend_kwargs,
+) -> DistributedPowerGridModel:
+    """Core factory: create model from a ParsedTileBundle.
+
+    Single code path: workers load their TileData from pkl files via
+    ``setup_from_pkl()``.
+    """
+    t_start = time.perf_counter()
+    metadata = bundle.metadata
+
+    # 1. Create backend
+    be = _init_backend(backend, backend_kwargs)
+
+    # 2. Compute interface nodes
+    die_net_map = getattr(metadata.package_data, 'die_attachment_net_map', {})
+    interface_nodes = (
+        bundle.shared_boundary_nodes
+        | set(die_net_map.keys())
+        | metadata.package_data.die_attachment_nodes
+    )
+    logger.info(
+        f"Interface: {len(interface_nodes)} nodes "
+        f"({len(bundle.shared_boundary_nodes)} boundary + "
+        f"{len(metadata.package_data.die_attachment_nodes)} die attachment)"
+    )
+
+    # 3. Create workers
+    workers = be.create_actors(TileWorker, metadata.tile_configs)
+
+    # 4. Setup workers: each loads its own .pkl and builds block system
+    pkl_path = Path(bundle.pkl_dir)
+    setup_args = [
+        (str(pkl_path / f'tile_{tc.tile_id[0]}_{tc.tile_id[1]}.pkl'), interface_nodes)
+        for tc in metadata.tile_configs
+    ]
+    setup_results = be.call_all(workers, 'setup_from_pkl', setup_args)
+
+    # 5. Collect results
+    (tile_boundary_nodes, tile_interior_counts,
+     island_stats, tile_kept_nonlargest_iface) = _collect_setup_results(setup_results)
 
     total_interior = sum(tile_interior_counts.values())
     total_boundary = sum(len(v) for v in tile_boundary_nodes.values())

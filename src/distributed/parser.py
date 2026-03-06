@@ -58,6 +58,7 @@ class PackageData:
     die_attachment_nodes: Set[str]  # M13 die nodes promoted to interface
     vdd: float
     net_name: str
+    die_attachment_net_map: Dict[str, str] = field(default_factory=dict)  # node → net (worker-validated)
 
 
 @dataclass
@@ -86,6 +87,15 @@ def _open_file(path: str):
     if path.endswith('.gz') or _is_gzip_file(path):
         return gzip.open(path, 'rt')
     return open(path, 'r')
+
+
+def compute_shared_boundary_nodes(per_tile_boundaries):
+    """Return nodes appearing in 2+ tile boundary sets."""
+    from collections import Counter
+    tile_count = Counter()
+    for boundary_set in per_tile_boundaries:
+        tile_count.update(boundary_set)
+    return {node for node, count in tile_count.items() if count >= 2}
 
 
 class DistributedNetlistParser:
@@ -329,7 +339,7 @@ class DistributedNetlistParser:
             net_name=net_name,
         )
 
-    def parse_and_dump(self, output_dir: str, backend: str = 'local') -> Path:
+    def parse_and_dump(self, output_dir: str, backend: str = 'local'):
         """Parse netlist and dump per-tile TileData + metadata as .pkl files.
 
         Creates output_dir (if needed) with:
@@ -337,68 +347,71 @@ class DistributedNetlistParser:
           - metadata.pkl  with ``{'metadata': PowerGridMetaData,
             'boundary_nodes': Set[str]}``
 
-        Boundary nodes stored in ``metadata.pkl`` are **shared** nodes only --
-        those appearing in 2 or more tiles.  Single-tile-only boundary nodes
-        are filtered out to reduce per-tile Schur complement cost.
+        Workers parse AND dump their own tiles in parallel. The coordinator
+        collects only lightweight per-tile boundary/die-attachment metadata,
+        merges them, and writes ``metadata.pkl``.
 
         Args:
             output_dir: Directory to write .pkl files into
             backend: Compute backend for tile parsing ('local' or 'ray')
 
         Returns:
-            Path to output_dir
+            Tuple of (Path to output_dir, ParsedTileBundle).
         """
         import pickle
-        from collections import Counter
         from .backend import LocalBackend, RayBackend
-        from .tile_worker import parse_tile_with_instances
+        from .tile_worker import parse_and_dump_tile
 
         out_path = Path(output_dir)
         out_path.mkdir(parents=True, exist_ok=True)
 
-        # 1. Parse metadata (tile configs + package data)
+        # 1. Parse coordinator-side metadata (tile configs + package data)
         metadata = self.parse_metadata()
 
-        # 2. Parse all tiles (locally or distributed via Ray)
+        # 2. Workers parse + dump tiles in parallel
         be = RayBackend() if backend == 'ray' else LocalBackend()
         be.initialize()
 
+        die_candidates = metadata.package_data.die_attachment_nodes
+        net_name = metadata.net_name
+
         args_list = [
-            (tc.ckt_path, tc.nd_path, tc.net_filter, tc.tile_id, tc.instance_path)
+            (
+                tc.ckt_path, tc.nd_path, tc.net_filter, tc.tile_id,
+                tc.instance_path, str(out_path), die_candidates, net_name,
+            )
             for tc in metadata.tile_configs
         ]
-        tile_results = be.map_func(parse_tile_with_instances, args_list)
+        worker_results = be.map_func(parse_and_dump_tile, args_list)
 
-        # 3. Dump each TileData and track per-node tile counts
-        boundary_tile_count: Counter = Counter()
-        for tc, tile_data in zip(metadata.tile_configs, tile_results):
-            # Count each boundary node once per tile it appears in
-            boundary_tile_count.update(tile_data.boundary_nodes)
+        # 3. Merge per-tile boundary nodes + die_attachment_net_map
+        per_tile_boundaries = [r['boundary_nodes'] for r in worker_results]
+        shared_boundary_nodes = compute_shared_boundary_nodes(per_tile_boundaries)
 
-            # Dump tile data
-            x, y = tc.tile_id
-            tile_pkl_path = out_path / f'tile_{x}_{y}.pkl'
-            with open(tile_pkl_path, 'wb') as f:
-                pickle.dump(tile_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        merged_die_map: Dict[str, str] = {}
+        for r in worker_results:
+            merged_die_map.update(r.get('die_attachment_net_map', {}))
 
-            logger.info(
-                f"Tile ({x},{y}): {len(tile_data.all_nodes)} nodes, "
-                f"{len(tile_data.resistive_edges)} edges, "
-                f"{len(tile_data.current_injections)} current sources -> {tile_pkl_path.name}"
-            )
+        # Update package_data with worker-validated die attachment mapping
+        if merged_die_map:
+            metadata.package_data.die_attachment_net_map = merged_die_map
 
-        # 3. Filter: keep only boundary nodes shared by 2+ tiles
-        all_boundary_count = len(boundary_tile_count)
-        shared_boundary_nodes = {
-            node for node, count in boundary_tile_count.items() if count >= 2
-        }
+        # Log stats
+        all_boundary_count = len(set().union(*per_tile_boundaries)) if per_tile_boundaries else 0
         n_single = all_boundary_count - len(shared_boundary_nodes)
-
         logger.info(
             f"Boundary node filtering: {all_boundary_count} total, "
             f"{len(shared_boundary_nodes)} shared (2+ tiles), "
             f"{n_single} single-tile-only filtered"
         )
+
+        for r in worker_results:
+            x, y = r['tile_id']
+            logger.info(
+                f"Tile ({x},{y}): {r['n_nodes']} nodes, "
+                f"{r['n_edges']} edges, "
+                f"{r['n_currents']} current sources -> tile_{x}_{y}.pkl"
+            )
 
         # 4. Dump metadata + shared boundary nodes
         meta_pkl_path = out_path / 'metadata.pkl'
@@ -414,7 +427,16 @@ class DistributedNetlistParser:
             f"{len(shared_boundary_nodes)} shared boundary nodes -> {meta_pkl_path.name}"
         )
 
-        return out_path
+        # 5. Build and return ParsedTileBundle (lazy import to avoid circular)
+        from .model import ParsedTileBundle  # noqa: circular-safe (function-level)
+
+        bundle = ParsedTileBundle(
+            metadata=metadata,
+            shared_boundary_nodes=shared_boundary_nodes,
+            pkl_dir=str(out_path),
+        )
+
+        return out_path, bundle
 
     def collect_boundary_nodes(self, tile_configs: List[TileConfig]) -> Set[str]:
         """Pre-scan all tile .ckt files to collect *all* ``*``-prefixed boundary nodes.
@@ -455,15 +477,19 @@ class DistributedNetlistParser:
         Set[str]
             Boundary node names (``*`` prefix stripped) appearing in 2+ tiles.
         """
+        per_tile_boundaries = [
+            self._scan_tile_boundary_nodes(tc.ckt_path)
+            for tc in tile_configs
+        ]
+
+        shared = compute_shared_boundary_nodes(per_tile_boundaries)
+
+        # Compute stats for logging
         from collections import Counter
-
         tile_count: Counter = Counter()
-        for tc in tile_configs:
-            tile_nodes = self._scan_tile_boundary_nodes(tc.ckt_path)
-            tile_count.update(tile_nodes)
-
+        for boundary_set in per_tile_boundaries:
+            tile_count.update(boundary_set)
         all_boundary = set(tile_count.keys())
-        shared = {node for node, count in tile_count.items() if count >= 2}
         n_single = len(all_boundary) - len(shared)
 
         logger.info(
