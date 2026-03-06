@@ -226,6 +226,11 @@ class NetlistParser:
                 self._parse_instance_models()
                 timings["parse_instance_models"] = time.perf_counter() - t0
             
+            # Reconcile FLAG_DIE for nodes first seen in package.ckt
+            t0 = time.perf_counter()
+            self._reconcile_die_flags()
+            timings["reconcile_die_flags"] = time.perf_counter() - t0
+
             # Propagate net connectivity through package elements
             # This handles cases where package elements were parsed before die elements
             t0 = time.perf_counter()
@@ -481,6 +486,40 @@ class NetlistParser:
         
         return node_map
     
+    def _reconcile_die_flags(self):
+        """
+        Fix FLAG_DIE / FLAG_PACKAGE for nodes first created during package.ckt
+        parsing, before tile .nd files populated node_net_map.
+
+        When package.ckt is parsed first, die-attachment nodes (e.g.
+        ``1094400_1123200_M13``) are not yet in ``node_net_map``, so
+        ``add_node()`` marks them ``FLAG_PACKAGE``.  After tile .nd files are
+        read, ``node_net_map`` contains the correct mapping but the existing
+        node flags are never revisited.  This method corrects that.
+        """
+        nodes_dict = self.builder.graph.nodes_dict
+        reconciled = 0
+
+        for node_name in self.builder.node_net_map:
+            if node_name not in nodes_dict:
+                continue
+            attrs = nodes_dict[node_name]
+            if attrs.is_die:
+                continue  # already correct
+            # Verify the node name matches the die pattern: X_Y_LAYER
+            parts = node_name.split('_')
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                attrs.flags |= PDNNodeAttrs.FLAG_DIE
+                attrs.flags &= ~PDNNodeAttrs.FLAG_PACKAGE
+                reconciled += 1
+
+        if reconciled:
+            self.logger.debug(
+                "Reconciled %d node(s) from FLAG_PACKAGE to FLAG_DIE "
+                "(first seen in package.ckt before .nd files)",
+                reconciled,
+            )
+
     def _propagate_net_connectivity(self):
         """
         Process deferred package edges using union-find to efficiently trace connectivity.

@@ -2168,5 +2168,198 @@ class TestPDNNodeAttrsPickle(unittest.TestCase):
         self.assertEqual(restored.voltage, 0.95)
 
 
+# =============================================================================
+# Reconcile Die Flags Tests
+# =============================================================================
+
+class TestReconcileDieFlags(unittest.TestCase):
+    """Test _reconcile_die_flags() corrects FLAG_PACKAGE -> FLAG_DIE for nodes
+    first created during package.ckt parsing before tile .nd files are read."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir)
+
+    def _create_netlist_with_package_die_nodes(self, *, extra_package_nodes=""):
+        """Create a netlist where package.ckt references die-pattern nodes.
+
+        The package.ckt connects VDD_vsrc to die-pattern nodes (e.g.
+        1094400_1123200_M13) via resistors.  These nodes also appear in the
+        tile .nd file, so after full parsing node_net_map will contain them.
+        The bug is that because package.ckt is parsed first, these nodes get
+        FLAG_PACKAGE instead of FLAG_DIE.
+        """
+        netlist_dir = Path(self.temp_dir) / "test_netlist"
+        netlist_dir.mkdir()
+
+        # Main netlist includes package before tile
+        ckt_sp = """.partition_info 1 1
+.include package.ckt
+.include tile_0_0.ckt
+"""
+        (netlist_dir / "ckt.sp").write_text(ckt_sp)
+
+        # Package connects to die-pattern nodes via resistors
+        package_lines = [
+            "VVDD VDD_vsrc 0 1.0",
+            "Rs VDD_vsrc 1094400_1123200_M13 0.001",
+            "R_pkg1 1094400_1123200_M13 1000_1000_M1 0.01",
+        ]
+        if extra_package_nodes:
+            package_lines.append(extra_package_nodes)
+        (netlist_dir / "package.ckt").write_text("\n".join(package_lines) + "\n")
+
+        # Tile with die resistors
+        tile_content = """R1 1000_1000_M1 2000_1000_M1 0.01
+R2 2000_1000_M1 3000_1000_M1 0.01
+"""
+        (netlist_dir / "tile_0_0.ckt").write_text(tile_content)
+
+        # .nd file maps both tile nodes AND the die-attachment node
+        # Format: node_name val1 val2 val3 val4 net_name
+        nd_content = """1000_1000_M1 0 0 0 0 VDD
+2000_1000_M1 0 0 0 0 VDD
+3000_1000_M1 0 0 0 0 VDD
+1094400_1123200_M13 0 0 0 0 VDD
+"""
+        (netlist_dir / "tile_0_0.nd").write_text(nd_content)
+
+        (netlist_dir / "pg_net_voltage").write_text("VDD 1.0")
+        (netlist_dir / "additional_vsrcs").write_text("")
+
+        return str(netlist_dir)
+
+    def test_die_attachment_node_gets_flag_die(self):
+        """Die-pattern node first seen in package.ckt should get FLAG_DIE after reconciliation."""
+        netlist_dir = self._create_netlist_with_package_die_nodes()
+        parser = NetlistParser(netlist_dir, validate=False)
+        graph = parser.parse()
+
+        attrs = graph.nodes_dict["1094400_1123200_M13"]
+        self.assertTrue(attrs.is_die,
+                        "Die-attachment node should have FLAG_DIE set")
+        self.assertFalse(attrs.is_package,
+                         "Die-attachment node should NOT have FLAG_PACKAGE set")
+
+    def test_die_attachment_node_layer_is_extractable(self):
+        """After reconciliation, .layer property should return the metal layer."""
+        netlist_dir = self._create_netlist_with_package_die_nodes()
+        parser = NetlistParser(netlist_dir, validate=False)
+        graph = parser.parse()
+
+        attrs = graph.nodes_dict["1094400_1123200_M13"]
+        self.assertEqual(attrs.layer, "M13",
+                         "Die-attachment node layer should be extractable")
+        self.assertEqual(attrs.x, 1094400)
+        self.assertEqual(attrs.y, 1123200)
+
+    def test_pure_package_nodes_remain_package(self):
+        """Nodes that are NOT in node_net_map should keep FLAG_PACKAGE."""
+        netlist_dir = self._create_netlist_with_package_die_nodes()
+        parser = NetlistParser(netlist_dir, validate=False)
+        graph = parser.parse()
+
+        # VDD_vsrc is a package node (not in .nd file) and should stay FLAG_PACKAGE
+        attrs = graph.nodes_dict["VDD_vsrc"]
+        self.assertFalse(attrs.is_die,
+                         "Pure package node should NOT have FLAG_DIE")
+
+    def test_already_correct_nodes_are_not_double_counted(self):
+        """Nodes that already have FLAG_DIE should not be reconciled again."""
+        netlist_dir = self._create_netlist_with_package_die_nodes()
+        parser = NetlistParser(netlist_dir, validate=False)
+        graph = parser.parse()
+
+        # Tile nodes (1000_1000_M1, etc.) were created after .nd is loaded,
+        # so they should already have FLAG_DIE from initial creation.
+        attrs = graph.nodes_dict["1000_1000_M1"]
+        self.assertTrue(attrs.is_die)
+        self.assertFalse(attrs.is_package)
+
+    def test_multiple_die_attachment_nodes_reconciled(self):
+        """Multiple die-pattern nodes in package.ckt should all be reconciled."""
+        netlist_dir = Path(self.temp_dir) / "test_multi"
+        netlist_dir.mkdir()
+
+        ckt_sp = """.partition_info 1 1
+.include package.ckt
+.include tile_0_0.ckt
+"""
+        (netlist_dir / "ckt.sp").write_text(ckt_sp)
+
+        # Package references three die-pattern nodes
+        package_content = """VVDD VDD_vsrc 0 1.0
+Rs VDD_vsrc 100_200_M13 0.001
+R_p1 100_200_M13 300_400_M13 0.001
+R_p2 300_400_M13 500_600_M13 0.001
+R_p3 500_600_M13 1000_1000_M1 0.01
+"""
+        (netlist_dir / "package.ckt").write_text(package_content)
+
+        tile_content = "R1 1000_1000_M1 2000_1000_M1 0.01\n"
+        (netlist_dir / "tile_0_0.ckt").write_text(tile_content)
+
+        nd_content = """1000_1000_M1 0 0 0 0 VDD
+2000_1000_M1 0 0 0 0 VDD
+100_200_M13 0 0 0 0 VDD
+300_400_M13 0 0 0 0 VDD
+500_600_M13 0 0 0 0 VDD
+"""
+        (netlist_dir / "tile_0_0.nd").write_text(nd_content)
+        (netlist_dir / "pg_net_voltage").write_text("VDD 1.0")
+        (netlist_dir / "additional_vsrcs").write_text("")
+
+        parser = NetlistParser(str(netlist_dir), validate=False)
+        graph = parser.parse()
+
+        for node_name in ["100_200_M13", "300_400_M13", "500_600_M13"]:
+            attrs = graph.nodes_dict[node_name]
+            self.assertTrue(attrs.is_die,
+                            f"{node_name} should have FLAG_DIE after reconciliation")
+            self.assertFalse(attrs.is_package,
+                             f"{node_name} should NOT have FLAG_PACKAGE after reconciliation")
+
+    def test_non_die_pattern_nodes_not_reconciled(self):
+        """Nodes in node_net_map that don't match die pattern should not get FLAG_DIE."""
+        netlist_dir = Path(self.temp_dir) / "test_nondie"
+        netlist_dir.mkdir()
+
+        ckt_sp = """.partition_info 1 1
+.include package.ckt
+.include tile_0_0.ckt
+"""
+        (netlist_dir / "ckt.sp").write_text(ckt_sp)
+
+        # Package references a non-die-pattern node name
+        package_content = """VVDD VDD_vsrc 0 1.0
+Rs VDD_vsrc some_node 0.001
+R_p1 some_node 1000_1000_M1 0.01
+"""
+        (netlist_dir / "package.ckt").write_text(package_content)
+
+        tile_content = "R1 1000_1000_M1 2000_1000_M1 0.01\n"
+        (netlist_dir / "tile_0_0.ckt").write_text(tile_content)
+
+        # Include the non-die-pattern node in the .nd file
+        nd_content = """1000_1000_M1 0 0 0 0 VDD
+2000_1000_M1 0 0 0 0 VDD
+some_node 0 0 0 0 VDD
+"""
+        (netlist_dir / "tile_0_0.nd").write_text(nd_content)
+        (netlist_dir / "pg_net_voltage").write_text("VDD 1.0")
+        (netlist_dir / "additional_vsrcs").write_text("")
+
+        parser = NetlistParser(str(netlist_dir), validate=False)
+        graph = parser.parse()
+
+        # "some_node" does not match die pattern (first part is not a digit)
+        attrs = graph.nodes_dict["some_node"]
+        self.assertFalse(attrs.is_die,
+                         "Non-die-pattern node should NOT get FLAG_DIE")
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -57,25 +57,15 @@ class TestFlatVsDistributedConsistency:
         assert flat_data.total_floating == distributed_data.total_floating
 
     def test_total_nodes_match(self):
-        """Total node counts should match between flat and distributed modes (within tolerance).
-
-        Note: A small discrepancy (<10 nodes) is acceptable due to differences in how
-        package nodes and their interfaces are counted between flat and distributed modes.
-        The flat parser includes all package nodes in the graph, while distributed mode
-        separates them into tap_nodes (package-internal) and die_attachment_nodes (M13 die layer).
-        """
+        """Total node counts should match exactly between flat and distributed modes."""
         flat_data = self._collect_flat_data()
         distributed_data = self._collect_distributed_data()
 
-        # Allow small tolerance for package node accounting differences
-        diff = abs(flat_data.total_nodes - distributed_data.total_nodes)
-        tolerance = 10  # nodes
-
-        assert diff <= tolerance, (
-            f"Total node count mismatch exceeds tolerance!\n"
+        assert flat_data.total_nodes == distributed_data.total_nodes, (
+            f"Total node count mismatch!\n"
             f"Flat: {flat_data.total_nodes:,}\n"
             f"Distributed: {distributed_data.total_nodes:,}\n"
-            f"Difference: {diff} (tolerance: {tolerance})"
+            f"Difference: {flat_data.total_nodes - distributed_data.total_nodes}"
         )
 
     def test_per_layer_node_sets_match(self):

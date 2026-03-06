@@ -142,6 +142,7 @@ class TestCollectFloatingNodesDistributed:
 
         # Mock package_data
         model.package_data.tap_nodes = set()  # No package tap nodes in this mock
+        model.package_data.pad_nodes = set()  # No package pad nodes in this mock
         model.package_data.die_attachment_nodes = set()
 
         # Mock backend.call_all to raise an exception
@@ -162,8 +163,9 @@ class TestCollectFloatingNodesDistributed:
 
         # Should still return valid data (with just interface islands)
         assert data.total_floating == 1  # Only interface island
-        # total_nodes = interior (250) + interface (3) + floating (1) = 254
-        assert data.total_nodes == 254
+        # total_nodes = interior (250) + interface (3) + dropped_unique (0) = 253
+        # dropped_connectivity is empty (worker failed), so dropped_unique is also empty
+        assert data.total_nodes == 253
 
     def test_collect_with_success(self):
         """Test successful collection from workers."""
@@ -182,6 +184,7 @@ class TestCollectFloatingNodesDistributed:
 
         # Mock package_data
         model.package_data.tap_nodes = set()  # No package tap nodes in this mock
+        model.package_data.pad_nodes = set()  # No package pad nodes in this mock
         model.package_data.die_attachment_nodes = set()
 
         # Mock successful worker responses
@@ -196,11 +199,43 @@ class TestCollectFloatingNodesDistributed:
 
         # Should aggregate all floating nodes
         assert data.total_floating == 3  # 1 interface + 2 tile nodes
-        # total_nodes = interior (250) + interface (3) + floating (3) = 256
-        assert data.total_nodes == 256
+        # total_nodes = interior (250) + interface (3) + dropped_unique (0) = 253
+        # dropped_connectivity = {'1000_2100_M1', '2000_3000_M2'}, both are in
+        # interface_nodes, so dropped_unique is empty (no double-counting)
+        assert data.total_nodes == 253
         assert len(data.dropped_connectivity) == 2
         assert len(data.disconnected_interface) == 1
         assert data.layer_total_counts == {}  # Empty in distributed mode
+
+    def test_collect_with_mixed_dropped_nodes(self):
+        """Test that dropped nodes overlapping interface are not double-counted."""
+        from unittest.mock import Mock
+
+        from reports.floating_nodes import collect_floating_nodes_distributed
+
+        model = Mock()
+        context = Mock()
+        workers = [Mock()]
+
+        # Interface has 3 nodes; tile drops 2 interior + 1 interface node
+        model.interface_nodes = {'1000_2000_M1', '1000_2100_M1', '2000_3000_M2'}
+        model.tile_interior_counts = {(0, 0): 100}  # POST-removal
+        model.package_data.tap_nodes = {'3000_4000_M13'}
+        model.package_data.pad_nodes = {'VDD_vsrc'}
+        context.removed_interface_nodes = set()  # No global interface islands
+
+        model.backend.call_all.return_value = [
+            {'removed_nodes': {'5000_6000_M1', '5000_6100_M1', '2000_3000_M2'}},
+        ]
+
+        data = collect_floating_nodes_distributed(model, context, workers)
+
+        # dropped_connectivity = {'5000_6000_M1', '5000_6100_M1', '2000_3000_M2'}
+        # dropped_unique = dropped_connectivity - interface_nodes = {'5000_6000_M1', '5000_6100_M1'}
+        # total = 100 (interior) + 3 (interface) + 2 (dropped_unique) + 1 (tap) + 1 (pad) = 107
+        assert data.total_nodes == 107
+        assert data.total_floating == 3  # all three dropped nodes are floating
+        assert len(data.dropped_connectivity) == 3
 
 
 class TestCollectFloatingNodesFlat:

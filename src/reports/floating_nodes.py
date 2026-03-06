@@ -156,8 +156,17 @@ def collect_floating_nodes_distributed(
     total_interface = len(model.interface_nodes)
     # tap_nodes are internal package nodes (not vsrc pads, not die attachments)
     package_tap_nodes = len(model.package_data.tap_nodes)
+    package_pad_nodes = len(model.package_data.pad_nodes)
 
-    total_nodes = total_interior + total_interface + len(all_floating_nodes) + package_tap_nodes
+    # Dropped nodes that are also interface nodes are already in total_interface
+    dropped_unique = dropped_connectivity - model.interface_nodes
+    total_nodes = (
+        total_interior
+        + total_interface
+        + len(dropped_unique)
+        + package_tap_nodes
+        + package_pad_nodes
+    )
 
     # 7. For distributed mode, we don't have accurate per-layer total counts
     # Use empty dict so the report shows counts without percentages
