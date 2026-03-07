@@ -2930,5 +2930,221 @@ class TestPackageParsing(unittest.TestCase):
             shutil.rmtree(tmpdir)
 
 
+@unittest.skipUnless(NETLIST_SMALL_EXISTS, "netlist_small not available")
+class TestTopKReportIntegration(unittest.TestCase):
+    """Integration test: distributed solve + top-K report generation."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Parse netlist_small as distributed model and solve once."""
+        import logging
+        import warnings
+        logging.disable(logging.WARNING)
+        try:
+            from distributed import (
+                DistributedNetlistParser,
+                create_distributed_model,
+                DistributedDDMSolver,
+            )
+            parser = DistributedNetlistParser(NETLIST_SMALL_DIR, net_filter='VDD_XLV')
+            cls.metadata = parser.parse_metadata()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                cls.model = create_distributed_model(cls.metadata, backend='local')
+            cls.solver = DistributedDDMSolver(cls.model)
+            cls.ctx = cls.solver.prepare()
+            cls.result = cls.solver.solve_dc(context=cls.ctx)
+            cls._setup_ok = True
+        except Exception:
+            cls._setup_ok = False
+        finally:
+            logging.disable(logging.NOTSET)
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, '_setup_ok', False) and hasattr(cls, 'model'):
+            cls.model.shutdown()
+
+    def test_generate_reports_creates_topk_file(self):
+        """generate_reports(top_k=10) creates topk_irdrop_*.txt in output_dir."""
+        if not self._setup_ok:
+            self.skipTest("distributed setup failed for netlist_small")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import logging
+            logging.disable(logging.WARNING)
+            try:
+                self.solver.generate_reports(
+                    result=self.result,
+                    context=self.ctx,
+                    output_dir=tmpdir,
+                    top_k=10,
+                    show_irdrop=False,  # skip heatmaps for speed
+                )
+            finally:
+                logging.disable(logging.NOTSET)
+
+            # Find the topk report file
+            import glob
+            topk_files = glob.glob(os.path.join(tmpdir, 'topk_irdrop_*.txt'))
+            self.assertGreater(
+                len(topk_files), 0,
+                f"No topk_irdrop_*.txt found in {tmpdir}; contents: {os.listdir(tmpdir)}",
+            )
+
+            # Verify file has header and at least 1 data row
+            with open(topk_files[0], 'r') as f:
+                lines = f.read().splitlines()
+            # Header is 6 lines (title, net, voltage, separator, columns, separator)
+            self.assertGreater(len(lines), 6, "Report should have header + data rows")
+
+            # Data rows should be at most 10
+            data_lines = [l for l in lines[6:] if l.strip()]
+            self.assertLessEqual(len(data_lines), 10)
+            self.assertGreater(len(data_lines), 0, "Expected at least 1 data row")
+
+
+class TestLookupInstanceNames(unittest.TestCase):
+    """Tests for TileWorker.lookup_instance_names()."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix='lookup_inst_test_')
+        self.worker = None
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _get_worker(self):
+        """Lazy-create a TileWorker (no setup() needed for lookup_instance_names)."""
+        if self.worker is None:
+            from distributed.tile_worker import TileWorker
+            self.worker = TileWorker()
+        return self.worker
+
+    def _write_instance_file(self, lines):
+        """Write instance model lines to a temp file and return its path."""
+        path = os.path.join(self.tmpdir, 'instanceModels_0_0.sp')
+        with open(path, 'w') as f:
+            f.write('\n'.join(lines) + '\n')
+        return path
+
+    # ------------------------------------------------------------------
+    # 1. Basic lookup
+    # ------------------------------------------------------------------
+    def test_basic_lookup(self):
+        """Known instance file content maps to correct node->instance entries."""
+        instance_path = self._write_instance_file([
+            'I_inst1 1000_2000_M1 0 DC 0.001',
+            'I_inst2 1000_2100_M1 0 DC 0.002',
+            'I_inst3 2000_3000_M2 0 DC 0.003',
+        ])
+        target_nodes = {'1000_2000_M1', '1000_2100_M1', '2000_3000_M2'}
+
+        result = self._get_worker().lookup_instance_names(
+            target_nodes=target_nodes,
+            instance_path=instance_path,
+        )
+
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result['1000_2000_M1'], 'I_inst1')
+        self.assertEqual(result['1000_2100_M1'], 'I_inst2')
+        self.assertEqual(result['2000_3000_M2'], 'I_inst3')
+
+    # ------------------------------------------------------------------
+    # 2. None instance_path returns empty dict
+    # ------------------------------------------------------------------
+    def test_none_instance_path_returns_empty(self):
+        """When instance_path is None, return empty dict immediately."""
+        result = self._get_worker().lookup_instance_names(
+            target_nodes={'1000_2000_M1'},
+            instance_path=None,
+        )
+        self.assertEqual(result, {})
+
+    # ------------------------------------------------------------------
+    # 3. Target node filtering
+    # ------------------------------------------------------------------
+    def test_target_node_filtering(self):
+        """Only nodes in target_nodes appear in the result."""
+        instance_path = self._write_instance_file([
+            'I_inst1 1000_2000_M1 0 DC 0.001',
+            'I_inst2 1000_2100_M1 0 DC 0.002',
+            'I_inst3 2000_3000_M2 0 DC 0.003',
+        ])
+        # Only ask for one of the three nodes
+        target_nodes = {'1000_2100_M1'}
+
+        result = self._get_worker().lookup_instance_names(
+            target_nodes=target_nodes,
+            instance_path=instance_path,
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertIn('1000_2100_M1', result)
+        self.assertNotIn('1000_2000_M1', result)
+        self.assertNotIn('2000_3000_M2', result)
+
+    # ------------------------------------------------------------------
+    # 4. No matching nodes
+    # ------------------------------------------------------------------
+    def test_no_matching_nodes_returns_empty(self):
+        """When target_nodes has no overlap with file content, return empty."""
+        instance_path = self._write_instance_file([
+            'I_inst1 1000_2000_M1 0 DC 0.001',
+            'I_inst2 1000_2100_M1 0 DC 0.002',
+        ])
+        target_nodes = {'9999_9999_M9', 'nonexistent_node'}
+
+        result = self._get_worker().lookup_instance_names(
+            target_nodes=target_nodes,
+            instance_path=instance_path,
+        )
+
+        self.assertEqual(result, {})
+
+    # ------------------------------------------------------------------
+    # 5. Last-wins semantics for duplicate nodes
+    # ------------------------------------------------------------------
+    def test_duplicate_node_last_wins(self):
+        """Multiple instances mapping to the same node: last one wins."""
+        instance_path = self._write_instance_file([
+            'I_first 1000_2000_M1 0 DC 0.001',
+            'I_second 1000_2000_M1 0 DC 0.002',
+        ])
+        target_nodes = {'1000_2000_M1'}
+
+        result = self._get_worker().lookup_instance_names(
+            target_nodes=target_nodes,
+            instance_path=instance_path,
+        )
+
+        self.assertEqual(result['1000_2000_M1'], 'I_second')
+
+    # ------------------------------------------------------------------
+    # 6. Comments and blank lines are skipped
+    # ------------------------------------------------------------------
+    def test_comments_and_blanks_skipped(self):
+        """Lines starting with * or . and blank lines should be ignored."""
+        instance_path = self._write_instance_file([
+            '* This is a comment',
+            '.subckt something',
+            '',
+            'I_inst1 1000_2000_M1 0 DC 0.001',
+            '* Another comment',
+            'I_inst2 2000_3000_M2 0 DC 0.002',
+        ])
+        target_nodes = {'1000_2000_M1', '2000_3000_M2'}
+
+        result = self._get_worker().lookup_instance_names(
+            target_nodes=target_nodes,
+            instance_path=instance_path,
+        )
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result['1000_2000_M1'], 'I_inst1')
+        self.assertEqual(result['2000_3000_M2'], 'I_inst2')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -660,67 +660,46 @@ class PDNSolver:
         output_path: Path,
         top_k: int,
     ):
-        """Generate top-K worst IR-drop report."""
+        """Generate top-K worst IR-drop report.
+
+        Delegates to ``reports.topk_irdrop.generate_topk_report()`` after
+        building a flat voltages dict from graph node attributes.
+        """
+        from reports.topk_irdrop import generate_topk_report
+
         net_nodes = self.net_connectivity.get(net_name, [])
 
+        # Build flat voltages dict from graph node attrs (only nodes with voltage)
+        voltages: Dict[str, float] = {}
+        for node in net_nodes:
+            if node == '0':
+                continue
+            voltage = self.graph.nodes_dict[node].get('voltage')
+            if voltage is not None:
+                voltages[node] = voltage
+
         # Build reverse instance map
-        node_to_instance = {}
+        node_to_instance: Dict[str, str] = {}
         for inst, nodes in self.instance_node_map.items():
             for node in nodes:
                 node_to_instance[node] = inst
 
-        node_data = []
-        for node in net_nodes:
-            if node == '0':
-                continue
+        # Flat solver extra header lines (backend + solve time)
+        extra_header_lines = [
+            f"Backend: {result.backend}",
+            f"Solve Time: {result.timings.total * 1000:.2f} ms",
+        ]
 
-            node_attrs = self.graph.nodes_dict[node]
-            voltage = node_attrs.get('voltage')
-            if voltage is None:
-                continue
-
-            drop = abs(result.nominal_voltage - voltage)
-            drop_pct = (drop / result.nominal_voltage * 100) if result.nominal_voltage > 0 else 0.0
-
-            node_data.append({
-                'node': node,
-                'voltage': voltage,
-                'drop': drop,
-                'drop_pct': drop_pct,
-                'layer': node_attrs.get('layer', 'N/A'),
-                'x': node_attrs.get('x', 'N/A'),
-                'y': node_attrs.get('y', 'N/A'),
-                'instance': node_to_instance.get(node, 'N/A')
-            })
-
-        node_data.sort(key=lambda x: x['drop'], reverse=True)
-
-        report_file = output_path / f'topk_irdrop_{net_name}.txt'
-        with open(report_file, 'w') as f:
-            f.write(f"Top-{top_k} Worst IR-Drop Report\n")
-            f.write(f"Net: {net_name}\n")
-            f.write(f"Nominal Voltage: {result.nominal_voltage:.6f} V\n")
-            f.write(f"Backend: {result.backend}\n")
-            f.write(f"Solve Time: {result.timings.total*1000:.2f} ms\n")
-            f.write(f"{'='*120}\n")
-            f.write(f"{'Rank':<6} {'Node':<30} {'Layer':<8} {'X':<10} {'Y':<10} "
-                   f"{'Voltage(V)':<12} {'Drop(mV)':<12} {'Drop(%)':<10} {'Instance':<30}\n")
-            f.write(f"{'='*120}\n")
-
-            for i, data in enumerate(node_data[:top_k], 1):
-                f.write(f"{i:<6} {data['node']:<30} {str(data['layer']):<8} "
-                       f"{str(data['x']):<10} {str(data['y']):<10} "
-                       f"{data['voltage']:<12.6f} {data['drop']*1000:<12.3f} "
-                       f"{data['drop_pct']:<10.2f} {data['instance']:<30}\n")
-
-        self.logger.info(f"  Saved top-K report: {report_file}")
-
-        self.logger.info(f"\n  Top-10 Worst IR-Drop Nodes for {net_name}:")
-        self.logger.info(f"  {'Rank':<6} {'Node':<30} {'Layer':<8} {'Drop(mV)':<12} {'Drop(%)':<10}")
-        self.logger.info(f"  {'-'*66}")
-        for i, data in enumerate(node_data[:10], 1):
-            self.logger.info(f"  {i:<6} {data['node']:<30} {str(data['layer']):<8} "
-                           f"{data['drop']*1000:<12.3f} {data['drop_pct']:<10.2f}")
+        generate_topk_report(
+            voltages=voltages,
+            nominal_voltage=result.nominal_voltage,
+            net_name=net_name,
+            pad_nodes=self.vsrc_nodes_global,
+            output_dir=str(output_path),
+            top_k=top_k,
+            node_to_instance=node_to_instance,
+            extra_header_lines=extra_header_lines,
+        )
 
 
 # ============================================================================

@@ -283,6 +283,7 @@ class DistributedDDMSolver:
         max_stripes: int = 2000,
         stripe_bin_size: Optional[int] = None,
         show_irdrop: bool = True,
+        top_k: int = 100,
         verbose: bool = False,
     ) -> None:
         """Generate per-layer stripe heatmaps from distributed solve results.
@@ -309,6 +310,9 @@ class DistributedDDMSolver:
         show_irdrop : bool
             If True (default), generate IR-drop heatmaps in addition to
             current heatmaps.
+        top_k : int
+            Number of worst IR-drop nodes to include in the top-K report
+            (default 100).
         verbose : bool
             Log progress during heatmap generation.
         """
@@ -318,6 +322,7 @@ class DistributedDDMSolver:
             collect_floating_nodes_distributed,
             generate_floating_nodes_report,
         )
+        from reports.topk_irdrop import generate_topk_report
 
         # Generate floating nodes report if context is provided
         if context is None:
@@ -330,6 +335,52 @@ class DistributedDDMSolver:
                 net_name=self.model.net_name,
             )
             generate_floating_nodes_report(floating_data, Path(output_dir), verbose=verbose)
+
+        # Generate top-K worst IR-drop report
+        v_all = result.flatten()
+        pad_nodes = self.model.pad_nodes
+        vdd = self.model.vdd
+
+        # Compute IR-drop for each non-pad, non-ground node and find top-K
+        ir_items = []
+        for node, voltage in v_all.items():
+            if node == '0' or node in pad_nodes:
+                continue
+            ir_items.append((node, abs(vdd - voltage)))
+        ir_items.sort(key=lambda x: x[1], reverse=True)
+        target_nodes = {node for node, _ in ir_items[:top_k]}
+
+        # Parallel instance name lookup across all tile workers
+        tile_configs = self.model.metadata.tile_configs
+        lookup_args = [
+            (target_nodes, tc.instance_path, tc.nd_path, tc.net_filter)
+            for tc in tile_configs
+        ]
+        try:
+            per_tile_maps = self.model.backend.call_all(
+                self.model.workers, 'lookup_instance_names', lookup_args,
+            )
+        except Exception:
+            logger.warning(
+                "Instance name lookup failed; report will show N/A for instances",
+                exc_info=True,
+            )
+            per_tile_maps = []
+
+        # Merge per-tile instance dicts into a single mapping
+        node_to_instance: Dict[str, str] = {}
+        for tile_map in per_tile_maps:
+            node_to_instance.update(tile_map)
+
+        generate_topk_report(
+            voltages=v_all,
+            nominal_voltage=vdd,
+            net_name=self.model.net_name,
+            pad_nodes=pad_nodes,
+            output_dir=output_dir,
+            top_k=top_k,
+            node_to_instance=node_to_instance,
+        )
 
         common_kwargs = dict(
             model=self.model,

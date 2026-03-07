@@ -120,6 +120,7 @@ def cmd_solve(args: argparse.Namespace) -> None:
                 max_stripes=args.max_stripes,
                 stripe_bin_size=args.stripe_bin_size,
                 show_irdrop=args.show_irdrop,
+                top_k=args.top_k,
                 verbose=args.verbose,
             )
     finally:
@@ -217,6 +218,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 max_stripes=args.max_stripes,
                 stripe_bin_size=args.stripe_bin_size,
                 show_irdrop=args.show_irdrop,
+                top_k=args.top_k,
                 verbose=args.verbose,
             )
     finally:

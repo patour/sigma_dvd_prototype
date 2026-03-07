@@ -15,6 +15,7 @@ Static and dynamic IR-drop analysis prototype for multi-layer power grids. Suppo
 6. **`src/distributed/`** - Distributed DDM solver (tile-based domain decomposition), includes `heatmap.py` for tile-parallel pre-binned stripe heatmaps
 7. **`src/visualization/`** - Plotters (`UnifiedPlotter`, `DynamicPlotter`, `PDNPlotter`)
 8. **`src/legacy/`** - Original synthetic grid modules (originally `irdrop/`)
+9. **`src/reports/`** - Shared report generators (floating nodes, top-K IR-drop)
 
 ## Commands
 
@@ -22,7 +23,7 @@ Static and dynamic IR-drop analysis prototype for multi-layer power grids. Suppo
 # Install (editable)
 uv pip install -e ".[test]"
 
-# Run all tests (fast, ~1111 tests)
+# Run all tests (fast, ~1145 tests)
 pytest
 
 # Run slow integration tests
@@ -101,6 +102,9 @@ src/
 │   ├── heatmap.py              # Distributed stripe heatmap pipeline (prebin/merge/render)
 │   ├── cli.py                  # CLI: python -m distributed {solve,run,parse}
 │   └── result.py               # Result/context dataclasses
+├── reports/
+│   ├── floating_nodes.py          # Floating nodes detection and reporting
+│   └── topk_irdrop.py             # Top-K worst IR-drop report (shared by flat and distributed)
 ├── visualization/
 │   ├── unified_plotter.py      # UnifiedPlotter (voltage/IR-drop heatmaps)
 │   ├── dynamic_plotter.py      # DynamicPlotter (time-domain results)
@@ -129,6 +133,7 @@ src/
 - **PWLSmoother**: Analytical triangular low-pass filter for waveform preprocessing
 - **NetlistParser**: SPICE-like tile-based netlist parsing with parallel support
 - **ParsedTileBundle**: Lightweight coordinator-side metadata for distributed model creation (no tile data)
+- **generate_topk_report**: Shared top-K IR-drop report writer (used by both PDNSolver and DistributedDDMSolver)
 
 ### Legacy Module (src/legacy/)
 - `generate_power_grid()`: Creates K-layer resistor mesh with `NodeID` keys
@@ -158,6 +163,7 @@ src/
 - **Headless plotting**: Use `show=False` for batch/headless runs. Matplotlib backend is set to `Agg` in test runners.
 - **Legacy pickle files**: Old `pdn_graph.pkl` files contain NetworkX graphs. Use `ensure_rustworkx_graph()` to convert before creating models.
 - **Edge elem_name access**: With optimized edges (default), `elem_name` is None for most resistors. Use `data.get('elem_name', '')` not `data['elem_name']`.
+- **Instance model iteration**: Use `_iter_instance_sources()` from `distributed/tile_worker.py` to iterate filtered instanceModels entries — don't duplicate the gzip/net-filter logic.
 - **np.digitize binning**: Use `valid_mask` filter for out-of-range indices, NOT `np.clip`. Clamping corrupts edge bin values.
 - **Current heatmaps**: Only plot layers that have current sources (check for non-zero bins). Upper metal layers typically have none.
 - **Distributed circular imports**: `distributed/parser.py` cannot import from `distributed/model.py` at module level (model.py already imports from parser.py). Use lazy imports inside functions.

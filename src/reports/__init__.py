@@ -10,10 +10,12 @@ from .floating_nodes import (
     collect_floating_nodes_flat,
     generate_floating_nodes_report,
 )
+from .topk_irdrop import generate_topk_report
 
 __all__ = [
     'FloatingNodesData',
     'collect_floating_nodes_distributed',
     'collect_floating_nodes_flat',
     'generate_floating_nodes_report',
+    'generate_topk_report',
 ]

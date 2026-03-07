@@ -194,32 +194,38 @@ def _parse_tile_ckt(
     )
 
 
-def _parse_instance_models(
-    instance_path: str,
+def _iter_instance_sources(
+    instance_path: Optional[str],
     net_filter: Optional[str],
     nd_path: Optional[str] = None,
-) -> Dict[str, float]:
-    """Parse instanceModels file for current source DC values.
+):
+    """Yield PreparedSource objects from an instanceModels file.
 
-    Uses shared _prepare_instance_source() for parsing + A→mA conversion,
-    matching the flat parser's handling exactly.
+    Encapsulates all shared I/O and filtering logic: gzip detection,
+    comment/blank/dot-prefix line skipping, fast structured-name filter,
+    ``_prepare_instance_source()`` parsing, and slow .nd-based filter
+    fallback.
 
     Args:
-        instance_path: Path to instanceModels*.sp file
-        net_filter: Optional lowercase net name to filter by
-        nd_path: Path to .nd file for net filtering (required when net_filter is set)
+        instance_path: Path to instanceModels*.sp file.  Yields nothing
+            when ``None``.
+        net_filter: Optional lowercase net name to filter by.
+        nd_path: Path to .nd file for net filtering (used only when
+            *net_filter* is set and instance names are not structured).
 
-    Returns:
-        Dict mapping node -> current in mA (positive = sink)
+    Yields:
+        ``PreparedSource`` namedtuples that passed all filters.
     """
+    if instance_path is None:
+        return
+
     import gzip
     from parser.current_sources import _prepare_instance_source
     from parser.spice_lexer import (
         _check_net_filter,
-        _fast_instance_net_filter, _has_structured_instance_names,
+        _fast_instance_net_filter,
+        _has_structured_instance_names,
     )
-
-    current_injections: Dict[str, float] = {}
 
     # Detect structured names for fast net filtering
     use_fast_filter = (
@@ -253,17 +259,43 @@ def _parse_instance_models(
 
             # Slow path fallback: .nd-based filtering for unstructured names
             if net_filter and not use_fast_filter:
-                if not _check_net_filter(prepared.node_pos, prepared.node_neg,
-                                         node_net_map_lower, net_filter):
+                if not _check_net_filter(
+                    prepared.node_pos, prepared.node_neg,
+                    node_net_map_lower, net_filter,
+                ):
                     continue
 
-            # Inject at positive terminal only: instance model current sources
-            # are always node+ -> ground ('0'), so the negative terminal is
-            # eliminated from the nodal system and needs no entry.
-            if prepared.node_pos != '0':
-                current_injections[prepared.node_pos] = (
-                    current_injections.get(prepared.node_pos, 0.0) + prepared.static_current_ma
-                )
+            yield prepared
+
+
+def _parse_instance_models(
+    instance_path: str,
+    net_filter: Optional[str],
+    nd_path: Optional[str] = None,
+) -> Dict[str, float]:
+    """Parse instanceModels file for current source DC values.
+
+    Uses shared ``_iter_instance_sources()`` for parsing + A-to-mA conversion,
+    matching the flat parser's handling exactly.
+
+    Args:
+        instance_path: Path to instanceModels*.sp file
+        net_filter: Optional lowercase net name to filter by
+        nd_path: Path to .nd file for net filtering (required when net_filter is set)
+
+    Returns:
+        Dict mapping node -> current in mA (positive = sink)
+    """
+    current_injections: Dict[str, float] = {}
+
+    for prepared in _iter_instance_sources(instance_path, net_filter, nd_path):
+        # Inject at positive terminal only: instance model current sources
+        # are always node+ -> ground ('0'), so the negative terminal is
+        # eliminated from the nodal system and needs no entry.
+        if prepared.node_pos != '0':
+            current_injections[prepared.node_pos] = (
+                current_injections.get(prepared.node_pos, 0.0) + prepared.static_current_ma
+            )
 
     return current_injections
 
@@ -732,3 +764,35 @@ class TileWorker:
             'removed_nodes': list(self._removed_island_nodes),
             'tile_id': self._tile_data.tile_id,
         }
+
+    def lookup_instance_names(
+        self,
+        target_nodes: Set[str],
+        instance_path: Optional[str],
+        nd_path: Optional[str] = None,
+        net_filter: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Look up instance names for a set of target nodes from instanceModels file.
+
+        Uses shared ``_iter_instance_sources()`` for all I/O and filtering, then
+        collects ``{node: instance_name}`` for nodes in *target_nodes*.
+
+        Args:
+            target_nodes: Node names to look up (only matching nodes are returned).
+            instance_path: Path to instanceModels*.sp file.  Returns empty dict
+                if ``None``.
+            nd_path: Path to .nd file for net filtering when *net_filter* is set
+                and instance names are not structured.
+            net_filter: Optional lowercase net name to filter by.
+
+        Returns:
+            Dict mapping node name to instance name.  If multiple instances map
+            to the same node, the last one wins (matching flat solver behaviour).
+        """
+        node_to_instance: Dict[str, str] = {}
+
+        for prepared in _iter_instance_sources(instance_path, net_filter, nd_path):
+            if prepared.node_pos in target_nodes:
+                node_to_instance[prepared.node_pos] = prepared.cs.name
+
+        return node_to_instance
