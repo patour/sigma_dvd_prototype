@@ -8,8 +8,11 @@ from pathlib import Path
 from typing import Dict, Any
 
 import numpy as np
+import pytest
 
 from legacy.generate_power_grid import generate_power_grid
+
+pytestmark = pytest.mark.integration
 from model.factory import create_model_from_synthetic, create_model_from_pdn
 from solver.unified_solver import UnifiedIRDropSolver
 from analysis.dynamic_solver import DynamicIRDropSolver, QuasiStaticResult

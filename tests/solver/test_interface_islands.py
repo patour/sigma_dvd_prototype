@@ -8,6 +8,7 @@ handle singular global Schur complement systems.
 import unittest
 
 import numpy as np
+import pytest
 import scipy.sparse as sp
 
 from solver.coupled_system import (
@@ -15,6 +16,8 @@ from solver.coupled_system import (
     apply_island_penalty,
     detect_interface_islands,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def _make_laplacian(n, edges):

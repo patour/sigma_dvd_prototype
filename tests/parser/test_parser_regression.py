@@ -16,8 +16,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 from parser.current_sources import CurrentSource, _DCOnlyCurrentSource, get_optimize_dc_only, set_optimize_dc_only
 from parser.netlist import NetlistParser
+
+pytestmark = pytest.mark.unit
 
 
 # Netlist paths

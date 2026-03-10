@@ -8,13 +8,17 @@ tests/
 ├── model/          # test_unified_core
 ├── solver/         # test_hierarchical_solver, test_coupled_hierarchical_solver,
 │                   # test_batch_solving, test_regional_solver, test_pdn_solver,
-│                   # test_hierarchical_integration (slow), test_tiled_accuracy
+│                   # test_interface_islands, test_tiled_accuracy,
+│                   # test_hierarchical_integration (integration)
 ├── analysis/       # test_dynamic_solver, test_transient_solver, test_transient_multi_rhs,
 │                   # test_adjoint_sensitivity, test_pwl_smoothing, test_vectorized_sources,
-│                   # test_smoothing_source_idx, test_dynamic_integration (slow)
+│                   # test_smoothing_source_idx, test_dynamic_integration (integration)
 ├── parser/         # test_pdn_parser, test_parallel_parser, test_edge_attrs,
-│                   # test_parser_regression, test_pdn_integration (slow)
-├── distributed/    # test_distributed_solver
+│                   # test_parser_regression, test_pdn_integration (integration)
+├── distributed/    # test_distributed_solver, test_distributed_heatmap,
+│                   # test_distributed_integration (integration)
+├── reports/        # test_floating_nodes, test_topk_irdrop,
+│                   # test_floating_nodes_consistency (integration)
 ├── visualization/  # test_pdn_plotter, test_stripe_heatmap
 ├── legacy/         # test_irdrop, test_partitioner
 └── fixtures.py     # Factory functions for edge case testing
@@ -39,11 +43,17 @@ tests/
 ## Running Tests
 
 ```bash
-# All tests (~984 tests)
-pytest
+# Run unit tests (fast, <60s)
+pytest -m unit
 
-# Slow integration tests
-pytest tests/solver/test_hierarchical_integration.py tests/analysis/test_dynamic_integration.py tests/parser/test_pdn_integration.py
+# Run a specific integration test file
+pytest tests/distributed/test_distributed_integration.py -v
+
+# Run ALL integration tests (~4 min, slow — only when needed)
+pytest -m integration
+
+# Run everything (~4 min, slow — only as a final check)
+pytest
 
 # Specific module
 pytest tests/solver/test_hierarchical_solver.py
@@ -51,3 +61,8 @@ pytest tests/solver/test_hierarchical_solver.py
 # Single test
 pytest tests/legacy/test_irdrop.py::TestIRDrop::test_no_load_currents_all_pad_voltage -v
 ```
+
+> **Test priority:** First run individual unit test files related to the affected
+> area, then `pytest -m unit` for full unit coverage. Run individual integration
+> test files only when changes affect that area. Run bare `pytest` only as a
+> final validation step, not during intermediate steps.

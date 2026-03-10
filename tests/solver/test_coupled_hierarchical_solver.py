@@ -11,8 +11,11 @@ import unittest
 from functools import wraps
 
 import numpy as np
+import pytest
 
 from legacy.generate_power_grid import generate_power_grid, NodeID
+
+pytestmark = pytest.mark.unit
 
 
 def timeout(seconds):

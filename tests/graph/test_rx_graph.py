@@ -5,7 +5,12 @@ provide NetworkX-compatible API behavior.
 """
 
 import unittest
+
+import pytest
+
 from graph.rx_graph import RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper
+
+pytestmark = pytest.mark.unit
 
 
 class TestRustworkxGraphWrapperNodes(unittest.TestCase):

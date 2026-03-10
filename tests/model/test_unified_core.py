@@ -4,6 +4,7 @@ import math
 import unittest
 
 import numpy as np
+import pytest
 
 from legacy.generate_power_grid import generate_power_grid, NodeID
 from graph.rx_graph import RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper
@@ -12,6 +13,8 @@ from model.edge_adapter import EdgeInfoExtractor, UnifiedEdgeInfo, ElementType
 from model.unified_model import UnifiedPowerGridModel, GridSource
 from model.factory import create_model_from_synthetic, create_model_from_pdn
 from solver.unified_solver import UnifiedIRDropSolver
+
+pytestmark = pytest.mark.unit
 
 
 def build_small_grid():

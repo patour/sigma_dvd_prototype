@@ -8,8 +8,11 @@ import unittest
 from typing import Any, Dict, List
 
 import numpy as np
+import pytest
 
 from analysis.vectorized_sources import VectorizedCurrentSources
+
+pytestmark = pytest.mark.unit
 
 
 def create_simple_sources() -> Dict[str, Dict[str, Any]]:

@@ -23,11 +23,17 @@ Static and dynamic IR-drop analysis prototype for multi-layer power grids. Suppo
 # Install (editable)
 uv pip install -e ".[test]"
 
-# Run all tests (fast, ~1145 tests)
-pytest
+# Run unit tests (fast, <160s)
+pytest -m unit
 
-# Run slow integration tests
-pytest tests/solver/test_hierarchical_integration.py tests/analysis/test_dynamic_integration.py tests/parser/test_pdn_integration.py
+# Run a specific integration test file
+pytest tests/distributed/test_distributed_integration.py -v
+
+# Run ALL integration tests (~6 min, slow — only when needed)
+pytest -m integration
+
+# Run everything (~10 min, slow — only as a final check)
+pytest
 
 # Run specific test module
 pytest tests/solver/test_hierarchical_solver.py
@@ -45,6 +51,11 @@ python -m analysis.dynamic_irdrop_decomposition ./netlist/netlist_test --net VDD
 # Run distributed solver with heatmaps
 python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --backend ray --plot --verbose
 ```
+
+> **Test priority:** First run individual unit test files related to the affected
+> area, then `pytest -m unit` for full unit coverage. Run individual integration
+> test files only when changes affect that area. Run bare `pytest` only as a
+> final validation step, not during intermediate steps.
 
 ## Architecture
 

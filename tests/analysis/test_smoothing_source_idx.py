@@ -20,10 +20,13 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from analysis.vectorized_sources import VectorizedCurrentSources
 from analysis.transient_solver import TransientIRDropSolver, IntegrationMethod
 from model.factory import create_model_from_pdn
+
+pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------

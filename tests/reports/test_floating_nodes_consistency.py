@@ -17,10 +17,13 @@ from pathlib import Path
 NETLIST_DIR = Path('./netlist/netlist_sampled')
 DISTRIBUTED_PKL_DIR = NETLIST_DIR / 'distributed_pkl'
 
-pytestmark = pytest.mark.skipif(
-    not NETLIST_DIR.exists() or not DISTRIBUTED_PKL_DIR.exists(),
-    reason="netlist_sampled test data not available"
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not NETLIST_DIR.exists() or not DISTRIBUTED_PKL_DIR.exists(),
+        reason="netlist_sampled test data not available"
+    ),
+]
 
 
 class TestFlatVsDistributedConsistency:

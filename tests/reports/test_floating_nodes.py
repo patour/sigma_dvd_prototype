@@ -13,6 +13,8 @@ from reports.floating_nodes import (
     generate_floating_nodes_report,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestLayerSorting:
     """Test layer sorting utilities."""

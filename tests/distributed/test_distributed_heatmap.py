@@ -25,6 +25,10 @@ from distributed.heatmap import (
     _compute_stripe_boundaries,
 )
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Helpers for building test data

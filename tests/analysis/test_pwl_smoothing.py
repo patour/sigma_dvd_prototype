@@ -3,6 +3,7 @@
 import unittest
 import math
 import numpy as np
+import pytest
 
 from analysis.pwl_smoothing import (
     triangular_window,
@@ -14,6 +15,8 @@ from analysis.pwl_smoothing import (
     SmoothedWaveformCache,
     SmoothingConfig,
 )
+
+pytestmark = pytest.mark.unit
 
 
 class TestTriangularWindow(unittest.TestCase):

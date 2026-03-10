@@ -8,10 +8,14 @@ import unittest
 import time
 from typing import Dict, Any
 
+import pytest
+
 from legacy.generate_power_grid import generate_power_grid
 from model.factory import create_model_from_synthetic
 from model.solver_results import FlatSolverContext, HierarchicalSolverContext, CoupledHierarchicalSolverContext
 from solver.unified_solver import UnifiedIRDropSolver
+
+pytestmark = pytest.mark.unit
 
 
 def build_test_grid(K=3, N0=8, I_N=80, N_vsrc=4, seed=42):

@@ -28,8 +28,9 @@ pdn-solve = "solver.pdn_solver:main"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = [
-    "--ignore=tests/solver/test_hierarchical_integration.py",
-    "--ignore=tests/analysis/test_dynamic_integration.py",
-    "--ignore=tests/parser/test_pdn_integration.py",
     "--tb=short",
+]
+markers = [
+    "unit: fast isolated unit tests",
+    "integration: integration tests (slow, require test netlists)",
 ]

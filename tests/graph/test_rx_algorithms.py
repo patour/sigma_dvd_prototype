@@ -5,6 +5,9 @@ algorithms match NetworkX behavior.
 """
 
 import unittest
+
+import pytest
+
 from graph.rx_graph import RustworkxGraphWrapper, RustworkxMultiDiGraphWrapper
 from graph.rx_algorithms import (
     contract_nodes,
@@ -13,6 +16,8 @@ from graph.rx_algorithms import (
     is_connected,
     number_connected_components,
 )
+
+pytestmark = pytest.mark.unit
 
 
 class TestContractNodesUndirected(unittest.TestCase):

@@ -8,9 +8,12 @@ import math
 import unittest
 
 import numpy as np
+import pytest
 
 from legacy.generate_power_grid import generate_power_grid, NodeID
 from legacy import PowerGridModel, EffectiveResistanceCalculator, RegionalIRDropSolver, IRDropSolver, GridPartitioner
+
+pytestmark = pytest.mark.unit
 
 
 def build_test_grid():

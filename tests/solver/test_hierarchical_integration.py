@@ -18,6 +18,9 @@ import unittest
 from functools import wraps
 
 import numpy as np
+import pytest
+
+pytestmark = pytest.mark.integration
 
 
 def timeout(seconds):

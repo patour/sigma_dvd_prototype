@@ -26,6 +26,10 @@ from parser.netlist import NetlistParser
 from solver.pdn_solver import PDNSolver
 from visualization.pdn_plotter import PDNPlotter
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 
 class TestNetTypeDetection(unittest.TestCase):
     """Test power vs ground net type detection"""

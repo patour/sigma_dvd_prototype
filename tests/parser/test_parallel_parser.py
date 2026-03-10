@@ -19,6 +19,8 @@ import unittest
 from pathlib import Path
 from typing import Dict, List
 
+import pytest
+
 from parser.parallel import (
     MMapSpiceLineReader,
     TileParseResult,
@@ -32,6 +34,8 @@ from parser.parallel import (
 )
 from parser.current_sources import CurrentSource, _DCOnlyCurrentSource, get_optimize_dc_only, set_optimize_dc_only
 from parser.netlist import NetlistParser
+
+pytestmark = pytest.mark.unit
 
 
 class TestMMapSpiceLineReader(unittest.TestCase):

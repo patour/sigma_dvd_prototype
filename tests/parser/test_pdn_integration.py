@@ -15,7 +15,11 @@ import tempfile
 import shutil
 from pathlib import Path
 
+import pytest
+
 from parser.netlist import NetlistParser
+
+pytestmark = pytest.mark.integration
 from solver.pdn_solver import PDNSolver, PDNSolveResult, SolveResults
 
 

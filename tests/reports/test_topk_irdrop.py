@@ -8,6 +8,8 @@ import pytest
 
 from reports.topk_irdrop import generate_topk_report
 
+pytestmark = pytest.mark.unit
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Helpers

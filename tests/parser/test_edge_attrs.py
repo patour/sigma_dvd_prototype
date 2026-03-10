@@ -5,6 +5,8 @@ import pickle
 import sys
 import unittest
 
+import pytest
+
 from parser.edge_attrs import (
     BaseElementEdge,
     ResistorEdge,
@@ -23,6 +25,8 @@ from parser.edge_attrs import (
     _unpack_net_type_idx,
     reset_net_type_table,
 )
+
+pytestmark = pytest.mark.unit
 
 
 class TestNetTypeIndexing(unittest.TestCase):

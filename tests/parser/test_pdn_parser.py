@@ -19,6 +19,8 @@ import tempfile
 import gzip
 from pathlib import Path
 
+import pytest
+
 from parser.netlist import NetlistParser
 from parser.spice_lexer import (
     SpiceLineReader, R_TO_KOHM, C_TO_FF, L_TO_NH, I_TO_MA, SHORT_THRESHOLD,
@@ -32,6 +34,8 @@ from parser.current_sources import (
     get_optimize_dc_only, set_optimize_dc_only,
 )
 from parser.metadata import PDNNodeAttrs
+
+pytestmark = pytest.mark.unit
 
 
 class TestSpiceLineReader(unittest.TestCase):

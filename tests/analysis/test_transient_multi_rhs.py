@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Set
 
 import numpy as np
+import pytest
 
 from model.factory import create_model_from_pdn
 from analysis.transient_solver import (
@@ -28,6 +29,8 @@ from analysis.transient_solver import (
     TransientResult,
     IntegrationMethod,
 )
+
+pytestmark = pytest.mark.unit
 
 # Check for --small flag to use netlist_small instead of netlist_test
 USE_SMALL_NETLIST = '--small' in sys.argv or os.environ.get('USE_SMALL_NETLIST', '').lower() in ('1', 'true', 'yes')

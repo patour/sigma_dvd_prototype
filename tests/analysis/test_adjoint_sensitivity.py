@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 import numpy as np
+import pytest
 
 from model.factory import create_model_from_pdn
 from analysis.transient_solver import (
@@ -22,6 +23,8 @@ from analysis.adjoint_sensitivity import (
     AdjointAttribution,
     AggressorContribution,
 )
+
+pytestmark = pytest.mark.unit
 
 
 class TestAdjointSolverInit(unittest.TestCase):

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 import numpy as np
+import pytest
 
 from legacy.generate_power_grid import generate_power_grid
 from model.factory import create_model_from_synthetic, create_model_from_pdn
@@ -18,6 +19,8 @@ from analysis.transient_solver import (
     RCSystem,
 )
 from analysis.dynamic_solver import DynamicIRDropSolver
+
+pytestmark = pytest.mark.unit
 
 
 def build_synthetic_grid(K=3, N0=8, I_N=80, N_vsrc=4, seed=42):

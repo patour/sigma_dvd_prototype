@@ -21,6 +21,7 @@ import sys
 import tempfile
 import json
 import numpy as np
+import pytest
 from pathlib import Path
 
 from parser.netlist import NetlistParser
@@ -28,6 +29,8 @@ from solver.pdn_solver import (
     PDNSolver, PDNSolveResult, SolveResults, TimingStats, MemoryStats,
     load_config, merge_config_with_args,
 )
+
+pytestmark = pytest.mark.unit
 
 
 class TestPDNSolverBasic(unittest.TestCase):

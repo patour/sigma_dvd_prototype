@@ -19,6 +19,10 @@ from visualization.stripe_heatmap import (
     render_from_prebinned_stripe_data,
 )
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 
 class TestNodeParsing(unittest.TestCase):
     """Tests for node name parsing utilities."""
