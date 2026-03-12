@@ -2,6 +2,8 @@
 
 Orchestrates the Schur complement domain decomposition across tiles.
 Follows the prepare/solve pattern matching the existing unified solver.
+Time-domain methods (quasi-static, transient) are provided by the
+_SolverTimeDomainMixin in solver_td.py.
 """
 
 from __future__ import annotations
@@ -13,12 +15,17 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 
 from .model import DistributedPowerGridModel
-from .result import DistributedSolveResult, DistributedSolverContext, TileSolveResult
+from .result import (
+    DistributedSolveResult,
+    DistributedSolverContext,
+    TileSolveResult,
+)
+from .solver_td import _SolverTimeDomainMixin
 
 logger = logging.getLogger(__name__)
 
 
-class DistributedDDMSolver:
+class DistributedDDMSolver(_SolverTimeDomainMixin):
     """Solver for distributed DDM. Takes DistributedPowerGridModel.
 
     Follows the prepare/solve pattern:

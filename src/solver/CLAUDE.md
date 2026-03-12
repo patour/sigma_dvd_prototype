@@ -6,8 +6,8 @@ Flat, hierarchical, coupled, and tiled IR-drop solvers. Entry point: `UnifiedIRD
 
 - **UnifiedIRDropSolver**: Orchestrates all solve modes — `solve()` (flat), `solve_hierarchical()`, `solve_hierarchical_coupled()`, `solve_hierarchical_tiled()`
 - **BlockMatrixSystem** (`coupled_system.py`): Block-partitioned conductance matrix (port/interior splits)
-- **SchurComplementOperator** (`coupled_system.py`): Matrix-free Schur complement for coupled solver
-- **CoupledSystemOperator** (`coupled_system.py`): Full coupled top-grid + Schur complement operator
+- **SchurComplementOperator** (`coupled_operators.py`, re-exported from `coupled_system.py`): Matrix-free Schur complement for coupled solver
+- **CoupledSystemOperator** (`coupled_operators.py`, re-exported from `coupled_system.py`): Full coupled top-grid + Schur complement operator
 - **CurrentAggregator** (`current_aggregation.py`): Distributes load currents to ports using shortest-path or effective resistance weighting
 - **TileManager** (`tiling.py`): Tile generation, connectivity validation, and result merging
 - **UnifiedPartitioner** (`unified_partitioner.py`): Layer-based and spatial grid partitioning

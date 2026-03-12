@@ -8,6 +8,10 @@ from .result import (
     TileSolveResult,
     DistributedSolveResult,
     DistributedSolverContext,
+    DistributedSmoothedSources,
+    DistributedTransientContext,
+    DistributedQuasiStaticResult,
+    DistributedTransientResult,
 )
 from .backend import (
     ComputeBackend,
@@ -50,6 +54,10 @@ __all__ = [
     "TileSolveResult",
     "DistributedSolveResult",
     "DistributedSolverContext",
+    "DistributedSmoothedSources",
+    "DistributedTransientContext",
+    "DistributedQuasiStaticResult",
+    "DistributedTransientResult",
     # Backends
     "ComputeBackend",
     "LocalBackend",

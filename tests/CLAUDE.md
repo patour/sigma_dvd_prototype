@@ -16,7 +16,8 @@ tests/
 ├── parser/         # test_pdn_parser, test_parallel_parser, test_edge_attrs,
 │                   # test_parser_regression, test_pdn_integration (integration)
 ├── distributed/    # test_distributed_solver, test_distributed_heatmap,
-│                   # test_distributed_integration (integration)
+│                   # test_distributed_cli, test_time_domain,
+│                   # test_distributed_integration, test_time_domain_integration (integration)
 ├── reports/        # test_floating_nodes, test_topk_irdrop,
 │                   # test_floating_nodes_consistency (integration)
 ├── visualization/  # test_pdn_plotter, test_stripe_heatmap
@@ -39,11 +40,12 @@ tests/
 ## Test Helper
 
 `build_small()` in `fixtures.py` creates standard test grid (K=3, N0=8, I_N=80).
+`_build_two_tile_distributed_model()` in `distributed/test_time_domain.py` creates a minimal 2-tile distributed model with optional cap edges for unit tests.
 
 ## Running Tests
 
 ```bash
-# Run unit tests (fast, <60s)
+# Run unit tests (fast, <160s)
 pytest -m unit
 
 # Run a specific integration test file

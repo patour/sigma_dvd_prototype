@@ -1951,5 +1951,357 @@ class TestLookupInstanceNames(unittest.TestCase):
         self.assertEqual(result['2000_3000_M2'], 'I_inst2')
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Phase 5: Coordinator time-domain method tests
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _build_two_tile_model_with_caps():
+    """Build a minimal two-tile distributed model with capacitors.
+
+    Returns (model, tile_configs) suitable for time-domain tests.
+
+    Layout:
+        Tile (0,0): n1 --[1mS]-- *B --[2mS]-- n2 --[1mS to gnd]
+                    n2 has grounded cap 10fF
+        Tile (0,1): *B --[3mS]-- n3 --[2mS to gnd]
+                    n3 has grounded cap 20fF
+
+    Boundary: B (shared between tiles)
+    Package: pad_v at Vdd=1.0V connected to B via 10mS
+    """
+    import pickle
+    from distributed.tile_worker import TileData
+    from distributed.parser import PackageData, PowerGridMetaData, TileConfig
+    from distributed.model import ParsedTileBundle, create_distributed_model
+
+    tile_a = TileData(
+        tile_id=(0, 0),
+        resistive_edges=[
+            ('n1', 'B', 1.0),
+            ('B', 'n2', 2.0),
+            ('n2', '0', 1.0),
+        ],
+        all_nodes={'n1', 'B', 'n2'},
+        boundary_nodes={'B'},
+        current_injections={'n2': 0.5},  # 0.5 mA sink
+        capacitive_edges=[('n2', '0', 10.0)],  # 10 fF grounded cap
+    )
+    tile_b = TileData(
+        tile_id=(0, 1),
+        resistive_edges=[
+            ('B', 'n3', 3.0),
+            ('n3', '0', 2.0),
+        ],
+        all_nodes={'B', 'n3'},
+        boundary_nodes={'B'},
+        current_injections={'n3': 0.3},  # 0.3 mA sink
+        capacitive_edges=[('n3', '0', 20.0)],  # 20 fF grounded cap
+    )
+
+    pkg = PackageData(
+        vsrc_dict={'V1': {'node_pos': 'pad_v', 'node_neg': '0',
+                          'net': 'VDD', 'value': 1.0}},
+        package_edges=[('pad_v', 'B', 10.0)],  # 10 mS from pad to B
+        pad_nodes={'pad_v'},
+        tap_nodes=set(),
+        die_attachment_nodes=set(),
+        vdd=1.0,
+        net_name='VDD',
+        package_cap_edges=[('pad_v', '0', 5.0)],  # 5 fF grounded cap on pad
+    )
+
+    tile_configs = [
+        TileConfig(tile_id=(0, 0), ckt_path='/dev/null',
+                   nd_path=None, instance_path=None, net_filter=None),
+        TileConfig(tile_id=(0, 1), ckt_path='/dev/null',
+                   nd_path=None, instance_path=None, net_filter=None),
+    ]
+    metadata = PowerGridMetaData(
+        tile_grid=(1, 2),
+        parameters={'VDD': '1.0'},
+        tile_configs=tile_configs,
+        package_data=pkg,
+        net_name='VDD',
+        vdd=1.0,
+    )
+
+    # Dump tiles and metadata to temp dir
+    tmpdir = tempfile.mkdtemp()
+    for td in [tile_a, tile_b]:
+        x, y = td.tile_id
+        with open(os.path.join(tmpdir, f'tile_{x}_{y}.pkl'), 'wb') as f:
+            pickle.dump(td, f)
+    with open(os.path.join(tmpdir, 'metadata.pkl'), 'wb') as f:
+        pickle.dump({
+            'metadata': metadata,
+            'boundary_nodes': {'B'},
+        }, f)
+
+    bundle = ParsedTileBundle(
+        metadata=metadata,
+        shared_boundary_nodes={'B'},
+        pkl_dir=tmpdir,
+    )
+    model = create_distributed_model(bundle, backend='local')
+    model._owns_pkl_dir = tmpdir  # auto-cleanup
+    return model
+
+
+class TestRecoverAndUpdatePeaks(unittest.TestCase):
+    """Test the combined recover_and_update_peaks worker method."""
+
+    def test_recover_and_update_peaks_basic(self):
+        """recover_and_update_peaks returns step max drop and tracks peaks."""
+        from distributed.tile_worker import TileWorker, TileData
+
+        tile = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[('a', 'B', 1.0), ('B', '0', 0.5)],
+            all_nodes={'a', 'B'},
+            boundary_nodes={'B'},
+            current_injections={'a': 0.1},
+            capacitive_edges=[],
+        )
+        w = TileWorker()
+        w.setup_from_tile_data(tile, interface_nodes={'B'})
+        w.factor_and_compute_schur()
+
+        # Init peak tracking
+        w.init_peak_tracking(track_nodes=None, vdd=1.0)
+
+        # Recover with B at 0.95V
+        drop = w.recover_and_update_peaks({'B': 0.95}, t=1e-9)
+        self.assertGreater(drop, 0.0)
+        self.assertLessEqual(drop, 1.0)
+
+        # Peak stats should have entries
+        stats = w.get_peak_stats()
+        self.assertGreater(len(stats), 0)
+
+    def test_recover_transient_and_update_peaks(self):
+        """recover_transient_and_update_peaks works for transient path."""
+        from distributed.tile_worker import TileWorker, TileData
+
+        tile = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[('a', 'B', 1.0), ('B', '0', 0.5)],
+            all_nodes={'a', 'B'},
+            boundary_nodes={'B'},
+            current_injections={'a': 0.1},
+            capacitive_edges=[('a', '0', 10.0)],
+        )
+        w = TileWorker()
+        w.setup_from_tile_data(tile, interface_nodes={'B'})
+        w.factor_and_compute_schur()
+
+        # Factor transient system
+        dt_scaled = 100.0  # 100 ps
+        w.factor_transient_system(dt_scaled, method='be')
+
+        # Set initial voltages
+        w.set_initial_voltages({'a': 1.0, 'B': 1.0})
+
+        # Init peak tracking
+        w.init_peak_tracking(vdd=1.0)
+
+        # Compute transient reduced RHS
+        w.get_transient_reduced_rhs(t=1e-9, boundary_v_old={'B': 0.99})
+
+        # Recover and update peaks (transient path)
+        drop = w.recover_transient_and_update_peaks({'B': 0.99}, t=1e-9)
+        self.assertGreaterEqual(drop, 0.0)
+        self.assertLessEqual(drop, 1.0)
+
+
+class TestDistributedSolverTimeDomain(unittest.TestCase):
+    """Test coordinator-side time-domain methods on DistributedDDMSolver."""
+
+    def setUp(self):
+        self.model = _build_two_tile_model_with_caps()
+
+    def tearDown(self):
+        self.model.shutdown()
+
+    def test_prepare_and_solve_dc_still_works(self):
+        """DC solve should still work with the mixin in place."""
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(self.model)
+        ctx = solver.prepare()
+        result = solver.solve_dc(context=ctx)
+
+        self.assertGreater(len(result.tile_results), 0)
+        v_all = result.flatten()
+        # All voltages should be positive and <= Vdd
+        for node, v in v_all.items():
+            if node == '0':
+                continue
+            self.assertGreater(v, 0.0)
+            self.assertLessEqual(v, 1.001)
+
+    def test_prepare_transient_returns_context(self):
+        """prepare_transient() returns a DistributedTransientContext."""
+        from distributed.solver import DistributedDDMSolver
+        from distributed.result import DistributedTransientContext
+
+        solver = DistributedDDMSolver(self.model)
+        ctx = solver.prepare_transient(dt=1e-10, method='be')
+
+        self.assertIsInstance(ctx, DistributedTransientContext)
+        self.assertEqual(ctx.integration_method, 'be')
+        self.assertAlmostEqual(ctx.dt_scaled, 1e-10 * 1e12, places=6)
+        self.assertIsNotNone(ctx.dc_context)
+        self.assertGreater(len(ctx.interface_nodes), 0)
+
+    def test_prepare_transient_trap(self):
+        """prepare_transient() works with trapezoidal method."""
+        from distributed.solver import DistributedDDMSolver
+        from distributed.result import DistributedTransientContext
+
+        solver = DistributedDDMSolver(self.model)
+        ctx = solver.prepare_transient(dt=1e-10, method='trap')
+
+        self.assertIsInstance(ctx, DistributedTransientContext)
+        self.assertEqual(ctx.integration_method, 'trap')
+        # C_coeff for trap = 2 / dt_scaled
+        expected_C_coeff = 2.0 / (1e-10 * 1e12)
+        self.assertAlmostEqual(ctx.C_coeff, expected_C_coeff, places=6)
+
+
+class TestDistributedSmoothedSources(unittest.TestCase):
+    """Test DistributedSmoothedSources dataclass methods."""
+
+    def test_is_compatible(self):
+        """is_compatible checks time parameters."""
+        from distributed.result import DistributedSmoothedSources
+
+        handle = DistributedSmoothedSources(
+            time_step=1e-10,
+            t_start=0.0,
+            t_end=100e-9,
+            smoothed=True,
+            n_tiles=4,
+            per_tile_stats={},
+        )
+        self.assertTrue(handle.is_compatible(1e-10, 0.0, 100e-9))
+        self.assertFalse(handle.is_compatible(2e-10, 0.0, 100e-9))
+        self.assertFalse(handle.is_compatible(1e-10, 1e-9, 100e-9))
+
+    def test_validate_against_model(self):
+        """validate_against_model raises on tile count mismatch."""
+        from distributed.result import DistributedSmoothedSources
+
+        handle = DistributedSmoothedSources(
+            time_step=1e-10, t_start=0.0, t_end=100e-9,
+            smoothed=True, n_tiles=99, per_tile_stats={},
+        )
+        model = _build_two_tile_model_with_caps()
+        try:
+            with self.assertRaises(ValueError):
+                handle.validate_against_model(model)
+        finally:
+            model.shutdown()
+
+
+class TestDistributedTransientContext(unittest.TestCase):
+    """Test DistributedTransientContext properties."""
+
+    def test_dt_property(self):
+        """dt property converts from ps to seconds."""
+        from distributed.result import DistributedTransientContext
+
+        ctx = DistributedTransientContext(
+            interface_lu=lambda x: x,
+            interface_nodes=['a'],
+            interface_node_to_idx={'a': 0},
+            rhs_dirichlet_interface=np.zeros(1),
+            tile_index_maps={},
+            dc_context=None,
+            dt_scaled=100.0,  # 100 ps
+            integration_method='be',
+            has_capacitance=True,
+        )
+        self.assertAlmostEqual(ctx.dt, 100e-12)
+
+    def test_C_coeff_be(self):
+        """C_coeff for Backward Euler = 1/dt_scaled."""
+        from distributed.result import DistributedTransientContext
+
+        ctx = DistributedTransientContext(
+            interface_lu=lambda x: x,
+            interface_nodes=[],
+            interface_node_to_idx={},
+            rhs_dirichlet_interface=np.zeros(0),
+            tile_index_maps={},
+            dc_context=None,
+            dt_scaled=100.0,
+            integration_method='be',
+            has_capacitance=True,
+        )
+        self.assertAlmostEqual(ctx.C_coeff, 1.0 / 100.0)
+
+    def test_C_coeff_trap(self):
+        """C_coeff for Trapezoidal = 2/dt_scaled."""
+        from distributed.result import DistributedTransientContext
+
+        ctx = DistributedTransientContext(
+            interface_lu=lambda x: x,
+            interface_nodes=[],
+            interface_node_to_idx={},
+            rhs_dirichlet_interface=np.zeros(0),
+            tile_index_maps={},
+            dc_context=None,
+            dt_scaled=100.0,
+            integration_method='trap',
+            has_capacitance=True,
+        )
+        self.assertAlmostEqual(ctx.C_coeff, 2.0 / 100.0)
+
+
+class TestQuasiStaticResultLazyPeaks(unittest.TestCase):
+    """Test DistributedQuasiStaticResult lazy peak collection."""
+
+    def test_no_model_raises_on_collect(self):
+        """Collecting peaks without model raises RuntimeError."""
+        from distributed.result import DistributedQuasiStaticResult
+
+        result = DistributedQuasiStaticResult(
+            t_array=np.array([0.0]),
+            nominal_voltage=1.0,
+            _model=None,
+        )
+        with self.assertRaises(RuntimeError):
+            result.as_flat()
+
+    def test_dump_and_load(self):
+        """Dump/load round-trip preserves data."""
+        from distributed.result import DistributedQuasiStaticResult
+
+        result = DistributedQuasiStaticResult(
+            t_array=np.linspace(0, 1e-9, 5),
+            nominal_voltage=1.0,
+            peak_ir_drop=0.05,
+            peak_ir_drop_time=0.5e-9,
+            max_ir_drop_per_time=np.array([0.01, 0.02, 0.05, 0.03, 0.01]),
+            total_current_per_time=np.array([1.0, 2.0, 3.0, 2.0, 1.0]),
+            _model=None,
+            _peak_collected=True,
+            _peak_cache={(0, 0): {'n1': (0.05, 0.5e-9)}},
+        )
+
+        with tempfile.NamedTemporaryFile(suffix='.pkl', delete=False) as f:
+            tmp_path = f.name
+        try:
+            result.dump(tmp_path)
+            loaded = DistributedQuasiStaticResult.load(tmp_path)
+            self.assertEqual(loaded.nominal_voltage, 1.0)
+            self.assertAlmostEqual(loaded.peak_ir_drop, 0.05)
+            np.testing.assert_array_equal(loaded.t_array, result.t_array)
+            self.assertIsNone(loaded._model)
+        finally:
+            os.unlink(tmp_path)
+
+
 if __name__ == '__main__':
     unittest.main()

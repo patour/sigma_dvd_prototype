@@ -3,369 +3,56 @@
 Thin stateful actor that holds per-tile BlockMatrixSystem and delegates
 ALL math to solver/coupled_system.py building blocks.
 
-Parsing helpers (_parse_spice_value, _parse_current_source_line) are
-imported lazily from parser sub-modules to avoid circular imports
-(parser -> solver -> distributed).
+Parsing helpers (TileData, _parse_tile_ckt, etc.) live in tile_parsing.py
+and are re-exported here for backward compatibility.
+
+Time-domain methods (VCS, smoothing, transient, peak tracking) live in
+tile_worker_td.py and are mixed in via _TimeDomainMixin.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Unit conversions matching pdn_parser.py
-R_TO_KOHM = 1e-3  # Ohm to kOhm
-I_TO_MA = 1e3  # Ampere to mA
-
-
-@dataclass
-class TileData:
-    """Parsed tile data. Serializable for Ray."""
-
-    tile_id: Tuple[int, int]
-    resistive_edges: List[Tuple[str, str, float]]  # (u, v, conductance_mS)
-    all_nodes: Set[str]
-    boundary_nodes: Set[str]
-    current_injections: Dict[str, float]  # node -> current in mA (positive = sink)
-
-
-def _is_gzip_file(path: str) -> bool:
-    """Check if file is gzip-compressed by magic bytes."""
-    with open(path, 'rb') as f:
-        return f.read(2) == b'\x1f\x8b'
-
-
-def _load_nd_file(nd_path: str) -> Dict[str, str]:
-    """Load .nd file for node-net mapping (lowercase net names).
-
-    Returns:
-        node -> lowercase net name mapping
-    """
-    import gzip
-
-    node_net_map_lower: Dict[str, str] = {}
-
-    if nd_path is None:
-        return node_net_map_lower
-
-    is_gzip = nd_path.endswith('.gz') or _is_gzip_file(nd_path)
-    open_fn = gzip.open if is_gzip else open
-    mode = 'rt' if is_gzip else 'r'
-
-    with open_fn(nd_path, mode) as f:
-        for line in f:
-            parts = line.strip().split()
-            # Format: node_name x y layer tile_id net_name
-            if len(parts) >= 6:
-                node_net_map_lower[parts[0]] = parts[5].lower()
-
-    return node_net_map_lower
-
-
-def _parse_tile_ckt(
-    ckt_path: str,
-    nd_path: Optional[str],
-    net_filter: Optional[str],
-    tile_id: Tuple[int, int],
-) -> TileData:
-    """Parse a tile .ckt file to extract resistive edges and current injections.
-
-    Args:
-        ckt_path: Path to tile .ckt file
-        nd_path: Path to tile .nd file (for net filtering)
-        net_filter: Optional lowercase net name to filter by
-        tile_id: Tile identifier
-
-    Returns:
-        TileData with parsed edges and nodes
-    """
-    import gzip
-    from parser.spice_lexer import _parse_spice_value
-
-    node_net_map_lower = _load_nd_file(nd_path)
-
-    resistive_edges: List[Tuple[str, str, float]] = []
-    current_injections: Dict[str, float] = {}
-    all_nodes: Set[str] = set()
-    boundary_nodes: Set[str] = set()
-
-    GMAX = 1e5
-    SHORT_THRESHOLD = 1e-6
-
-    is_gzip = ckt_path.endswith('.gz') or _is_gzip_file(ckt_path)
-    open_fn = gzip.open if is_gzip else open
-    mode = 'rt' if is_gzip else 'r'
-
-    with open_fn(ckt_path, mode) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('*'):
-                continue
-
-            tokens = line.split()
-            if len(tokens) < 4:
-                continue
-
-            first = tokens[0].lower()
-
-            # Resistors
-            if first[0] == 'r':
-                if first == 'r':
-                    # Unnamed: r node1 node2 value
-                    node1, node2, value_token = tokens[1], tokens[2], tokens[3]
-                else:
-                    # Named: R_name node1 node2 value
-                    node1, node2, value_token = tokens[1], tokens[2], tokens[3]
-
-                # Handle boundary markers
-                is_bnd1 = node1.startswith('*')
-                is_bnd2 = node2.startswith('*')
-                if is_bnd1:
-                    node1 = node1[1:]
-                    boundary_nodes.add(node1)
-                if is_bnd2:
-                    node2 = node2[1:]
-                    boundary_nodes.add(node2)
-
-                # Net filter
-                if net_filter is not None:
-                    n1_net = node_net_map_lower.get(node1)
-                    n2_net = node_net_map_lower.get(node2)
-                    if n1_net != net_filter and n2_net != net_filter:
-                        continue
-
-                try:
-                    r_value = _parse_spice_value(value_token)
-                except ValueError:
-                    continue
-
-                # Convert to kOhm then conductance (mS)
-                r_kohm = r_value * R_TO_KOHM
-                if r_kohm <= 0 or r_kohm < SHORT_THRESHOLD:
-                    g = GMAX
-                else:
-                    g = 1.0 / r_kohm
-
-                resistive_edges.append((node1, node2, g))
-                all_nodes.add(node1)
-                all_nodes.add(node2)
-
-            # Current sources (for DC value extraction)
-            elif first[0] == 'i':
-                if first == 'i':
-                    continue  # Unnamed current source without enough info
-                # Named: I_name node+ node- dc_value ...
-                node_pos = tokens[1]
-                node_neg = tokens[2]
-
-                if node_pos.startswith('*'):
-                    node_pos = node_pos[1:]
-                if node_neg.startswith('*'):
-                    node_neg = node_neg[1:]
-
-                # Net filter
-                if net_filter is not None:
-                    n1_net = node_net_map_lower.get(node_pos)
-                    n2_net = node_net_map_lower.get(node_neg)
-                    if n1_net != net_filter and n2_net != net_filter:
-                        continue
-
-                try:
-                    dc_value = _parse_spice_value(tokens[3])
-                    dc_ma = dc_value * I_TO_MA  # Convert A to mA
-                except (ValueError, IndexError):
-                    continue
-
-                # Current source from node_pos to node_neg (pos = net node, neg = ground)
-                if node_pos != '0':
-                    current_injections[node_pos] = current_injections.get(node_pos, 0.0) + dc_ma
-
-    return TileData(
-        tile_id=tile_id,
-        resistive_edges=resistive_edges,
-        all_nodes=all_nodes,
-        boundary_nodes=boundary_nodes,
-        current_injections=current_injections,
-    )
-
-
-def _iter_instance_sources(
-    instance_path: Optional[str],
-    net_filter: Optional[str],
-    nd_path: Optional[str] = None,
-):
-    """Yield PreparedSource objects from an instanceModels file.
-
-    Encapsulates all shared I/O and filtering logic: gzip detection,
-    comment/blank/dot-prefix line skipping, fast structured-name filter,
-    ``_prepare_instance_source()`` parsing, and slow .nd-based filter
-    fallback.
-
-    Args:
-        instance_path: Path to instanceModels*.sp file.  Yields nothing
-            when ``None``.
-        net_filter: Optional lowercase net name to filter by.
-        nd_path: Path to .nd file for net filtering (used only when
-            *net_filter* is set and instance names are not structured).
-
-    Yields:
-        ``PreparedSource`` namedtuples that passed all filters.
-    """
-    if instance_path is None:
-        return
-
-    import gzip
-    from parser.current_sources import _prepare_instance_source
-    from parser.spice_lexer import (
-        _check_net_filter,
-        _fast_instance_net_filter,
-        _has_structured_instance_names,
-    )
-
-    # Detect structured names for fast net filtering
-    use_fast_filter = (
-        net_filter is not None
-        and _has_structured_instance_names(instance_path)
-    )
-
-    # Only load .nd file when net_filter is set AND names are not structured
-    if net_filter and not use_fast_filter:
-        node_net_map_lower = _load_nd_file(nd_path)
-    else:
-        node_net_map_lower = {}
-
-    is_gzip = instance_path.endswith('.gz') or _is_gzip_file(instance_path)
-    open_fn = gzip.open if is_gzip else open
-    mode = 'rt' if is_gzip else 'r'
-
-    with open_fn(instance_path, mode) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('*') or line.startswith('.'):
-                continue
-
-            # Fast path: reject non-matching nets before expensive parsing
-            if use_fast_filter and not _fast_instance_net_filter(line, net_filter):
-                continue
-
-            prepared = _prepare_instance_source(line)
-            if prepared is None:
-                continue
-
-            # Slow path fallback: .nd-based filtering for unstructured names
-            if net_filter and not use_fast_filter:
-                if not _check_net_filter(
-                    prepared.node_pos, prepared.node_neg,
-                    node_net_map_lower, net_filter,
-                ):
-                    continue
-
-            yield prepared
-
-
-def _parse_instance_models(
-    instance_path: str,
-    net_filter: Optional[str],
-    nd_path: Optional[str] = None,
-) -> Dict[str, float]:
-    """Parse instanceModels file for current source DC values.
-
-    Uses shared ``_iter_instance_sources()`` for parsing + A-to-mA conversion,
-    matching the flat parser's handling exactly.
-
-    Args:
-        instance_path: Path to instanceModels*.sp file
-        net_filter: Optional lowercase net name to filter by
-        nd_path: Path to .nd file for net filtering (required when net_filter is set)
-
-    Returns:
-        Dict mapping node -> current in mA (positive = sink)
-    """
-    current_injections: Dict[str, float] = {}
-
-    for prepared in _iter_instance_sources(instance_path, net_filter, nd_path):
-        # Inject at positive terminal only: instance model current sources
-        # are always node+ -> ground ('0'), so the negative terminal is
-        # eliminated from the nodal system and needs no entry.
-        if prepared.node_pos != '0':
-            current_injections[prepared.node_pos] = (
-                current_injections.get(prepared.node_pos, 0.0) + prepared.static_current_ma
-            )
-
-    return current_injections
-
-
-def parse_tile_with_instances(
-    ckt_path: str,
-    nd_path: Optional[str],
-    net_filter: Optional[str],
-    tile_id: Tuple[int, int],
-    instance_path: Optional[str] = None,
-) -> TileData:
-    """Parse a tile .ckt file and merge instance model current injections.
-
-    Combines _parse_tile_ckt() + _parse_instance_models() + merge into a
-    single call, eliminating duplication between TileWorker.setup() and
-    DistributedNetlistParser.parse_and_dump().
-
-    Args:
-        ckt_path: Path to tile .ckt file
-        nd_path: Path to tile .nd file (for net filtering)
-        net_filter: Optional lowercase net name to filter by
-        tile_id: Tile identifier tuple (x, y)
-        instance_path: Optional path to instanceModels*.sp file
-
-    Returns:
-        TileData with parsed edges, nodes, and merged current injections
-    """
-    tile_data = _parse_tile_ckt(ckt_path, nd_path, net_filter, tile_id)
-
-    if instance_path:
-        inst_currents = _parse_instance_models(instance_path, net_filter, nd_path)
-        for node, current in inst_currents.items():
-            if node in tile_data.all_nodes:
-                tile_data.current_injections[node] = (
-                    tile_data.current_injections.get(node, 0.0) + current
-                )
-
-    return tile_data
-
-
-def parse_and_dump_tile(
-    ckt_path, nd_path, net_filter, tile_id, instance_path,
-    output_dir, die_attachment_candidates=None, net_name=None,
-):
-    """Parse tile, dump TileData to .pkl, return lightweight metadata."""
-    import pickle
-    from pathlib import Path
-    tile_data = parse_tile_with_instances(ckt_path, nd_path, net_filter, tile_id, instance_path)
-    x, y = tile_id
-    pkl_path = Path(output_dir) / f'tile_{x}_{y}.pkl'
-    with open(pkl_path, 'wb') as f:
-        pickle.dump(tile_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-    die_found = {}
-    if die_attachment_candidates and net_name:
-        die_found = {n: net_name for n in die_attachment_candidates if n in tile_data.all_nodes}
-    return {
-        'tile_id': tile_id,
-        'boundary_nodes': tile_data.boundary_nodes,
-        'die_attachment_net_map': die_found,
-        'n_nodes': len(tile_data.all_nodes),
-        'n_edges': len(tile_data.resistive_edges),
-        'n_currents': len(tile_data.current_injections),
-    }
-
-
-class TileWorker:
+# ---------------------------------------------------------------------------
+# Re-exports from tile_parsing for backward compatibility.
+# All existing ``from distributed.tile_worker import X`` continue to work.
+# ---------------------------------------------------------------------------
+
+from .tile_parsing import (  # noqa: F401
+    TileData,
+    R_TO_KOHM,
+    C_TO_FF,
+    I_TO_MA,
+    _is_gzip_file,
+    _load_nd_file,
+    _parse_tile_ckt,
+    _iter_instance_sources,
+    _parse_instance_models,
+    _iter_instance_capacitors,
+    _parse_instance_capacitors,
+    parse_tile_with_instances,
+    parse_and_dump_tile,
+)
+
+from .tile_worker_td import _TimeDomainMixin
+
+
+class TileWorker(_TimeDomainMixin):
     """Per-tile actor for distributed DDM. Thin wrapper that delegates
     all math to coupled_system.py building blocks.
 
-    Intentionally thin - manages state, not algorithms.
+    Time-domain methods (init_vectorized_sources, smooth_sources,
+    evaluate_and_get_reduced_rhs, factor_transient_system,
+    get_transient_reduced_rhs, get_transient_interior_voltages,
+    set_initial_voltages, init_peak_tracking, update_peak_stats,
+    get_peak_stats, get_tracked_waveforms, use_smoothed_sources) are
+    provided by _TimeDomainMixin in tile_worker_td.py.
     """
 
     def __init__(self):
@@ -374,6 +61,31 @@ class TileWorker:
         self._rhs_dirichlet = None
         self._interface_nodes: Optional[Set[str]] = None
         self._removed_island_nodes: Set[str] = set()
+
+        # --- Time-domain state (Phase 4) ---
+        # VectorizedCurrentSources (raw and smoothed)
+        self._vec_sources = None
+        self._smoothed_sources = None
+        self._active_sources = None  # Points to _vec_sources or _smoothed_sources
+
+        # Transient system (A = G + C_coeff * C)
+        self._transient_block_system = None
+        self._c_pp_diag: Optional[np.ndarray] = None
+        self._c_ii_diag: Optional[np.ndarray] = None
+        self._total_cap: float = 0.0
+        self._C_coeff: float = 0.0
+        self._dt_scaled: float = 0.0
+        self._transient_method: str = 'be'
+        # Transient time-stepping state
+        self._v_interior_old: Optional[np.ndarray] = None
+        self._last_f_i: Optional[np.ndarray] = None
+
+        # Peak tracking
+        self._peak_per_node: Dict[str, Tuple[float, float]] = {}
+        self._peak_vdd: float = 0.0
+        self._peak_tracking_active: bool = False
+        self._tracked_nodes: Optional[Set[str]] = None
+        self._tracked_waveforms: Dict[str, List[float]] = {}
 
     def setup(
         self,
@@ -477,10 +189,6 @@ class TileWorker:
         }
 
     # Minimum interface node count for a non-largest component to be kept.
-    # Components with fewer interface nodes are likely small fragments whose
-    # boundary nodes form near-singular chains in the interface system.
-    # Components with many interface nodes (>= threshold) are legitimate
-    # cross-tile strips that connect to the main network through other tiles.
     MIN_INTERFACE_NODES_KEEP = 5
 
     def _remove_floating_islands(self, port_nodes: Set[str]) -> Tuple[int, Set[str]]:
@@ -488,14 +196,10 @@ class TileWorker:
 
         Keeps the largest component plus any component with enough interface
         node connectivity (>= MIN_INTERFACE_NODES_KEEP interface nodes) to
-        be a legitimate cross-tile strip. Removes small fragments whose few
-        boundary nodes would create near-singular interface blocks.
+        be a legitimate cross-tile strip.
 
         Returns:
-            Tuple of (islands_removed, kept_nonlargest_iface) where
-            kept_nonlargest_iface is the set of interface node names from
-            non-largest components that were kept due to sufficient
-            interface connectivity.
+            Tuple of (islands_removed, kept_nonlargest_iface).
         """
         # Build adjacency
         adj: Dict[str, Set[str]] = {}
@@ -505,7 +209,7 @@ class TileWorker:
             adj.setdefault(u, set()).add(v)
             adj.setdefault(v, set()).add(u)
 
-        # Find connected components via BFS (exclude ground node — handled separately)
+        # Find connected components via BFS
         visited: Set[str] = set()
         components: List[Set[str]] = []
         for start_node in self._tile_data.all_nodes:
@@ -527,7 +231,6 @@ class TileWorker:
         if len(components) <= 1:
             return 0, set()
 
-        # Keep largest component + components with sufficient interface connectivity
         largest = max(components, key=len)
         removed_nodes: Set[str] = set()
         kept_nonlargest_iface: Set[str] = set()
@@ -538,20 +241,22 @@ class TileWorker:
             n_interface = len(comp & port_nodes)
             if n_interface >= self.MIN_INTERFACE_NODES_KEEP:
                 kept_nonlargest_iface.update(comp & port_nodes)
-                continue  # Legitimate cross-tile strip
+                continue
             removed_nodes.update(comp)
             islands_removed += 1
 
         if not removed_nodes:
             return 0, kept_nonlargest_iface
 
-        # Store removed nodes for report aggregation
         self._removed_island_nodes = removed_nodes.copy()
-
         self._tile_data.all_nodes -= removed_nodes
         self._tile_data.boundary_nodes -= removed_nodes
         self._tile_data.resistive_edges = [
             (u, v, g) for u, v, g in self._tile_data.resistive_edges
+            if u not in removed_nodes and v not in removed_nodes
+        ]
+        self._tile_data.capacitive_edges = [
+            (u, v, c) for u, v, c in self._tile_data.capacitive_edges
             if u not in removed_nodes and v not in removed_nodes
         ]
         for node in removed_nodes:
@@ -599,7 +304,6 @@ class TileWorker:
         Args:
             boundary_voltages_dict: Dict mapping boundary node -> voltage
             current_injections: Optional override currents (node -> mA).
-                If None, uses tile's own current sources from parsing.
 
         Returns:
             Dict mapping all tile nodes (interior + boundary) -> voltage
@@ -608,13 +312,11 @@ class TileWorker:
 
         currents = current_injections if current_injections is not None else self._tile_data.current_injections
 
-        # Convert boundary dict to array in port_nodes order
         port_voltages = np.zeros(self._block_system.n_ports, dtype=np.float64)
         for node, idx in self._block_system.port_to_idx.items():
             if node in boundary_voltages_dict:
                 port_voltages[idx] = boundary_voltages_dict[node]
 
-        # Recover interior
         interior_voltages = recover_bottom_voltages(
             self._block_system,
             port_voltages,
@@ -622,7 +324,6 @@ class TileWorker:
             self._rhs_dirichlet,
         )
 
-        # Combine boundary + interior voltages
         all_voltages = dict(interior_voltages)
         for node in self._block_system.port_nodes:
             if node in boundary_voltages_dict:
@@ -631,26 +332,7 @@ class TileWorker:
         return all_voltages
 
     def get_layer_metadata(self) -> Dict[str, Dict]:
-        """Per-layer spatial extents, orientation, and stripe coordinates.
-
-        Parses coordinates from node names (``X_Y_LAYER`` format) in a single
-        pass over ``all_nodes``, then scans ``resistive_edges`` for same-layer
-        edge orientation (horizontal / vertical / diagonal).
-
-        Returns
-        -------
-        dict
-            ``layer -> { 'bbox': (x_min, x_max, y_min, y_max),
-            'n_nodes': int,
-            'stripe_coords_h': sorted unique Y values,
-            'stripe_coords_v': sorted unique X values,
-            'edge_orientation': (h_count, v_count, d_count) }``
-
-        Raises
-        ------
-        RuntimeError
-            If called before ``setup()`` or ``setup_from_tile_data()``.
-        """
+        """Per-layer spatial extents, orientation, and stripe coordinates."""
         if self._tile_data is None:
             raise RuntimeError(
                 "get_layer_metadata() called before setup(); no tile data loaded"
@@ -658,10 +340,7 @@ class TileWorker:
 
         from visualization.stripe_heatmap import parse_node_info
 
-        # --- Pass 1: classify nodes by layer, collect coords ---------------
-        # node -> (x, y, layer) for later edge classification
         node_info: Dict[str, Tuple[float, float, str]] = {}
-        # layer -> lists of (x, y)
         layer_xs: Dict[str, List[float]] = {}
         layer_ys: Dict[str, List[float]] = {}
 
@@ -673,7 +352,6 @@ class TileWorker:
             layer_xs.setdefault(layer, []).append(x)
             layer_ys.setdefault(layer, []).append(y)
 
-        # --- Pass 2: classify same-layer edge orientation ------------------
         layer_h: Dict[str, int] = {}
         layer_v: Dict[str, int] = {}
         layer_d: Dict[str, int] = {}
@@ -686,12 +364,12 @@ class TileWorker:
             ux, uy, u_layer = u_info
             vx, vy, v_layer = v_info
             if u_layer != v_layer:
-                continue  # via / cross-layer edge — skip
+                continue
 
             dx = abs(vx - ux)
             dy = abs(vy - uy)
             if dx == 0 and dy == 0:
-                continue  # degenerate zero-length edge
+                continue
 
             if dy == 0:
                 layer_h[u_layer] = layer_h.get(u_layer, 0) + 1
@@ -700,7 +378,6 @@ class TileWorker:
             else:
                 layer_d[u_layer] = layer_d.get(u_layer, 0) + 1
 
-        # --- Build result dict ---------------------------------------------
         result: Dict[str, Dict] = {}
         for layer in sorted(layer_xs):
             xs = layer_xs[layer]
@@ -720,15 +397,7 @@ class TileWorker:
         return result
 
     def get_current_injections(self) -> Dict[str, float]:
-        """Return per-tile current injection dict ``{node: mA}``.
-
-        Returns a *copy* so callers cannot accidentally mutate tile state.
-
-        Raises
-        ------
-        RuntimeError
-            If called before ``setup()`` or ``setup_from_tile_data()``.
-        """
+        """Return per-tile current injection dict ``{node: mA}``."""
         if self._tile_data is None:
             raise RuntimeError(
                 "get_current_injections() called before setup(); no tile data loaded"
@@ -748,14 +417,7 @@ class TileWorker:
         return self._block_system.n_ports if self._block_system else 0
 
     def get_floating_nodes_data(self) -> Dict[str, Any]:
-        """Return floating node data for report aggregation.
-
-        Returns:
-            Dict with removed_nodes and tile_id
-
-        Raises:
-            RuntimeError: If called before setup() or setup_from_tile_data()
-        """
+        """Return floating node data for report aggregation."""
         if self._tile_data is None:
             raise RuntimeError(
                 "get_floating_nodes_data() called before setup(); no tile data loaded"
@@ -772,23 +434,7 @@ class TileWorker:
         nd_path: Optional[str] = None,
         net_filter: Optional[str] = None,
     ) -> Dict[str, str]:
-        """Look up instance names for a set of target nodes from instanceModels file.
-
-        Uses shared ``_iter_instance_sources()`` for all I/O and filtering, then
-        collects ``{node: instance_name}`` for nodes in *target_nodes*.
-
-        Args:
-            target_nodes: Node names to look up (only matching nodes are returned).
-            instance_path: Path to instanceModels*.sp file.  Returns empty dict
-                if ``None``.
-            nd_path: Path to .nd file for net filtering when *net_filter* is set
-                and instance names are not structured.
-            net_filter: Optional lowercase net name to filter by.
-
-        Returns:
-            Dict mapping node name to instance name.  If multiple instances map
-            to the same node, the last one wins (matching flat solver behaviour).
-        """
+        """Look up instance names for a set of target nodes from instanceModels file."""
         node_to_instance: Dict[str, str] = {}
 
         for prepared in _iter_instance_sources(instance_path, net_filter, nd_path):

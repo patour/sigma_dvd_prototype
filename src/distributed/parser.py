@@ -34,6 +34,7 @@ _RE_BOUNDARY_NODE = re.compile(r'^\*(\S+)')
 
 # Unit conversions (matching pdn_parser.py)
 R_TO_KOHM = 1e-3  # Ohm to kOhm
+C_TO_FF = 1e15  # Farad to femtoFarad
 
 
 @dataclass
@@ -59,6 +60,7 @@ class PackageData:
     vdd: float
     net_name: str
     die_attachment_net_map: Dict[str, str] = field(default_factory=dict)  # node → net (worker-validated)
+    package_cap_edges: List[Tuple[str, str, float]] = field(default_factory=list)  # (u, v, C_fF)
 
 
 @dataclass
@@ -319,6 +321,7 @@ class DistributedNetlistParser:
         # Collected raw elements (unfiltered)
         vsrc_list: List[Tuple[str, str, str, str]] = []   # (name, node_pos, node_neg, vsrc_net)
         resistor_list: List[Tuple[str, str, float]] = []   # (node1, node2, g)
+        capacitor_list: List[Tuple[str, str, float]] = []  # (node1, node2, c_fF)
         all_resistor_nodes: Set[str] = set()               # every node seen in any resistor
 
         with _open_file(str(pkg_path)) as f:
@@ -385,6 +388,11 @@ class DistributedNetlistParser:
                     node1, node2 = tokens[1], tokens[2]
                     if node1 != '0' and node2 != '0':
                         _uf_union(parent, uf_net, node1, node2)
+                    try:
+                        c_value = _parse_spice_value(tokens[3])
+                    except (ValueError, IndexError):
+                        continue
+                    capacitor_list.append((node1, node2, c_value * C_TO_FF))
 
         # Seed union-find with external die_net_map (worker-validated)
         if die_net_map:
@@ -432,6 +440,20 @@ class DistributedNetlistParser:
                 filtered_nodes.add(node1)
                 filtered_nodes.add(node2)
 
+        # Filter capacitors by net (package caps CAN be coupling / non-grounded)
+        package_cap_edges: List[Tuple[str, str, float]] = []
+        for node1, node2, c_fF in capacitor_list:
+            match = False
+            for node in (node1, node2):
+                if node == '0':
+                    continue
+                root = _uf_find(parent, node)
+                if uf_net.get(root, '').upper() == net_upper:
+                    match = True
+                    break
+            if match:
+                package_cap_edges.append((node1, node2, c_fF))
+
         # die_attachment_nodes: ALL nodes from ALL resistors with die coordinate pattern
         die_attachment_nodes: Set[str] = {
             node for node in all_resistor_nodes
@@ -456,6 +478,7 @@ class DistributedNetlistParser:
             die_attachment_nodes=die_attachment_nodes,
             vdd=vdd,
             net_name=net_name,
+            package_cap_edges=package_cap_edges,
         )
 
     def parse_and_dump(self, output_dir: str, backend: str = 'local'):
@@ -662,7 +685,7 @@ class DistributedNetlistParser:
                 if len(tokens) < 4:
                     continue
                 first = tokens[0].lower()
-                if first[0] == 'r':  # Match _parse_tile_ckt: only resistors
+                if first[0] in ('r', 'c'):  # Match _parse_tile_ckt: R and C lines
                     for t in tokens[1:3]:
                         if t.startswith('*'):
                             boundary_nodes.add(t[1:])  # Strip *

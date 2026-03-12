@@ -50,6 +50,12 @@ python -m analysis.dynamic_irdrop_decomposition ./netlist/netlist_test --net VDD
 
 # Run distributed solver with heatmaps
 python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --backend ray --plot --verbose
+
+# Run distributed quasi-static analysis
+python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --mode quasi-static --t-end 100ns --n-points 11 --verbose
+
+# Run distributed transient analysis
+python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --mode transient --t-end 10ns --dt 100ps --verbose
 ```
 
 > **Test priority:** First run individual unit test files related to the affected
@@ -64,6 +70,8 @@ python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --backend 
 - **PDN**: `NetlistParser.parse()` -> `create_model_from_pdn(graph, net_name)` -> `UnifiedIRDropSolver`
 - **Multi-Net**: `NetlistParser.parse()` -> `create_multi_net_models(graph)` -> iterate models
 - **Distributed**: `DistributedNetlistParser.parse_and_dump()` -> `ParsedTileBundle` -> `create_distributed_model(bundle)` -> `DistributedDDMSolver`
+- **Distributed QS**: `preprocess_sources()` -> `solve_quasi_static(t_array)` -> `DistributedQuasiStaticResult` (peaks lazy on workers)
+- **Distributed Transient**: `preprocess_sources()` -> `prepare_transient(dt, method)` -> `solve_transient()` -> `DistributedTransientResult`
 
 **Key Constraint:** Pads (voltage sources) are Dirichlet BCs at Vdd, eliminated via Schur complement. LU factorization cached for batch solves.
 
@@ -83,7 +91,9 @@ src/
 │   └── solver_results.py       # Result/context data classes
 ├── solver/
 │   ├── unified_solver.py       # UnifiedIRDropSolver (orchestration)
-│   ├── coupled_system.py       # Block matrices, Schur complement
+│   ├── coupled_system.py       # BlockMatrixSystem, Schur math, grounded cap diags, re-exports
+│   ├── coupled_operators.py    # SchurComplementOperator, CoupledSystemOperator, preconditioners
+│   ├── interface_assembly.py   # Distributed interface assembly, island detection, package matrices
 │   ├── current_aggregation.py  # CurrentAggregator
 │   ├── tiling.py               # TileManager for parallel tiling
 │   ├── unified_partitioner.py  # Layer/spatial partitioning
@@ -106,13 +116,16 @@ src/
 │   └── edge_attrs.py           # Memory-optimized edge attributes
 ├── distributed/
 │   ├── model.py                # DistributedPowerGridModel, ParsedTileBundle
-│   ├── solver.py               # DistributedDDMSolver
+│   ├── solver.py               # DistributedDDMSolver (DC + time-domain mixin)
+│   ├── solver_td.py            # Time-domain mixin: preprocess_sources, solve_quasi_static, solve_transient
 │   ├── parser.py               # DistributedNetlistParser
-│   ├── tile_worker.py          # Per-tile BlockMatrixSystem actor
+│   ├── tile_worker.py          # Per-tile BlockMatrixSystem actor (+ time-domain mixin)
+│   ├── tile_worker_td.py       # Time-domain mixin: VCS, transient factor/RHS, peak tracking
+│   ├── tile_parsing.py         # TileData, stateless parsing functions (_parse_tile_ckt, etc.)
 │   ├── backend.py              # Local/Ray compute backends
 │   ├── heatmap.py              # Distributed stripe heatmap pipeline (prebin/merge/render)
-│   ├── cli.py                  # CLI: python -m distributed {solve,run,parse}
-│   └── result.py               # Result/context dataclasses
+│   ├── cli.py                  # CLI: python -m distributed {solve,run,parse} with --mode dc/quasi-static/transient
+│   └── result.py               # Result/context dataclasses (DC, quasi-static, transient)
 ├── reports/
 │   ├── floating_nodes.py          # Floating nodes detection and reporting
 │   └── topk_irdrop.py             # Top-K worst IR-drop report (shared by flat and distributed)
@@ -144,6 +157,9 @@ src/
 - **PWLSmoother**: Analytical triangular low-pass filter for waveform preprocessing
 - **NetlistParser**: SPICE-like tile-based netlist parsing with parallel support
 - **ParsedTileBundle**: Lightweight coordinator-side metadata for distributed model creation (no tile data)
+- **DistributedSmoothedSources**: Coordinator-side handle for preprocessed VCS (data lives on workers)
+- **DistributedQuasiStaticResult**: Lazy peak collection from workers; `as_flat()` / `as_per_tile()` / `dump()`
+- **DistributedTransientResult**: Extends quasi-static result with RC transient metadata
 - **generate_topk_report**: Shared top-K IR-drop report writer (used by both PDNSolver and DistributedDDMSolver)
 
 ### Legacy Module (src/legacy/)
@@ -178,6 +194,8 @@ src/
 - **np.digitize binning**: Use `valid_mask` filter for out-of-range indices, NOT `np.clip`. Clamping corrupts edge bin values.
 - **Current heatmaps**: Only plot layers that have current sources (check for non-zero bins). Upper metal layers typically have none.
 - **Distributed circular imports**: `distributed/parser.py` cannot import from `distributed/model.py` at module level (model.py already imports from parser.py). Use lazy imports inside functions.
+- **Transient Dirichlet RHS**: In the distributed transient time loop, use `rhs_dirichlet_G` (G-only), NOT `rhs_dirichlet_interface` (A-based, includes cap terms). BE: `+rhs_d_G`, TR: `+2*rhs_d_G`. Pad capacitance history cancels because pads hold constant voltage.
+- **Island detection with caps**: Capacitive edges do NOT contribute to connectivity for island detection. A node connected to pads only via caps is floating. But DO filter cap edges when removing island nodes.
 
 ## Typical Workflow Patterns
 
