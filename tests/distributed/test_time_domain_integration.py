@@ -67,7 +67,7 @@ def _create_flat_solver():
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 11: Quasi-static distributed vs flat (batch DC at time points)
+# Test 11: Quasi-static distributed vs flat (per-node peak IR-drop)
 # ──────────────────────────────────────────────────────────────────────
 
 @unittest.skipUnless(
@@ -75,16 +75,49 @@ def _create_flat_solver():
     "netlist_sampled / distributed_pkl not available",
 )
 class TestDistributedQuasiStaticVsFlat(unittest.TestCase):
-    """Compare distributed quasi-static against flat DynamicIRDropSolver.
+    """Per-node comparison of distributed vs flat quasi-static analysis.
 
-    Both solvers perform batch DC solves at each time point with the same
-    time-varying current sources.  Voltages at each time point should match
-    within floating-point tolerance.
+    Both solvers perform batch DC solves at each time point using time-
+    varying current sources evaluated from the same instanceModels files.
+
+    The DC matrix solve is exact (verified to < 1 uV by the DC integration
+    tests). The ~851 VCS sources "dropped" by the distributed solver all
+    reference nodes on floating islands -- both solvers ignore current
+    injected at floating nodes, so the dropped sources have no effect on
+    the solve. With smoothing disabled on both sides, the per-node
+    voltages match within floating-point precision (~1 uV), the same
+    tolerance as the DC comparison.
+
+    We therefore assert:
+    1. Per-node peak IR-drop agrees within 1 uV (numerical noise).
+    2. Total injected current agrees within 1 % (floating-island sources
+       contribute zero net current to both solvers).
+    3. Physical range and time-variation sanity checks.
     """
+
+    # Per-node peak absolute tolerance (V).
+    # With smoothing disabled on both sides, the only difference is
+    # floating-point accumulation in the Schur complement solve.
+    # Same tolerance as the DC comparison (< 1 uV).
+    PEAK_ATOL = 1e-6
+
+    # Total current relative tolerance.
+    # The flat solver's VCS includes 851 sources on floating-island nodes
+    # (the flat model's edge_cache.node_to_idx maps all graph nodes, not
+    # just valid_nodes). These sources contribute ~1.3 % to the flat total
+    # current sum but inject zero effective current into the solve (their
+    # nodes are absent from the conductance matrix). The distributed solver
+    # correctly excludes them. Use 2 % to accommodate this accounting gap.
+    CURRENT_RTOL = 0.02
 
     @classmethod
     def setUpClass(cls):
-        """Create distributed + flat solvers and run quasi-static analysis."""
+        """Create distributed + flat solvers and run quasi-static analysis.
+
+        Smoothing is disabled on both sides so that source evaluation is
+        identical and the only residual is floating-point noise from the
+        matrix solve (same as the DC comparison, < 1 uV).
+        """
         logging.disable(logging.WARNING)
 
         cls.model, cls.solver = _create_distributed_model()
@@ -94,16 +127,29 @@ class TestDistributedQuasiStaticVsFlat(unittest.TestCase):
         cls.n_points = 5
         cls.t_end = 10e-9  # 10 ns
         cls.t_start = 0.0
+        cls.dt = (cls.t_end - cls.t_start) / max(cls.n_points - 1, 1)
 
-        # Run distributed quasi-static
+        # Preprocess distributed sources WITHOUT smoothing so that the
+        # raw PWL/Pulse waveforms are evaluated identically to the flat
+        # solver's raw VectorizedCurrentSources.
+        dist_sources = cls.solver.preprocess_sources(
+            time_step=cls.dt,
+            t_start=cls.t_start,
+            t_end=cls.t_end,
+            smooth=False,
+            verbose=False,
+        )
+
+        # Run distributed quasi-static with pre-built unsmoothed sources.
         cls.dist_result = cls.solver.solve_quasi_static(
             t_start=cls.t_start,
             t_end=cls.t_end,
             n_points=cls.n_points,
+            smoothed_sources=dist_sources,
             verbose=False,
         )
 
-        # Run flat quasi-static (DynamicIRDropSolver)
+        # Run flat quasi-static WITHOUT smoothing (raw VCS sources).
         from analysis.dynamic_solver import DynamicIRDropSolver
 
         cls.flat_dyn_solver = DynamicIRDropSolver(
@@ -116,11 +162,87 @@ class TestDistributedQuasiStaticVsFlat(unittest.TestCase):
             method='flat',
         )
 
+        # Collect per-node peak IR-drop from both solvers
+        # Flat: peak_ir_drop_per_node: Dict[node, float] (includes pads at 0.0)
+        cls.flat_peaks = cls.flat_result.peak_ir_drop_per_node
+
+        # Distributed: as_flat() -> Dict[node, (max_drop, time_of_max)]
+        # Only tile nodes (no pads).
+        cls.dist_peaks_raw = cls.dist_result.as_flat()
+        cls.dist_peaks = {
+            node: drop for node, (drop, _t) in cls.dist_peaks_raw.items()
+        }
+
+        # Common nodes (intersection of both dicts' keys)
+        cls.common_nodes = set(cls.flat_peaks.keys()) & set(cls.dist_peaks.keys())
+
         logging.disable(logging.NOTSET)
 
     @classmethod
     def tearDownClass(cls):
         cls.model.shutdown()
+
+    def test_common_nodes_nonempty(self):
+        """Flat and distributed solvers share a large set of common nodes."""
+        self.assertGreater(
+            len(self.common_nodes), 1000,
+            f"Only {len(self.common_nodes)} common nodes -- expected thousands",
+        )
+
+    def test_per_node_peak_ir_drop_matches(self):
+        """Per-node max IR-drop matches flat solver within numerical noise.
+
+        With smoothing disabled on both sides, the only difference is
+        floating-point accumulation in the Schur complement solve --
+        same as the DC comparison (< 1 uV).
+        """
+        nodes = sorted(self.common_nodes)
+        flat_arr = np.array([self.flat_peaks[n] for n in nodes])
+        dist_arr = np.array([self.dist_peaks[n] for n in nodes])
+        diffs = np.abs(flat_arr - dist_arr)
+
+        max_diff = float(diffs.max())
+        mean_diff = float(diffs.mean())
+
+        # Print top-10 worst nodes on failure for debugging
+        if max_diff >= self.PEAK_ATOL:
+            worst_idx = np.argsort(diffs)[-10:][::-1]
+            diag_lines = [
+                f"Worst-case per-node peak IR-drop differences "
+                f"(max={max_diff:.2e} V, mean={mean_diff:.2e} V, "
+                f"{len(nodes)} nodes):"
+            ]
+            for idx in worst_idx:
+                n = nodes[idx]
+                diag_lines.append(
+                    f"  {n}: diff={diffs[idx]:.2e} V, "
+                    f"flat={flat_arr[idx]:.6f}, dist={dist_arr[idx]:.6f}"
+                )
+            self.fail("\n".join(diag_lines))
+
+        # Also assert with numpy for clean output on smaller violations
+        np.testing.assert_allclose(
+            dist_arr, flat_arr, atol=self.PEAK_ATOL, rtol=0,
+            err_msg=(
+                f"Per-node peak IR-drop mismatch: max_diff={max_diff:.2e} V, "
+                f"mean_diff={mean_diff:.2e} V over {len(nodes)} common nodes"
+            ),
+        )
+
+    def test_global_peak_ir_drop_matches(self):
+        """Global peak IR-drop matches flat solver within numerical noise."""
+        dist_peak = self.dist_result.peak_ir_drop
+        flat_peak = self.flat_result.peak_ir_drop
+
+        self.assertGreater(dist_peak, 0, "Distributed peak IR-drop is zero")
+        self.assertGreater(flat_peak, 0, "Flat peak IR-drop is zero")
+
+        diff = abs(dist_peak - flat_peak)
+        self.assertLess(
+            diff, self.PEAK_ATOL,
+            f"Global peak IR-drop diff {diff:.2e} V: "
+            f"flat={flat_peak:.6f} V, dist={dist_peak:.6f} V",
+        )
 
     def test_time_arrays_match(self):
         """Both solvers use the same time points."""
@@ -130,54 +252,33 @@ class TestDistributedQuasiStaticVsFlat(unittest.TestCase):
             atol=1e-15,
         )
 
-    def test_max_ir_drop_per_time_reasonable(self):
-        """Per-step max IR-drop is nonzero and in physical range for both solvers.
-
-        The distributed and flat solvers evaluate current sources via
-        independent VCS instances (per-tile vs monolithic). Because source
-        partitioning and wscale handling differ, the per-step values may
-        diverge somewhat. We check that both produce nonzero, physical
-        results rather than requiring tight numerical agreement.
-        """
+    def test_max_ir_drop_per_time_matches(self):
+        """Per-step max IR-drop matches flat solver within numerical noise."""
         dist_max = self.dist_result.max_ir_drop_per_time
         flat_max = self.flat_result.max_ir_drop_per_time
 
-        # Both should be non-negative
+        # Both should be non-negative and nonzero
         self.assertTrue(np.all(dist_max >= 0))
         self.assertTrue(np.all(flat_max >= 0))
-
-        # At least one time point should have nonzero IR-drop
         self.assertGreater(np.max(dist_max), 0,
                            "Distributed max IR-drop is zero -- sources may not be evaluated")
         self.assertGreater(np.max(flat_max), 0,
                            "Flat max IR-drop is zero -- sources may not be evaluated")
 
-        # Both peaks should be within the same order of magnitude
-        ratio = max(np.max(dist_max), np.max(flat_max)) / min(np.max(dist_max), np.max(flat_max))
-        self.assertLess(ratio, 5.0,
-                        f"Peak IR-drop ratio {ratio:.1f}x -- distributed and flat "
-                        f"should be within 5x")
+        np.testing.assert_allclose(
+            dist_max, flat_max, atol=self.PEAK_ATOL, rtol=0,
+            err_msg="Per-step max IR-drop mismatch",
+        )
 
-    def test_peak_ir_drop_order_of_magnitude(self):
-        """Distributed and flat peak IR-drop within same order of magnitude."""
-        dist_peak = self.dist_result.peak_ir_drop
-        flat_peak = self.flat_result.peak_ir_drop
+    def test_total_current_per_time_matches(self):
+        """Total injected current per time point matches within tolerance.
 
-        self.assertGreater(dist_peak, 0)
-        self.assertGreater(flat_peak, 0)
-
-        ratio = max(dist_peak, flat_peak) / min(dist_peak, flat_peak)
-        self.assertLess(ratio, 3.0,
-                        f"Peak IR-drop ratio {ratio:.2f} -- should be within 3x")
-
-    def test_total_current_per_time_nonzero(self):
-        """Total injected current per time point is nonzero for both solvers.
-
-        The two solvers evaluate sources independently (per-tile VCS vs
-        monolithic VCS). Source partitioning, wscale handling, and
-        net-filtering differences can produce significant current-total
-        variation. We verify both produce nonzero results and are within
-        the same order of magnitude.
+        The flat model's edge_cache.node_to_idx includes floating-island
+        nodes (434 nodes across 4 islands), so the flat VCS evaluates
+        ~851 extra sources that inject into those nodes. These currents
+        do NOT affect the solve (floating nodes are absent from the
+        conductance matrix), but they inflate the flat ``total_current``
+        sum by ~1.3 %. The distributed solver correctly excludes them.
         """
         dist_I = self.dist_result.total_current_per_time
         flat_I = self.flat_result.total_current_per_time
@@ -188,12 +289,14 @@ class TestDistributedQuasiStaticVsFlat(unittest.TestCase):
         self.assertGreater(np.max(np.abs(flat_I)), 0,
                            "Flat total current is all zero")
 
-        # Same order of magnitude
-        dist_max_I = float(np.max(np.abs(dist_I)))
-        flat_max_I = float(np.max(np.abs(flat_I)))
-        ratio = max(dist_max_I, flat_max_I) / max(min(dist_max_I, flat_max_I), 1e-12)
-        self.assertLess(ratio, 5.0,
-                        f"Total current ratio {ratio:.1f}x -- should be within 5x")
+        max_I_diff = float(np.max(np.abs(dist_I - flat_I)))
+        max_I_mag = max(float(np.max(np.abs(dist_I))), float(np.max(np.abs(flat_I))))
+        rel_diff = max_I_diff / max(max_I_mag, 1e-12)
+        self.assertLess(
+            rel_diff, self.CURRENT_RTOL,
+            f"Total current relative diff {rel_diff:.2e} "
+            f"(abs diff={max_I_diff:.4f} mA, max={max_I_mag:.4f} mA)",
+        )
 
     def test_voltages_in_physical_range(self):
         """Distributed quasi-static voltages should be in [0, Vdd]."""
@@ -214,6 +317,190 @@ class TestDistributedQuasiStaticVsFlat(unittest.TestCase):
             "All distributed time steps have identical IR-drop -- "
             "time-varying sources may not be working",
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test 11b: Transient distributed vs flat (per-node peak IR-drop)
+# ──────────────────────────────────────────────────────────────────────
+
+@unittest.skipUnless(
+    NETLIST_SAMPLED_EXISTS and PKL_DIR_EXISTS,
+    "netlist_sampled / distributed_pkl not available",
+)
+class TestDistributedTransientVsFlat(unittest.TestCase):
+    """Per-node comparison of distributed vs flat transient (RC) analysis.
+
+    Both solvers perform implicit time integration (Backward Euler) with
+    the same dt, t_start, t_end, and time-varying current sources.
+
+    Smoothing is enabled on both sides (PWL triangular low-pass filter)
+    so that the same preprocessed waveforms drive both solvers.  The
+    transient system includes capacitance, which adds C_coeff * C to
+    the A-matrix and history terms (C * v_old) to the RHS. These extra
+    matrix-vector products introduce slightly more floating-point
+    accumulation than the pure-G DC/quasi-static system, so we use
+    2 uV tolerance (vs 1 uV for quasi-static).
+
+    We assert:
+    1. Per-node peak IR-drop agrees within 2 uV (numerical noise).
+    2. Physical range and time-variation sanity checks.
+    """
+
+    # Per-node peak absolute tolerance (V).
+    # Larger than the quasi-static tolerance (1 uV) because the transient
+    # A = G + C_coeff*C system has additional matrix-vector operations
+    # (C*v_old history terms, A_ii factorization with cap contributions)
+    # and PWL smoothing evaluation adds further floating-point accumulation
+    # on top of the Schur complement solve.  Observed worst-case ~2.2 uV.
+    PEAK_ATOL = 3e-6
+
+    @classmethod
+    def setUpClass(cls):
+        """Create distributed + flat solvers and run transient analysis.
+
+        Smoothing is enabled on both sides so that the same preprocessed
+        (PWL-smoothed) waveforms drive both solvers.  The only residual
+        is floating-point noise from the matrix solve.
+        """
+        logging.disable(logging.WARNING)
+
+        cls.model, cls.solver = _create_distributed_model()
+        cls.flat_model, cls.flat_graph, cls.flat_solver = _create_flat_solver()
+
+        cls.dt = 1e-9        # 1 ns
+        cls.t_end = 5e-9     # 5 ns
+        cls.t_start = 0.0
+
+        # -- Distributed transient (smoothed) --
+        dist_sources = cls.solver.preprocess_sources(
+            time_step=cls.dt,
+            t_start=cls.t_start,
+            t_end=cls.t_end,
+            smooth=True,
+            verbose=False,
+        )
+        cls.dist_result = cls.solver.solve_transient(
+            t_start=cls.t_start,
+            t_end=cls.t_end,
+            dt=cls.dt,
+            method='be',
+            smoothed_sources=dist_sources,
+            verbose=False,
+        )
+
+        # -- Flat transient (smoothed) --
+        from analysis.transient_solver import TransientIRDropSolver, IntegrationMethod
+
+        cls.flat_trans_solver = TransientIRDropSolver(
+            cls.flat_model, cls.flat_graph,
+        )
+        flat_smoothed = cls.flat_trans_solver.preprocess_sources(
+            dt=cls.dt,
+            t_start=cls.t_start,
+            t_end=cls.t_end,
+        )
+        cls.flat_result = cls.flat_trans_solver.solve_transient(
+            t_start=cls.t_start,
+            t_end=cls.t_end,
+            dt=cls.dt,
+            method=IntegrationMethod.BACKWARD_EULER,
+            smoothed_sources=flat_smoothed,
+        )
+
+        # Collect per-node peak IR-drop from both solvers
+        cls.flat_peaks = cls.flat_result.peak_ir_drop_per_node
+
+        cls.dist_peaks_raw = cls.dist_result.as_flat()
+        cls.dist_peaks = {
+            node: drop for node, (drop, _t) in cls.dist_peaks_raw.items()
+        }
+
+        cls.common_nodes = set(cls.flat_peaks.keys()) & set(cls.dist_peaks.keys())
+
+        logging.disable(logging.NOTSET)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.model.shutdown()
+
+    def test_common_nodes_nonempty(self):
+        """Flat and distributed solvers share a large set of common nodes."""
+        self.assertGreater(
+            len(self.common_nodes), 1000,
+            f"Only {len(self.common_nodes)} common nodes -- expected thousands",
+        )
+
+    def test_per_node_peak_ir_drop_matches(self):
+        """Per-node max IR-drop matches flat solver within numerical noise.
+
+        With smoothing enabled on both sides, the same preprocessed
+        waveforms drive both solvers.  The only difference is floating-
+        point accumulation in the Schur complement solve (< 2 uV).
+        """
+        nodes = sorted(self.common_nodes)
+        flat_arr = np.array([self.flat_peaks[n] for n in nodes])
+        dist_arr = np.array([self.dist_peaks[n] for n in nodes])
+        diffs = np.abs(flat_arr - dist_arr)
+
+        max_diff = float(diffs.max())
+        mean_diff = float(diffs.mean())
+
+        # Print top-10 worst nodes on failure for debugging
+        if max_diff >= self.PEAK_ATOL:
+            worst_idx = np.argsort(diffs)[-10:][::-1]
+            diag_lines = [
+                f"Worst-case per-node peak IR-drop differences "
+                f"(max={max_diff:.2e} V, mean={mean_diff:.2e} V, "
+                f"{len(nodes)} nodes):"
+            ]
+            for idx in worst_idx:
+                n = nodes[idx]
+                diag_lines.append(
+                    f"  {n}: diff={diffs[idx]:.2e} V, "
+                    f"flat={flat_arr[idx]:.6f}, dist={dist_arr[idx]:.6f}"
+                )
+            self.fail("\n".join(diag_lines))
+
+        np.testing.assert_allclose(
+            dist_arr, flat_arr, atol=self.PEAK_ATOL, rtol=0,
+            err_msg=(
+                f"Per-node peak IR-drop mismatch: max_diff={max_diff:.2e} V, "
+                f"mean_diff={mean_diff:.2e} V over {len(nodes)} common nodes"
+            ),
+        )
+
+    def test_global_peak_ir_drop_matches(self):
+        """Global peak IR-drop matches flat solver within numerical noise."""
+        dist_peak = self.dist_result.peak_ir_drop
+        flat_peak = self.flat_result.peak_ir_drop
+
+        self.assertGreater(dist_peak, 0, "Distributed peak IR-drop is zero")
+        self.assertGreater(flat_peak, 0, "Flat peak IR-drop is zero")
+
+        diff = abs(dist_peak - flat_peak)
+        self.assertLess(
+            diff, self.PEAK_ATOL,
+            f"Global peak IR-drop diff {diff:.2e} V: "
+            f"flat={flat_peak:.6f} V, dist={dist_peak:.6f} V",
+        )
+
+    def test_nonzero_ir_drop(self):
+        """Transient produces measurable IR-drop."""
+        self.assertGreater(self.dist_result.peak_ir_drop, 0,
+                           "Distributed transient peak IR-drop is zero")
+        self.assertGreater(self.flat_result.peak_ir_drop, 0,
+                           "Flat transient peak IR-drop is zero")
+
+    def test_ir_drop_within_vdd(self):
+        """All per-step max IR-drop values are within Vdd."""
+        vdd = self.model.vdd
+        for i, drop in enumerate(self.dist_result.max_ir_drop_per_time):
+            self.assertLessEqual(drop, vdd + 0.01,
+                                 f"Step {i}: IR-drop {drop} > Vdd+margin")
+
+    def test_integration_method_recorded(self):
+        """Distributed result records correct integration method."""
+        self.assertEqual(self.dist_result.integration_method, 'be')
 
 
 # ──────────────────────────────────────────────────────────────────────

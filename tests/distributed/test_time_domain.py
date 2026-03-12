@@ -690,7 +690,124 @@ class TestPeakTracking:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 7. Island detection with caps
+# 7. Cached RHS recovery (quasi-static bug fix)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestCachedRHSRecovery:
+    """Unit tests for the cached interior RHS recovery path.
+
+    Verifies that recover_and_update_peaks() uses the cached RHS from
+    evaluate_and_get_reduced_rhs() rather than static DC currents.
+    """
+
+    def test_cache_set_and_consumed(self):
+        """evaluate_and_get_reduced_rhs sets cache; recover consumes it."""
+        from unittest.mock import MagicMock
+        from analysis.vectorized_sources import VectorizedCurrentSources
+        from parser.current_sources import CurrentSource
+
+        worker = _make_worker_with_tile(
+            edges=[('a', 'b', 2.0), ('b', '0', 1.0)],
+            port_nodes={'a'},
+            currents={'b': 0.5},
+        )
+
+        # Build a simple VCS with one DC source
+        n_ports = worker._block_system.n_ports
+        n_interior = worker._block_system.n_interior
+        n_nodes = n_ports + n_interior
+        node_to_idx = dict(worker._block_system.port_to_idx)
+        for node, idx in worker._block_system.interior_to_idx.items():
+            node_to_idx[node] = idx + n_ports
+
+        src = CurrentSource(name='i1', node1='b', node2='0', dc_value=1.0)
+        worker._vec_sources = VectorizedCurrentSources.from_current_sources(
+            {'i1': src}, node_to_idx, n_nodes,
+        )
+        worker._active_sources = worker._vec_sources
+
+        # Before evaluate: cache should be None
+        assert worker._last_qs_rhs_i is None
+
+        # Evaluate: cache should be set
+        g, total = worker.evaluate_and_get_reduced_rhs(t=0.0)
+        assert worker._last_qs_rhs_i is not None
+        assert worker._last_qs_rhs_i.shape == (n_interior,)
+
+        # Recover with peak tracking: cache should be consumed
+        worker.init_peak_tracking(vdd=1.0)
+        drop = worker.recover_and_update_peaks({'a': 0.95}, t=0.0)
+        assert worker._last_qs_rhs_i is None  # consumed
+
+        # Subsequent call falls back to static DC path (no error)
+        drop2 = worker.recover_and_update_peaks({'a': 0.95}, t=1e-9)
+        assert drop2 >= 0
+
+    def test_cached_recovery_matches_evaluate(self):
+        """Interior voltages from cached RHS are consistent with the
+        reduced RHS sent to the coordinator."""
+        from analysis.vectorized_sources import VectorizedCurrentSources
+        from parser.current_sources import CurrentSource
+
+        # 2-interior-node tile: a(port) -- b(int) -- c(int) -- 0
+        worker = _make_worker_with_tile(
+            edges=[('a', 'b', 1.0), ('b', 'c', 1.0), ('c', '0', 1.0)],
+            port_nodes={'a'},
+            currents={'b': 0.3, 'c': 0.2},
+        )
+
+        n_ports = worker._block_system.n_ports
+        n_interior = worker._block_system.n_interior
+        n_nodes = n_ports + n_interior
+        node_to_idx = dict(worker._block_system.port_to_idx)
+        for node, idx in worker._block_system.interior_to_idx.items():
+            node_to_idx[node] = idx + n_ports
+
+        # Create VCS with different currents than static (0.5 mA vs 0.3/0.2)
+        src_b = CurrentSource(name='ib', node1='b', node2='0', dc_value=0.5)
+        src_c = CurrentSource(name='ic', node1='c', node2='0', dc_value=0.1)
+        worker._vec_sources = VectorizedCurrentSources.from_current_sources(
+            {'ib': src_b, 'ic': src_c}, node_to_idx, n_nodes,
+        )
+        worker._active_sources = worker._vec_sources
+
+        # Solve via evaluate + manual coordinator solve + recover
+        g_vcs, _ = worker.evaluate_and_get_reduced_rhs(t=0.0)
+
+        # Also solve via static DC path for comparison
+        g_dc = worker.get_reduced_rhs()
+
+        # VCS currents differ from static, so reduced RHS should differ
+        assert not np.allclose(g_vcs, g_dc, atol=1e-10), \
+            "VCS and DC reduced RHS should differ (different currents)"
+
+        # Recover with cached path (VCS currents)
+        worker.init_peak_tracking(vdd=1.0)
+        worker.evaluate_and_get_reduced_rhs(t=0.0)  # re-populate cache
+        worker.recover_and_update_peaks({'a': 0.9}, t=0.0)
+
+        # Get the voltages from peak stats
+        peaks_vcs = worker.get_peak_stats()
+
+        # Now solve with static DC path
+        worker._last_qs_rhs_i = None  # force DC fallback
+        worker._peak_per_node = {}  # reset peaks
+        worker.recover_and_update_peaks({'a': 0.9}, t=1e-9)
+        peaks_dc = worker.get_peak_stats()
+
+        # The two recoveries should produce different interior voltages
+        # because VCS injects 0.5+0.1=0.6 mA while static injects 0.3+0.2=0.5 mA
+        common = set(peaks_vcs) & set(peaks_dc)
+        interior_common = {n for n in common if n != 'a'}
+        assert len(interior_common) > 0
+        diffs = [abs(peaks_vcs[n][0] - peaks_dc[n][0]) for n in interior_common]
+        assert max(diffs) > 1e-6, \
+            "Cached and DC recovery should produce different interior voltages"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 8. Island detection with caps
 # ──────────────────────────────────────────────────────────────────────
 
 

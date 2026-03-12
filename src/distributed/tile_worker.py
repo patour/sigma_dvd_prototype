@@ -79,6 +79,8 @@ class TileWorker(_TimeDomainMixin):
         # Transient time-stepping state
         self._v_interior_old: Optional[np.ndarray] = None
         self._last_f_i: Optional[np.ndarray] = None
+        # Quasi-static: cached interior RHS from last evaluate_and_get_reduced_rhs
+        self._last_qs_rhs_i: Optional[np.ndarray] = None
 
         # Peak tracking
         self._peak_per_node: Dict[str, Tuple[float, float]] = {}

@@ -164,7 +164,10 @@ class _TimeDomainMixin:
     ) -> Tuple[np.ndarray, float]:
         """Evaluate time-domain currents and compute reduced RHS.
 
-        Falls back to static DC path when no VCS is loaded.
+        Falls back to static DC path when no VCS is loaded.  Caches the
+        interior RHS vector so that the subsequent
+        :meth:`recover_and_update_peaks` call recovers interior voltages
+        using the same time-varying currents (not the static DC values).
 
         Args:
             t: Time in seconds.
@@ -177,6 +180,7 @@ class _TimeDomainMixin:
         n_interior = self._block_system.n_interior
 
         if self._active_sources is None:
+            self._last_qs_rhs_i = None
             rhs = self.get_reduced_rhs()
             total = sum(self._tile_data.current_injections.values())
             return rhs, total
@@ -192,6 +196,9 @@ class _TimeDomainMixin:
 
         rhs_p = -I_p + rhs_d_p
         rhs_i = -I_i + rhs_d_i
+
+        # Cache interior RHS for consistent recovery in recover_and_update_peaks
+        self._last_qs_rhs_i = rhs_i
 
         if n_interior > 0 and self._block_system.lu_ii is not None:
             v_i = self._block_system.lu_ii(rhs_i)
@@ -460,10 +467,15 @@ class _TimeDomainMixin:
         boundary_voltages_dict: Dict[str, float],
         t: float,
     ) -> float:
-        """Recover interior voltages (DC path) and update peak stats in one call.
+        """Recover interior voltages and update peak stats in one call.
 
-        Combines :meth:`get_interior_voltages` with :meth:`update_peak_stats`
-        to avoid two round-trips per time step in the quasi-static loop.
+        When called after :meth:`evaluate_and_get_reduced_rhs`, uses the
+        cached interior RHS (which includes time-varying VCS currents) to
+        recover interior voltages consistently with the reduced RHS that
+        was used to solve the interface system.
+
+        Falls back to :meth:`get_interior_voltages` (static DC currents)
+        when no cached interior RHS is available.
 
         Args:
             boundary_voltages_dict: Solved port voltages ``{node: V}``.
@@ -472,13 +484,63 @@ class _TimeDomainMixin:
         Returns:
             Scalar max IR-drop for this tile at this time step.
         """
-        voltages = self.get_interior_voltages(boundary_voltages_dict)
+        if self._last_qs_rhs_i is not None:
+            # Use cached interior RHS from evaluate_and_get_reduced_rhs
+            voltages = self._recover_interior_from_cached_rhs(
+                boundary_voltages_dict
+            )
+            self._last_qs_rhs_i = None  # Consumed; prevent stale use
+        else:
+            voltages = self.get_interior_voltages(boundary_voltages_dict)
+
         if self._peak_tracking_active:
             return self.update_peak_stats(voltages, t)
         vdd = self._peak_vdd if self._peak_vdd > 0 else 0.0
         if vdd > 0:
             return max((vdd - v for v in voltages.values()), default=0.0)
         return 0.0
+
+    def _recover_interior_from_cached_rhs(
+        self,
+        boundary_voltages_dict: Dict[str, float],
+    ) -> Dict[str, float]:
+        """Recover interior voltages using the cached interior RHS.
+
+        This produces interior voltages consistent with the time-varying
+        currents evaluated in the last :meth:`evaluate_and_get_reduced_rhs`
+        call, avoiding the static-current mismatch that would occur when
+        using :meth:`get_interior_voltages` in the quasi-static loop.
+
+        Args:
+            boundary_voltages_dict: Solved port voltages ``{node: V}``.
+
+        Returns:
+            Dict mapping all tile nodes (interior + boundary) -> voltage.
+        """
+        bs = self._block_system
+        n_ports = bs.n_ports
+
+        # Build port voltage array
+        v_p = np.zeros(n_ports, dtype=np.float64)
+        for node, idx in bs.port_to_idx.items():
+            if node in boundary_voltages_dict:
+                v_p[idx] = boundary_voltages_dict[node]
+
+        # v_i = inv(G_ii) @ (rhs_i - G_ip @ v_p)
+        if bs.n_interior > 0 and bs.lu_ii is not None:
+            v_i = bs.lu_ii(self._last_qs_rhs_i - bs.G_ip @ v_p)
+        else:
+            v_i = np.array([], dtype=np.float64)
+
+        # Build all-node voltage dict
+        all_voltages: Dict[str, float] = {}
+        for i, node in enumerate(bs.interior_nodes):
+            all_voltages[node] = float(v_i[i])
+        for node in bs.port_nodes:
+            if node in boundary_voltages_dict:
+                all_voltages[node] = boundary_voltages_dict[node]
+
+        return all_voltages
 
     def recover_transient_and_update_peaks(
         self,
