@@ -56,11 +56,10 @@ class _TimeDomainMixin:
         n_nodes = n_ports + n_interior
 
         if self._vec_sources is not None:
-            return {
-                'n_sources': self._vec_sources.n_sources,
-                'n_nodes': n_nodes,
-                'cached': True,
-            }
+            stats = self._vec_sources.get_statistics()
+            stats['n_nodes'] = n_nodes
+            stats['cached'] = True
+            return stats
 
         import os
         import pickle
@@ -77,11 +76,10 @@ class _TimeDomainMixin:
                 with open(cache_path, 'rb') as f:
                     self._vec_sources = pickle.load(f)
                 self._active_sources = self._vec_sources
-                return {
-                    'n_sources': self._vec_sources.n_sources,
-                    'n_nodes': n_nodes,
-                    'cached': True,
-                }
+                stats = self._vec_sources.get_statistics()
+                stats['n_nodes'] = n_nodes
+                stats['cached'] = True
+                return stats
 
         # Build node_to_idx: ports [0..n_ports), interior [n_ports..n_total)
         node_to_idx: Dict[str, int] = dict(self._block_system.port_to_idx)
@@ -106,11 +104,10 @@ class _TimeDomainMixin:
             with open(cache_path, 'wb') as f:
                 pickle.dump(self._vec_sources, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        return {
-            'n_sources': self._vec_sources.n_sources,
-            'n_nodes': n_nodes,
-            'cached': False,
-        }
+        stats = self._vec_sources.get_statistics()
+        stats['n_nodes'] = n_nodes
+        stats['cached'] = False
+        return stats
 
     # --- 4b. PWL smoothing ---------------------------------------------
 
@@ -275,7 +272,7 @@ class _TimeDomainMixin:
         transient_bs.factor_interior()
         self._transient_block_system = transient_bs
         S_A = compute_explicit_schur(transient_bs)
-        return S_A, list(bs.port_nodes)
+        return S_A, list(bs.port_nodes), self._total_cap
 
     # --- 4f. Transient reduced RHS ------------------------------------
 

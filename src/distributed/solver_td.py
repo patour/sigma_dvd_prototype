@@ -323,10 +323,12 @@ class _SolverTimeDomainMixin:
         # Organize results by tile
         tile_schur_complements: Dict[Any, np.ndarray] = {}
         tile_port_node_lists: Dict[Any, List[str]] = {}
-        for i, (S_A_i, port_list) in enumerate(schur_results):
+        total_tile_cap = 0.0
+        for i, (S_A_i, port_list, tile_cap) in enumerate(schur_results):
             tid = tile_configs[i].tile_id
             tile_schur_complements[tid] = S_A_i
             tile_port_node_lists[tid] = port_list
+            total_tile_cap += tile_cap
 
         # 3. Build combined package edges: resistive + effective cap edges
         t0 = time.perf_counter()
@@ -334,7 +336,7 @@ class _SolverTimeDomainMixin:
         pkg_cap_edges = model.package_data.package_cap_edges
 
         combined_edges = list(pkg_res_edges)
-        has_cap = False
+        has_cap = total_tile_cap > 0
         for u, v, c_fF in pkg_cap_edges:
             if c_fF > 0:
                 combined_edges.append((u, v, C_coeff * c_fF))

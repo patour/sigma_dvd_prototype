@@ -6,6 +6,7 @@ _bmad-output/
 *.swp
 *.token
 *.log
+*.pkl
 .env
 venv/
 .vscode/
@@ -13,8 +14,8 @@ venv/
 .cursor/commands/
 *.egg-info/
 .ipynb_checkpoints/
-netlist/netlist_test/*.pkl
-pdn/netlist_minion/
+netlist/netlist_brcm
+netlist/netlist_minion
 netlist_data/
 results/
 /parser/
