@@ -9,6 +9,7 @@ TileWorker via inheritance.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -158,7 +159,7 @@ class _TimeDomainMixin:
 
     def evaluate_and_get_reduced_rhs(
         self, t: float,
-    ) -> Tuple[np.ndarray, float]:
+    ) -> Tuple[np.ndarray, float, Dict[str, Any]]:
         """Evaluate time-domain currents and compute reduced RHS.
 
         Falls back to static DC path when no VCS is loaded.  Caches the
@@ -170,17 +171,27 @@ class _TimeDomainMixin:
             t: Time in seconds.
 
         Returns:
-            ``(g, total_current)`` -- reduced RHS ``(n_ports,)`` and
-            scalar sum of currents (mA).
+            ``(g, total_current, stats)`` -- reduced RHS ``(n_ports,)``,
+            scalar sum of currents (mA), and stats dict.
         """
+        t0 = time.perf_counter()
+
         n_ports = self._block_system.n_ports
         n_interior = self._block_system.n_interior
 
         if self._active_sources is None:
             self._last_qs_rhs_i = None
-            rhs = self.get_reduced_rhs()
+            rhs, _rhs_stats = self.get_reduced_rhs()
             total = sum(self._tile_data.current_injections.values())
-            return rhs, total
+            eval_time = time.perf_counter() - t0
+            stats = {
+                'eval_time_s': eval_time,
+                'n_active_sources': sum(
+                    1 for v in self._tile_data.current_injections.values()
+                    if v != 0.0
+                ),
+            }
+            return rhs, total, stats
 
         current_array = self._active_sources.evaluate_at_time(t)
         total_current = float(np.sum(current_array))
@@ -203,7 +214,21 @@ class _TimeDomainMixin:
         else:
             g = rhs_p
 
-        return g, total_current
+        eval_time = time.perf_counter() - t0
+        n_active = int(np.count_nonzero(current_array))
+        stats = {
+            'eval_time_s': eval_time,
+            'n_active_sources': n_active,
+        }
+
+        tid = self._tile_data.tile_id if self._tile_data else '?'
+        logger.debug(
+            "Tile %s evaluate_and_get_reduced_rhs:\n"
+            "  time: %.3fs  |  n_active_sources: %s  |  total_current: %.2f mA",
+            tid, eval_time, f"{n_active:,}", total_current,
+        )
+
+        return g, total_current, stats
 
     # --- 4e. Transient system factorization ----------------------------
 
@@ -211,7 +236,7 @@ class _TimeDomainMixin:
         self,
         dt_scaled: float,
         method: str = 'be',
-    ) -> Tuple[np.ndarray, List[str]]:
+    ) -> Tuple[np.ndarray, List[str], float, Dict[str, Any]]:
         """Build and factor A = G + C_coeff * diag(C), return Schur complement.
 
         Args:
@@ -219,13 +244,15 @@ class _TimeDomainMixin:
             method: ``'be'`` (Backward Euler) or ``'trap'`` (Trapezoidal).
 
         Returns:
-            ``(S_A_dense, port_list)`` -- dense Schur complement and
-            ordered port node names.
+            ``(S_A_dense, port_list, total_cap, stats)`` -- dense Schur
+            complement, ordered port node names, total capacitance (fF),
+            and stats dict.
         """
         from solver.coupled_system import (
             BlockMatrixSystem,
             build_grounded_capacitance_diags,
             compute_explicit_schur,
+            _format_bytes,
         )
         import scipy.sparse as sp_mod
 
@@ -269,10 +296,71 @@ class _TimeDomainMixin:
             interior_to_idx=dict(bs.interior_to_idx),
             lu_ii=None,
         )
+
+        t0 = time.perf_counter()
         transient_bs.factor_interior()
+        factor_time = time.perf_counter() - t0
+
         self._transient_block_system = transient_bs
-        S_A = compute_explicit_schur(transient_bs)
-        return S_A, list(bs.port_nodes), self._total_cap
+
+        t0 = time.perf_counter()
+        S_A, schur_stats = compute_explicit_schur(transient_bs)
+        schur_time = time.perf_counter() - t0
+
+        # Capacitance stats
+        c_ii_cap_nodes = int(np.count_nonzero(self._c_ii_diag))
+        c_pp_cap_nodes = int(np.count_nonzero(self._c_pp_diag))
+
+        # Backend info from factor_adapter
+        fa = transient_bs.factor_adapter
+        if fa is not None:
+            backend = fa.backend
+            backend_info = fa.backend_info
+        else:
+            backend = 'n/a'
+            backend_info = 'n/a'
+
+        A_ii_nnz = A_ii.nnz if sp_mod.issparse(A_ii) else 0
+        A_pp_nnz = A_pp.nnz if sp_mod.issparse(A_pp) else 0
+
+        stats = {
+            'factor_interior_s': factor_time,
+            'compute_schur_s': schur_time,
+            'total_cap_fF': self._total_cap,
+            'A_ii_nnz': A_ii_nnz,
+            'A_pp_nnz': A_pp_nnz,
+            'schur_mem_bytes': schur_stats['schur_mem_bytes'],
+            'schur_chunk_size': schur_stats['chunk_size'],
+            'factorization_backend': backend,
+            'factorization_backend_info': backend_info,
+            'n_ports': n_ports,
+            'n_interior': n_interior,
+            'c_ii_cap_nodes': c_ii_cap_nodes,
+            'c_pp_cap_nodes': c_pp_cap_nodes,
+            'C_coeff': C_coeff,
+        }
+
+        tid = self._tile_data.tile_id if self._tile_data else '?'
+        logger.debug(
+            "Tile %s factor_transient_system:\n"
+            "  A_ii: %s x %s, nnz=%s  |  A_pp: %s x %s, nnz=%s\n"
+            "  C_ii cap nodes: %s / %s  |  C_pp cap nodes: %s / %s\n"
+            "  Total tile cap: %.0f fF  |  C_coeff: %.4f\n"
+            "  factor_interior: %.3fs  |  backend: %s\n"
+            "  compute_schur: %.3fs  |  Schur: %s x %s dense (%s)  |  chunk_size: %s",
+            tid,
+            f"{n_interior:,}", f"{n_interior:,}", f"{A_ii_nnz:,}",
+            f"{n_ports:,}", f"{n_ports:,}", f"{A_pp_nnz:,}",
+            f"{c_ii_cap_nodes:,}", f"{n_interior:,}",
+            f"{c_pp_cap_nodes:,}", f"{n_ports:,}",
+            self._total_cap, C_coeff,
+            factor_time, backend_info,
+            schur_time, f"{S_A.shape[0]:,}", f"{S_A.shape[1]:,}",
+            _format_bytes(schur_stats['schur_mem_bytes']),
+            schur_stats['chunk_size'],
+        )
+
+        return S_A, list(bs.port_nodes), self._total_cap, stats
 
     # --- 4f. Transient reduced RHS ------------------------------------
 
@@ -280,7 +368,7 @@ class _TimeDomainMixin:
         self,
         t: float,
         boundary_v_old: Dict[str, float],
-    ) -> Tuple[np.ndarray, float]:
+    ) -> Tuple[np.ndarray, float, Dict[str, Any]]:
         """Compute reduced RHS for one transient time step (BE or TR).
 
         Args:
@@ -288,9 +376,11 @@ class _TimeDomainMixin:
             boundary_v_old: Previous-step port voltages ``{node: V}``.
 
         Returns:
-            ``(g, total_current)`` -- reduced RHS ``(n_ports,)`` and
-            scalar sum of currents (mA).
+            ``(g, total_current, stats)`` -- reduced RHS ``(n_ports,)``,
+            scalar sum of currents (mA), and stats dict.
         """
+        t0 = time.perf_counter()
+
         if self._transient_block_system is None:
             raise RuntimeError(
                 "get_transient_reduced_rhs() requires factor_transient_system()"
@@ -353,7 +443,22 @@ class _TimeDomainMixin:
         else:
             g = f_p
 
-        return g, total_current
+        rhs_time = time.perf_counter() - t0
+        rhs_norm = float(np.linalg.norm(g))
+        stats = {
+            'rhs_time_s': rhs_time,
+            'total_current': total_current,
+            'rhs_norm': rhs_norm,
+        }
+
+        tid = self._tile_data.tile_id if self._tile_data else '?'
+        logger.debug(
+            "Tile %s get_transient_reduced_rhs:\n"
+            "  time: %.3fs  |  total_current: %.2f mA  |  rhs_norm: %.2f",
+            tid, rhs_time, total_current, rhs_norm,
+        )
+
+        return g, total_current, stats
 
     # --- 4g. Transient interior recovery + state update ----------------
 
@@ -488,7 +593,7 @@ class _TimeDomainMixin:
             )
             self._last_qs_rhs_i = None  # Consumed; prevent stale use
         else:
-            voltages = self.get_interior_voltages(boundary_voltages_dict)
+            voltages, _recovery_stats = self.get_interior_voltages(boundary_voltages_dict)
 
         if self._peak_tracking_active:
             return self.update_peak_stats(voltages, t)

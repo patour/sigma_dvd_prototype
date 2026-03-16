@@ -157,7 +157,7 @@ class _SolverTimeDomainMixin:
             DistributedQuasiStaticResult with per-step summaries and
             lazy peak collection.
         """
-        timings: Dict[str, float] = {}
+        timings: Dict[str, Any] = {}
         model = self.model
         tile_configs = model.metadata.tile_configs
 
@@ -195,9 +195,16 @@ class _SolverTimeDomainMixin:
         max_drops = np.zeros(len(t_array), dtype=np.float64)
         total_currents = np.zeros(len(t_array), dtype=np.float64)
 
+        # Cumulative timing accumulators for the time loop
+        cum_rhs_time = 0.0
+        cum_asm_solve_time = 0.0
+        cum_recovery_time = 0.0
+        all_step_eval_times: List[List[float]] = []
+
         t0_loop = time.perf_counter()
         for step_idx, t_val in enumerate(t_array):
             # 5a. Workers: evaluate sources + compute reduced RHS (parallel)
+            t0_rhs = time.perf_counter()
             rhs_results = model.backend.call_all(
                 model.workers, 'evaluate_and_get_reduced_rhs',
                 [(t_val,)] * len(tile_configs),
@@ -206,17 +213,25 @@ class _SolverTimeDomainMixin:
             # 5b. Coordinator: assemble global RHS
             global_rhs = np.zeros(n_interface, dtype=np.float64)
             step_total_current = 0.0
-            for i, (g_i, tile_current) in enumerate(rhs_results):
+            step_eval_times: List[float] = []
+            for i, (g_i, tile_current, tile_rhs_stats) in enumerate(rhs_results):
                 tid = tile_configs[i].tile_id
                 idx_map = ctx.tile_index_maps[tid]
                 np.add.at(global_rhs, idx_map, g_i)
                 step_total_current += tile_current
+                step_eval_times.append(
+                    tile_rhs_stats.get('eval_time_s', 0.0)
+                )
+            all_step_eval_times.append(step_eval_times)
+            cum_rhs_time += time.perf_counter() - t0_rhs
 
             global_rhs += ctx.rhs_dirichlet_interface
             total_currents[step_idx] = step_total_current
 
             # 5c. Coordinator: solve interface
+            t0_asm = time.perf_counter()
             v_gamma = ctx.interface_lu(global_rhs)
+            cum_asm_solve_time += time.perf_counter() - t0_asm
 
             # 5d. Build per-tile boundary voltage dicts
             bv_per_tile = _build_bv_dicts(
@@ -226,9 +241,11 @@ class _SolverTimeDomainMixin:
             bv_per_tile_t = [(bv, t_val) for bv in bv_per_tile]
 
             # 5e. Workers: recover interior + update peaks (parallel)
+            t0_rec = time.perf_counter()
             step_max_drops = model.backend.call_all(
                 model.workers, 'recover_and_update_peaks', bv_per_tile_t,
             )
+            cum_recovery_time += time.perf_counter() - t0_rec
 
             max_drops[step_idx] = max(step_max_drops) if step_max_drops else 0.0
 
@@ -252,17 +269,51 @@ class _SolverTimeDomainMixin:
         peak_time = float(t_array[peak_idx])
 
         timings['total'] = sum(
-            v for k, v in timings.items() if k != 'total'
+            v for k, v in timings.items()
+            if k != 'total' and isinstance(v, (int, float))
         )
 
+        # --- Build time-loop stats ---
+        n_steps = len(t_array)
+        from distributed.solver import _minmeanmax
+
+        # Per-tile eval times: flatten all per-step lists, then min/mean/max
+        flat_eval_times = [
+            et for step_list in all_step_eval_times for et in step_list
+        ]
+        if flat_eval_times:
+            elo, eavg, ehi = _minmeanmax(flat_eval_times)
+        else:
+            elo = eavg = ehi = 0.0
+
+        loop_stats: Dict[str, Any] = {
+            'n_steps': n_steps,
+            'total_loop_s': timings['time_loop'],
+            'cum_rhs_time_s': cum_rhs_time,
+            'cum_asm_solve_time_s': cum_asm_solve_time,
+            'cum_recovery_time_s': cum_recovery_time,
+            'per_tile_eval_time': {'min': elo, 'mean': eavg, 'max': ehi},
+        }
+        timings['loop_stats'] = loop_stats
+
         if verbose:
-            logger.info("Quasi-static timing breakdown:")
-            for k, v in sorted(timings.items()):
-                logger.info("  %s: %.4fs", k, v)
-            logger.info(
-                "Peak IR-drop: %.4f V at t=%.3e s",
-                peak_ir_drop, peak_time,
-            )
+            logger.info("=== Distributed DDM Quasi-Static Solve Statistics ===")
+            t_first = float(t_array[0]) * 1e9 if n_steps > 0 else t_start * 1e9
+            t_last = float(t_array[-1]) * 1e9 if n_steps > 0 else t_end * 1e9
+            logger.info("Time steps: %d  |  t: [%.3gns, %.3gns]",
+                        n_steps, t_first, t_last)
+            avg_step = timings['time_loop'] / max(n_steps, 1)
+            logger.info("Time loop: %.2fs (%d steps, avg %.3fs/step)",
+                        timings['time_loop'], n_steps, avg_step)
+            rhs_per = cum_rhs_time / max(n_steps, 1)
+            logger.info("  Evaluate + RHS:    %.3fs/step (per-tile: %.3f / %.3f / %.3f)",
+                        rhs_per, elo, eavg, ehi)
+            asm_per = cum_asm_solve_time / max(n_steps, 1)
+            logger.info("  Assemble + solve:  %.3fs/step", asm_per)
+            rec_per = cum_recovery_time / max(n_steps, 1)
+            logger.info("  Recovery + peaks:   %.3fs/step", rec_per)
+            logger.info("Peak IR-drop: %.4f V at t=%.3fns",
+                        peak_ir_drop, peak_time * 1e9)
 
         return DistributedQuasiStaticResult(
             t_array=t_array,
@@ -300,7 +351,7 @@ class _SolverTimeDomainMixin:
         Returns:
             DistributedTransientContext with cached transient factorizations.
         """
-        timings: Dict[str, float] = {}
+        timings: Dict[str, Any] = {}
         model = self.model
         tile_configs = model.metadata.tile_configs
 
@@ -324,11 +375,38 @@ class _SolverTimeDomainMixin:
         tile_schur_complements: Dict[Any, np.ndarray] = {}
         tile_port_node_lists: Dict[Any, List[str]] = {}
         total_tile_cap = 0.0
-        for i, (S_A_i, port_list, tile_cap) in enumerate(schur_results):
+        per_tile_stats: List[Dict[str, Any]] = []
+        for i, (S_A_i, port_list, tile_cap, tile_stats) in enumerate(schur_results):
             tid = tile_configs[i].tile_id
             tile_schur_complements[tid] = S_A_i
             tile_port_node_lists[tid] = port_list
             total_tile_cap += tile_cap
+            per_tile_stats.append(tile_stats)
+
+        # Coordinator-side DEBUG: per-tile transient factor details
+        from solver.coupled_system import _format_bytes
+        from distributed.solver import _fmt_count
+        for i, ts in enumerate(per_tile_stats):
+            tid = tile_configs[i].tile_id
+            n_pp = ts.get('n_ports', 0)
+            logger.debug(
+                "Tile %s factor_transient_system:\n"
+                "  A_ii: nnz=%s  |  A_pp: nnz=%s\n"
+                "  C_ii cap nodes: %d / %d  |  C_pp cap nodes: %d / %d\n"
+                "  Total tile cap: %.1f fF  |  C_coeff: %.4f\n"
+                "  factor_interior: %.3fs  |  backend: %s\n"
+                "  compute_schur: %.3fs  |  Schur: %s x %s dense (%s)  |  chunk_size: %s",
+                tid,
+                _fmt_count(ts.get('A_ii_nnz', 0)), _fmt_count(ts.get('A_pp_nnz', 0)),
+                ts.get('c_ii_cap_nodes', 0), ts.get('n_interior', 0),
+                ts.get('c_pp_cap_nodes', 0), n_pp,
+                ts.get('total_cap_fF', 0), ts.get('C_coeff', 0),
+                ts.get('factor_interior_s', 0), ts.get('factorization_backend_info', 'n/a'),
+                ts.get('compute_schur_s', 0),
+                f"{n_pp:,}", f"{n_pp:,}",
+                _format_bytes(ts.get('schur_mem_bytes', 0)),
+                ts.get('schur_chunk_size', 0),
+            )
 
         # 3. Build combined package edges: resistive + effective cap edges
         t0 = time.perf_counter()
@@ -413,17 +491,92 @@ class _SolverTimeDomainMixin:
             tile_index_maps[tid] = local_to_global
 
         timings['total_prepare_transient'] = sum(
-            v for k, v in timings.items() if k != 'total_prepare_transient'
+            v for k, v in timings.items()
+            if k != 'total_prepare_transient' and isinstance(v, (int, float))
         )
 
+        # --- Build solver_stats ---
+        from distributed.solver import _minmeanmax, _fmt_count
+        from solver.coupled_system import _sparse_mem_bytes, _format_bytes
+
+        # Interface system stats
+        n_unknowns = S_global.shape[0]
+        iface_nnz = S_global.nnz
+        iface_density_pct = (
+            (iface_nnz / (n_unknowns * n_unknowns) * 100)
+            if n_unknowns > 0 else 0.0
+        )
+        iface_mem_bytes = _sparse_mem_bytes(S_global)
+
+        interface_stats: Dict[str, Any] = {
+            'n_unknowns': n_unknowns,
+            'nnz': iface_nnz,
+            'density_pct': iface_density_pct,
+            'mem_bytes': iface_mem_bytes,
+            'factor_time_s': timings['factor_transient_interface'],
+            'backend': interface_lu.backend,
+            'backend_info': interface_lu.backend_info,
+            'has_capacitance': has_cap,
+            'pkg_C_uu_nnz': C_pkg_uu.nnz if C_pkg_uu is not None else 0,
+            'pkg_G_uu_nnz': G_pkg_uu.nnz if G_pkg_uu is not None else 0,
+        }
+
+        # Aggregate per-tile stats (min/mean/max)
+        aggregate_stats: Dict[str, Any] = {}
+        if per_tile_stats:
+            for key in ('A_ii_nnz', 'A_pp_nnz', 'total_cap_fF',
+                        'schur_mem_bytes', 'factor_interior_s'):
+                values = [s.get(key, 0) for s in per_tile_stats]
+                lo, avg, hi = _minmeanmax(values)
+                aggregate_stats[key] = {'min': lo, 'mean': avg, 'max': hi,
+                                        'total': float(np.sum(values))}
+
+        solver_stats: Dict[str, Any] = {
+            'per_tile': per_tile_stats,
+            'interface': interface_stats,
+            'aggregate': aggregate_stats,
+        }
+        timings['solver_stats'] = solver_stats
+
+        # --- Verbose INFO logging ---
         if verbose:
-            logger.info("Prepare transient timing breakdown:")
-            for k, v in sorted(timings.items()):
-                logger.info("  %s: %.4fs", k, v)
-            logger.info(
-                "Transient interface: %d unknowns, has_cap=%s",
-                n_interface, has_cap,
-            )
+            n_tiles = len(per_tile_stats)
+            logger.info("=== Distributed DDM Prepare Transient Statistics ===")
+            logger.info("Method: %s  |  dt: %.1f ps  |  C_coeff: %.4f",
+                        method, dt_scaled, C_coeff)
+            logger.info("Tiles: %d", n_tiles)
+            if aggregate_stats:
+                _ag = aggregate_stats
+                lo, avg, hi = _ag['A_ii_nnz']['min'], _ag['A_ii_nnz']['mean'], _ag['A_ii_nnz']['max']
+                logger.info("  A_ii nnz:         %s / %s / %s  (min/mean/max)",
+                            _fmt_count(lo), _fmt_count(avg), _fmt_count(hi))
+                lo, avg, hi = _ag['A_pp_nnz']['min'], _ag['A_pp_nnz']['mean'], _ag['A_pp_nnz']['max']
+                logger.info("  A_pp nnz:         %s / %s / %s",
+                            _fmt_count(lo), _fmt_count(avg), _fmt_count(hi))
+                lo, avg, hi = _ag['total_cap_fF']['min'], _ag['total_cap_fF']['mean'], _ag['total_cap_fF']['max']
+                total_cap = _ag['total_cap_fF']['total']
+                logger.info("  Total cap:        %.0f fF / %.0f fF / %.0f fF  (total: %.0f fF)",
+                            lo, avg, hi, total_cap)
+                lo, avg, hi = _ag['schur_mem_bytes']['min'], _ag['schur_mem_bytes']['mean'], _ag['schur_mem_bytes']['max']
+                total_sm = _ag['schur_mem_bytes']['total']
+                logger.info("  Schur memory:     %s / %s / %s  (total: %s)",
+                            _format_bytes(lo), _format_bytes(avg),
+                            _format_bytes(hi), _format_bytes(total_sm))
+                lo, avg, hi = _ag['factor_interior_s']['min'], _ag['factor_interior_s']['mean'], _ag['factor_interior_s']['max']
+                logger.info("  Factor time:      %.3fs / %.3fs / %.3fs", lo, avg, hi)
+                # Backend: use the first tile's backend_info as representative
+                backend_info = per_tile_stats[0].get('factorization_backend_info', 'n/a')
+                logger.info("  Factor backend:   %s", backend_info)
+
+            logger.info("Transient interface: %s unknowns, %s nnz (density %.3f%%), %s",
+                        _fmt_count(n_unknowns), _fmt_count(iface_nnz),
+                        iface_density_pct, _format_bytes(iface_mem_bytes))
+            logger.info("  Backend: %s", interface_lu.backend_info)
+            logger.info("  Factor time: %.3fs", timings['factor_transient_interface'])
+            logger.info("  Has capacitance: %s", has_cap)
+            logger.info("  Package C_uu nnz: %d  |  Package G_uu nnz: %d",
+                        interface_stats['pkg_C_uu_nnz'],
+                        interface_stats['pkg_G_uu_nnz'])
 
         return DistributedTransientContext(
             interface_lu=interface_lu.solve,
@@ -476,7 +629,7 @@ class _SolverTimeDomainMixin:
             DistributedTransientResult with per-step summaries and
             lazy peak collection.
         """
-        timings: Dict[str, float] = {}
+        timings: Dict[str, Any] = {}
         model = self.model
         tile_configs = model.metadata.tile_configs
         vdd = model.vdd
@@ -509,7 +662,7 @@ class _SolverTimeDomainMixin:
 
         # Assemble global DC RHS
         global_rhs_init = np.zeros(n_interface, dtype=np.float64)
-        for i, (g_i, _) in enumerate(rhs_results):
+        for i, (g_i, _, _stats) in enumerate(rhs_results):
             tid = tile_configs[i].tile_id
             idx_map = dc_ctx.tile_index_maps[tid]
             np.add.at(global_rhs_init, idx_map, g_i)
@@ -525,9 +678,10 @@ class _SolverTimeDomainMixin:
             v_gamma_init, vdd,
         )
         bv_init_args = [(bv,) for bv in bv_init_list]
-        init_voltages_list = model.backend.call_all(
+        init_voltages_results = model.backend.call_all(
             model.workers, 'get_interior_voltages', bv_init_args,
         )
+        init_voltages_list = [v for v, _stats in init_voltages_results]
         timings['dc_initial'] = time.perf_counter() - t0
 
         # 4. Set initial voltages on workers (parallel)
@@ -556,6 +710,12 @@ class _SolverTimeDomainMixin:
         max_drops = np.zeros(len(t_array), dtype=np.float64)
         total_currents = np.zeros(len(t_array), dtype=np.float64)
 
+        # Cumulative timing accumulators for the time loop
+        cum_rhs_time = 0.0
+        cum_asm_solve_time = 0.0
+        cum_recovery_time = 0.0
+        all_step_rhs_times: List[List[float]] = []
+
         t0_loop = time.perf_counter()
         for step_idx, t_val in enumerate(t_array):
             # 7a. Build per-tile boundary_v_old dicts from v_gamma_old
@@ -567,6 +727,7 @@ class _SolverTimeDomainMixin:
             bv_old_per_tile = [(t_val, bv) for bv in bv_old_list]
 
             # 7b. Workers: compute transient reduced RHS (parallel)
+            t0_rhs = time.perf_counter()
             rhs_results = model.backend.call_all(
                 model.workers, 'get_transient_reduced_rhs', bv_old_per_tile,
             )
@@ -574,16 +735,23 @@ class _SolverTimeDomainMixin:
             # 7c. Coordinator: assemble global RHS
             global_rhs = np.zeros(n_interface, dtype=np.float64)
             step_total_current = 0.0
-            for i, (g_i, tile_current) in enumerate(rhs_results):
+            step_rhs_times: List[float] = []
+            for i, (g_i, tile_current, tile_rhs_stats) in enumerate(rhs_results):
                 tid = tile_configs[i].tile_id
                 idx_map = trans_ctx.tile_index_maps[tid]
                 np.add.at(global_rhs, idx_map, g_i)
                 step_total_current += tile_current
+                step_rhs_times.append(
+                    tile_rhs_stats.get('rhs_time_s', 0.0)
+                )
+            all_step_rhs_times.append(step_rhs_times)
+            cum_rhs_time += time.perf_counter() - t0_rhs
 
             total_currents[step_idx] = step_total_current
 
             # Dirichlet RHS: use G-only (no cap contribution from ud block)
             # BE: + rhs_dirichlet_G, TR: + 2 * rhs_dirichlet_G
+            t0_asm = time.perf_counter()
             rhs_d_G = trans_ctx.rhs_dirichlet_G
             if method == 'trap':
                 global_rhs += 2.0 * rhs_d_G
@@ -602,6 +770,7 @@ class _SolverTimeDomainMixin:
 
             # 7d. Coordinator: solve transient interface
             v_gamma_new = trans_ctx.interface_lu(global_rhs)
+            cum_asm_solve_time += time.perf_counter() - t0_asm
 
             # 7e. Build per-tile boundary voltage dicts for new step
             bv_new_list = _build_bv_dicts(
@@ -612,11 +781,13 @@ class _SolverTimeDomainMixin:
             bv_per_tile_t = [(bv, t_val) for bv in bv_new_list]
 
             # 7f. Workers: recover transient interior + update peaks (parallel)
+            t0_rec = time.perf_counter()
             step_max_drops = model.backend.call_all(
                 model.workers,
                 'recover_transient_and_update_peaks',
                 bv_per_tile_t,
             )
+            cum_recovery_time += time.perf_counter() - t0_rec
 
             max_drops[step_idx] = (
                 max(step_max_drops) if step_max_drops else 0.0
@@ -645,16 +816,54 @@ class _SolverTimeDomainMixin:
         peak_time = float(t_array[peak_idx]) if len(t_array) > 0 else t_start
 
         timings['total'] = sum(
-            v for k, v in timings.items() if k != 'total'
+            v for k, v in timings.items()
+            if k != 'total' and isinstance(v, (int, float))
         )
 
+        # --- Build time-loop stats ---
+        n_steps = len(t_array)
+        from distributed.solver import _minmeanmax
+
+        # Per-tile rhs times: flatten all per-step lists, then min/mean/max
+        flat_rhs_times = [
+            rt for step_list in all_step_rhs_times for rt in step_list
+        ]
+        if flat_rhs_times:
+            rlo, ravg, rhi = _minmeanmax(flat_rhs_times)
+        else:
+            rlo = ravg = rhi = 0.0
+
+        loop_stats: Dict[str, Any] = {
+            'n_steps': n_steps,
+            'total_loop_s': timings['time_loop'],
+            'cum_rhs_time_s': cum_rhs_time,
+            'cum_asm_solve_time_s': cum_asm_solve_time,
+            'cum_recovery_time_s': cum_recovery_time,
+            'per_tile_rhs_time': {'min': rlo, 'mean': ravg, 'max': rhi},
+        }
+        timings['loop_stats'] = loop_stats
+
         if verbose:
-            logger.info("Transient timing breakdown:")
-            for k, v in sorted(timings.items()):
-                logger.info("  %s: %.4fs", k, v)
+            logger.info("=== Distributed DDM Transient Solve Statistics ===")
+            t_first = float(t_array[0]) if len(t_array) > 0 else t_start + dt
+            t_last = float(t_array[-1]) if len(t_array) > 0 else t_end
             logger.info(
-                "Peak IR-drop: %.4f V at t=%.3e s", peak_ir_drop, peak_time,
+                "Time steps: %d  |  t: [%.3gps, %.3gns]  |  dt: %.3gps  |  method: %s",
+                n_steps, t_first * 1e12, t_last * 1e9, dt * 1e12, method,
             )
+            logger.info("DC initial condition: %.3fs", timings.get('dc_initial', 0.0))
+            avg_step = timings['time_loop'] / max(n_steps, 1)
+            logger.info("Time loop: %.2fs (%d steps, avg %.3fs/step)",
+                        timings['time_loop'], n_steps, avg_step)
+            rhs_per = cum_rhs_time / max(n_steps, 1)
+            logger.info("  Transient RHS:     %.3fs/step (per-tile: %.3f / %.3f / %.3f)",
+                        rhs_per, rlo, ravg, rhi)
+            asm_per = cum_asm_solve_time / max(n_steps, 1)
+            logger.info("  Assemble + solve:  %.3fs/step", asm_per)
+            rec_per = cum_recovery_time / max(n_steps, 1)
+            logger.info("  Interior recovery:  %.3fs/step", rec_per)
+            logger.info("Peak IR-drop: %.4f V at t=%.3fns",
+                        peak_ir_drop, peak_time * 1e9)
 
         return DistributedTransientResult(
             t_array=t_array,

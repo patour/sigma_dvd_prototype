@@ -13,6 +13,7 @@ tile_worker_td.py and are mixed in via _TimeDomainMixin.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -266,41 +267,121 @@ class TileWorker(_TimeDomainMixin):
 
         return islands_removed, kept_nonlargest_iface
 
-    def factor_and_compute_schur(self) -> Tuple[Any, List[str]]:
+    def factor_and_compute_schur(self) -> Tuple[Any, List[str], Dict[str, Any]]:
         """Factor interior and compute explicit Schur complement.
 
         Returns:
-            Tuple of (S_i as numpy array, boundary_node_list)
+            Tuple of (S_i as numpy array, boundary_node_list, stats dict)
         """
-        from solver.coupled_system import compute_explicit_schur
+        from solver.coupled_system import (
+            compute_explicit_schur, _format_bytes, _sparse_mem_bytes,
+        )
 
+        t_total_start = time.perf_counter()
+
+        t0 = time.perf_counter()
         self._block_system.factor_interior()
-        S = compute_explicit_schur(self._block_system)
-        return S, list(self._block_system.port_nodes)
+        factor_time = time.perf_counter() - t0
 
-    def get_reduced_rhs(self, current_injections: Optional[Dict[str, float]] = None) -> Any:
+        t0 = time.perf_counter()
+        S, schur_stats = compute_explicit_schur(self._block_system)
+        schur_time = time.perf_counter() - t0
+
+        total_time = time.perf_counter() - t_total_start
+
+        # Build stats dict
+        bs = self._block_system
+        stats = dict(bs.stats())  # n_ports, n_interior, G_ii_nnz, etc.
+        stats.update({
+            'factor_interior_s': factor_time,
+            'compute_schur_s': schur_time,
+            'total_s': total_time,
+            'schur_shape': S.shape,
+            'schur_mem_bytes': schur_stats['schur_mem_bytes'],
+            'schur_chunk_size': schur_stats['chunk_size'],
+        })
+
+        # Backend info from factor_adapter (may be None if n_interior == 0)
+        fa = bs.factor_adapter
+        if fa is not None:
+            stats['factorization_backend'] = fa.backend
+            stats['factorization_backend_info'] = fa.backend_info
+        else:
+            stats['factorization_backend'] = 'n/a'
+            stats['factorization_backend_info'] = 'n/a'
+
+        # DEBUG logging: per-tile matrix characteristics
+        tid = self._tile_data.tile_id if self._tile_data else '?'
+        n_ii = stats['n_interior']
+        n_pp = stats['n_ports']
+        G_ii_nnz = stats['G_ii_nnz']
+        density = (G_ii_nnz / (n_ii * n_ii) * 100) if n_ii > 0 else 0.0
+        G_ii_mem = _sparse_mem_bytes(bs.G_ii) if hasattr(bs.G_ii, 'data') else 0
+        logger.debug(
+            "Tile %s factor_and_compute_schur:\n"
+            "  G_ii: %s x %s, nnz=%s (density %.5f%%), %s\n"
+            "  G_pp: %s x %s, nnz=%s\n"
+            "  G_pi: %s x %s, nnz=%s  |  G_ip: %s x %s, nnz=%s\n"
+            "  Block system memory: %s\n"
+            "  factor_interior: %.3fs  |  backend: %s\n"
+            "  compute_schur: %.3fs  |  Schur: %s x %s dense (%s)  |  chunk_size: %s",
+            tid,
+            f"{n_ii:,}", f"{n_ii:,}", f"{G_ii_nnz:,}", density, _format_bytes(G_ii_mem),
+            f"{n_pp:,}", f"{n_pp:,}", f"{stats['G_pp_nnz']:,}",
+            f"{n_pp:,}", f"{n_ii:,}", f"{stats['G_pi_nnz']:,}",
+            f"{n_ii:,}", f"{n_pp:,}", f"{stats['G_ip_nnz']:,}",
+            _format_bytes(stats['mem_bytes']),
+            factor_time, stats['factorization_backend_info'],
+            schur_time, f"{S.shape[0]:,}", f"{S.shape[1]:,}",
+            _format_bytes(schur_stats['schur_mem_bytes']),
+            schur_stats['chunk_size'],
+        )
+
+        return S, list(bs.port_nodes), stats
+
+    def get_reduced_rhs(self, current_injections: Optional[Dict[str, float]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Compute reduced RHS for this tile.
 
         Args:
             current_injections: Override current injections. If None, uses tile's own.
 
         Returns:
-            Reduced RHS numpy array (n_ports,)
+            Tuple of (reduced RHS numpy array (n_ports,), stats dict)
         """
         from solver.coupled_system import compute_reduced_rhs
 
         if current_injections is None:
             current_injections = self._tile_data.current_injections
 
-        return compute_reduced_rhs(
+        t0 = time.perf_counter()
+        rhs = compute_reduced_rhs(
             self._block_system, current_injections, self._rhs_dirichlet,
         )
+        rhs_time = time.perf_counter() - t0
+
+        n_currents = sum(1 for v in current_injections.values() if v != 0.0)
+        rhs_norm = float(np.linalg.norm(rhs))
+
+        stats = {
+            'rhs_time_s': rhs_time,
+            'n_currents': n_currents,
+            'rhs_norm': rhs_norm,
+        }
+
+        tid = self._tile_data.tile_id if self._tile_data else '?'
+        logger.debug(
+            "Tile %s get_reduced_rhs:\n"
+            "  time: %.3fs  |  n_currents: %s  |  rhs_norm: %.2f",
+            tid, rhs_time, f"{n_currents:,}", rhs_norm,
+        )
+
+        return rhs, stats
 
     def get_interior_voltages(
         self,
         boundary_voltages_dict: Dict[str, float],
         current_injections: Optional[Dict[str, float]] = None,
-    ) -> Dict[str, float]:
+    ) -> Tuple[Dict[str, float], Dict[str, Any]]:
         """Recover interior voltages from boundary voltages.
 
         Args:
@@ -308,9 +389,11 @@ class TileWorker(_TimeDomainMixin):
             current_injections: Optional override currents (node -> mA).
 
         Returns:
-            Dict mapping all tile nodes (interior + boundary) -> voltage
+            Tuple of (Dict mapping all tile nodes -> voltage, stats dict)
         """
         from solver.coupled_system import recover_bottom_voltages
+
+        t0 = time.perf_counter()
 
         currents = current_injections if current_injections is not None else self._tile_data.current_injections
 
@@ -331,7 +414,32 @@ class TileWorker(_TimeDomainMixin):
             if node in boundary_voltages_dict:
                 all_voltages[node] = boundary_voltages_dict[node]
 
-        return all_voltages
+        recovery_time = time.perf_counter() - t0
+
+        n_nodes = len(all_voltages)
+        if all_voltages:
+            vals = list(all_voltages.values())
+            v_min = min(vals)
+            v_max = max(vals)
+        else:
+            v_min = 0.0
+            v_max = 0.0
+
+        stats = {
+            'recovery_time_s': recovery_time,
+            'n_nodes': n_nodes,
+            'v_min': v_min,
+            'v_max': v_max,
+        }
+
+        tid = self._tile_data.tile_id if self._tile_data else '?'
+        logger.debug(
+            "Tile %s get_interior_voltages:\n"
+            "  time: %.3fs  |  n_nodes: %s  |  v_range: [%.3f, %.3f]",
+            tid, recovery_time, f"{n_nodes:,}", v_min, v_max,
+        )
+
+        return all_voltages, stats
 
     def get_layer_metadata(self) -> Dict[str, Dict]:
         """Per-layer spatial extents, orientation, and stripe coordinates."""

@@ -40,13 +40,30 @@ where r^B = i_p - G^B_pb * inv(G^B_bb) * i_b is the reduced RHS from bottom-grid
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import scipy.sparse as sp
 
 from model.unified_model import UnifiedPowerGridModel
+
+logger = logging.getLogger(__name__)
+
+
+def _sparse_mem_bytes(M) -> int:
+    """Memory footprint of a scipy sparse CSR/CSC matrix."""
+    return M.data.nbytes + M.indices.nbytes + M.indptr.nbytes
+
+
+def _format_bytes(n: int) -> str:
+    """Human-readable byte size."""
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if abs(n) < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
 
 
 @dataclass
@@ -84,6 +101,7 @@ class BlockMatrixSystem:
     port_to_idx: Dict[Any, int]
     interior_to_idx: Dict[Any, int]
     lu_ii: Optional[Callable[[np.ndarray], np.ndarray]] = None
+    factor_adapter: Optional[Any] = field(default=None, repr=False)
 
     @property
     def n_ports(self) -> int:
@@ -99,6 +117,8 @@ class BlockMatrixSystem:
         """Pre-compute factorization of G_ii for fast solves.
 
         Uses cholmod if available, otherwise falls back to splu.
+        Stores the full SparseFactorAdapter in ``self.factor_adapter``
+        and the solve callable in ``self.lu_ii`` for backward compatibility.
 
         Args:
             verbose: If True, print which backend is being used
@@ -106,9 +126,30 @@ class BlockMatrixSystem:
         if self.n_interior > 0:
             from .unified_solver import _factor_conductance_matrix
             factor = _factor_conductance_matrix(self.G_ii, verbose=verbose)
+            self.factor_adapter = factor
             self.lu_ii = factor.solve
         else:
             self.lu_ii = lambda x: np.array([])
+
+    def memory_bytes(self) -> int:
+        """Total memory footprint of the four block matrices (CSR storage)."""
+        total = 0
+        for M in (self.G_pp, self.G_pi, self.G_ip, self.G_ii):
+            if sp.issparse(M):
+                total += _sparse_mem_bytes(M)
+        return total
+
+    def stats(self) -> Dict[str, Any]:
+        """Summary statistics for this block system."""
+        return {
+            'n_ports': self.n_ports,
+            'n_interior': self.n_interior,
+            'G_ii_nnz': self.G_ii.nnz if sp.issparse(self.G_ii) else 0,
+            'G_pp_nnz': self.G_pp.nnz if sp.issparse(self.G_pp) else 0,
+            'G_pi_nnz': self.G_pi.nnz if sp.issparse(self.G_pi) else 0,
+            'G_ip_nnz': self.G_ip.nnz if sp.issparse(self.G_ip) else 0,
+            'mem_bytes': self.memory_bytes(),
+        }
 
     def solve_interior(self, b: np.ndarray) -> np.ndarray:
         """Solve G_ii * x = b using cached LU factorization.
@@ -384,7 +425,7 @@ def _ensure_dense(x):
 def compute_explicit_schur(
     block_system: BlockMatrixSystem,
     max_memory_gb: float = 4.0,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Compute explicit Schur complement S = G_pp - G_pi * inv(G_ii) * G_ip.
 
     Memory-efficient: keeps G_ip sparse, processes columns in chunks.
@@ -402,7 +443,9 @@ def compute_explicit_schur(
             computed to keep Z_chunk within this limit.
 
     Returns:
-        Dense Schur complement matrix of shape (n_ports, n_ports)
+        Tuple of (S, stats) where S is the dense Schur complement matrix of
+        shape (n_ports, n_ports) and stats is a dict with ``chunk_size``,
+        ``n_chunks``, and ``schur_mem_bytes``.
 
     Raises:
         ValueError: If interior not factored (call factor_interior first)
@@ -415,7 +458,9 @@ def compute_explicit_schur(
 
     if n_interior == 0:
         # No interior nodes: Schur complement is just G_pp
-        return block_system.G_pp.toarray()
+        S = block_system.G_pp.toarray()
+        stats = {'chunk_size': 0, 'n_chunks': 0, 'schur_mem_bytes': S.nbytes}
+        return S, stats
 
     # Compute optimal chunk size balancing memory, CHOLMOD limits, and BLAS efficiency
     INT_MAX = 2**31 - 1
@@ -426,6 +471,13 @@ def compute_explicit_schur(
     # Cap at 256 for BLAS efficiency (diminishing returns beyond), floor at 32
     chunk_size = min(memory_chunk, index_chunk, n_ports, 256)
     chunk_size = max(chunk_size, min(32, n_ports))
+
+    n_chunks = (n_ports + chunk_size - 1) // chunk_size
+
+    logger.debug(
+        "compute_explicit_schur: n_ports=%d, n_interior=%d, chunk_size=%d, n_chunks=%d",
+        n_ports, n_interior, chunk_size, n_chunks,
+    )
 
     # S starts as G_pp (dense copy)
     S = block_system.G_pp.toarray()
@@ -439,7 +491,16 @@ def compute_explicit_schur(
         Z_chunk = block_system.lu_ii(G_ip_chunk)
         S[:, start:end] -= _ensure_dense(block_system.G_pi @ Z_chunk)
 
-    return S
+    stats = {
+        'chunk_size': chunk_size,
+        'n_chunks': n_chunks,
+        'schur_mem_bytes': S.nbytes,
+    }
+    logger.debug(
+        "compute_explicit_schur: Schur %dx%d, memory %s",
+        n_ports, n_ports, _format_bytes(S.nbytes),
+    )
+    return S, stats
 
 
 def build_block_system_from_edges(

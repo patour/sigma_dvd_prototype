@@ -74,8 +74,8 @@ class DistributedSolverContext:
     # Interface island nodes penalized during prepare (shorted to Vdd)
     removed_interface_nodes: Set[str] = field(default_factory=set)
 
-    # Timing breakdown
-    timings: Dict[str, float] = field(default_factory=dict)
+    # Timing breakdown (includes nested solver_stats dict)
+    timings: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -167,8 +167,8 @@ class DistributedTransientContext:
     # Interface island nodes penalized during prepare
     removed_interface_nodes: Set[str] = field(default_factory=set)
 
-    # Timing breakdown
-    timings: Dict[str, float] = field(default_factory=dict)
+    # Timing breakdown (includes nested solver_stats dict)
+    timings: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def dt(self) -> float:

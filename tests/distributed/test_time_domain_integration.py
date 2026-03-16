@@ -742,7 +742,7 @@ class TestTransientDCLimit(unittest.TestCase):
             model.workers, 'get_reduced_rhs',
         )
         global_rhs_init = np.zeros(n_interface, dtype=np.float64)
-        for i, g_i in enumerate(dc_rhs_results):
+        for i, (g_i, _stats) in enumerate(dc_rhs_results):
             tid = tile_configs_list[i].tile_id
             idx_map = dc_ctx.tile_index_maps[tid]
             np.add.at(global_rhs_init, idx_map, g_i)
@@ -759,9 +759,10 @@ class TestTransientDCLimit(unittest.TestCase):
         for pad in model.pad_nodes:
             bv_init[pad] = model.vdd
 
-        init_v_list = be.call_all(
+        init_v_results = be.call_all(
             model.workers, 'get_interior_voltages', [(bv_init,)] * len(model.workers),
         )
+        init_v_list = [v for v, _stats in init_v_results]
         be.call_all(
             model.workers, 'set_initial_voltages',
             [(v,) for v in init_v_list],
@@ -792,7 +793,7 @@ class TestTransientDCLimit(unittest.TestCase):
             )
 
             global_rhs = np.zeros(n_interface, dtype=np.float64)
-            for i, (g_i, _) in enumerate(rhs_results):
+            for i, (g_i, _, _stats) in enumerate(rhs_results):
                 tid = tile_configs_list[i].tile_id
                 idx_map = trans_ctx.tile_index_maps[tid]
                 np.add.at(global_rhs, idx_map, g_i)
@@ -832,7 +833,7 @@ class TestTransientDCLimit(unittest.TestCase):
         for pad in model.pad_nodes:
             final_bv[pad] = model.vdd
 
-        final_voltages_list = be.call_all(
+        final_voltages_results = be.call_all(
             model.workers, 'get_interior_voltages', [(final_bv,)] * len(model.workers),
         )
 
@@ -843,7 +844,7 @@ class TestTransientDCLimit(unittest.TestCase):
         for i_node in trans_ctx.interface_nodes:
             idx = trans_ctx.interface_node_to_idx[i_node]
             trans_voltages[i_node] = float(v_gamma_old[idx])
-        for v_dict in final_voltages_list:
+        for v_dict, _stats in final_voltages_results:
             trans_voltages.update(v_dict)
 
         # 4. Compare: transient steady state should match DC

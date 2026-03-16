@@ -25,6 +25,19 @@ from .solver_td import _SolverTimeDomainMixin
 logger = logging.getLogger(__name__)
 
 
+def _minmeanmax(values):
+    """Return (min, mean, max) of a sequence of numbers."""
+    arr = np.asarray(values, dtype=np.float64)
+    return float(arr.min()), float(arr.mean()), float(arr.max())
+
+
+def _fmt_count(n: float) -> str:
+    """Format a count with comma separators or SI suffix for large values."""
+    if abs(n) >= 1e6:
+        return f"{n / 1e6:.1f}M"
+    return f"{n:,.0f}"
+
+
 class DistributedDDMSolver(_SolverTimeDomainMixin):
     """Solver for distributed DDM. Takes DistributedPowerGridModel.
 
@@ -50,7 +63,7 @@ class DistributedDDMSolver(_SolverTimeDomainMixin):
         Returns:
             DistributedSolverContext with cached factorizations
         """
-        timings: Dict[str, float] = {}
+        timings: Dict[str, Any] = {}
         model = self.model
 
         # 1. Factor tiles and compute Schur complements (parallel on workers)
@@ -63,11 +76,44 @@ class DistributedDDMSolver(_SolverTimeDomainMixin):
         # Organize results by tile
         tile_schur_complements: Dict[Any, np.ndarray] = {}
         tile_port_node_lists: Dict[Any, List[str]] = {}
+        per_tile_stats: List[Dict[str, Any]] = []
 
-        for i, (S_i, boundary_list) in enumerate(schur_results):
+        for i, (S_i, boundary_list, tile_stats) in enumerate(schur_results):
             tid = model.metadata.tile_configs[i].tile_id
             tile_schur_complements[tid] = S_i
             tile_port_node_lists[tid] = boundary_list
+            per_tile_stats.append(tile_stats)
+
+        # Coordinator-side DEBUG: per-tile factor/schur details
+        from solver.coupled_system import _format_bytes
+        for i, ts in enumerate(per_tile_stats):
+            tid = model.metadata.tile_configs[i].tile_id
+            n_ii = ts.get('n_interior', 0)
+            n_pp = ts.get('n_ports', 0)
+            G_ii_nnz = ts.get('G_ii_nnz', 0)
+            density = (G_ii_nnz / (n_ii * n_ii) * 100) if n_ii > 0 else 0.0
+            logger.debug(
+                "Tile %s factor_and_compute_schur:\n"
+                "  G_ii: %s x %s, nnz=%s (density %.5f%%), %s\n"
+                "  G_pp: %s x %s, nnz=%s\n"
+                "  G_pi: %s x %s, nnz=%s  |  G_ip: %s x %s, nnz=%s\n"
+                "  Block system memory: %s\n"
+                "  factor_interior: %.3fs  |  backend: %s\n"
+                "  compute_schur: %.3fs  |  Schur: %s dense (%s)  |  chunk_size: %s",
+                tid,
+                f"{n_ii:,}", f"{n_ii:,}", f"{G_ii_nnz:,}", density,
+                _format_bytes(ts.get('mem_bytes', 0)),
+                f"{n_pp:,}", f"{n_pp:,}", f"{ts.get('G_pp_nnz', 0):,}",
+                f"{n_pp:,}", f"{n_ii:,}", f"{ts.get('G_pi_nnz', 0):,}",
+                f"{n_ii:,}", f"{n_pp:,}", f"{ts.get('G_ip_nnz', 0):,}",
+                _format_bytes(ts.get('mem_bytes', 0)),
+                ts.get('factor_interior_s', 0), ts.get('factorization_backend_info', 'n/a'),
+                ts.get('compute_schur_s', 0),
+                "%s x %s" % (f"{ts.get('schur_shape', (0, 0))[0]:,}",
+                             f"{ts.get('schur_shape', (0, 0))[1]:,}"),
+                _format_bytes(ts.get('schur_mem_bytes', 0)),
+                ts.get('schur_chunk_size', 0),
+            )
 
         # 2. Assemble global interface system
         t0 = time.perf_counter()
@@ -121,17 +167,11 @@ class DistributedDDMSolver(_SolverTimeDomainMixin):
                     len(saved),
                 )
 
-        if verbose:
-            logger.info(
-                f"Interface system: {len(interface_nodes)} unknowns, "
-                f"{S_global.nnz} nonzeros"
-            )
-
         # 3. Factor interface system
         t0 = time.perf_counter()
         from solver.unified_solver import _factor_conductance_matrix
 
-        interface_lu = _factor_conductance_matrix(S_global, verbose=verbose)
+        interface_lu = _factor_conductance_matrix(S_global, verbose=False)
         timings['factor_interface'] = time.perf_counter() - t0
 
         # 4. Build tile index maps (local port indices -> global interface indices)
@@ -145,10 +185,84 @@ class DistributedDDMSolver(_SolverTimeDomainMixin):
 
         timings['total_prepare'] = sum(timings.values())
 
+        # --- Build solver_stats ---
+        from solver.coupled_system import _sparse_mem_bytes, _format_bytes
+
+        # Interface system stats
+        n_unknowns = S_global.shape[0]
+        iface_nnz = S_global.nnz
+        iface_density_pct = (
+            (iface_nnz / (n_unknowns * n_unknowns) * 100)
+            if n_unknowns > 0 else 0.0
+        )
+        iface_mem_bytes = _sparse_mem_bytes(S_global)
+
+        interface_stats: Dict[str, Any] = {
+            'n_unknowns': n_unknowns,
+            'nnz': iface_nnz,
+            'density_pct': iface_density_pct,
+            'mem_bytes': iface_mem_bytes,
+            'factor_time_s': timings['factor_interface'],
+            'backend': interface_lu.backend,
+            'backend_info': interface_lu.backend_info,
+            'islands_penalized': len(island_nodes),
+        }
+
+        # Aggregate per-tile stats (min/mean/max)
+        aggregate_stats: Dict[str, Any] = {}
+        if per_tile_stats:
+            for key in ('n_interior', 'n_ports', 'G_ii_nnz', 'mem_bytes',
+                        'schur_mem_bytes', 'factor_interior_s'):
+                values = [s.get(key, 0) for s in per_tile_stats]
+                lo, avg, hi = _minmeanmax(values)
+                aggregate_stats[key] = {'min': lo, 'mean': avg, 'max': hi,
+                                        'total': float(np.sum(values))}
+
+        solver_stats: Dict[str, Any] = {
+            'per_tile': per_tile_stats,
+            'interface': interface_stats,
+            'aggregate': aggregate_stats,
+        }
+        timings['solver_stats'] = solver_stats
+
+        # --- Verbose INFO logging ---
         if verbose:
-            logger.info("Prepare timing breakdown:")
-            for key, val in sorted(timings.items()):
-                logger.info(f"  {key}: {val:.4f}s")
+            n_tiles = len(per_tile_stats)
+            logger.info("=== Distributed DDM Prepare Statistics ===")
+            logger.info("Tiles: %d", n_tiles)
+            if aggregate_stats:
+                _ag = aggregate_stats
+                lo, avg, hi = _ag['n_interior']['min'], _ag['n_interior']['mean'], _ag['n_interior']['max']
+                logger.info("  Interior nodes:  %s / %s / %s  (min/mean/max)",
+                            _fmt_count(lo), _fmt_count(avg), _fmt_count(hi))
+                lo, avg, hi = _ag['n_ports']['min'], _ag['n_ports']['mean'], _ag['n_ports']['max']
+                logger.info("  Port nodes:      %s / %s / %s",
+                            _fmt_count(lo), _fmt_count(avg), _fmt_count(hi))
+                lo, avg, hi = _ag['G_ii_nnz']['min'], _ag['G_ii_nnz']['mean'], _ag['G_ii_nnz']['max']
+                logger.info("  G_ii nnz:        %s / %s / %s",
+                            _fmt_count(lo), _fmt_count(avg), _fmt_count(hi))
+                lo, avg, hi = _ag['mem_bytes']['min'], _ag['mem_bytes']['mean'], _ag['mem_bytes']['max']
+                total = _ag['mem_bytes']['total']
+                logger.info("  G_ii memory:     %s / %s / %s  (total: %s)",
+                            _format_bytes(lo), _format_bytes(avg),
+                            _format_bytes(hi), _format_bytes(total))
+                lo, avg, hi = _ag['schur_mem_bytes']['min'], _ag['schur_mem_bytes']['mean'], _ag['schur_mem_bytes']['max']
+                total = _ag['schur_mem_bytes']['total']
+                logger.info("  Schur memory:    %s / %s / %s  (total: %s)",
+                            _format_bytes(lo), _format_bytes(avg),
+                            _format_bytes(hi), _format_bytes(total))
+                lo, avg, hi = _ag['factor_interior_s']['min'], _ag['factor_interior_s']['mean'], _ag['factor_interior_s']['max']
+                logger.info("  Factor time:     %.3fs / %.3fs / %.3fs", lo, avg, hi)
+                # Backend: use the first tile's backend_info as representative
+                backend_info = per_tile_stats[0].get('factorization_backend_info', 'n/a')
+                logger.info("  Factor backend:  %s", backend_info)
+
+            logger.info("Interface system: %s unknowns, %s nnz (density %.3f%%), %s",
+                        _fmt_count(n_unknowns), _fmt_count(iface_nnz),
+                        iface_density_pct, _format_bytes(iface_mem_bytes))
+            logger.info("  Backend: %s", interface_lu.backend_info)
+            logger.info("  Factor time: %.3fs", timings['factor_interface'])
+            logger.info("  Islands penalized: %d", len(island_nodes))
 
         return DistributedSolverContext(
             interface_lu=interface_lu.solve,
@@ -207,7 +321,8 @@ class DistributedDDMSolver(_SolverTimeDomainMixin):
         n_interface = len(ctx.interface_nodes)
         global_rhs = np.zeros(n_interface, dtype=np.float64)
 
-        for i, g_i in enumerate(rhs_results):
+        per_tile_rhs_stats: List[Dict[str, Any]] = []
+        for i, (g_i, rhs_stats) in enumerate(rhs_results):
             tid = model.metadata.tile_configs[i].tile_id
             idx_map = ctx.tile_index_maps[tid]
             # g_i has shape (n_ports,) from compute_reduced_rhs
@@ -217,6 +332,17 @@ class DistributedDDMSolver(_SolverTimeDomainMixin):
             )
             # Vectorized scatter-add
             np.add.at(global_rhs, idx_map, g_i)
+            per_tile_rhs_stats.append(rhs_stats)
+
+        # Coordinator-side DEBUG: per-tile RHS details
+        for i, rs in enumerate(per_tile_rhs_stats):
+            tid = model.metadata.tile_configs[i].tile_id
+            logger.debug(
+                "Tile %s get_reduced_rhs:\n"
+                "  time: %.3fs  |  n_currents: %d  |  rhs_norm: %.4f",
+                tid, rs.get('rhs_time_s', 0), rs.get('n_currents', 0),
+                rs.get('rhs_norm', 0),
+            )
 
         # Add Dirichlet contribution
         global_rhs += ctx.rhs_dirichlet_interface
@@ -252,7 +378,8 @@ class DistributedDDMSolver(_SolverTimeDomainMixin):
 
         # 5. Build result
         tile_results: Dict[Tuple[int, int], TileSolveResult] = {}
-        for i, voltages in enumerate(interior_results):
+        per_tile_recovery_stats: List[Dict[str, Any]] = []
+        for i, (voltages, recovery_stats) in enumerate(interior_results):
             tid = model.metadata.tile_configs[i].tile_id
             n_bnd = len(model.tile_boundary_nodes[tid])
             tile_results[tid] = TileSolveResult(
@@ -261,15 +388,69 @@ class DistributedDDMSolver(_SolverTimeDomainMixin):
                 n_interior=model.tile_interior_counts[tid],
                 n_boundary=n_bnd,
             )
+            per_tile_recovery_stats.append(recovery_stats)
+
+        # Coordinator-side DEBUG: per-tile recovery details
+        for i, rs in enumerate(per_tile_recovery_stats):
+            tid = model.metadata.tile_configs[i].tile_id
+            logger.debug(
+                "Tile %s get_interior_voltages:\n"
+                "  time: %.3fs  |  n_nodes: %d  |  v_range: [%.3f, %.3f]",
+                tid, rs.get('recovery_time_s', 0), rs.get('n_nodes', 0),
+                rs.get('v_min', 0), rs.get('v_max', 0),
+            )
 
         pad_voltages = {n: model.vdd for n in model.pad_nodes}
 
         timings['total_solve'] = sum(timings.values())
 
+        # --- Build solve_stats ---
+        rhs_norm = float(np.linalg.norm(global_rhs))
+        v_min = float(v_gamma.min()) if v_gamma.size > 0 else 0.0
+        v_max = float(v_gamma.max()) if v_gamma.size > 0 else 0.0
+
+        rhs_times = [s.get('rhs_time_s', 0.0) for s in per_tile_rhs_stats]
+        recovery_times = [s.get('recovery_time_s', 0.0) for s in per_tile_recovery_stats]
+
+        solve_stats: Dict[str, Any] = {
+            'reduced_rhs': {
+                'total_time_s': timings['compute_reduced_rhs'],
+                'per_tile_times': rhs_times,
+            },
+            'assemble_rhs_s': timings['assemble_rhs'],
+            'interface_solve': {
+                'time_s': timings['solve_interface'],
+                'n_unknowns': n_interface,
+                'v_min': v_min,
+                'v_max': v_max,
+                'rhs_norm': rhs_norm,
+            },
+            'interior_recovery': {
+                'total_time_s': timings['recover_interior'],
+                'per_tile_times': recovery_times,
+            },
+            'per_tile_rhs_stats': per_tile_rhs_stats,
+            'per_tile_recovery_stats': per_tile_recovery_stats,
+        }
+
+        # --- Verbose INFO logging ---
         if verbose:
-            logger.info("Solve timing breakdown:")
-            for key, val in sorted(timings.items()):
-                logger.info(f"  {key}: {val:.4f}s")
+            logger.info("=== Distributed DDM Solve Statistics ===")
+            if rhs_times:
+                rlo, ravg, rhi = _minmeanmax(rhs_times)
+                logger.info("Reduced RHS:       %.3fs (per-tile: %.3f / %.3f / %.3f)",
+                            timings['compute_reduced_rhs'], rlo, ravg, rhi)
+            else:
+                logger.info("Reduced RHS:       %.3fs", timings['compute_reduced_rhs'])
+            logger.info("Assemble RHS:      %.3fs", timings['assemble_rhs'])
+            logger.info("Interface solve:    %.3fs  |  %s unknowns  |  solution range [%.3f, %.3f]",
+                        timings['solve_interface'], _fmt_count(n_interface), v_min, v_max)
+            if recovery_times:
+                ilo, iavg, ihi = _minmeanmax(recovery_times)
+                logger.info("Interior recovery:  %.3fs (per-tile: %.3f / %.3f / %.3f)",
+                            timings['recover_interior'], ilo, iavg, ihi)
+            else:
+                logger.info("Interior recovery:  %.3fs", timings['recover_interior'])
 
         return DistributedSolveResult(
             tile_results=tile_results,
@@ -278,7 +459,7 @@ class DistributedDDMSolver(_SolverTimeDomainMixin):
             nominal_voltage=model.vdd,
             net_name=model.net_name,
             interface_size=n_interface,
-            solve_metadata={'timings': timings},
+            solve_metadata={'timings': timings, 'solve_stats': solve_stats},
         )
 
     def generate_reports(

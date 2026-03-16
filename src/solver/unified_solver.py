@@ -262,20 +262,27 @@ class SparseFactorAdapter:
         backend: String indicating which backend is used ('cholmod' or 'splu')
     """
     
-    def __init__(self, factor: Any, backend: str):
+    def __init__(self, factor: Any, backend: str, backend_info: str = ''):
         """Initialize adapter with a factorization object.
-        
+
         Args:
             factor: Either a cholmod Factor or scipy SuperLU object
             backend: 'cholmod' or 'splu'
+            backend_info: Human-readable description of backend configuration
         """
         self._factor = factor
         self._backend = backend
-    
+        self._backend_info = backend_info
+
     @property
     def backend(self) -> str:
         """Return the backend name ('cholmod' or 'splu')."""
         return self._backend
+
+    @property
+    def backend_info(self) -> str:
+        """Return human-readable backend configuration string."""
+        return self._backend_info
     
     def solve(self, rhs: np.ndarray) -> np.ndarray:
         """Solve the linear system using the cached factorization.
@@ -390,7 +397,7 @@ def _factor_conductance_matrix(
               f"CSC conversion {csc_time_ms:.2f} ms, "
               f"factorization {factor_time_ms:.2f} ms")
     
-    return SparseFactorAdapter(factor, backend)
+    return SparseFactorAdapter(factor, backend, backend_info)
 
 
 # Re-export for backward compatibility

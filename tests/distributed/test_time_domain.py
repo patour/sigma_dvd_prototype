@@ -731,7 +731,7 @@ class TestCachedRHSRecovery:
         assert worker._last_qs_rhs_i is None
 
         # Evaluate: cache should be set
-        g, total = worker.evaluate_and_get_reduced_rhs(t=0.0)
+        g, total, _stats = worker.evaluate_and_get_reduced_rhs(t=0.0)
         assert worker._last_qs_rhs_i is not None
         assert worker._last_qs_rhs_i.shape == (n_interior,)
 
@@ -773,10 +773,10 @@ class TestCachedRHSRecovery:
         worker._active_sources = worker._vec_sources
 
         # Solve via evaluate + manual coordinator solve + recover
-        g_vcs, _ = worker.evaluate_and_get_reduced_rhs(t=0.0)
+        g_vcs, _, _stats = worker.evaluate_and_get_reduced_rhs(t=0.0)
 
         # Also solve via static DC path for comparison
-        g_dc = worker.get_reduced_rhs()
+        g_dc, _dc_stats = worker.get_reduced_rhs()
 
         # VCS currents differ from static, so reduced RHS should differ
         assert not np.allclose(g_vcs, g_dc, atol=1e-10), \
@@ -1088,3 +1088,211 @@ class TestTransientDirichletRHS:
             "Trapezoidal: rhs_dirichlet_A and rhs_dirichlet_G should differ "
             "when package caps are present"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 9. Time-domain worker stats tests
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestTimeDomainWorkerStats:
+    """Verify that time-domain TileWorker methods return stats dicts
+    with the expected keys, as added in Tasks 5/6."""
+
+    def test_factor_transient_returns_stats(self):
+        """factor_transient_system returns a 4-tuple with expected stats keys."""
+        worker = _make_worker_with_tile(
+            edges=[
+                ('a', 'b', 2.0),   # 2 mS
+                ('b', 'c', 1.0),   # 1 mS
+                ('c', '0', 0.5),   # 0.5 mS to ground
+            ],
+            port_nodes={'a'},
+            currents={'c': 0.1},
+            cap_edges=[
+                ('b', '0', 8.0),   # 8 fF grounded on interior
+                ('a', '0', 3.0),   # 3 fF grounded on port
+            ],
+        )
+
+        dt_scaled = 100.0  # 100 ps
+        result = worker.factor_transient_system(dt_scaled, method='be')
+
+        # Must be a 4-tuple
+        assert len(result) == 4
+        S_A, port_list, total_cap, stats = result
+
+        assert isinstance(S_A, np.ndarray)
+        assert isinstance(port_list, list)
+        assert isinstance(total_cap, float)
+        assert isinstance(stats, dict)
+
+        # Total cap should be 8 + 3 = 11 fF
+        np.testing.assert_allclose(total_cap, 11.0, rtol=1e-6)
+
+        # Check all expected stats keys
+        expected_keys = {
+            'factor_interior_s',
+            'compute_schur_s',
+            'total_cap_fF',
+            'A_ii_nnz',
+            'A_pp_nnz',
+            'schur_mem_bytes',
+            'schur_chunk_size',
+            'factorization_backend',
+            'factorization_backend_info',
+            'n_ports',
+            'n_interior',
+            'c_ii_cap_nodes',
+            'c_pp_cap_nodes',
+            'C_coeff',
+        }
+        for key in expected_keys:
+            assert key in stats, f"Missing stats key: {key}"
+
+        # Sanity: timing values are non-negative floats
+        assert stats['factor_interior_s'] >= 0.0
+        assert stats['compute_schur_s'] >= 0.0
+
+        # Sanity: capacitance stats match topology
+        assert stats['total_cap_fF'] == total_cap
+        assert stats['n_ports'] == 1
+        assert stats['n_interior'] == 2   # b, c
+        assert stats['c_ii_cap_nodes'] >= 1  # at least b has cap
+        assert stats['c_pp_cap_nodes'] >= 1  # a has cap
+
+        # C_coeff for BE: 1 / dt_scaled
+        np.testing.assert_allclose(stats['C_coeff'], 1.0 / dt_scaled)
+
+        # Schur complement is (n_ports x n_ports)
+        assert S_A.shape == (1, 1)
+
+    def test_evaluate_and_get_reduced_rhs_returns_stats(self):
+        """evaluate_and_get_reduced_rhs returns a 3-tuple with stats (static fallback)."""
+        worker = _make_worker_with_tile(
+            edges=[
+                ('a', 'b', 2.0),
+                ('b', '0', 1.0),
+            ],
+            port_nodes={'a'},
+            currents={'b': 0.5},   # 0.5 mA static current
+        )
+
+        # No VCS loaded -> static fallback path (_active_sources is None)
+        result = worker.evaluate_and_get_reduced_rhs(t=0.0)
+
+        # Must be a 3-tuple
+        assert len(result) == 3
+        g, total_current, stats = result
+
+        assert isinstance(g, np.ndarray)
+        assert isinstance(total_current, float)
+        assert isinstance(stats, dict)
+
+        # Check expected stats keys
+        expected_keys = {'eval_time_s', 'n_active_sources'}
+        for key in expected_keys:
+            assert key in stats, f"Missing stats key: {key}"
+
+        # Sanity: timing is non-negative
+        assert stats['eval_time_s'] >= 0.0
+
+        # Static path: 1 active source (b has 0.5 mA != 0)
+        assert stats['n_active_sources'] == 1
+
+        # Total current should be the sum of static injections
+        np.testing.assert_allclose(total_current, 0.5)
+
+    def test_evaluate_and_get_reduced_rhs_with_vcs_returns_stats(self):
+        """evaluate_and_get_reduced_rhs returns stats when VCS is loaded."""
+        from analysis.vectorized_sources import VectorizedCurrentSources
+        from parser.current_sources import CurrentSource
+
+        worker = _make_worker_with_tile(
+            edges=[
+                ('a', 'b', 2.0),
+                ('b', '0', 1.0),
+            ],
+            port_nodes={'a'},
+            currents={'b': 0.5},
+        )
+
+        # Build a VCS with one DC source
+        n_ports = worker._block_system.n_ports
+        n_interior = worker._block_system.n_interior
+        n_nodes = n_ports + n_interior
+        node_to_idx = dict(worker._block_system.port_to_idx)
+        for node, idx in worker._block_system.interior_to_idx.items():
+            node_to_idx[node] = idx + n_ports
+
+        src = CurrentSource(name='i1', node1='b', node2='0', dc_value=1.0)
+        worker._vec_sources = VectorizedCurrentSources.from_current_sources(
+            {'i1': src}, node_to_idx, n_nodes,
+        )
+        worker._active_sources = worker._vec_sources
+
+        result = worker.evaluate_and_get_reduced_rhs(t=0.0)
+
+        assert len(result) == 3
+        g, total_current, stats = result
+
+        expected_keys = {'eval_time_s', 'n_active_sources'}
+        for key in expected_keys:
+            assert key in stats, f"Missing stats key: {key}"
+
+        assert isinstance(g, np.ndarray)
+        assert isinstance(total_current, float)
+        assert isinstance(stats, dict)
+        assert stats['eval_time_s'] >= 0.0
+        # VCS path: one DC source -> at least 1 active source
+        assert stats['n_active_sources'] >= 1
+        np.testing.assert_allclose(total_current, 1.0, rtol=1e-6)
+
+    def test_get_transient_reduced_rhs_returns_stats(self):
+        """get_transient_reduced_rhs returns a 3-tuple with stats."""
+        worker = _make_worker_with_tile(
+            edges=[
+                ('a', 'b', 2.0),
+                ('b', 'c', 1.0),
+                ('c', '0', 0.5),
+            ],
+            port_nodes={'a'},
+            currents={'c': 0.2},
+            cap_edges=[
+                ('b', '0', 5.0),
+                ('c', '0', 3.0),
+            ],
+        )
+
+        # Factor the transient system first (required before get_transient_reduced_rhs)
+        dt_scaled = 100.0  # 100 ps
+        worker.factor_transient_system(dt_scaled, method='be')
+
+        # Need previous-step port voltages
+        boundary_v_old = {'a': 1.0}
+
+        result = worker.get_transient_reduced_rhs(t=0.0, boundary_v_old=boundary_v_old)
+
+        # Must be a 3-tuple
+        assert len(result) == 3
+        g, total_current, stats = result
+
+        assert isinstance(g, np.ndarray)
+        assert isinstance(total_current, float)
+        assert isinstance(stats, dict)
+
+        # Check expected stats keys
+        expected_keys = {'rhs_time_s', 'total_current', 'rhs_norm'}
+        for key in expected_keys:
+            assert key in stats, f"Missing stats key: {key}"
+
+        # Sanity: timing is non-negative
+        assert stats['rhs_time_s'] >= 0.0
+
+        # total_current and rhs_norm should be numeric
+        assert isinstance(stats['total_current'], float)
+        assert isinstance(stats['rhs_norm'], float)
+        assert stats['rhs_norm'] >= 0.0
+
+        # total_current in stats should match the returned value
+        np.testing.assert_allclose(stats['total_current'], total_current)

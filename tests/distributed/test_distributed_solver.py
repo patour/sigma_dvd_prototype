@@ -83,7 +83,7 @@ class TestComputeExplicitSchur(unittest.TestCase):
         )
         block.factor_interior()
 
-        S_explicit = compute_explicit_schur(block)
+        S_explicit, _ = compute_explicit_schur(block)
         n = block.n_ports
 
         self.assertEqual(S_explicit.shape, (n, n))
@@ -109,7 +109,7 @@ class TestComputeExplicitSchur(unittest.TestCase):
             edges, port_nodes, ground_node='0',
         )
         block.factor_interior()
-        S = compute_explicit_schur(block)
+        S, _ = compute_explicit_schur(block)
         np.testing.assert_allclose(S, S.T, atol=1e-12)
 
     def test_chunked_path_matches_single_solve(self):
@@ -143,11 +143,11 @@ class TestComputeExplicitSchur(unittest.TestCase):
         self.assertGreater(n_ports, 32, "Need >32 ports for chunked path test")
 
         # Single solve (large memory budget)
-        S_single = compute_explicit_schur(block, max_memory_gb=100.0)
+        S_single, _ = compute_explicit_schur(block, max_memory_gb=100.0)
 
         # Force chunked path: tiny memory budget -> chunk_size = 32 (BLAS floor)
         # With 76 ports and chunk_size=32, we get 3 chunks
-        S_chunked = compute_explicit_schur(block, max_memory_gb=1e-9)
+        S_chunked, _ = compute_explicit_schur(block, max_memory_gb=1e-9)
 
         # Verify chunked path was actually taken
         # chunk_size = max(min(memory_chunk, ..., 256), 32) = 32 < 76 = n_ports
@@ -244,13 +244,13 @@ class TestAssembleSchurComplementSystem(unittest.TestCase):
             tile_a_edges, {'A', 'B'}, ground_node='0',
         )
         block_a.factor_interior()
-        S_a = compute_explicit_schur(block_a)
+        S_a, _ = compute_explicit_schur(block_a)
 
         block_b, _ = build_block_system_from_edges(
             tile_b_edges, {'B'}, ground_node='0',
         )
         block_b.factor_interior()
-        S_b = compute_explicit_schur(block_b)
+        S_b, _ = compute_explicit_schur(block_b)
 
         # Assemble global interface
         tile_schurs = {
@@ -281,13 +281,13 @@ class TestAssembleSchurComplementSystem(unittest.TestCase):
             tile_a_edges, {'A', 'B'}, ground_node='0',
         )
         block_a.factor_interior()
-        S_a = compute_explicit_schur(block_a)
+        S_a, _ = compute_explicit_schur(block_a)
 
         block_b, _ = build_block_system_from_edges(
             tile_b_edges, {'B'}, ground_node='0',
         )
         block_b.factor_interior()
-        S_b = compute_explicit_schur(block_b)
+        S_b, _ = compute_explicit_schur(block_b)
 
         S_global, _, _, _ = assemble_schur_complement_system(
             {'A': S_a, 'B': S_b},
@@ -301,7 +301,7 @@ class TestAssembleSchurComplementSystem(unittest.TestCase):
         edges = [('a', 'b', 1.0)]
         block, _ = build_block_system_from_edges(edges, {'a', 'b'}, ground_node='0')
         block.factor_interior()
-        S = compute_explicit_schur(block)
+        S, _ = compute_explicit_schur(block)
 
         # Without extra edges
         S1, _, _, _ = assemble_schur_complement_system(
@@ -375,7 +375,7 @@ class TestTileWorker(unittest.TestCase):
                  'instance_path': None, 'net_filter': None},
                 interface_nodes={'b'},
             )
-            S, boundary_list = worker.factor_and_compute_schur()
+            S, boundary_list, stats = worker.factor_and_compute_schur()
 
             self.assertEqual(S.shape[0], S.shape[1])
             self.assertEqual(len(boundary_list), S.shape[0])
@@ -412,11 +412,11 @@ class TestTileWorker(unittest.TestCase):
             worker.factor_and_compute_schur()
 
             # With no current, RHS should be zero
-            rhs_zero = worker.get_reduced_rhs()
+            rhs_zero, rhs_stats_zero = worker.get_reduced_rhs()
             np.testing.assert_allclose(rhs_zero, 0.0, atol=1e-15)
 
             # With current at interior node c
-            rhs_with_current = worker.get_reduced_rhs({'c': 1.0})  # 1 mA at c
+            rhs_with_current, rhs_stats = worker.get_reduced_rhs({'c': 1.0})  # 1 mA at c
             self.assertGreater(np.abs(rhs_with_current).sum(), 0)
         finally:
             os.unlink(temp_ckt)
@@ -887,13 +887,13 @@ class TestInterfaceIslandDetection(unittest.TestCase):
             tile_a_edges, {'I1', 'I2'}, ground_node='0',
         )
         block_a.factor_interior()
-        S_a = compute_explicit_schur(block_a)
+        S_a, _ = compute_explicit_schur(block_a)
 
         block_b, _ = build_block_system_from_edges(
             tile_b_edges, {'I1', 'I2'}, ground_node='0',
         )
         block_b.factor_interior()
-        S_b = compute_explicit_schur(block_b)
+        S_b, _ = compute_explicit_schur(block_b)
 
         pad_nodes = {'PAD1'}
         extra_edges = [('I1', 'PAD1', 10.0)]
@@ -931,13 +931,13 @@ class TestInterfaceIslandDetection(unittest.TestCase):
             tile_a_edges, {'I1', 'I2'}, ground_node='0',
         )
         block_a.factor_interior()
-        S_a = compute_explicit_schur(block_a)
+        S_a, _ = compute_explicit_schur(block_a)
 
         block_b, _ = build_block_system_from_edges(
             tile_b_edges, {'I3', 'I4'}, ground_node='0',
         )
         block_b.factor_interior()
-        S_b = compute_explicit_schur(block_b)
+        S_b, _ = compute_explicit_schur(block_b)
 
         pad_nodes = {'PAD1'}
         extra_edges = [('I1', 'PAD1', 10.0)]
@@ -2301,6 +2301,332 @@ class TestQuasiStaticResultLazyPeaks(unittest.TestCase):
             self.assertIsNone(loaded._model)
         finally:
             os.unlink(tmp_path)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# DC Stats Tests
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestFactorAndComputeSchurReturnsStats(unittest.TestCase):
+    """Verify factor_and_compute_schur returns a 3-tuple with stats dict."""
+
+    def test_factor_and_compute_schur_returns_stats(self):
+        from distributed.tile_worker import TileWorker, TileData
+
+        tile = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[
+                ('a', 'B', 1.0),   # 1 mS
+                ('B', 'c', 2.0),   # 2 mS
+                ('c', '0', 0.5),   # 0.5 mS to ground
+            ],
+            all_nodes={'a', 'B', 'c'},
+            boundary_nodes={'B'},
+            current_injections={'c': 0.1},
+        )
+        worker = TileWorker()
+        worker.setup_from_tile_data(tile, interface_nodes={'B'})
+
+        result = worker.factor_and_compute_schur()
+
+        # Must be a 3-tuple
+        self.assertEqual(len(result), 3)
+        S, port_list, stats = result
+        self.assertIsInstance(S, np.ndarray)
+        self.assertIsInstance(port_list, list)
+        self.assertIsInstance(stats, dict)
+
+        # Check all expected keys
+        expected_keys = {
+            'factor_interior_s', 'compute_schur_s', 'total_s',
+            'schur_shape', 'schur_mem_bytes', 'schur_chunk_size',
+            'factorization_backend', 'factorization_backend_info',
+            'n_ports', 'n_interior',
+            'G_ii_nnz', 'G_pp_nnz', 'G_pi_nnz', 'G_ip_nnz',
+            'mem_bytes',
+        }
+        for key in expected_keys:
+            self.assertIn(key, stats, f"Missing stats key: {key}")
+
+        self.assertIsInstance(stats['factorization_backend_info'], str)
+        self.assertGreater(stats['schur_chunk_size'], 0)
+
+        # Sanity checks on values
+        self.assertGreater(stats['factor_interior_s'], 0.0)
+        self.assertGreaterEqual(stats['compute_schur_s'], 0.0)
+        self.assertGreater(stats['total_s'], 0.0)
+        self.assertEqual(stats['schur_shape'], S.shape)
+        self.assertGreater(stats['schur_mem_bytes'], 0)
+        self.assertGreater(stats['n_interior'], 0)
+        self.assertGreater(stats['n_ports'], 0)
+        self.assertGreater(stats['G_ii_nnz'], 0)
+        self.assertGreater(stats['mem_bytes'], 0)
+        self.assertIsInstance(stats['factorization_backend'], str)
+
+
+class TestReducedRhsReturnsStats(unittest.TestCase):
+    """Verify get_reduced_rhs returns a 2-tuple with stats dict."""
+
+    def test_reduced_rhs_returns_stats(self):
+        from distributed.tile_worker import TileWorker, TileData
+
+        tile = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[
+                ('a', 'B', 1.0),
+                ('B', 'c', 2.0),
+                ('c', '0', 0.5),
+            ],
+            all_nodes={'a', 'B', 'c'},
+            boundary_nodes={'B'},
+            current_injections={'c': 0.5},  # 0.5 mA at interior node
+        )
+        worker = TileWorker()
+        worker.setup_from_tile_data(tile, interface_nodes={'B'})
+        worker.factor_and_compute_schur()
+
+        result = worker.get_reduced_rhs()
+
+        # Must be a 2-tuple
+        self.assertEqual(len(result), 2)
+        rhs, stats = result
+        self.assertIsInstance(rhs, np.ndarray)
+        self.assertIsInstance(stats, dict)
+
+        # Check expected keys
+        expected_keys = {'rhs_time_s', 'n_currents', 'rhs_norm'}
+        for key in expected_keys:
+            self.assertIn(key, stats, f"Missing stats key: {key}")
+
+        # Sanity checks
+        self.assertGreaterEqual(stats['rhs_time_s'], 0.0)
+        self.assertIsInstance(stats['n_currents'], int)
+        self.assertGreaterEqual(stats['n_currents'], 0)
+        self.assertIsInstance(stats['rhs_norm'], float)
+        self.assertGreaterEqual(stats['rhs_norm'], 0.0)
+
+    def test_rhs_norm_is_nonzero_with_current(self):
+        """RHS norm should be positive when current injection is nonzero."""
+        from distributed.tile_worker import TileWorker, TileData
+
+        tile = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[
+                ('a', 'B', 1.0),
+                ('B', 'c', 2.0),
+                ('c', '0', 0.5),
+            ],
+            all_nodes={'a', 'B', 'c'},
+            boundary_nodes={'B'},
+            current_injections={'c': 1.0},
+        )
+        worker = TileWorker()
+        worker.setup_from_tile_data(tile, interface_nodes={'B'})
+        worker.factor_and_compute_schur()
+
+        _, stats = worker.get_reduced_rhs()
+        self.assertGreater(stats['rhs_norm'], 0.0)
+        self.assertEqual(stats['n_currents'], 1)
+
+
+class TestInteriorRecoveryReturnsStats(unittest.TestCase):
+    """Verify get_interior_voltages returns a 2-tuple with stats dict."""
+
+    def test_interior_recovery_returns_stats(self):
+        from distributed.tile_worker import TileWorker, TileData
+
+        tile = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[
+                ('a', 'B', 1.0),
+                ('B', 'c', 2.0),
+                ('c', '0', 0.5),
+            ],
+            all_nodes={'a', 'B', 'c'},
+            boundary_nodes={'B'},
+            current_injections={'c': 0.5},
+        )
+        worker = TileWorker()
+        worker.setup_from_tile_data(tile, interface_nodes={'B'})
+        worker.factor_and_compute_schur()
+
+        # Recover with B at 0.9V
+        result = worker.get_interior_voltages({'B': 0.9})
+
+        # Must be a 2-tuple
+        self.assertEqual(len(result), 2)
+        voltages, stats = result
+        self.assertIsInstance(voltages, dict)
+        self.assertIsInstance(stats, dict)
+
+        # Check expected keys
+        expected_keys = {'recovery_time_s', 'n_nodes', 'v_min', 'v_max'}
+        for key in expected_keys:
+            self.assertIn(key, stats, f"Missing stats key: {key}")
+
+        # Sanity checks
+        self.assertGreaterEqual(stats['recovery_time_s'], 0.0)
+        self.assertGreater(stats['n_nodes'], 0)
+        self.assertLessEqual(stats['v_min'], stats['v_max'])
+        self.assertIsInstance(stats['v_min'], float)
+        self.assertIsInstance(stats['v_max'], float)
+
+
+class TestBlockSystemStatsAndMemory(unittest.TestCase):
+    """Verify BlockMatrixSystem.stats() and memory_bytes()."""
+
+    def test_block_system_stats_and_memory(self):
+        edges, port_nodes = _build_toy_graph()
+        block, _ = build_block_system_from_edges(
+            edges, port_nodes, ground_node='0',
+        )
+
+        # stats() should return a dict with expected keys
+        stats = block.stats()
+        self.assertIsInstance(stats, dict)
+        expected_keys = {
+            'n_ports', 'n_interior',
+            'G_ii_nnz', 'G_pp_nnz', 'G_pi_nnz', 'G_ip_nnz',
+            'mem_bytes',
+        }
+        for key in expected_keys:
+            self.assertIn(key, stats, f"Missing stats key: {key}")
+
+        # Values consistent with the toy graph
+        self.assertEqual(stats['n_ports'], 2)
+        self.assertEqual(stats['n_interior'], 1)
+        self.assertGreater(stats['G_ii_nnz'], 0)
+        self.assertGreater(stats['G_pp_nnz'], 0)
+
+        # memory_bytes should return a positive int
+        mem = block.memory_bytes()
+        self.assertIsInstance(mem, int)
+        self.assertGreater(mem, 0)
+        self.assertEqual(mem, stats['mem_bytes'])
+
+    def test_empty_block_system_stats(self):
+        """Edge case: block system with no ports or interior has zero counts."""
+        block, _ = build_block_system_from_edges(
+            edges=[], port_nodes=set(), ground_node='0',
+        )
+        stats = block.stats()
+        self.assertEqual(stats['n_ports'], 0)
+        self.assertEqual(stats['n_interior'], 0)
+        self.assertEqual(stats['G_ii_nnz'], 0)
+        self.assertEqual(stats['G_pp_nnz'], 0)
+        # memory_bytes may include CSR overhead from empty indptr arrays
+        self.assertIsInstance(block.memory_bytes(), int)
+        self.assertGreaterEqual(block.memory_bytes(), 0)
+
+
+class TestPrepareStoresSolverStats(unittest.TestCase):
+    """End-to-end: prepare() populates ctx.timings['solver_stats']."""
+
+    def setUp(self):
+        self.model = _build_two_tile_model_with_caps()
+
+    def tearDown(self):
+        self.model.shutdown()
+
+    def test_prepare_stores_solver_stats(self):
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(self.model)
+        ctx = solver.prepare(verbose=True)
+
+        # solver_stats must exist in timings
+        self.assertIn('solver_stats', ctx.timings)
+        solver_stats = ctx.timings['solver_stats']
+
+        # Top-level sub-dicts
+        for key in ('per_tile', 'interface', 'aggregate'):
+            self.assertIn(key, solver_stats, f"Missing solver_stats key: {key}")
+
+        # per_tile: list of dicts, one per tile
+        per_tile = solver_stats['per_tile']
+        self.assertIsInstance(per_tile, list)
+        self.assertEqual(len(per_tile), 2)  # 2 tiles
+        for tile_stats in per_tile:
+            self.assertIsInstance(tile_stats, dict)
+            self.assertIn('n_interior', tile_stats)
+            self.assertIn('n_ports', tile_stats)
+            self.assertIn('factor_interior_s', tile_stats)
+
+        # interface: dict with interface system stats
+        iface = solver_stats['interface']
+        self.assertIsInstance(iface, dict)
+        for key in ('n_unknowns', 'nnz', 'density_pct', 'mem_bytes',
+                     'factor_time_s', 'backend', 'backend_info',
+                     'islands_penalized'):
+            self.assertIn(key, iface, f"Missing interface stats key: {key}")
+        self.assertGreater(iface['n_unknowns'], 0)
+        self.assertGreater(iface['nnz'], 0)
+
+        # aggregate: dict with min/mean/max summaries
+        agg = solver_stats['aggregate']
+        self.assertIsInstance(agg, dict)
+        for key in ('n_interior', 'n_ports', 'G_ii_nnz', 'mem_bytes',
+                     'schur_mem_bytes', 'factor_interior_s'):
+            self.assertIn(key, agg, f"Missing aggregate stats key: {key}")
+            entry = agg[key]
+            self.assertIn('min', entry)
+            self.assertIn('mean', entry)
+            self.assertIn('max', entry)
+            self.assertIn('total', entry)
+
+
+class TestSolveDcStoresSolveStats(unittest.TestCase):
+    """End-to-end: solve_dc() populates result.solve_metadata['solve_stats']."""
+
+    def setUp(self):
+        self.model = _build_two_tile_model_with_caps()
+
+    def tearDown(self):
+        self.model.shutdown()
+
+    def test_solve_dc_stores_solve_stats(self):
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(self.model)
+        ctx = solver.prepare(verbose=True)
+        result = solver.solve_dc(context=ctx, verbose=True)
+
+        # solve_stats must exist in solve_metadata
+        self.assertIn('solve_stats', result.solve_metadata)
+        solve_stats = result.solve_metadata['solve_stats']
+
+        # Top-level sub-dicts
+        for key in ('reduced_rhs', 'assemble_rhs_s', 'interface_solve',
+                     'interior_recovery'):
+            self.assertIn(key, solve_stats, f"Missing solve_stats key: {key}")
+
+        # reduced_rhs: timing and per-tile breakdown
+        rhs = solve_stats['reduced_rhs']
+        self.assertIn('total_time_s', rhs)
+        self.assertIn('per_tile_times', rhs)
+        self.assertEqual(len(rhs['per_tile_times']), 2)
+
+        # assemble_rhs_s: should be a float
+        self.assertIsInstance(solve_stats['assemble_rhs_s'], float)
+
+        # interface_solve: timing and interface system info
+        iface = solve_stats['interface_solve']
+        for key in ('time_s', 'n_unknowns', 'v_min', 'v_max', 'rhs_norm'):
+            self.assertIn(key, iface, f"Missing interface_solve key: {key}")
+        self.assertGreater(iface['n_unknowns'], 0)
+
+        # interior_recovery: timing and per-tile breakdown
+        recovery = solve_stats['interior_recovery']
+        self.assertIn('total_time_s', recovery)
+        self.assertIn('per_tile_times', recovery)
+        self.assertEqual(len(recovery['per_tile_times']), 2)
+
+        # Per-tile stats are also stored
+        self.assertIn('per_tile_rhs_stats', solve_stats)
+        self.assertIn('per_tile_recovery_stats', solve_stats)
+        self.assertEqual(len(solve_stats['per_tile_rhs_stats']), 2)
+        self.assertEqual(len(solve_stats['per_tile_recovery_stats']), 2)
 
 
 if __name__ == '__main__':
