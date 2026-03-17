@@ -382,19 +382,7 @@ class TestResultTypes:
 
     def test_transient_context_dt_property(self):
         """dt_scaled=100.0 (ps) -> dt == 100e-12 (seconds)."""
-        from distributed.result import (
-            DistributedTransientContext,
-            DistributedSolverContext,
-        )
-
-        # Minimal dc_context stub
-        dc_ctx = DistributedSolverContext(
-            interface_lu=lambda x: x,
-            interface_nodes=[],
-            interface_node_to_idx={},
-            rhs_dirichlet_interface=np.zeros(0),
-            tile_index_maps={},
-        )
+        from distributed.result import DistributedTransientContext
 
         ctx = DistributedTransientContext(
             interface_lu=lambda x: x,
@@ -402,7 +390,6 @@ class TestResultTypes:
             interface_node_to_idx={},
             rhs_dirichlet_interface=np.zeros(0),
             tile_index_maps={},
-            dc_context=dc_ctx,
             dt_scaled=100.0,
             integration_method='be',
             has_capacitance=True,
@@ -412,18 +399,7 @@ class TestResultTypes:
 
     def test_transient_context_C_coeff_be(self):
         """BE: C_coeff = 1 / dt_scaled."""
-        from distributed.result import (
-            DistributedTransientContext,
-            DistributedSolverContext,
-        )
-
-        dc_ctx = DistributedSolverContext(
-            interface_lu=lambda x: x,
-            interface_nodes=[],
-            interface_node_to_idx={},
-            rhs_dirichlet_interface=np.zeros(0),
-            tile_index_maps={},
-        )
+        from distributed.result import DistributedTransientContext
 
         ctx = DistributedTransientContext(
             interface_lu=lambda x: x,
@@ -431,7 +407,6 @@ class TestResultTypes:
             interface_node_to_idx={},
             rhs_dirichlet_interface=np.zeros(0),
             tile_index_maps={},
-            dc_context=dc_ctx,
             dt_scaled=100.0,
             integration_method='be',
             has_capacitance=True,
@@ -441,18 +416,7 @@ class TestResultTypes:
 
     def test_transient_context_C_coeff_trap(self):
         """Trapezoidal: C_coeff = 2 / dt_scaled."""
-        from distributed.result import (
-            DistributedTransientContext,
-            DistributedSolverContext,
-        )
-
-        dc_ctx = DistributedSolverContext(
-            interface_lu=lambda x: x,
-            interface_nodes=[],
-            interface_node_to_idx={},
-            rhs_dirichlet_interface=np.zeros(0),
-            tile_index_maps={},
-        )
+        from distributed.result import DistributedTransientContext
 
         ctx = DistributedTransientContext(
             interface_lu=lambda x: x,
@@ -460,7 +424,6 @@ class TestResultTypes:
             interface_node_to_idx={},
             rhs_dirichlet_interface=np.zeros(0),
             tile_index_maps={},
-            dc_context=dc_ctx,
             dt_scaled=100.0,
             integration_method='trap',
             has_capacitance=True,
@@ -1053,10 +1016,11 @@ class TestTransientDirichletRHS:
             package_cap_edges=[('pad', 'shared', 100.0)],
         )
         solver = DistributedDDMSolver(model)
+        dc_ctx = solver.prepare()
         ctx = solver.prepare_transient(dt=1e-9, method='be')
 
         rhs_G = ctx.rhs_dirichlet_G
-        rhs_dc = ctx.dc_context.rhs_dirichlet_interface
+        rhs_dc = dc_ctx.rhs_dirichlet_interface
 
         assert rhs_G is not None
         assert rhs_dc is not None
@@ -1296,3 +1260,537 @@ class TestTimeDomainWorkerStats:
 
         # total_current in stats should match the returned value
         np.testing.assert_allclose(stats['total_current'], total_current)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 10. Factorization lifecycle tests
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestFactorizationLifecycle:
+    """Tests for clear_dc_factorization and clear_transient_factorization."""
+
+    def test_clear_dc_factorization_preserves_matrices(self):
+        """After factor + clear_dc, G matrices survive but LU is gone."""
+        worker = _make_worker_with_tile(
+            edges=[
+                ('a', 'b', 2.0),
+                ('b', 'c', 1.0),
+                ('c', '0', 0.5),
+            ],
+            port_nodes={'a'},
+            currents={'c': 0.1},
+        )
+
+        # Verify LU exists after setup (factor_and_compute_schur was called)
+        bs = worker._block_system
+        assert bs.lu_ii is not None, "LU should exist after factor"
+
+        worker.clear_dc_factorization()
+
+        # LU and factor_adapter should be cleared
+        assert bs.lu_ii is None, "lu_ii should be None after clear"
+        assert bs.factor_adapter is None, "factor_adapter should be None after clear"
+
+        # G matrices should still be present and valid
+        assert bs.G_ii is not None
+        assert bs.G_pp is not None
+        assert bs.G_pi is not None
+        assert bs.G_ip is not None
+        assert bs.G_ii.shape[0] == bs.n_interior
+        assert bs.G_pp.shape[0] == bs.n_ports
+
+    def test_clear_dc_factorization_returns_stats(self):
+        """Returned dict has correct had_lu and n_interior values."""
+        worker = _make_worker_with_tile(
+            edges=[
+                ('a', 'b', 2.0),
+                ('b', '0', 1.0),
+            ],
+            port_nodes={'a'},
+            currents={'b': 0.5},
+        )
+
+        stats = worker.clear_dc_factorization()
+
+        assert stats['had_lu'] is True
+        assert stats['n_interior'] == 1  # only 'b' is interior
+
+    def test_clear_dc_factorization_idempotent(self):
+        """Calling clear_dc twice should not raise; second returns had_lu=False."""
+        worker = _make_worker_with_tile(
+            edges=[
+                ('a', 'b', 2.0),
+                ('b', '0', 1.0),
+            ],
+            port_nodes={'a'},
+        )
+
+        stats1 = worker.clear_dc_factorization()
+        assert stats1['had_lu'] is True
+
+        stats2 = worker.clear_dc_factorization()
+        assert stats2['had_lu'] is False
+        assert stats2['n_interior'] == stats1['n_interior']
+
+    def test_clear_transient_factorization_removes_system(self):
+        """After factor_transient + clear, _transient_block_system is None."""
+        worker = _make_worker_with_tile(
+            edges=[
+                ('a', 'b', 2.0),
+                ('b', '0', 1.0),
+            ],
+            port_nodes={'a'},
+            cap_edges=[('b', '0', 5.0)],
+        )
+
+        dt_scaled = 100.0  # 100 ps
+        worker.factor_transient_system(dt_scaled, method='be')
+        assert worker._transient_block_system is not None
+
+        stats = worker.clear_transient_factorization()
+
+        assert stats['had_transient_system'] is True
+        assert worker._transient_block_system is None
+
+    def test_clear_transient_factorization_preserves_dc(self):
+        """Clearing transient leaves DC _block_system.lu_ii intact."""
+        worker = _make_worker_with_tile(
+            edges=[
+                ('a', 'b', 2.0),
+                ('b', '0', 1.0),
+            ],
+            port_nodes={'a'},
+            cap_edges=[('b', '0', 5.0)],
+        )
+
+        # Both DC and transient systems exist
+        dt_scaled = 100.0
+        worker.factor_transient_system(dt_scaled, method='be')
+        assert worker._block_system.lu_ii is not None
+        assert worker._transient_block_system is not None
+
+        worker.clear_transient_factorization()
+
+        # DC system should be untouched
+        assert worker._block_system.lu_ii is not None
+        assert worker._block_system.factor_adapter is not None
+        # Transient system should be gone
+        assert worker._transient_block_system is None
+
+    def test_clear_transient_factorization_clears_stepping_state(self):
+        """After clear_transient, _last_f_i and _v_interior_old should be None."""
+        worker = _make_worker_with_tile(
+            edges=[
+                ('a', 'b', 2.0),
+                ('b', '0', 1.0),
+            ],
+            port_nodes={'a'},
+            cap_edges=[('b', '0', 5.0)],
+        )
+
+        dt_scaled = 100.0
+        worker.factor_transient_system(dt_scaled, method='be')
+
+        # Run one transient RHS to populate _last_f_i
+        worker.get_transient_reduced_rhs(t=0.0, boundary_v_old={'a': 1.0})
+        assert worker._last_f_i is not None
+
+        # Set initial voltages so _v_interior_old is populated
+        worker.set_initial_voltages({'a': 1.0, 'b': 0.9})
+        assert worker._v_interior_old is not None
+
+        worker.clear_transient_factorization()
+
+        assert worker._last_f_i is None
+        assert worker._v_interior_old is None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 11. Context lifecycle tests (factor / release / topology reuse)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestContextLifecycle:
+    """Test factor/release lifecycle on active context classes."""
+
+    def test_dc_context_factor_without_model_raises(self):
+        """DistributedSolverContext.factor() raises if model is None."""
+        from distributed.result import DistributedSolverContext
+
+        ctx = DistributedSolverContext()
+        with pytest.raises(RuntimeError, match="Cannot factor without a model"):
+            ctx.factor()
+
+    def test_transient_context_factor_without_model_raises(self):
+        """DistributedTransientContext.factor() raises if model is None."""
+        from distributed.result import DistributedTransientContext
+
+        ctx = DistributedTransientContext(dt=1e-10, method='be')
+        with pytest.raises(RuntimeError, match="Cannot factor without a model"):
+            ctx.factor()
+
+    def test_dc_context_backward_compat_is_factored(self):
+        """Context built with explicit interface_lu is marked as factored."""
+        from distributed.result import DistributedSolverContext
+
+        ctx = DistributedSolverContext(
+            interface_lu=lambda x: x,
+            interface_nodes=['a'],
+            interface_node_to_idx={'a': 0},
+            rhs_dirichlet_interface=np.zeros(1),
+            tile_index_maps={},
+        )
+        assert ctx.is_factored is True
+
+    def test_transient_context_backward_compat_is_factored(self):
+        """Transient context built with explicit interface_lu is marked as factored."""
+        from distributed.result import DistributedTransientContext
+
+        ctx = DistributedTransientContext(
+            interface_lu=lambda x: x,
+            interface_nodes=['a'],
+            interface_node_to_idx={'a': 0},
+            rhs_dirichlet_interface=np.zeros(1),
+            tile_index_maps={},
+            dt_scaled=100.0,
+            integration_method='be',
+            has_capacitance=False,
+        )
+        assert ctx.is_factored is True
+
+    def test_dc_context_release_clears_state(self):
+        """release() on DC context clears interface_lu and is_factored."""
+        from distributed.result import DistributedSolverContext
+
+        ctx = DistributedSolverContext(
+            interface_lu=lambda x: x,
+            interface_nodes=['a'],
+            interface_node_to_idx={'a': 0},
+            rhs_dirichlet_interface=np.zeros(1),
+            tile_index_maps={},
+        )
+        assert ctx.is_factored is True
+        ctx.release()
+        assert ctx.is_factored is False
+        assert ctx.interface_lu is None
+
+    def test_transient_context_release_clears_state(self):
+        """release() on transient context clears interface_lu and is_factored."""
+        from distributed.result import DistributedTransientContext
+
+        ctx = DistributedTransientContext(
+            interface_lu=lambda x: x,
+            interface_nodes=['a'],
+            interface_node_to_idx={'a': 0},
+            rhs_dirichlet_interface=np.zeros(1),
+            tile_index_maps={},
+            dt_scaled=100.0,
+            integration_method='be',
+            has_capacitance=False,
+        )
+        assert ctx.is_factored is True
+        ctx.release()
+        assert ctx.is_factored is False
+        assert ctx.interface_lu is None
+        assert ctx.rhs_dirichlet_A is None
+        assert ctx.C_package_uu is None
+
+    def test_dc_context_topology_preserved_after_release(self):
+        """release() on DC context preserves topology."""
+        from distributed.result import (
+            DistributedSolverContext,
+            DistributedTopologyContext,
+        )
+
+        topo = DistributedTopologyContext(
+            interface_nodes=['a'],
+            interface_node_to_idx={'a': 0},
+            tile_index_maps={},
+            rhs_dirichlet_G=np.zeros(1),
+            G_package_uu=None,
+        )
+        ctx = DistributedSolverContext(
+            topology=topo,
+            interface_lu=lambda x: x,
+            interface_nodes=['a'],
+            interface_node_to_idx={'a': 0},
+            rhs_dirichlet_interface=np.zeros(1),
+            tile_index_maps={},
+        )
+        ctx.release()
+        assert ctx.topology is topo
+
+    def test_topology_reuse_across_prepare_calls(self):
+        """prepare() then prepare_transient() share the same topology."""
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(model)
+        dc_ctx = solver.prepare()
+        assert dc_ctx.topology is not None
+
+        trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+        # Topology should be the exact same object (cached on solver)
+        assert trans_ctx.topology is dc_ctx.topology
+
+
+class TestContextSaveLoad:
+    """Tests for context checkpoint save / load / refactor round-trips."""
+
+    def test_dc_context_save_load_round_trip(self, tmp_path):
+        """Save a DC context, load it, refactor, and verify identical solve.
+
+        Verifies that topology, S_global, and timings survive the
+        pickle round-trip, and that refactor() rebuilds the LU so that
+        the reloaded context produces the same interface solution as the
+        original.
+        """
+        from distributed.solver import DistributedDDMSolver
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        solver = DistributedDDMSolver(model)
+
+        # Original prepare (factor)
+        ctx_orig = solver.prepare()
+        assert ctx_orig.is_factored is True
+
+        # Save
+        save_path = str(tmp_path / 'dc_context.pkl')
+        returned_path = ctx_orig.save(path=save_path)
+        assert returned_path == save_path
+        assert os.path.isfile(save_path)
+
+        # Load
+        from distributed.result import DistributedSolverContext
+        ctx_loaded = DistributedSolverContext.load(model, save_path)
+        assert ctx_loaded.is_factored is False
+        assert ctx_loaded.topology is not None
+
+        # Verify topology matches
+        assert ctx_loaded.interface_nodes == ctx_orig.interface_nodes
+        assert (
+            ctx_loaded.interface_node_to_idx == ctx_orig.interface_node_to_idx
+        )
+        for tid in ctx_orig.tile_index_maps:
+            np.testing.assert_array_equal(
+                ctx_loaded.tile_index_maps[tid],
+                ctx_orig.tile_index_maps[tid],
+            )
+
+        # Verify S_global round-trips correctly
+        assert ctx_loaded._S_global is not None
+        np.testing.assert_array_equal(
+            ctx_loaded._S_global.toarray(),
+            ctx_orig._S_global.toarray(),
+        )
+
+        # Verify rhs_dirichlet round-trips via topology
+        np.testing.assert_array_equal(
+            ctx_loaded.rhs_dirichlet_interface,
+            ctx_orig.rhs_dirichlet_interface,
+        )
+
+        # Refactor from saved S_global and verify interface solve matches
+        ctx_loaded.refactor()
+        assert ctx_loaded.is_factored is True
+
+        # Solve the same RHS with both contexts and compare
+        rhs = ctx_orig.rhs_dirichlet_interface.copy()
+        v_orig = ctx_orig.interface_lu(rhs)
+        v_loaded = ctx_loaded.interface_lu(rhs)
+        np.testing.assert_allclose(v_loaded, v_orig, atol=1e-12)
+
+    def test_transient_context_save_load_round_trip(self, tmp_path):
+        """Save a transient context, load it, refactor, and verify fields."""
+        from distributed.solver import DistributedDDMSolver
+
+        pkg_caps = [('pad', 'shared', 50.0)]
+        model = _build_two_tile_distributed_model(package_cap_edges=pkg_caps)
+        solver = DistributedDDMSolver(model)
+
+        # Prepare transient
+        trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+        assert trans_ctx.is_factored is True
+
+        # Save
+        save_path = str(tmp_path / 'transient_context.pkl')
+        returned_path = trans_ctx.save(path=save_path)
+        assert returned_path == save_path
+        assert os.path.isfile(save_path)
+
+        # Load
+        from distributed.result import DistributedTransientContext
+        ctx_loaded = DistributedTransientContext.load(model, save_path)
+        assert ctx_loaded.is_factored is False
+
+        # Verify integration params
+        np.testing.assert_allclose(
+            ctx_loaded.dt_scaled, trans_ctx.dt_scaled, rtol=1e-12,
+        )
+        assert ctx_loaded.integration_method == trans_ctx.integration_method
+        assert ctx_loaded.has_capacitance == trans_ctx.has_capacitance
+
+        # Verify topology
+        assert ctx_loaded.interface_nodes == trans_ctx.interface_nodes
+
+        # Verify transient-specific matrices
+        if trans_ctx.rhs_dirichlet_A is not None:
+            np.testing.assert_array_equal(
+                ctx_loaded.rhs_dirichlet_A, trans_ctx.rhs_dirichlet_A,
+            )
+        if trans_ctx.rhs_dirichlet_G is not None:
+            np.testing.assert_array_equal(
+                ctx_loaded.rhs_dirichlet_G, trans_ctx.rhs_dirichlet_G,
+            )
+        if trans_ctx.C_package_uu is not None:
+            np.testing.assert_array_equal(
+                ctx_loaded.C_package_uu.toarray(),
+                trans_ctx.C_package_uu.toarray(),
+            )
+        if trans_ctx.G_package_uu is not None:
+            np.testing.assert_array_equal(
+                ctx_loaded.G_package_uu.toarray(),
+                trans_ctx.G_package_uu.toarray(),
+            )
+
+        # Refactor and verify usable
+        ctx_loaded.refactor()
+        assert ctx_loaded.is_factored is True
+
+    def test_dc_context_save_default_path(self):
+        """save() with path=None uses the model-derived default path."""
+        from distributed.result import DistributedSolverContext
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+
+        # The model's tile_configs have empty ckt_path (''), so the
+        # default path logic should fall through to './checkpoint/...'
+        ctx = DistributedSolverContext(model=model)
+        default_path = ctx._default_checkpoint_path('dc_context.pkl')
+        assert default_path.endswith('dc_context.pkl')
+        assert 'checkpoint' in default_path
+
+    def test_load_wrong_type_raises(self, tmp_path):
+        """Loading a DC checkpoint as transient raises ValueError."""
+        from distributed.result import (
+            DistributedSolverContext,
+            DistributedTransientContext,
+        )
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        solver_module = __import__('distributed.solver', fromlist=['DistributedDDMSolver'])
+        DistributedDDMSolver = solver_module.DistributedDDMSolver
+        solver = DistributedDDMSolver(model)
+
+        # Prepare and save a DC context
+        dc_ctx = solver.prepare()
+        save_path = str(tmp_path / 'dc_context.pkl')
+        dc_ctx.save(path=save_path)
+
+        # Try to load as transient -- should raise ValueError
+        with pytest.raises(ValueError, match="Expected DistributedTransientContext"):
+            DistributedTransientContext.load(model, save_path)
+
+        # Also verify loading DC as DC works fine
+        loaded = DistributedSolverContext.load(model, save_path)
+        assert loaded.topology is not None
+
+    def test_refactor_without_s_global_raises(self):
+        """refactor() without S_global raises RuntimeError."""
+        from distributed.result import (
+            DistributedSolverContext,
+            DistributedTransientContext,
+        )
+
+        # DC context without S_global
+        dc_ctx = DistributedSolverContext()
+        assert dc_ctx._S_global is None
+        with pytest.raises(RuntimeError, match="Cannot refactor without S_global"):
+            dc_ctx.refactor()
+
+        # Transient context without S_global
+        trans_ctx = DistributedTransientContext(dt=1e-10, method='be')
+        assert trans_ctx._S_global is None
+        with pytest.raises(RuntimeError, match="Cannot refactor without S_global"):
+            trans_ctx.refactor()
+
+    def test_save_after_release_raises(self, tmp_path):
+        """save() after release() raises RuntimeError (S_global is None)."""
+        from distributed.result import DistributedSolverContext
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare()
+        ctx.release()
+
+        with pytest.raises(RuntimeError, match="Cannot save"):
+            ctx.save(str(tmp_path / 'should_fail.pkl'))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 14. recover_and_set_initial_voltages tests
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestRecoverAndSetInitialVoltages:
+    """Test that recover_and_set_initial_voltages matches get+set."""
+
+    def test_matches_separate_get_and_set(self):
+        """recover_and_set should produce same _v_interior_old as get+set."""
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        try:
+            # Factor interior LU on each worker so recovery works
+            for worker in model.workers:
+                worker._block_system.factor_interior()
+
+            # Construct boundary voltage dicts directly.  The model has
+            # interface_nodes = {shared, pad} with pad at Vdd=1.0.
+            # Use slightly non-trivial voltages to exercise the math.
+            vdd = model.vdd
+            bv_tile_a = {'shared': 0.95, 'pad': vdd}
+            bv_tile_b = {'shared': 0.95}
+            bv_list = [bv_tile_a, bv_tile_b]
+
+            for i, worker in enumerate(model.workers):
+                bv = bv_list[i]
+
+                # Method 1: separate get + set (original two-step path)
+                voltages, _stats = worker.get_interior_voltages(bv)
+                worker.set_initial_voltages(voltages)
+                v_old_separate = worker._v_interior_old.copy()
+
+                # Reset state
+                worker._v_interior_old = None
+
+                # Method 2: combined recover + set (optimized path)
+                worker.recover_and_set_initial_voltages(bv)
+                v_old_combined = worker._v_interior_old.copy()
+
+                np.testing.assert_allclose(
+                    v_old_separate, v_old_combined,
+                    atol=1e-12,
+                    err_msg=f"Worker {i}: recover_and_set_initial_voltages "
+                            f"produced different _v_interior_old",
+                )
+        finally:
+            model.shutdown()
+
+    def test_returns_stats_dict(self):
+        """recover_and_set_initial_voltages returns a stats dict."""
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        try:
+            for worker in model.workers:
+                worker._block_system.factor_interior()
+
+            bv = {'shared': 0.95, 'pad': model.vdd}
+            stats = model.workers[0].recover_and_set_initial_voltages(bv)
+
+            assert isinstance(stats, dict)
+            assert 'n_interior' in stats
+            assert 'n_ports' in stats
+            assert stats['n_interior'] > 0
+        finally:
+            model.shutdown()

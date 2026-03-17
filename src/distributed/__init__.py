@@ -7,6 +7,7 @@ into per-tile subproblems coupled through a Schur complement interface.
 from .result import (
     TileSolveResult,
     DistributedSolveResult,
+    DistributedTopologyContext,
     DistributedSolverContext,
     DistributedSmoothedSources,
     DistributedTransientContext,
@@ -53,6 +54,7 @@ __all__ = [
     # Result / Context
     "TileSolveResult",
     "DistributedSolveResult",
+    "DistributedTopologyContext",
     "DistributedSolverContext",
     "DistributedSmoothedSources",
     "DistributedTransientContext",

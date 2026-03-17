@@ -69,14 +69,15 @@ def cmd_solve(args: argparse.Namespace) -> None:
 
     try:
         solver = DistributedDDMSolver(model)
-        ctx = solver.prepare(verbose=args.verbose)
 
         if mode == 'dc':
+            ctx = solver.prepare(verbose=args.verbose)
             _solve_dc(solver, ctx, args, t0)
         elif mode == 'quasi-static':
+            ctx = solver.prepare(verbose=args.verbose)
             _solve_quasi_static(solver, ctx, args, t0)
         elif mode == 'transient':
-            _solve_transient(solver, ctx, args, t0)
+            _solve_transient(solver, args, t0)
         else:
             logger.error("Unknown mode: %s", mode)
             raise SystemExit(1)
@@ -91,7 +92,7 @@ def _solve_dc(
     t0: float,
 ) -> None:
     """Run DC solve and report results (original behavior)."""
-    result = solver.solve_dc(context=ctx, verbose=args.verbose)
+    result = solver.solve_dc(ctx, verbose=args.verbose)
 
     # Report summary
     v_all = result.flatten()
@@ -169,10 +170,10 @@ def _solve_quasi_static(
     )
 
     result = solver.solve_quasi_static(
+        ctx,
         t_start=args.t_start,
         t_end=args.t_end,
         n_points=args.n_points,
-        context=ctx,
         smoothed_sources=smoothed_sources,
         verbose=args.verbose,
     )
@@ -182,7 +183,6 @@ def _solve_quasi_static(
 
 def _solve_transient(
     solver: 'DistributedDDMSolver',
-    ctx: 'DistributedSolverContext',  # unused: transient builds its own context
     args: argparse.Namespace,
     t0: float,
 ) -> None:
@@ -198,15 +198,23 @@ def _solve_transient(
         verbose=args.verbose,
     )
 
+    # Create DC context for initial condition, then transient context
+    dc_ctx = solver.prepare(verbose=args.verbose)
+    trans_ctx = solver.prepare_transient(
+        dt=args.dt, method=args.method, verbose=args.verbose,
+    )
+
     result = solver.solve_transient(
+        trans_ctx,
+        dc_context=dc_ctx,
         t_start=args.t_start,
         t_end=args.t_end,
-        dt=args.dt,
-        method=args.method,
         smoothed_sources=smoothed_sources,
         verbose=args.verbose,
     )
 
+    dc_ctx.release()
+    trans_ctx.release()
     _report_time_domain_result(result, args, t0, mode='transient')
 
 
@@ -278,17 +286,20 @@ def cmd_run(args: argparse.Namespace) -> None:
     try:
         solver = DistributedDDMSolver(model)
 
-        t0_prepare = time.perf_counter()
-        ctx = solver.prepare(verbose=args.verbose)
-        t_prepare = time.perf_counter() - t0_prepare
-        logger.info(f"Prepare phase: {t_prepare:.3f}s")
-
         if mode == 'dc':
+            t0_prepare = time.perf_counter()
+            ctx = solver.prepare(verbose=args.verbose)
+            t_prepare = time.perf_counter() - t0_prepare
+            logger.info(f"Prepare phase: {t_prepare:.3f}s")
             _solve_dc(solver, ctx, args, t_total)
         elif mode == 'quasi-static':
+            t0_prepare = time.perf_counter()
+            ctx = solver.prepare(verbose=args.verbose)
+            t_prepare = time.perf_counter() - t0_prepare
+            logger.info(f"Prepare phase: {t_prepare:.3f}s")
             _solve_quasi_static(solver, ctx, args, t_total)
         elif mode == 'transient':
-            _solve_transient(solver, ctx, args, t_total)
+            _solve_transient(solver, args, t_total)
         else:
             logger.error("Unknown mode: %s", mode)
             raise SystemExit(1)

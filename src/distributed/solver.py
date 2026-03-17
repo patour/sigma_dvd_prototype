@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -45,261 +45,62 @@ class DistributedDDMSolver(_SolverTimeDomainMixin):
         model = create_distributed_model(metadata, backend='ray')
         solver = DistributedDDMSolver(model)
         ctx = solver.prepare()
-        result = solver.solve_dc(context=ctx)
+        result = solver.solve_dc(ctx)
     """
 
     def __init__(self, model: DistributedPowerGridModel):
         self.model = model
+        self._topology = None  # Cached DistributedTopologyContext for reuse
 
     def prepare(self, verbose: bool = False) -> DistributedSolverContext:
         """Factor tiles + assemble/factor interface. Expensive, reusable for batch.
 
-        Steps:
-        1. Workers factor interior and compute explicit Schur complements
-        2. Assemble global interface system from tile Schurs + package edges
-        3. Factor interface system
-        4. Build tile index maps (local -> global)
+        Creates a DistributedSolverContext and calls factor(). Topology is
+        cached for reuse by prepare_transient().
 
         Returns:
             DistributedSolverContext with cached factorizations
         """
-        timings: Dict[str, Any] = {}
-        model = self.model
-
-        # 1. Factor tiles and compute Schur complements (parallel on workers)
-        t0 = time.perf_counter()
-        schur_results = model.backend.call_all(
-            model.workers, 'factor_and_compute_schur'
+        ctx = DistributedSolverContext(
+            model=self.model, topology=self._topology,
         )
-        timings['factor_tiles'] = time.perf_counter() - t0
-
-        # Organize results by tile
-        tile_schur_complements: Dict[Any, np.ndarray] = {}
-        tile_port_node_lists: Dict[Any, List[str]] = {}
-        per_tile_stats: List[Dict[str, Any]] = []
-
-        for i, (S_i, boundary_list, tile_stats) in enumerate(schur_results):
-            tid = model.metadata.tile_configs[i].tile_id
-            tile_schur_complements[tid] = S_i
-            tile_port_node_lists[tid] = boundary_list
-            per_tile_stats.append(tile_stats)
-
-        # Coordinator-side DEBUG: per-tile factor/schur details
-        from solver.coupled_system import _format_bytes
-        for i, ts in enumerate(per_tile_stats):
-            tid = model.metadata.tile_configs[i].tile_id
-            n_ii = ts.get('n_interior', 0)
-            n_pp = ts.get('n_ports', 0)
-            G_ii_nnz = ts.get('G_ii_nnz', 0)
-            density = (G_ii_nnz / (n_ii * n_ii) * 100) if n_ii > 0 else 0.0
-            logger.debug(
-                "Tile %s factor_and_compute_schur:\n"
-                "  G_ii: %s x %s, nnz=%s (density %.5f%%), %s\n"
-                "  G_pp: %s x %s, nnz=%s\n"
-                "  G_pi: %s x %s, nnz=%s  |  G_ip: %s x %s, nnz=%s\n"
-                "  Block system memory: %s\n"
-                "  factor_interior: %.3fs  |  backend: %s\n"
-                "  compute_schur: %.3fs  |  Schur: %s dense (%s)  |  chunk_size: %s",
-                tid,
-                f"{n_ii:,}", f"{n_ii:,}", f"{G_ii_nnz:,}", density,
-                _format_bytes(ts.get('mem_bytes', 0)),
-                f"{n_pp:,}", f"{n_pp:,}", f"{ts.get('G_pp_nnz', 0):,}",
-                f"{n_pp:,}", f"{n_ii:,}", f"{ts.get('G_pi_nnz', 0):,}",
-                f"{n_ii:,}", f"{n_pp:,}", f"{ts.get('G_ip_nnz', 0):,}",
-                _format_bytes(ts.get('mem_bytes', 0)),
-                ts.get('factor_interior_s', 0), ts.get('factorization_backend_info', 'n/a'),
-                ts.get('compute_schur_s', 0),
-                "%s x %s" % (f"{ts.get('schur_shape', (0, 0))[0]:,}",
-                             f"{ts.get('schur_shape', (0, 0))[1]:,}"),
-                _format_bytes(ts.get('schur_mem_bytes', 0)),
-                ts.get('schur_chunk_size', 0),
-            )
-
-        # 2. Assemble global interface system
-        t0 = time.perf_counter()
-        from solver.coupled_system import assemble_schur_complement_system
-
-        S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx = (
-            assemble_schur_complement_system(
-                tile_schur_complements=tile_schur_complements,
-                tile_port_node_lists=tile_port_node_lists,
-                extra_edges=model.package_data.package_edges,
-                dirichlet_nodes=model.pad_nodes,
-                dirichlet_voltage=model.vdd,
-            )
-        )
-        timings['assemble_interface'] = time.perf_counter() - t0
-
-        # 2b. Global interface island detection
-        t0 = time.perf_counter()
-        from solver.coupled_system import detect_interface_islands
-
-        S_global, rhs_dirichlet, island_nodes = detect_interface_islands(
-            S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
-            pad_nodes=model.pad_nodes,
-            extra_edges=model.package_data.package_edges,
-            dirichlet_voltage=model.vdd,
-        )
-        timings['detect_interface_islands'] = time.perf_counter() - t0
-
-        if island_nodes:
-            logger.warning(
-                "Penalized %d interface island nodes (shorted to %.3f V)",
-                len(island_nodes), model.vdd,
-            )
-
-        if verbose and island_nodes:
-            # Cross-check: tile-level kept non-largest components vs global islands
-            tile_flagged: Set[str] = set()
-            for nodes in model.tile_kept_nonlargest_iface.values():
-                tile_flagged.update(nodes)
-
-            confirmed = tile_flagged & island_nodes
-            saved = tile_flagged - island_nodes
-            if confirmed:
-                logger.info(
-                    "%d tile-flagged interface nodes confirmed as global islands",
-                    len(confirmed),
-                )
-            if saved:
-                logger.info(
-                    "%d tile-flagged interface nodes connected to pads through other tiles",
-                    len(saved),
-                )
-
-        # 3. Factor interface system
-        t0 = time.perf_counter()
-        from solver.unified_solver import _factor_conductance_matrix
-
-        interface_lu = _factor_conductance_matrix(S_global, verbose=False)
-        timings['factor_interface'] = time.perf_counter() - t0
-
-        # 4. Build tile index maps (local port indices -> global interface indices)
-        tile_index_maps: Dict[Tuple[int, int], np.ndarray] = {}
-        for tid, boundary_list in tile_port_node_lists.items():
-            local_to_global = np.array(
-                [interface_node_to_idx[n] for n in boundary_list if n in interface_node_to_idx],
-                dtype=np.int32,
-            )
-            tile_index_maps[tid] = local_to_global
-
-        timings['total_prepare'] = sum(timings.values())
-
-        # --- Build solver_stats ---
-        from solver.coupled_system import _sparse_mem_bytes, _format_bytes
-
-        # Interface system stats
-        n_unknowns = S_global.shape[0]
-        iface_nnz = S_global.nnz
-        iface_density_pct = (
-            (iface_nnz / (n_unknowns * n_unknowns) * 100)
-            if n_unknowns > 0 else 0.0
-        )
-        iface_mem_bytes = _sparse_mem_bytes(S_global)
-
-        interface_stats: Dict[str, Any] = {
-            'n_unknowns': n_unknowns,
-            'nnz': iface_nnz,
-            'density_pct': iface_density_pct,
-            'mem_bytes': iface_mem_bytes,
-            'factor_time_s': timings['factor_interface'],
-            'backend': interface_lu.backend,
-            'backend_info': interface_lu.backend_info,
-            'islands_penalized': len(island_nodes),
-        }
-
-        # Aggregate per-tile stats (min/mean/max)
-        aggregate_stats: Dict[str, Any] = {}
-        if per_tile_stats:
-            for key in ('n_interior', 'n_ports', 'G_ii_nnz', 'mem_bytes',
-                        'schur_mem_bytes', 'factor_interior_s'):
-                values = [s.get(key, 0) for s in per_tile_stats]
-                lo, avg, hi = _minmeanmax(values)
-                aggregate_stats[key] = {'min': lo, 'mean': avg, 'max': hi,
-                                        'total': float(np.sum(values))}
-
-        solver_stats: Dict[str, Any] = {
-            'per_tile': per_tile_stats,
-            'interface': interface_stats,
-            'aggregate': aggregate_stats,
-        }
-        timings['solver_stats'] = solver_stats
-
-        # --- Verbose INFO logging ---
-        if verbose:
-            n_tiles = len(per_tile_stats)
-            logger.info("=== Distributed DDM Prepare Statistics ===")
-            logger.info("Tiles: %d", n_tiles)
-            if aggregate_stats:
-                _ag = aggregate_stats
-                lo, avg, hi = _ag['n_interior']['min'], _ag['n_interior']['mean'], _ag['n_interior']['max']
-                logger.info("  Interior nodes:  %s / %s / %s  (min/mean/max)",
-                            _fmt_count(lo), _fmt_count(avg), _fmt_count(hi))
-                lo, avg, hi = _ag['n_ports']['min'], _ag['n_ports']['mean'], _ag['n_ports']['max']
-                logger.info("  Port nodes:      %s / %s / %s",
-                            _fmt_count(lo), _fmt_count(avg), _fmt_count(hi))
-                lo, avg, hi = _ag['G_ii_nnz']['min'], _ag['G_ii_nnz']['mean'], _ag['G_ii_nnz']['max']
-                logger.info("  G_ii nnz:        %s / %s / %s",
-                            _fmt_count(lo), _fmt_count(avg), _fmt_count(hi))
-                lo, avg, hi = _ag['mem_bytes']['min'], _ag['mem_bytes']['mean'], _ag['mem_bytes']['max']
-                total = _ag['mem_bytes']['total']
-                logger.info("  G_ii memory:     %s / %s / %s  (total: %s)",
-                            _format_bytes(lo), _format_bytes(avg),
-                            _format_bytes(hi), _format_bytes(total))
-                lo, avg, hi = _ag['schur_mem_bytes']['min'], _ag['schur_mem_bytes']['mean'], _ag['schur_mem_bytes']['max']
-                total = _ag['schur_mem_bytes']['total']
-                logger.info("  Schur memory:    %s / %s / %s  (total: %s)",
-                            _format_bytes(lo), _format_bytes(avg),
-                            _format_bytes(hi), _format_bytes(total))
-                lo, avg, hi = _ag['factor_interior_s']['min'], _ag['factor_interior_s']['mean'], _ag['factor_interior_s']['max']
-                logger.info("  Factor time:     %.3fs / %.3fs / %.3fs", lo, avg, hi)
-                # Backend: use the first tile's backend_info as representative
-                backend_info = per_tile_stats[0].get('factorization_backend_info', 'n/a')
-                logger.info("  Factor backend:  %s", backend_info)
-
-            logger.info("Interface system: %s unknowns, %s nnz (density %.3f%%), %s",
-                        _fmt_count(n_unknowns), _fmt_count(iface_nnz),
-                        iface_density_pct, _format_bytes(iface_mem_bytes))
-            logger.info("  Backend: %s", interface_lu.backend_info)
-            logger.info("  Factor time: %.3fs", timings['factor_interface'])
-            logger.info("  Islands penalized: %d", len(island_nodes))
-
-        return DistributedSolverContext(
-            interface_lu=interface_lu.solve,
-            interface_nodes=interface_nodes,
-            interface_node_to_idx=interface_node_to_idx,
-            rhs_dirichlet_interface=rhs_dirichlet,
-            tile_index_maps=tile_index_maps,
-            removed_interface_nodes=island_nodes,
-            timings=timings,
-        )
+        ctx.factor(verbose=verbose)
+        # Cache topology for reuse by prepare_transient
+        if self._topology is None:
+            self._topology = ctx.topology
+        return ctx
 
     def solve_dc(
         self,
+        context: DistributedSolverContext,
         per_tile_currents: Optional[List[Dict[str, float]]] = None,
-        context: Optional[DistributedSolverContext] = None,
         verbose: bool = False,
     ) -> DistributedSolveResult:
         """DC solve using domain decomposition.
 
-        If context is None, calls prepare() internally.
-
         Args:
+            context: Pre-computed solver context (from prepare()). Must be
+                factored (``context.is_factored == True``).
             per_tile_currents: Optional pre-partitioned currents, one dict per
                 tile (node -> mA). If None, uses each tile's own current
                 sources from parsing. Caller is responsible for partitioning
                 boundary node currents to exactly one tile.
-            context: Pre-computed solver context (from prepare())
             verbose: Print timing info
 
         Returns:
             DistributedSolveResult with per-tile voltages
+
+        Raises:
+            ValueError: If context is not factored.
         """
+        if not context.is_factored:
+            raise ValueError(
+                "Context is not factored. Call context.factor() or use "
+                "solver.prepare() to obtain a factored context."
+            )
+
         timings: Dict[str, float] = {}
         model = self.model
-
-        if context is None:
-            context = self.prepare(verbose=verbose)
 
         ctx = context
 

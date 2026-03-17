@@ -196,7 +196,7 @@ class TestDistributedVsFlat(unittest.TestCase):
             cls.model = create_distributed_model(cls.metadata, backend='local')
         cls.solver = DistributedDDMSolver(cls.model)
         cls.ctx = cls.solver.prepare()
-        cls.ddm_result = cls.solver.solve_dc(context=cls.ctx)
+        cls.ddm_result = cls.solver.solve_dc(cls.ctx)
         cls.ddm_voltages = cls.ddm_result.flatten()
 
         # Flat
@@ -256,7 +256,7 @@ class TestDistributedVsFlat(unittest.TestCase):
 
     def test_batch_solve_reuse(self):
         """Second solve with same context gives identical result."""
-        result2 = self.solver.solve_dc(context=self.ctx)
+        result2 = self.solver.solve_dc(self.ctx)
         v2 = result2.flatten()
         for node in self.common_nodes:
             self.assertEqual(self.ddm_voltages[node], v2[node])
@@ -277,7 +277,7 @@ class TestDistributedVsFlat(unittest.TestCase):
         # DDM with scaled override
         per_tile = _partition_currents_for_tiles(self.model, scaled)
         ddm_result = self.solver.solve_dc(
-            per_tile_currents=per_tile, context=self.ctx,
+            self.ctx, per_tile_currents=per_tile,
         )
         v_ddm = ddm_result.flatten()
 
@@ -307,7 +307,7 @@ class TestDistributedVsFlat(unittest.TestCase):
         """
         zero_per_tile = [{} for _ in self.model.workers]
         result = self.solver.solve_dc(
-            per_tile_currents=zero_per_tile, context=self.ctx,
+            self.ctx, per_tile_currents=zero_per_tile,
         )
         voltages = result.flatten()
         vdd = self.metadata.vdd
@@ -393,7 +393,8 @@ class TestDistributedResult(unittest.TestCase):
             warnings.simplefilter("ignore", DeprecationWarning)
             cls.model = create_distributed_model(metadata, backend='local')
         solver = DistributedDDMSolver(cls.model)
-        cls.result = solver.solve_dc()
+        ctx = solver.prepare()
+        cls.result = solver.solve_dc(ctx)
         logging.disable(logging.NOTSET)
 
     @classmethod
@@ -529,13 +530,15 @@ class TestRayBackend(unittest.TestCase):
             # Local solve
             model_local = create_distributed_model(metadata, backend='local')
             solver_local = DistributedDDMSolver(model_local)
-            result_local = solver_local.solve_dc()
+            ctx_local = solver_local.prepare()
+            result_local = solver_local.solve_dc(ctx_local)
             v_local = result_local.flatten()
 
             # Ray solve
             model_ray = create_distributed_model(metadata, backend='ray')
             solver_ray = DistributedDDMSolver(model_ray)
-            result_ray = solver_ray.solve_dc()
+            ctx_ray = solver_ray.prepare()
+            result_ray = solver_ray.solve_dc(ctx_ray)
             v_ray = result_ray.flatten()
 
         try:
@@ -681,7 +684,7 @@ class TestBenchmarkDDMVsFlat(unittest.TestCase):
         t_prepare = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        result = solver.solve_dc(context=ctx)
+        result = solver.solve_dc(ctx)
         t_solve = time.perf_counter() - t0
 
         timings = {
@@ -1075,7 +1078,8 @@ class TestPklSolveMatchesDirect(unittest.TestCase):
                 warnings.simplefilter("ignore", DeprecationWarning)
                 model_direct = create_distributed_model(metadata_direct, backend='local')
             solver_direct = DistributedDDMSolver(model_direct)
-            result_direct = solver_direct.solve_dc()
+            ctx_direct = solver_direct.prepare()
+            result_direct = solver_direct.solve_dc(ctx_direct)
             v_direct = result_direct.flatten()
 
             # PKL-based DDM solve (new ParsedTileBundle path)
@@ -1084,7 +1088,8 @@ class TestPklSolveMatchesDirect(unittest.TestCase):
 
                 model_pkl = create_distributed_model(bundle, backend='local')
                 solver_pkl = DistributedDDMSolver(model_pkl)
-                result_pkl = solver_pkl.solve_dc()
+                ctx_pkl = solver_pkl.prepare()
+                result_pkl = solver_pkl.solve_dc(ctx_pkl)
                 v_pkl = result_pkl.flatten()
 
                 # Verify identical results
@@ -1139,7 +1144,8 @@ class TestPklSolveMatchesDirect(unittest.TestCase):
 
                 model_pkl = create_distributed_model(bundle, backend='local')
                 solver_pkl = DistributedDDMSolver(model_pkl)
-                result_pkl = solver_pkl.solve_dc()
+                ctx_pkl = solver_pkl.prepare()
+                result_pkl = solver_pkl.solve_dc(ctx_pkl)
                 v_pkl = result_pkl.flatten()
 
                 # Compare
@@ -1180,7 +1186,7 @@ class TestTopKReportIntegration(unittest.TestCase):
                 cls.model = create_distributed_model(cls.metadata, backend='local')
             cls.solver = DistributedDDMSolver(cls.model)
             cls.ctx = cls.solver.prepare()
-            cls.result = cls.solver.solve_dc(context=cls.ctx)
+            cls.result = cls.solver.solve_dc(cls.ctx)
             cls._setup_ok = True
         except Exception:
             cls._setup_ok = False

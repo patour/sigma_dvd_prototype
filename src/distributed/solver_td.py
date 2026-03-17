@@ -10,13 +10,14 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
 from .result import (
     DistributedQuasiStaticResult,
     DistributedSmoothedSources,
+    DistributedSolveResult,
     DistributedSolverContext,
     DistributedTransientContext,
     DistributedTransientResult,
@@ -124,11 +125,11 @@ class _SolverTimeDomainMixin:
 
     def solve_quasi_static(
         self,
+        context: DistributedSolverContext,
         t_start: float = 0.0,
         t_end: float = 100e-9,
         n_points: int = 101,
         t_array: Optional[np.ndarray] = None,
-        context: Optional[DistributedSolverContext] = None,
         smoothed_sources: Optional[DistributedSmoothedSources] = None,
         n_worst_nodes: int = 10,
         track_nodes: Optional[List[str]] = None,
@@ -142,11 +143,12 @@ class _SolverTimeDomainMixin:
         the coordinator each step.
 
         Args:
+            context: Pre-computed DC solver context (from ``prepare()``).
+                Must be factored.
             t_start: Simulation start time in seconds.
             t_end: Simulation end time in seconds.
             n_points: Number of time points (used when ``t_array`` is None).
             t_array: Explicit time array. Overrides ``t_start/t_end/n_points``.
-            context: Pre-computed DC solver context. If None, calls ``prepare()``.
             smoothed_sources: Pre-processed sources handle. If None, calls
                 ``preprocess_sources()`` with defaults.
             n_worst_nodes: Number of worst-drop nodes to report.
@@ -156,16 +158,20 @@ class _SolverTimeDomainMixin:
         Returns:
             DistributedQuasiStaticResult with per-step summaries and
             lazy peak collection.
+
+        Raises:
+            ValueError: If context is not factored.
         """
+        if not context.is_factored:
+            raise ValueError(
+                "Context is not factored. Call context.factor() or use "
+                "solver.prepare() to obtain a factored context."
+            )
+
         timings: Dict[str, Any] = {}
         model = self.model
         tile_configs = model.metadata.tile_configs
 
-        # 1. Prepare DC context if needed
-        if context is None:
-            t0 = time.perf_counter()
-            context = self.prepare(verbose=verbose)
-            timings['prepare'] = time.perf_counter() - t0
         ctx = context
 
         # 2. Preprocess sources if needed
@@ -338,9 +344,9 @@ class _SolverTimeDomainMixin:
     ) -> DistributedTransientContext:
         """Factor transient A-system on tiles and assemble interface.
 
-        Builds A = G + C_coeff * C on each tile, computes Schur complements,
-        and assembles the global transient interface system including package
-        capacitance contributions.
+        Creates a DistributedTransientContext with transient factorization
+        only.  Does NOT create a DC context -- callers must create one
+        separately via ``prepare()`` if needed for the initial condition.
 
         Args:
             dt: Time step in seconds.
@@ -351,257 +357,24 @@ class _SolverTimeDomainMixin:
         Returns:
             DistributedTransientContext with cached transient factorizations.
         """
-        timings: Dict[str, Any] = {}
-        model = self.model
-        tile_configs = model.metadata.tile_configs
-
-        # 1. DC prepare (needed for initial condition)
-        t0 = time.perf_counter()
-        dc_ctx = self.prepare(verbose=verbose)
-        timings['dc_prepare'] = time.perf_counter() - t0
-
-        # 2. Factor transient system on all workers (parallel)
-        dt_scaled = dt * 1e12  # seconds -> ps
-        C_coeff = (2.0 if method == 'trap' else 1.0) / dt_scaled
-
-        t0 = time.perf_counter()
-        trans_args = [(dt_scaled, method)] * len(tile_configs)
-        schur_results = model.backend.call_all(
-            model.workers, 'factor_transient_system', trans_args,
+        trans_ctx = DistributedTransientContext(
+            model=self.model, topology=self._topology, dt=dt, method=method,
         )
-        timings['factor_transient_tiles'] = time.perf_counter() - t0
+        trans_ctx.factor(verbose=verbose)
 
-        # Organize results by tile
-        tile_schur_complements: Dict[Any, np.ndarray] = {}
-        tile_port_node_lists: Dict[Any, List[str]] = {}
-        total_tile_cap = 0.0
-        per_tile_stats: List[Dict[str, Any]] = []
-        for i, (S_A_i, port_list, tile_cap, tile_stats) in enumerate(schur_results):
-            tid = tile_configs[i].tile_id
-            tile_schur_complements[tid] = S_A_i
-            tile_port_node_lists[tid] = port_list
-            total_tile_cap += tile_cap
-            per_tile_stats.append(tile_stats)
+        # Cache topology for reuse
+        if self._topology is None:
+            self._topology = trans_ctx.topology
 
-        # Coordinator-side DEBUG: per-tile transient factor details
-        from solver.coupled_system import _format_bytes
-        from distributed.solver import _fmt_count
-        for i, ts in enumerate(per_tile_stats):
-            tid = tile_configs[i].tile_id
-            n_pp = ts.get('n_ports', 0)
-            logger.debug(
-                "Tile %s factor_transient_system:\n"
-                "  A_ii: nnz=%s  |  A_pp: nnz=%s\n"
-                "  C_ii cap nodes: %d / %d  |  C_pp cap nodes: %d / %d\n"
-                "  Total tile cap: %.1f fF  |  C_coeff: %.4f\n"
-                "  factor_interior: %.3fs  |  backend: %s\n"
-                "  compute_schur: %.3fs  |  Schur: %s x %s dense (%s)  |  chunk_size: %s",
-                tid,
-                _fmt_count(ts.get('A_ii_nnz', 0)), _fmt_count(ts.get('A_pp_nnz', 0)),
-                ts.get('c_ii_cap_nodes', 0), ts.get('n_interior', 0),
-                ts.get('c_pp_cap_nodes', 0), n_pp,
-                ts.get('total_cap_fF', 0), ts.get('C_coeff', 0),
-                ts.get('factor_interior_s', 0), ts.get('factorization_backend_info', 'n/a'),
-                ts.get('compute_schur_s', 0),
-                f"{n_pp:,}", f"{n_pp:,}",
-                _format_bytes(ts.get('schur_mem_bytes', 0)),
-                ts.get('schur_chunk_size', 0),
-            )
-
-        # 3. Build combined package edges: resistive + effective cap edges
-        t0 = time.perf_counter()
-        pkg_res_edges = model.package_data.package_edges
-        pkg_cap_edges = model.package_data.package_cap_edges
-
-        combined_edges = list(pkg_res_edges)
-        has_cap = total_tile_cap > 0
-        for u, v, c_fF in pkg_cap_edges:
-            if c_fF > 0:
-                combined_edges.append((u, v, C_coeff * c_fF))
-                has_cap = True
-
-        # 4. Assemble transient interface system
-        from solver.coupled_system import (
-            assemble_schur_complement_system,
-            build_interface_package_matrices,
-            detect_interface_islands,
-        )
-
-        S_global, rhs_dirichlet_A, interface_nodes, interface_node_to_idx = (
-            assemble_schur_complement_system(
-                tile_schur_complements=tile_schur_complements,
-                tile_port_node_lists=tile_port_node_lists,
-                extra_edges=combined_edges,
-                dirichlet_nodes=model.pad_nodes,
-                dirichlet_voltage=model.vdd,
-            )
-        )
-
-        # Also compute G-only Dirichlet RHS (without cap contributions)
-        # needed for correct transient RHS formulation
-        _, rhs_dirichlet_G, _, _ = assemble_schur_complement_system(
-            tile_schur_complements=tile_schur_complements,
-            tile_port_node_lists=tile_port_node_lists,
-            extra_edges=list(pkg_res_edges),
-            dirichlet_nodes=model.pad_nodes,
-            dirichlet_voltage=model.vdd,
-        )
-
-        # Island detection on transient system
-        S_global, rhs_dirichlet_A, island_nodes = detect_interface_islands(
-            S_global, rhs_dirichlet_A, interface_nodes, interface_node_to_idx,
-            pad_nodes=model.pad_nodes,
-            extra_edges=combined_edges,
-            dirichlet_voltage=model.vdd,
-        )
-
-        if island_nodes:
-            logger.warning(
-                "Transient: penalized %d interface island nodes",
-                len(island_nodes),
-            )
-
-        timings['assemble_transient_interface'] = time.perf_counter() - t0
-
-        # 5. Build package G and C matrices for transient RHS history terms
-        n_interface = len(interface_nodes)
-        G_pkg_uu, C_pkg_uu = build_interface_package_matrices(
-            package_edges=pkg_res_edges,
-            package_cap_edges=pkg_cap_edges,
-            interface_node_to_idx=interface_node_to_idx,
-            n_interface=n_interface,
-            dirichlet_nodes=model.pad_nodes,
-        )
-
-        # 6. Factor transient interface system
-        t0 = time.perf_counter()
-        from solver.unified_solver import _factor_conductance_matrix
-
-        interface_lu = _factor_conductance_matrix(S_global, verbose=verbose)
-        timings['factor_transient_interface'] = time.perf_counter() - t0
-
-        # 7. Build tile index maps
-        tile_index_maps: Dict[Tuple[int, int], np.ndarray] = {}
-        for tid, port_list in tile_port_node_lists.items():
-            local_to_global = np.array(
-                [interface_node_to_idx[n] for n in port_list
-                 if n in interface_node_to_idx],
-                dtype=np.int32,
-            )
-            tile_index_maps[tid] = local_to_global
-
-        timings['total_prepare_transient'] = sum(
-            v for k, v in timings.items()
-            if k != 'total_prepare_transient' and isinstance(v, (int, float))
-        )
-
-        # --- Build solver_stats ---
-        from distributed.solver import _minmeanmax, _fmt_count
-        from solver.coupled_system import _sparse_mem_bytes, _format_bytes
-
-        # Interface system stats
-        n_unknowns = S_global.shape[0]
-        iface_nnz = S_global.nnz
-        iface_density_pct = (
-            (iface_nnz / (n_unknowns * n_unknowns) * 100)
-            if n_unknowns > 0 else 0.0
-        )
-        iface_mem_bytes = _sparse_mem_bytes(S_global)
-
-        interface_stats: Dict[str, Any] = {
-            'n_unknowns': n_unknowns,
-            'nnz': iface_nnz,
-            'density_pct': iface_density_pct,
-            'mem_bytes': iface_mem_bytes,
-            'factor_time_s': timings['factor_transient_interface'],
-            'backend': interface_lu.backend,
-            'backend_info': interface_lu.backend_info,
-            'has_capacitance': has_cap,
-            'pkg_C_uu_nnz': C_pkg_uu.nnz if C_pkg_uu is not None else 0,
-            'pkg_G_uu_nnz': G_pkg_uu.nnz if G_pkg_uu is not None else 0,
-        }
-
-        # Aggregate per-tile stats (min/mean/max)
-        aggregate_stats: Dict[str, Any] = {}
-        if per_tile_stats:
-            for key in ('A_ii_nnz', 'A_pp_nnz', 'total_cap_fF',
-                        'schur_mem_bytes', 'factor_interior_s'):
-                values = [s.get(key, 0) for s in per_tile_stats]
-                lo, avg, hi = _minmeanmax(values)
-                aggregate_stats[key] = {'min': lo, 'mean': avg, 'max': hi,
-                                        'total': float(np.sum(values))}
-
-        solver_stats: Dict[str, Any] = {
-            'per_tile': per_tile_stats,
-            'interface': interface_stats,
-            'aggregate': aggregate_stats,
-        }
-        timings['solver_stats'] = solver_stats
-
-        # --- Verbose INFO logging ---
-        if verbose:
-            n_tiles = len(per_tile_stats)
-            logger.info("=== Distributed DDM Prepare Transient Statistics ===")
-            logger.info("Method: %s  |  dt: %.1f ps  |  C_coeff: %.4f",
-                        method, dt_scaled, C_coeff)
-            logger.info("Tiles: %d", n_tiles)
-            if aggregate_stats:
-                _ag = aggregate_stats
-                lo, avg, hi = _ag['A_ii_nnz']['min'], _ag['A_ii_nnz']['mean'], _ag['A_ii_nnz']['max']
-                logger.info("  A_ii nnz:         %s / %s / %s  (min/mean/max)",
-                            _fmt_count(lo), _fmt_count(avg), _fmt_count(hi))
-                lo, avg, hi = _ag['A_pp_nnz']['min'], _ag['A_pp_nnz']['mean'], _ag['A_pp_nnz']['max']
-                logger.info("  A_pp nnz:         %s / %s / %s",
-                            _fmt_count(lo), _fmt_count(avg), _fmt_count(hi))
-                lo, avg, hi = _ag['total_cap_fF']['min'], _ag['total_cap_fF']['mean'], _ag['total_cap_fF']['max']
-                total_cap = _ag['total_cap_fF']['total']
-                logger.info("  Total cap:        %.0f fF / %.0f fF / %.0f fF  (total: %.0f fF)",
-                            lo, avg, hi, total_cap)
-                lo, avg, hi = _ag['schur_mem_bytes']['min'], _ag['schur_mem_bytes']['mean'], _ag['schur_mem_bytes']['max']
-                total_sm = _ag['schur_mem_bytes']['total']
-                logger.info("  Schur memory:     %s / %s / %s  (total: %s)",
-                            _format_bytes(lo), _format_bytes(avg),
-                            _format_bytes(hi), _format_bytes(total_sm))
-                lo, avg, hi = _ag['factor_interior_s']['min'], _ag['factor_interior_s']['mean'], _ag['factor_interior_s']['max']
-                logger.info("  Factor time:      %.3fs / %.3fs / %.3fs", lo, avg, hi)
-                # Backend: use the first tile's backend_info as representative
-                backend_info = per_tile_stats[0].get('factorization_backend_info', 'n/a')
-                logger.info("  Factor backend:   %s", backend_info)
-
-            logger.info("Transient interface: %s unknowns, %s nnz (density %.3f%%), %s",
-                        _fmt_count(n_unknowns), _fmt_count(iface_nnz),
-                        iface_density_pct, _format_bytes(iface_mem_bytes))
-            logger.info("  Backend: %s", interface_lu.backend_info)
-            logger.info("  Factor time: %.3fs", timings['factor_transient_interface'])
-            logger.info("  Has capacitance: %s", has_cap)
-            logger.info("  Package C_uu nnz: %d  |  Package G_uu nnz: %d",
-                        interface_stats['pkg_C_uu_nnz'],
-                        interface_stats['pkg_G_uu_nnz'])
-
-        return DistributedTransientContext(
-            interface_lu=interface_lu.solve,
-            interface_nodes=interface_nodes,
-            interface_node_to_idx=interface_node_to_idx,
-            rhs_dirichlet_interface=rhs_dirichlet_A,
-            tile_index_maps=tile_index_maps,
-            dc_context=dc_ctx,
-            dt_scaled=dt_scaled,
-            integration_method=method,
-            has_capacitance=has_cap,
-            rhs_dirichlet_G=rhs_dirichlet_G,
-            C_package_uu=C_pkg_uu if C_pkg_uu.nnz > 0 else None,
-            G_package_uu=G_pkg_uu if G_pkg_uu.nnz > 0 else None,
-            removed_interface_nodes=island_nodes,
-            timings=timings,
-        )
+        return trans_ctx
 
     def solve_transient(
         self,
+        context: DistributedTransientContext,
+        dc_context: Optional[DistributedSolverContext] = None,
+        ic_voltages: Optional[Union[Dict[str, float], DistributedSolveResult]] = None,
         t_start: float = 0.0,
         t_end: float = 100e-9,
-        dt: float = 0.1e-9,
-        method: str = 'be',
-        context: Optional[DistributedTransientContext] = None,
         smoothed_sources: Optional[DistributedSmoothedSources] = None,
         n_worst_nodes: int = 10,
         track_nodes: Optional[List[str]] = None,
@@ -612,13 +385,24 @@ class _SolverTimeDomainMixin:
         Uses DC initial condition at t=t_start, then time-steps forward
         using Backward Euler or Trapezoidal integration.
 
+        The initial condition is determined by one of two paths:
+        - **dc_context path**: Evaluates sources at t_start and solves the DC
+          system using the provided dc_context.
+        - **ic_voltages path**: Directly uses the provided voltage dict as
+          initial condition (skips DC solve entirely).
+
         Args:
+            context: Pre-computed transient context (from
+                ``prepare_transient()``). Must be factored.
+            dc_context: DC solver context for initial condition solve.
+                Mutually exclusive alternative to ``ic_voltages``. Not
+                consumed — caller is responsible for releasing it.
+            ic_voltages: Initial voltages for all nodes. Accepts either a
+                ``DistributedSolveResult`` (preferred -- extracts per-tile
+                voltages without flattening) or a flat ``Dict[str, float]``
+                (backward compat). Mutually exclusive with ``dc_context``.
             t_start: Simulation start time in seconds.
             t_end: Simulation end time in seconds.
-            dt: Time step in seconds.
-            method: ``'be'`` (Backward Euler) or ``'trap'`` (Trapezoidal).
-            context: Pre-computed transient context. If None, calls
-                ``prepare_transient()``.
             smoothed_sources: Pre-processed sources. If None, calls
                 ``preprocess_sources()``.
             n_worst_nodes: Number of worst-drop nodes to report.
@@ -628,18 +412,37 @@ class _SolverTimeDomainMixin:
         Returns:
             DistributedTransientResult with per-step summaries and
             lazy peak collection.
+
+        Raises:
+            ValueError: If context is not factored, if neither dc_context
+                nor ic_voltages is provided, or if both are provided
+                (they are mutually exclusive).
         """
+        if not context.is_factored:
+            raise ValueError(
+                "Context is not factored. Call context.factor() or use "
+                "solver.prepare_transient() to obtain a factored context."
+            )
+        if dc_context is None and ic_voltages is None:
+            raise ValueError(
+                "Either dc_context or ic_voltages must be provided for "
+                "the initial condition."
+            )
+        if dc_context is not None and ic_voltages is not None:
+            raise ValueError(
+                "dc_context and ic_voltages are mutually exclusive. "
+                "Provide one or the other, not both."
+            )
+
         timings: Dict[str, Any] = {}
         model = self.model
         tile_configs = model.metadata.tile_configs
         vdd = model.vdd
-
-        # 1. Prepare transient context if needed
-        if context is None:
-            t0 = time.perf_counter()
-            context = self.prepare_transient(dt, method, verbose=verbose)
-            timings['prepare_transient'] = time.perf_counter() - t0
         trans_ctx = context
+        dt = trans_ctx.dt_scaled / 1e12  # Convert back to seconds
+        method = trans_ctx.integration_method
+
+        n_interface = len(trans_ctx.interface_nodes)
 
         # 2. Preprocess sources if needed
         if smoothed_sources is None:
@@ -649,48 +452,76 @@ class _SolverTimeDomainMixin:
             )
             timings['preprocess_sources'] = time.perf_counter() - t0
 
-        # 3. Initial condition at t=t_start using time-varying sources
-        t0 = time.perf_counter()
-        dc_ctx = trans_ctx.dc_context
-        n_interface = len(dc_ctx.interface_nodes)
+        # 3. Initial condition
+        if ic_voltages is not None:
+            t0 = time.perf_counter()
 
-        # Evaluate sources at t_start on workers and solve DC system
-        eval_args = [(t_start,)] * len(tile_configs)
-        rhs_results = model.backend.call_all(
-            model.workers, 'evaluate_and_get_reduced_rhs', eval_args,
-        )
+            if isinstance(ic_voltages, DistributedSolveResult):
+                # --- DistributedSolveResult path: per-tile extraction ---
+                v_gamma_init = np.zeros(n_interface, dtype=np.float64)
+                for i, node in enumerate(trans_ctx.interface_nodes):
+                    v_gamma_init[i] = ic_voltages.interface_voltages.get(
+                        node, ic_voltages.pad_voltages.get(node, vdd)
+                    )
+                # Per-tile voltage dicts (no flattening needed)
+                init_v_args = []
+                for tc in tile_configs:
+                    tile_res = ic_voltages.tile_results.get(tc.tile_id)
+                    if tile_res is None:
+                        raise ValueError(
+                            f"ic_voltages (DistributedSolveResult) is missing "
+                            f"tile_id {tc.tile_id}. Ensure ic_voltages was "
+                            f"produced by the same model/tiling configuration."
+                        )
+                    init_v_args.append((tile_res.voltages,))
+            else:
+                # --- Flat dict path (backward compat) ---
+                v_gamma_init = np.zeros(n_interface, dtype=np.float64)
+                for i, node in enumerate(trans_ctx.interface_nodes):
+                    v_gamma_init[i] = ic_voltages.get(node, vdd)
+                init_v_args = [(ic_voltages,)] * len(tile_configs)
 
-        # Assemble global DC RHS
-        global_rhs_init = np.zeros(n_interface, dtype=np.float64)
-        for i, (g_i, _, _stats) in enumerate(rhs_results):
-            tid = tile_configs[i].tile_id
-            idx_map = dc_ctx.tile_index_maps[tid]
-            np.add.at(global_rhs_init, idx_map, g_i)
-        global_rhs_init += dc_ctx.rhs_dirichlet_interface
+            # Workers: set initial voltages from provided data
+            model.backend.call_all(
+                model.workers, 'set_initial_voltages', init_v_args,
+            )
+            timings['dc_initial'] = time.perf_counter() - t0
+        else:
+            # --- dc_context path: solve DC at t=t_start for initial condition ---
+            t0 = time.perf_counter()
+            dc_ctx = dc_context
 
-        # Solve DC interface for initial voltages
-        v_gamma_init = dc_ctx.interface_lu(global_rhs_init)
+            # Evaluate sources at t_start on workers and solve DC system
+            eval_args = [(t_start,)] * len(tile_configs)
+            rhs_results = model.backend.call_all(
+                model.workers, 'evaluate_and_get_reduced_rhs', eval_args,
+            )
 
-        # Recover interior voltages on workers
-        bv_init_list = _build_bv_dicts(
-            tile_configs, dc_ctx.tile_index_maps,
-            dc_ctx.interface_nodes, model.tile_boundary_nodes,
-            v_gamma_init, vdd,
-        )
-        bv_init_args = [(bv,) for bv in bv_init_list]
-        init_voltages_results = model.backend.call_all(
-            model.workers, 'get_interior_voltages', bv_init_args,
-        )
-        init_voltages_list = [v for v, _stats in init_voltages_results]
-        timings['dc_initial'] = time.perf_counter() - t0
+            # Assemble global DC RHS
+            global_rhs_init = np.zeros(n_interface, dtype=np.float64)
+            for i, (g_i, _, _stats) in enumerate(rhs_results):
+                tid = tile_configs[i].tile_id
+                idx_map = dc_ctx.tile_index_maps[tid]
+                np.add.at(global_rhs_init, idx_map, g_i)
+            global_rhs_init += dc_ctx.rhs_dirichlet_interface
 
-        # 4. Set initial voltages on workers (parallel)
-        t0 = time.perf_counter()
-        init_v_args = [(v,) for v in init_voltages_list]
-        model.backend.call_all(
-            model.workers, 'set_initial_voltages', init_v_args,
-        )
-        timings['set_initial_voltages'] = time.perf_counter() - t0
+            # Solve DC interface for initial voltages
+            v_gamma_init = dc_ctx.interface_lu(global_rhs_init)
+
+            # Workers: recover interior voltages and set as IC in one call
+            # (avoids coordinator round-trip -- data stays on workers)
+            bv_init_list = _build_bv_dicts(
+                tile_configs, dc_ctx.tile_index_maps,
+                dc_ctx.interface_nodes, model.tile_boundary_nodes,
+                v_gamma_init, vdd,
+            )
+            bv_init_args = [(bv,) for bv in bv_init_list]
+            model.backend.call_all(
+                model.workers, 'recover_and_set_initial_voltages', bv_init_args,
+            )
+            timings['dc_initial'] = time.perf_counter() - t0
+
+            del dc_ctx
 
         # 5. Init peak tracking on workers (parallel)
         t0 = time.perf_counter()
@@ -702,6 +533,11 @@ class _SolverTimeDomainMixin:
 
         # 6. Compute initial v_gamma_old from initial interface voltages
         v_gamma_old = v_gamma_init.copy()
+        bv_old_list = _build_bv_dicts(
+            tile_configs, trans_ctx.tile_index_maps,
+            trans_ctx.interface_nodes, model.tile_boundary_nodes,
+            v_gamma_old, vdd,
+        )
 
         # 7. Time loop
         t_array = np.arange(
@@ -718,12 +554,7 @@ class _SolverTimeDomainMixin:
 
         t0_loop = time.perf_counter()
         for step_idx, t_val in enumerate(t_array):
-            # 7a. Build per-tile boundary_v_old dicts from v_gamma_old
-            bv_old_list = _build_bv_dicts(
-                tile_configs, trans_ctx.tile_index_maps,
-                trans_ctx.interface_nodes, model.tile_boundary_nodes,
-                v_gamma_old, vdd,
-            )
+            # 7a. Use cached bv_old_list (built before loop or from previous step)
             bv_old_per_tile = [(t_val, bv) for bv in bv_old_list]
 
             # 7b. Workers: compute transient reduced RHS (parallel)
@@ -795,6 +626,7 @@ class _SolverTimeDomainMixin:
 
             # 7g. Advance state
             v_gamma_old = v_gamma_new
+            bv_old_list = bv_new_list  # cache for next step
 
             if verbose and (step_idx % 10 == 0 or step_idx == len(t_array) - 1):
                 logger.info(

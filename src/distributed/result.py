@@ -1,16 +1,23 @@
-"""Result and context dataclasses for distributed DDM solver.
+"""Result and context classes for distributed DDM solver.
 
 Follows the same pattern as core/solver_results.py for the unified solver.
+Context classes are active objects with factor() / release() lifecycle methods.
 """
 
 from __future__ import annotations
 
+import logging
 import pickle
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import scipy.sparse as sp
+
+if TYPE_CHECKING:
+    from .model import DistributedPowerGridModel
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -55,27 +62,217 @@ class DistributedSolveResult:
 
 
 @dataclass
-class DistributedSolverContext:
-    """Cached solver artifacts. Analogous to CoupledHierarchicalSolverContext.
+class DistributedTopologyContext:
+    """Topology data shared by DC and transient contexts.
 
-    Contains ONLY solver-derived state (factorizations, operators, index maps).
-    Model data (workers, metadata, package) lives in DistributedPowerGridModel.
+    Computed once during the first factorization (prepare or prepare_transient),
+    then reused by subsequent context creations. Intended to be treated as
+    read-only after construction. Contains interface node ordering, tile index
+    maps, and G-only Dirichlet RHS.
     """
 
-    # Interface system (coordinator-side factorization)
-    interface_lu: Callable  # Factored interface matrix .solve()
-    interface_nodes: List[str]  # Global boundary node ordering
+    interface_nodes: List[str]
     interface_node_to_idx: Dict[str, int]
-    rhs_dirichlet_interface: np.ndarray  # Package Dirichlet RHS contribution
-
-    # Per-tile index maps (local -> global for scatter-add assembly)
     tile_index_maps: Dict[Tuple[int, int], np.ndarray]
-
-    # Interface island nodes penalized during prepare (shorted to Vdd)
+    rhs_dirichlet_G: np.ndarray  # G-only Dirichlet RHS (used by both DC and transient)
+    G_package_uu: Optional[sp.csr_matrix]  # Resistive package matrix (unknown-unknown)
     removed_interface_nodes: Set[str] = field(default_factory=set)
 
-    # Timing breakdown (includes nested solver_stats dict)
-    timings: Dict[str, Any] = field(default_factory=dict)
+
+class DistributedSolverContext:
+    """Active DC solver context. Manages coordinator + worker LU lifecycle.
+
+    Created by DistributedDDMSolver.prepare(). Owns a reference to the model
+    and orchestrates factorization on coordinator and workers.
+
+    For backward compatibility, can also be constructed with explicit field
+    values (used by tests that don't have a full model).
+    """
+
+    def __init__(
+        self,
+        model: Optional['DistributedPowerGridModel'] = None,
+        topology: Optional[DistributedTopologyContext] = None,
+        # Backward-compat kwargs (used by tests and direct construction)
+        interface_lu: Optional[Callable] = None,
+        interface_nodes: Optional[List[str]] = None,
+        interface_node_to_idx: Optional[Dict[str, int]] = None,
+        rhs_dirichlet_interface: Optional[np.ndarray] = None,
+        tile_index_maps: Optional[Dict[Tuple[int, int], np.ndarray]] = None,
+        removed_interface_nodes: Optional[Set[str]] = None,
+        timings: Optional[Dict[str, Any]] = None,
+    ):
+        self.model = model
+        self.topology: Optional[DistributedTopologyContext] = topology
+        self.is_factored: bool = False
+        self.timings: Dict[str, Any] = timings if timings is not None else {}
+        self._S_global: Optional[sp.csc_matrix] = None  # saved for potential re-factor
+
+        # Direct field storage (populated by factor() or backward-compat constructor)
+        self._interface_lu: Optional[Callable] = interface_lu
+        self._interface_nodes: Optional[List[str]] = interface_nodes
+        self._interface_node_to_idx: Optional[Dict[str, int]] = interface_node_to_idx
+        self._rhs_dirichlet_interface: Optional[np.ndarray] = rhs_dirichlet_interface
+        self._tile_index_maps: Optional[Dict[Tuple[int, int], np.ndarray]] = tile_index_maps
+        self._removed_interface_nodes: Set[str] = (
+            removed_interface_nodes if removed_interface_nodes is not None else set()
+        )
+
+        # If constructed with explicit fields, mark as factored
+        if interface_lu is not None:
+            self.is_factored = True
+
+    def factor(self, verbose: bool = False) -> None:
+        """Factor tiles + assemble/factor interface system.
+
+        Moves all the logic previously in solver.prepare() into this method.
+        After calling, self.is_factored=True and topology is populated.
+
+        Args:
+            verbose: Log timing and statistics info.
+
+        Raises:
+            RuntimeError: If model is not set.
+        """
+        from .result_factorization import _factor_dc_context
+        _factor_dc_context(self, verbose)
+
+    def release(self) -> None:
+        """Free coordinator LU + worker factorizations. Topology preserved."""
+        if self._interface_lu is not None:
+            self._interface_lu = None
+        self._S_global = None
+        self.is_factored = False
+        # Clear worker DC factorizations if we have a model reference
+        if self.model is not None:
+            self.model.backend.call_all(
+                self.model.workers, 'clear_dc_factorization'
+            )
+
+    # --- Checkpoint: save / load / refactor ---
+
+    def save(self, path: Optional[str] = None) -> str:
+        """Save coordinator-side metadata to disk.
+
+        Serializes topology, S_global sparse matrix, and timings.
+        LU factorizations are NOT saved (not picklable). Call
+        ``factor()`` or ``refactor()`` after ``load()`` to rebuild LU
+        from the saved S_global.
+
+        Args:
+            path: File path for pickle output. If None, uses a default
+                checkpoint directory derived from model metadata.
+
+        Returns:
+            The absolute path where the checkpoint was saved.
+        """
+        from .result_factorization import _save_dc_context
+        return _save_dc_context(self, path)
+
+    @classmethod
+    def load(
+        cls,
+        model: 'DistributedPowerGridModel',
+        path: str,
+    ) -> 'DistributedSolverContext':
+        """Load coordinator-side metadata from disk.
+
+        Restores topology and S_global. The context is NOT factored
+        after load -- call ``refactor()`` to rebuild LU from the saved
+        S_global, or ``factor()`` for a full re-factorization that also
+        re-runs workers.
+
+        Args:
+            model: A live DistributedPowerGridModel with active workers.
+            path: Path to saved checkpoint file.
+
+        Returns:
+            DistributedSolverContext with restored metadata,
+            ``is_factored=False``.
+
+        Raises:
+            ValueError: If the checkpoint type does not match.
+        """
+        from .result_factorization import _load_dc_context
+        return _load_dc_context(cls, model, path)
+
+    def refactor(self, verbose: bool = False) -> None:
+        """Rebuild coordinator-side LU from saved S_global.
+
+        .. warning::
+            This only rebuilds the coordinator interface LU. Workers must
+            already have their block systems factored (e.g., from a prior
+            ``factor()`` call in this session). If workers are fresh or
+            have been released, call ``factor()`` instead for a full
+            factorization that includes worker-side setup.
+
+        Args:
+            verbose: Log timing info.
+
+        Raises:
+            RuntimeError: If S_global is not available (e.g. after
+                ``release()`` without a prior ``save()``).
+        """
+        from .result_factorization import _refactor_dc_context
+        _refactor_dc_context(self, verbose)
+
+    def _default_checkpoint_path(self, filename: str) -> str:
+        """Derive default checkpoint path from model metadata."""
+        from .result_factorization import _default_checkpoint_path
+        return _default_checkpoint_path(self, filename)
+
+    # --- Backward-compat property access ---
+    # These allow existing code like ctx.interface_nodes, ctx.interface_lu, etc.
+    # to work whether the context was populated via factor() or direct construction.
+
+    @property
+    def interface_lu(self) -> Optional[Callable]:
+        return self._interface_lu
+
+    @interface_lu.setter
+    def interface_lu(self, value: Optional[Callable]) -> None:
+        self._interface_lu = value
+
+    @property
+    def interface_nodes(self) -> List[str]:
+        if self._interface_nodes is not None:
+            return self._interface_nodes
+        if self.topology is not None:
+            return self.topology.interface_nodes
+        return []
+
+    @property
+    def interface_node_to_idx(self) -> Dict[str, int]:
+        if self._interface_node_to_idx is not None:
+            return self._interface_node_to_idx
+        if self.topology is not None:
+            return self.topology.interface_node_to_idx
+        return {}
+
+    @property
+    def rhs_dirichlet_interface(self) -> Optional[np.ndarray]:
+        """For DC, this IS the G-only Dirichlet RHS."""
+        if self._rhs_dirichlet_interface is not None:
+            return self._rhs_dirichlet_interface
+        if self.topology is not None:
+            return self.topology.rhs_dirichlet_G
+        return None
+
+    @property
+    def tile_index_maps(self) -> Dict[Tuple[int, int], np.ndarray]:
+        if self._tile_index_maps is not None:
+            return self._tile_index_maps
+        if self.topology is not None:
+            return self.topology.tile_index_maps
+        return {}
+
+    @property
+    def removed_interface_nodes(self) -> Set[str]:
+        return self._removed_interface_nodes
+
+    @removed_interface_nodes.setter
+    def removed_interface_nodes(self, value: Set[str]) -> None:
+        self._removed_interface_nodes = value
 
 
 @dataclass
@@ -131,44 +328,179 @@ class DistributedSmoothedSources:
             )
 
 
-@dataclass
 class DistributedTransientContext:
-    """Cached solver artifacts for distributed transient (RC) analysis.
+    """Active transient solver context. Manages coordinator + worker LU lifecycle.
 
-    Extends DistributedSolverContext with time-integration state.
-    The dc_context field holds the base DC factorization; this context
-    adds capacitance-related matrices and integration parameters.
+    Created by DistributedDDMSolver.prepare_transient(). Owns a reference to
+    the model and orchestrates transient factorization on coordinator and workers.
+
+    For backward compatibility, can also be constructed with explicit field
+    values (used by tests that don't have a full model).
     """
 
-    # Interface system (coordinator-side factorization for A-based system)
-    interface_lu: Callable
-    interface_nodes: List[str]
-    interface_node_to_idx: Dict[str, int]
-    rhs_dirichlet_interface: np.ndarray
+    def __init__(
+        self,
+        model: Optional['DistributedPowerGridModel'] = None,
+        topology: Optional[DistributedTopologyContext] = None,
+        dt: float = 0.1e-9,
+        method: str = 'be',
+        # Backward-compat kwargs (used by tests and direct construction)
+        interface_lu: Optional[Callable] = None,
+        interface_nodes: Optional[List[str]] = None,
+        interface_node_to_idx: Optional[Dict[str, int]] = None,
+        rhs_dirichlet_interface: Optional[np.ndarray] = None,
+        tile_index_maps: Optional[Dict[Tuple[int, int], np.ndarray]] = None,
+        dt_scaled: Optional[float] = None,
+        integration_method: Optional[str] = None,
+        has_capacitance: bool = False,
+        rhs_dirichlet_G: Optional[np.ndarray] = None,
+        C_package_uu: Optional[sp.csr_matrix] = None,
+        G_package_uu: Optional[sp.csr_matrix] = None,
+        removed_interface_nodes: Optional[Set[str]] = None,
+        timings: Optional[Dict[str, Any]] = None,
+    ):
+        self.model = model
+        self.topology: Optional[DistributedTopologyContext] = topology
+        self.is_factored: bool = False
+        self.timings: Dict[str, Any] = timings if timings is not None else {}
 
-    # Per-tile index maps (local -> global for scatter-add assembly)
-    tile_index_maps: Dict[Tuple[int, int], np.ndarray]
+        # Time integration parameters: prefer explicit dt_scaled/integration_method
+        # if provided (backward compat), otherwise derive from dt/method
+        if dt_scaled is not None:
+            self.dt_scaled: float = dt_scaled
+        else:
+            self.dt_scaled = dt * 1e12
+        if integration_method is not None:
+            self.integration_method: str = integration_method
+        else:
+            self.integration_method = method
+        self.has_capacitance: bool = has_capacitance
 
-    # DC context from the base prepare step
-    dc_context: DistributedSolverContext
+        # Transient-specific coordinator state
+        self.rhs_dirichlet_A: Optional[np.ndarray] = rhs_dirichlet_interface
+        self._rhs_dirichlet_G: Optional[np.ndarray] = rhs_dirichlet_G
+        self.C_package_uu: Optional[sp.csr_matrix] = C_package_uu
+        self._G_package_uu: Optional[sp.csr_matrix] = G_package_uu
 
-    # Time integration parameters
-    dt_scaled: float  # dt in ps (dt = dt_seconds * 1e12)
-    integration_method: str  # 'be' or 'trap'
-    has_capacitance: bool
+        self._S_global: Optional[sp.csc_matrix] = None
 
-    # G-only Dirichlet RHS (without cap contributions), used in transient loop
-    rhs_dirichlet_G: Optional[np.ndarray] = None
+        # Direct field storage (populated by factor() or backward-compat constructor)
+        self._interface_lu: Optional[Callable] = interface_lu
+        self._interface_nodes: Optional[List[str]] = interface_nodes
+        self._interface_node_to_idx: Optional[Dict[str, int]] = interface_node_to_idx
+        self._tile_index_maps: Optional[Dict[Tuple[int, int], np.ndarray]] = tile_index_maps
+        self._removed_interface_nodes: Set[str] = (
+            removed_interface_nodes if removed_interface_nodes is not None else set()
+        )
 
-    # Optional package-level matrices (coordinator-side)
-    C_package_uu: Optional[sp.csr_matrix] = None
-    G_package_uu: Optional[sp.csr_matrix] = None
+        # If constructed with explicit fields, mark as factored
+        if interface_lu is not None:
+            self.is_factored = True
 
-    # Interface island nodes penalized during prepare
-    removed_interface_nodes: Set[str] = field(default_factory=set)
+    def factor(self, verbose: bool = False) -> None:
+        """Factor transient A-system on tiles and assemble interface.
 
-    # Timing breakdown (includes nested solver_stats dict)
-    timings: Dict[str, Any] = field(default_factory=dict)
+        Builds A = G + C_coeff * C on each tile, computes Schur complements,
+        and assembles the global transient interface system including package
+        capacitance contributions.
+
+        Args:
+            verbose: Log timing info.
+
+        Raises:
+            RuntimeError: If model is not set.
+        """
+        from .result_factorization import _factor_transient_context
+        _factor_transient_context(self, verbose)
+
+    def release(self) -> None:
+        """Free coordinator LU + worker transient factorizations."""
+        if self._interface_lu is not None:
+            self._interface_lu = None
+        self._S_global = None
+        self.rhs_dirichlet_A = None
+        self._rhs_dirichlet_G = None
+        self.C_package_uu = None
+        self._G_package_uu = None
+        self.is_factored = False
+        # Clear worker transient factorizations if we have a model reference
+        if self.model is not None:
+            self.model.backend.call_all(
+                self.model.workers, 'clear_transient_factorization'
+            )
+
+    # --- Checkpoint: save / load / refactor ---
+
+    def save(self, path: Optional[str] = None) -> str:
+        """Save coordinator-side transient metadata to disk.
+
+        Serializes topology, S_global sparse matrix, integration params,
+        transient-specific matrices, and timings.  LU factorizations are
+        NOT saved (not picklable). Call ``refactor()`` after ``load()``
+        to rebuild LU from the saved S_global.
+
+        Args:
+            path: File path for pickle output. If None, uses a default
+                checkpoint directory derived from model metadata.
+
+        Returns:
+            The absolute path where the checkpoint was saved.
+        """
+        from .result_factorization import _save_transient_context
+        return _save_transient_context(self, path)
+
+    @classmethod
+    def load(
+        cls,
+        model: 'DistributedPowerGridModel',
+        path: str,
+    ) -> 'DistributedTransientContext':
+        """Load coordinator-side transient metadata from disk.
+
+        Restores topology, S_global, integration params, and transient
+        matrices. The context is NOT factored after load -- call
+        ``refactor()`` to rebuild LU from the saved S_global, or
+        ``factor()`` for a full re-factorization.
+
+        Args:
+            model: A live DistributedPowerGridModel with active workers.
+            path: Path to saved checkpoint file.
+
+        Returns:
+            DistributedTransientContext with restored metadata,
+            ``is_factored=False``.
+
+        Raises:
+            ValueError: If the checkpoint type does not match.
+        """
+        from .result_factorization import _load_transient_context
+        return _load_transient_context(cls, model, path)
+
+    def refactor(self, verbose: bool = False) -> None:
+        """Rebuild coordinator-side LU from saved S_global.
+
+        .. warning::
+            This only rebuilds the coordinator interface LU. Workers must
+            already have their transient block systems factored (e.g.,
+            from a prior ``factor()`` call in this session). If workers
+            are fresh or have been released, call ``factor()`` instead
+            for a full factorization that includes worker-side setup.
+
+        Args:
+            verbose: Log timing info.
+
+        Raises:
+            RuntimeError: If S_global is not available.
+        """
+        from .result_factorization import _refactor_transient_context
+        _refactor_transient_context(self, verbose)
+
+    def _default_checkpoint_path(self, filename: str) -> str:
+        """Derive default checkpoint path from model metadata."""
+        from .result_factorization import _default_checkpoint_path
+        return _default_checkpoint_path(self, filename)
+
+    # --- Computed properties ---
 
     @property
     def dt(self) -> float:
@@ -179,6 +511,74 @@ class DistributedTransientContext:
     def C_coeff(self) -> float:
         """Capacitance coefficient: 1/dt_scaled (BE) or 2/dt_scaled (TR)."""
         return (2.0 if self.integration_method == 'trap' else 1.0) / self.dt_scaled
+
+    # --- Backward-compat property access ---
+
+    @property
+    def interface_lu(self) -> Optional[Callable]:
+        return self._interface_lu
+
+    @interface_lu.setter
+    def interface_lu(self, value: Optional[Callable]) -> None:
+        self._interface_lu = value
+
+    @property
+    def interface_nodes(self) -> List[str]:
+        if self._interface_nodes is not None:
+            return self._interface_nodes
+        if self.topology is not None:
+            return self.topology.interface_nodes
+        return []
+
+    @property
+    def interface_node_to_idx(self) -> Dict[str, int]:
+        if self._interface_node_to_idx is not None:
+            return self._interface_node_to_idx
+        if self.topology is not None:
+            return self.topology.interface_node_to_idx
+        return {}
+
+    @property
+    def rhs_dirichlet_interface(self) -> Optional[np.ndarray]:
+        """A-based Dirichlet RHS (includes cap contributions)."""
+        return self.rhs_dirichlet_A
+
+    @property
+    def rhs_dirichlet_G(self) -> Optional[np.ndarray]:
+        """G-only Dirichlet RHS (without cap contributions)."""
+        if self._rhs_dirichlet_G is not None:
+            return self._rhs_dirichlet_G
+        if self.topology is not None:
+            return self.topology.rhs_dirichlet_G
+        return None
+
+    @rhs_dirichlet_G.setter
+    def rhs_dirichlet_G(self, value: Optional[np.ndarray]) -> None:
+        self._rhs_dirichlet_G = value
+
+    @property
+    def tile_index_maps(self) -> Dict[Tuple[int, int], np.ndarray]:
+        if self._tile_index_maps is not None:
+            return self._tile_index_maps
+        if self.topology is not None:
+            return self.topology.tile_index_maps
+        return {}
+
+    @property
+    def removed_interface_nodes(self) -> Set[str]:
+        return self._removed_interface_nodes
+
+    @removed_interface_nodes.setter
+    def removed_interface_nodes(self, value: Set[str]) -> None:
+        self._removed_interface_nodes = value
+
+    @property
+    def G_package_uu(self) -> Optional[sp.csr_matrix]:
+        return self._G_package_uu
+
+    @G_package_uu.setter
+    def G_package_uu(self, value: Optional[sp.csr_matrix]) -> None:
+        self._G_package_uu = value
 
 
 @dataclass

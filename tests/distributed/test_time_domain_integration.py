@@ -141,7 +141,9 @@ class TestDistributedQuasiStaticVsFlat(unittest.TestCase):
         )
 
         # Run distributed quasi-static with pre-built unsmoothed sources.
+        cls.ctx = cls.solver.prepare(verbose=False)
         cls.dist_result = cls.solver.solve_quasi_static(
+            cls.ctx,
             t_start=cls.t_start,
             t_end=cls.t_end,
             n_points=cls.n_points,
@@ -379,11 +381,15 @@ class TestDistributedTransientVsFlat(unittest.TestCase):
             smooth=True,
             verbose=False,
         )
+        cls.dc_ctx = cls.solver.prepare(verbose=False)
+        cls.trans_ctx = cls.solver.prepare_transient(
+            dt=cls.dt, method='be', verbose=False,
+        )
         cls.dist_result = cls.solver.solve_transient(
+            cls.trans_ctx,
+            dc_context=cls.dc_ctx,
             t_start=cls.t_start,
             t_end=cls.t_end,
-            dt=cls.dt,
-            method='be',
             smoothed_sources=dist_sources,
             verbose=False,
         )
@@ -529,11 +535,15 @@ class TestDistributedTransientPhysics(unittest.TestCase):
         cls.t_end = 5e-9    # 5 ns
         cls.t_start = 0.0
 
+        cls.dc_ctx = cls.solver.prepare(verbose=False)
+        cls.trans_ctx = cls.solver.prepare_transient(
+            dt=cls.dt, method='be', verbose=False,
+        )
         cls.result = cls.solver.solve_transient(
+            cls.trans_ctx,
+            dc_context=cls.dc_ctx,
             t_start=cls.t_start,
             t_end=cls.t_end,
-            dt=cls.dt,
-            method='be',
             verbose=False,
         )
 
@@ -593,7 +603,9 @@ class TestDistributedTransientPhysics(unittest.TestCase):
         orders of magnitude for peak IR-drop.
         """
         # Run a quick quasi-static with the same time range
+        qs_ctx = self.solver.prepare(verbose=False)
         qs_result = self.solver.solve_quasi_static(
+            qs_ctx,
             t_start=self.t_start,
             t_end=self.t_end,
             n_points=len(self.result.t_array) + 1,
@@ -720,7 +732,7 @@ class TestTransientDCLimit(unittest.TestCase):
 
         # 1. Solve DC (steady state)
         dc_ctx = solver.prepare()
-        dc_result = solver.solve_dc(context=dc_ctx)
+        dc_result = solver.solve_dc(dc_ctx)
         dc_voltages = dc_result.flatten()
 
         # 2. Run transient with constant sources for enough steps to converge.
@@ -734,7 +746,7 @@ class TestTransientDCLimit(unittest.TestCase):
         trans_ctx = solver.prepare_transient(dt=dt, method='be')
 
         # Manual transient loop (cannot use solve_transient without VCS)
-        n_interface = len(trans_ctx.dc_context.interface_nodes)
+        n_interface = len(dc_ctx.interface_nodes)
         tile_configs_list = model.metadata.tile_configs
 
         # DC initial condition
@@ -885,7 +897,7 @@ class TestDCSolveUnchangedWithCaps(unittest.TestCase):
 
         # DC solve (distributed)
         cls.ctx = cls.solver.prepare()
-        cls.dc_result = cls.solver.solve_dc(context=cls.ctx)
+        cls.dc_result = cls.solver.solve_dc(cls.ctx)
         cls.dc_voltages = cls.dc_result.flatten()
 
         # DC solve (flat)

@@ -2938,7 +2938,7 @@ class UnifiedIRDropSolver:
                 "No distributed solver available. Call prepare_distributed() first."
             )
         return self._distributed_solver.solve_dc(
-            current_injections=current_injections,
-            context=context,
+            context,
+            per_tile_currents=current_injections,
             verbose=verbose,
         )

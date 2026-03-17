@@ -2129,7 +2129,7 @@ class TestDistributedSolverTimeDomain(unittest.TestCase):
 
         solver = DistributedDDMSolver(self.model)
         ctx = solver.prepare()
-        result = solver.solve_dc(context=ctx)
+        result = solver.solve_dc(ctx)
 
         self.assertGreater(len(result.tile_results), 0)
         v_all = result.flatten()
@@ -2151,7 +2151,6 @@ class TestDistributedSolverTimeDomain(unittest.TestCase):
         self.assertIsInstance(ctx, DistributedTransientContext)
         self.assertEqual(ctx.integration_method, 'be')
         self.assertAlmostEqual(ctx.dt_scaled, 1e-10 * 1e12, places=6)
-        self.assertIsNotNone(ctx.dc_context)
         self.assertGreater(len(ctx.interface_nodes), 0)
 
     def test_prepare_transient_trap(self):
@@ -2217,7 +2216,6 @@ class TestDistributedTransientContext(unittest.TestCase):
             interface_node_to_idx={'a': 0},
             rhs_dirichlet_interface=np.zeros(1),
             tile_index_maps={},
-            dc_context=None,
             dt_scaled=100.0,  # 100 ps
             integration_method='be',
             has_capacitance=True,
@@ -2234,7 +2232,6 @@ class TestDistributedTransientContext(unittest.TestCase):
             interface_node_to_idx={},
             rhs_dirichlet_interface=np.zeros(0),
             tile_index_maps={},
-            dc_context=None,
             dt_scaled=100.0,
             integration_method='be',
             has_capacitance=True,
@@ -2251,7 +2248,6 @@ class TestDistributedTransientContext(unittest.TestCase):
             interface_node_to_idx={},
             rhs_dirichlet_interface=np.zeros(0),
             tile_index_maps={},
-            dc_context=None,
             dt_scaled=100.0,
             integration_method='trap',
             has_capacitance=True,
@@ -2590,7 +2586,7 @@ class TestSolveDcStoresSolveStats(unittest.TestCase):
 
         solver = DistributedDDMSolver(self.model)
         ctx = solver.prepare(verbose=True)
-        result = solver.solve_dc(context=ctx, verbose=True)
+        result = solver.solve_dc(ctx, verbose=True)
 
         # solve_stats must exist in solve_metadata
         self.assertIn('solve_stats', result.solve_metadata)
@@ -2627,6 +2623,189 @@ class TestSolveDcStoresSolveStats(unittest.TestCase):
         self.assertIn('per_tile_recovery_stats', solve_stats)
         self.assertEqual(len(solve_stats['per_tile_rhs_stats']), 2)
         self.assertEqual(len(solve_stats['per_tile_recovery_stats']), 2)
+
+
+class TestSolveDcContextRequired(unittest.TestCase):
+    """Test that solve_dc() requires a factored context."""
+
+    def setUp(self):
+        self.model = _build_two_tile_model_with_caps()
+
+    def tearDown(self):
+        self.model.shutdown()
+
+    def test_solve_dc_without_context_raises(self):
+        """Calling solve_dc() without context should raise TypeError."""
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(self.model)
+        with self.assertRaises(TypeError):
+            solver.solve_dc()  # Missing required positional arg
+
+    def test_solve_dc_unfactored_context_raises(self):
+        """Calling solve_dc() with unfactored context should raise ValueError."""
+        from distributed.solver import DistributedDDMSolver
+        from distributed.result import DistributedSolverContext
+
+        solver = DistributedDDMSolver(self.model)
+        unfactored = DistributedSolverContext(model=self.model)
+        # is_factored should be False before factor() is called
+        self.assertFalse(unfactored.is_factored)
+        with self.assertRaises(ValueError, msg="Context is not factored"):
+            solver.solve_dc(unfactored)
+
+
+class TestSolveTransientContextRequired(unittest.TestCase):
+    """Test that solve_transient() requires context and IC params."""
+
+    def setUp(self):
+        self.model = _build_two_tile_model_with_caps()
+
+    def tearDown(self):
+        self.model.shutdown()
+
+    def test_solve_transient_without_context_raises(self):
+        """Calling solve_transient() without context should raise TypeError."""
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(self.model)
+        with self.assertRaises(TypeError):
+            solver.solve_transient()  # Missing required positional arg
+
+    def test_solve_transient_no_ic_raises(self):
+        """solve_transient() without dc_context or ic_voltages raises ValueError."""
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(self.model)
+        trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+        with self.assertRaises(ValueError, msg="Either dc_context or ic_voltages"):
+            solver.solve_transient(trans_ctx)
+
+    def test_solve_transient_both_ic_raises(self):
+        """solve_transient() with both dc_context and ic_voltages raises ValueError."""
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(self.model)
+        dc_ctx = solver.prepare()
+        trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+        ic = {n: self.model.vdd for n in trans_ctx.interface_nodes}
+        with self.assertRaises(ValueError, msg="mutually exclusive"):
+            solver.solve_transient(trans_ctx, dc_context=dc_ctx, ic_voltages=ic)
+
+    def test_solve_transient_with_dc_context(self):
+        """solve_transient() with dc_context for IC works correctly."""
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(self.model)
+        dc_ctx = solver.prepare()
+        trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+
+        # Need to preprocess sources first (workers need VCS)
+        # Use temp dir for VCS cache since model has ckt_path=''
+        with tempfile.TemporaryDirectory() as tmpdir:
+            smoothed = solver.preprocess_sources(
+                time_step=1e-10, t_start=0.0, t_end=1e-9,
+                pkl_dir=tmpdir, verbose=False,
+            )
+
+            result = solver.solve_transient(
+                trans_ctx,
+                dc_context=dc_ctx,
+                t_start=0.0,
+                t_end=1e-9,
+                smoothed_sources=smoothed,
+                verbose=False,
+            )
+        self.assertIsNotNone(result)
+        self.assertGreater(len(result.t_array), 0)
+
+    def test_solve_transient_with_ic_voltages(self):
+        """solve_transient() with ic_voltages skips DC solve."""
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(self.model)
+        trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+
+        # Need to preprocess sources first (workers need VCS)
+        # Use temp dir for VCS cache since model has ckt_path=''
+        with tempfile.TemporaryDirectory() as tmpdir:
+            smoothed = solver.preprocess_sources(
+                time_step=1e-10, t_start=0.0, t_end=1e-9,
+                pkl_dir=tmpdir, verbose=False,
+            )
+
+            # Build ic_voltages: all nodes at vdd (should be like a zero-current IC)
+            vdd = self.model.vdd
+            ic_voltages = {n: vdd for n in trans_ctx.interface_nodes}
+
+            result = solver.solve_transient(
+                trans_ctx,
+                ic_voltages=ic_voltages,
+                t_start=0.0,
+                t_end=1e-9,
+                smoothed_sources=smoothed,
+                verbose=False,
+            )
+        self.assertIsNotNone(result)
+        self.assertGreater(len(result.t_array), 0)
+
+    def test_solve_transient_with_distributed_result_ic(self):
+        """solve_transient() with DistributedSolveResult as ic_voltages."""
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(self.model)
+        dc_ctx = solver.prepare()
+        dc_result = solver.solve_dc(dc_ctx)
+        trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            smoothed = solver.preprocess_sources(
+                time_step=1e-10, t_start=0.0, t_end=1e-9,
+                pkl_dir=tmpdir, verbose=False,
+            )
+
+            # Pass DistributedSolveResult directly (not flattened)
+            result = solver.solve_transient(
+                trans_ctx,
+                ic_voltages=dc_result,
+                t_start=0.0,
+                t_end=1e-9,
+                smoothed_sources=smoothed,
+                verbose=False,
+            )
+        self.assertIsNotNone(result)
+        self.assertGreater(len(result.t_array), 0)
+
+        dc_ctx.release()
+        trans_ctx.release()
+
+
+class TestSolveQuasiStaticContextRequired(unittest.TestCase):
+    """Test that solve_quasi_static() requires a factored context."""
+
+    def setUp(self):
+        self.model = _build_two_tile_model_with_caps()
+
+    def tearDown(self):
+        self.model.shutdown()
+
+    def test_solve_quasi_static_without_context_raises(self):
+        """Calling solve_quasi_static() without context should raise TypeError."""
+        from distributed.solver import DistributedDDMSolver
+
+        solver = DistributedDDMSolver(self.model)
+        with self.assertRaises(TypeError):
+            solver.solve_quasi_static()  # Missing required positional arg
+
+    def test_solve_quasi_static_unfactored_context_raises(self):
+        """solve_quasi_static() with unfactored context raises ValueError."""
+        from distributed.solver import DistributedDDMSolver
+        from distributed.result import DistributedSolverContext
+
+        solver = DistributedDDMSolver(self.model)
+        unfactored = DistributedSolverContext(model=self.model)
+        with self.assertRaises(ValueError, msg="Context is not factored"):
+            solver.solve_quasi_static(unfactored)
 
 
 if __name__ == '__main__':

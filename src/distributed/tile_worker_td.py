@@ -25,7 +25,7 @@ class _TimeDomainMixin:
         _smoothed_sources, _active_sources, _transient_block_system,
         _c_pp_diag, _c_ii_diag, _total_cap, _C_coeff, _dt_scaled,
         _transient_method, _rhs_dirichlet_transient, _v_interior_old,
-        _v_port_old, _last_f_i, _peak_per_node, _peak_vdd,
+        _last_f_i, _peak_per_node, _peak_vdd,
         _peak_tracking_active, _tracked_nodes, _tracked_waveforms,
         get_reduced_rhs()
     """
@@ -518,6 +518,91 @@ class _TimeDomainMixin:
             if node in voltages:
                 v_i[idx] = voltages[node]
         self._v_interior_old = v_i
+
+    def recover_and_set_initial_voltages(
+        self,
+        boundary_voltages_dict: Dict[str, float],
+    ) -> Dict[str, Any]:
+        """Recover DC interior voltages and set as transient IC in one step.
+
+        Combines get_interior_voltages + set_initial_voltages without the
+        coordinator round-trip.  The interior voltage array stays on the
+        worker.
+
+        Args:
+            boundary_voltages_dict: Port/boundary voltages from DC interface
+                solve.
+
+        Returns:
+            Stats dict with recovery metadata.
+        """
+        from solver.coupled_system import recover_bottom_voltages
+
+        bs = self._block_system
+
+        port_voltages = np.zeros(bs.n_ports, dtype=np.float64)
+        for node, idx in bs.port_to_idx.items():
+            if node in boundary_voltages_dict:
+                port_voltages[idx] = boundary_voltages_dict[node]
+
+        interior_voltages = recover_bottom_voltages(
+            bs, port_voltages,
+            self._tile_data.current_injections,
+            self._rhs_dirichlet,
+        )
+
+        # Set _v_interior_old directly from recovered voltages
+        v_i = np.zeros(bs.n_interior, dtype=np.float64)
+        for node, idx in bs.interior_to_idx.items():
+            if node in interior_voltages:
+                v_i[idx] = interior_voltages[node]
+        self._v_interior_old = v_i
+
+        return {'n_interior': bs.n_interior, 'n_ports': bs.n_ports}
+
+    # --- 4k. Factorization lifecycle -------------------------------------
+
+    def clear_dc_factorization(self) -> Dict[str, Any]:
+        """Free DC LU factorization from _block_system. G matrices preserved.
+
+        Clears lu_ii and factor_adapter from the block system, freeing the
+        LU memory while preserving G_ii, G_pp, G_pi, G_ip matrices for
+        potential re-factorization.
+
+        Returns:
+            Stats dict with keys: had_lu (bool), n_interior (int).
+        """
+        had_lu = False
+        n_interior = 0
+        if self._block_system is not None:
+            n_interior = self._block_system.n_interior
+            if self._block_system.lu_ii is not None:
+                had_lu = True
+                self._block_system.lu_ii = None
+            if self._block_system.factor_adapter is not None:
+                self._block_system.factor_adapter = None
+        return {'had_lu': had_lu, 'n_interior': n_interior}
+
+    def clear_transient_factorization(self) -> Dict[str, Any]:
+        """Free transient block system entirely.
+
+        Removes the _transient_block_system (A = G + C_coeff * C), freeing
+        both matrices and LU factorization. The base _block_system (DC G matrices)
+        is preserved.
+
+        Also clears transient time-stepping state (_last_f_i and _v_interior_old).
+        Callers must call set_initial_voltages() before restarting transient
+        integration.
+
+        Returns:
+            Stats dict with keys: had_transient_system (bool).
+        """
+        had = self._transient_block_system is not None
+        self._transient_block_system = None
+        # Clear transient time-stepping state that depends on transient system
+        self._last_f_i = None
+        self._v_interior_old = None
+        return {'had_transient_system': had}
 
     # --- 4i. Peak tracking ---------------------------------------------
 

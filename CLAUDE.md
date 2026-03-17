@@ -70,8 +70,9 @@ python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --mode tra
 - **PDN**: `NetlistParser.parse()` -> `create_model_from_pdn(graph, net_name)` -> `UnifiedIRDropSolver`
 - **Multi-Net**: `NetlistParser.parse()` -> `create_multi_net_models(graph)` -> iterate models
 - **Distributed**: `DistributedNetlistParser.parse_and_dump()` -> `ParsedTileBundle` -> `create_distributed_model(bundle)` -> `DistributedDDMSolver`
-- **Distributed QS**: `preprocess_sources()` -> `solve_quasi_static(t_array)` -> `DistributedQuasiStaticResult` (peaks lazy on workers)
-- **Distributed Transient**: `preprocess_sources()` -> `prepare_transient(dt, method)` -> `solve_transient()` -> `DistributedTransientResult`
+- **Distributed QS**: `ctx = prepare()` -> `preprocess_sources()` -> `solve_quasi_static(ctx, t_array)` -> `DistributedQuasiStaticResult` (peaks lazy on workers)
+- **Distributed Transient**: `dc_ctx = prepare()` -> `trans_ctx = prepare_transient(dt, method)` -> `preprocess_sources()` -> `solve_transient(trans_ctx, dc_context=dc_ctx)` -> `DistributedTransientResult`
+- **Distributed Transient (ic_voltages)**: `trans_ctx = prepare_transient(dt, method)` -> `solve_transient(trans_ctx, ic_voltages=dc_result.voltages)` -> `DistributedTransientResult`
 
 **Key Constraint:** Pads (voltage sources) are Dirichlet BCs at Vdd, eliminated via Schur complement. LU factorization cached for batch solves.
 
@@ -125,7 +126,8 @@ src/
 │   ├── backend.py              # Local/Ray compute backends
 │   ├── heatmap.py              # Distributed stripe heatmap pipeline (prebin/merge/render)
 │   ├── cli.py                  # CLI: python -m distributed {solve,run,parse} with --mode dc/quasi-static/transient
-│   └── result.py               # Result/context dataclasses (DC, quasi-static, transient)
+│   ├── result.py               # Result/context classes (DC, quasi-static, transient) + dataclasses
+│   └── result_factorization.py # Factorization, save/load/refactor logic for context classes
 ├── reports/
 │   ├── floating_nodes.py          # Floating nodes detection and reporting
 │   └── topk_irdrop.py             # Top-K worst IR-drop report (shared by flat and distributed)
@@ -157,6 +159,9 @@ src/
 - **PWLSmoother**: Analytical triangular low-pass filter for waveform preprocessing
 - **NetlistParser**: SPICE-like tile-based netlist parsing with parallel support
 - **ParsedTileBundle**: Lightweight coordinator-side metadata for distributed model creation (no tile data)
+- **DistributedTopologyContext**: Immutable topology shared by DC and transient contexts
+- **DistributedSolverContext**: Active DC context with `factor()` / `release()` / `save()` / `load()` / `refactor()`
+- **DistributedTransientContext**: Active transient context with same lifecycle methods
 - **DistributedSmoothedSources**: Coordinator-side handle for preprocessed VCS (data lives on workers)
 - **DistributedQuasiStaticResult**: Lazy peak collection from workers; `as_flat()` / `as_per_tile()` / `dump()`
 - **DistributedTransientResult**: Extends quasi-static result with RC transient metadata
@@ -196,6 +201,11 @@ src/
 - **Distributed circular imports**: `distributed/parser.py` cannot import from `distributed/model.py` at module level (model.py already imports from parser.py). Use lazy imports inside functions.
 - **Transient Dirichlet RHS**: In the distributed transient time loop, use `rhs_dirichlet_G` (G-only), NOT `rhs_dirichlet_interface` (A-based, includes cap terms). BE: `+rhs_d_G`, TR: `+2*rhs_d_G`. Pad capacitance history cancels because pads hold constant voltage.
 - **Island detection with caps**: Capacitive edges do NOT contribute to connectivity for island detection. A node connected to pads only via caps is floating. But DO filter cap edges when removing island nodes.
+- **Context lifecycle**: `solve_dc(ctx)`, `solve_quasi_static(ctx)`, `solve_transient(trans_ctx, dc_context=dc_ctx)` — context is REQUIRED (first positional). Caller creates via `prepare()` / `prepare_transient()` and must `release()` when done.
+- **Transient IC paths**: `solve_transient` takes `dc_context` OR `ic_voltages` (mutually exclusive). `dc_context` does a DC solve for IC; `ic_voltages` skips DC entirely.
+- **prepare_transient() is independent**: Does NOT internally call `prepare()`. Caller manages DC and transient contexts separately.
+- **solve_transient does NOT release dc_context**: Caller owns the lifecycle of both contexts.
+- **Context save/load**: `save()` must be called BEFORE `release()` (release clears S_global). After `load()`, call `refactor()` to rebuild coordinator LU from saved S_global. Workers need separate `factor()`.
 
 ## Typical Workflow Patterns
 
