@@ -786,12 +786,31 @@ def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> 
         'show-irdrop': 'show_irdrop',
         'profile_memory': 'profile_memory',
         'profile-memory': 'profile_memory',
+        'mode': 'mode',
+        't_start': 't_start',
+        't-start': 't_start',
+        't_end': 't_end',
+        't-end': 't_end',
+        'dt': 'dt',
+        'n_points': 'n_points',
+        'n-points': 'n_points',
+        'method': 'method',
+        'smooth': 'smooth',
     }
+
+    # Keys that require numeric type coercion (YAML may parse e.g. '10e-9' as str)
+    _float_keys = {'t_start', 't_end', 'dt'}
+    _int_keys = {'n_points', 'top_k', 'max_stripes', 'stripe_bin_size',
+                 'plot_bin_size', 'bin_aspect_ratio'}
 
     for config_key, arg_name in key_mapping.items():
         if config_key in config:
-            # Config values override defaults
-            setattr(args, arg_name, config[config_key])
+            value = config[config_key]
+            if arg_name in _float_keys and isinstance(value, str):
+                value = float(value)
+            elif arg_name in _int_keys and isinstance(value, str):
+                value = int(value)
+            setattr(args, arg_name, value)
 
     return args
 

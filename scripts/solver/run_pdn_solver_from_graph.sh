@@ -40,6 +40,15 @@
 #   max_stripes: 50                 # Max stripes before consolidation
 #   stripe_bin_size: 10000          # Bin size for within-stripe aggregation
 #
+# Time-Domain (distributed only):
+#   mode: transient                  # dc, quasi-static, transient (default: dc)
+#   t_start: 0.0                     # Start time in seconds
+#   t_end: 100e-9                    # End time in seconds
+#   dt: 0.1e-9                       # Time step for transient
+#   n_points: 101                    # Number of time points for quasi-static
+#   method: be                       # Integration method: be or trap
+#   smooth: true                     # Enable PWL smoothing
+#
 # ============================================================================
 
 # Usage function
@@ -55,6 +64,11 @@ usage() {
     echo "  -c CONFIG_FILE  Config file (.yaml, .yml, or .json) for solver parameters"
     echo "  -d              Distributed DDM mode: load per-tile .pkl files and run DDM solver"
     echo "  -b BACKEND      Compute backend for distributed mode: local or ray (default: local)"
+    echo "  -m MODE         Analysis mode: dc, quasi-static, transient (default: dc) [distributed only]"
+    echo "  -t T_END        End time in seconds, e.g. 100e-9 (default: 100ns) [distributed only]"
+    echo "  -s DT           Time step for transient in seconds, e.g. 0.1e-9 [distributed only]"
+    echo "  -p N_POINTS     Number of time points for quasi-static (default: 101) [distributed only]"
+    echo "  -M METHOD       Integration method: be or trap (default: be) [distributed only]"
     echo "  -v              Enable verbose output"
     echo ""
     echo "PRECEDENCE: Config file values OVERRIDE CLI arguments."
@@ -66,6 +80,13 @@ usage() {
     echo "Example (distributed):"
     echo "  $0 -d -i ./netlist_data/distributed_pkl -o ./results -v"
     echo "  $0 -d -b ray -i ./netlist_data/distributed_pkl -o ./results"
+    echo ""
+    echo "Example (distributed quasi-static):"
+    echo "  $0 -d -i ./netlist_data/distributed_pkl -m quasi-static -t 100e-9 -p 51 -o ./results"
+    echo ""
+    echo "Example (distributed transient):"
+    echo "  $0 -d -i ./netlist_data/distributed_pkl -m transient -t 10e-9 -s 0.1e-9 -o ./results"
+    echo "  $0 -d -i ./netlist_data/distributed_pkl -m transient -t 10e-9 -s 0.1e-9 -M trap -v"
     echo ""
     echo "See script header for full list of config file parameters."
     exit 1
@@ -79,7 +100,7 @@ DISTRIBUTED=""
 BACKEND="local"
 
 # Parse command-line arguments
-while getopts "i:n:o:c:b:dvh" opt; do
+while getopts "i:n:o:c:b:m:t:s:p:M:dvh" opt; do
     case $opt in
         i)
             INPUT_PKL="$OPTARG"
@@ -98,6 +119,21 @@ while getopts "i:n:o:c:b:dvh" opt; do
             ;;
         b)
             BACKEND="$OPTARG"
+            ;;
+        m)
+            MODE="$OPTARG"
+            ;;
+        t)
+            T_END="$OPTARG"
+            ;;
+        s)
+            DT="$OPTARG"
+            ;;
+        p)
+            N_POINTS="$OPTARG"
+            ;;
+        M)
+            METHOD="$OPTARG"
             ;;
         v)
             VERBOSE="--verbose"
@@ -133,6 +169,21 @@ if [ -n "$DISTRIBUTED" ]; then
     fi
     if [ -n "$CONFIG_FILE" ]; then
         CMD_ARGS="$CMD_ARGS --config \"$CONFIG_FILE\""
+    fi
+    if [ -n "$MODE" ]; then
+        CMD_ARGS="$CMD_ARGS --mode \"$MODE\""
+    fi
+    if [ -n "$T_END" ]; then
+        CMD_ARGS="$CMD_ARGS --t-end \"$T_END\""
+    fi
+    if [ -n "$DT" ]; then
+        CMD_ARGS="$CMD_ARGS --dt \"$DT\""
+    fi
+    if [ -n "$N_POINTS" ]; then
+        CMD_ARGS="$CMD_ARGS --n-points \"$N_POINTS\""
+    fi
+    if [ -n "$METHOD" ]; then
+        CMD_ARGS="$CMD_ARGS --method \"$METHOD\""
     fi
     if [ -n "$VERBOSE" ]; then
         CMD_ARGS="$CMD_ARGS --verbose"
