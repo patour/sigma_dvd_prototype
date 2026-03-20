@@ -254,6 +254,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             # Backend: use the first tile's backend_info as representative
             backend_info = per_tile_stats[0].get('factorization_backend_info', 'n/a')
             logger.info("  Factor backend:  %s", backend_info)
+            logger.info("  Factor + Schur wall time: %.3fs", timings['factor_tiles'])
 
         logger.info("Interface system: %s unknowns, %s nnz (density %.3f%%), %s",
                     _fmt_count(n_unknowns), _fmt_count(iface_nnz),
@@ -261,6 +262,9 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
         logger.info("  Backend: %s", interface_lu_result.backend_info)
         logger.info("  Factor time: %.3fs", timings['factor_interface'])
         logger.info("  Islands penalized: %d", len(island_nodes))
+        logger.info("  Assemble time: %.3fs", timings['assemble_interface'])
+        logger.info("  Detect islands time: %.3fs", timings['detect_interface_islands'])
+        logger.info("=== Total Prepare: %.3fs ===", timings['total_prepare'])
 
     # 5. Build package G matrix for topology
     from solver.coupled_system import build_interface_package_matrices
@@ -598,6 +602,7 @@ def _factor_transient_context(
             # Backend: use the first tile's backend_info as representative
             backend_info = per_tile_stats[0].get('factorization_backend_info', 'n/a')
             logger.info("  Factor backend:   %s", backend_info)
+            logger.info("  Factor + Schur wall time: %.3fs", timings['factor_transient_tiles'])
 
         logger.info("Transient interface: %s unknowns, %s nnz (density %.3f%%), %s",
                     _fmt_count(n_unknowns), _fmt_count(iface_nnz),
@@ -608,6 +613,10 @@ def _factor_transient_context(
         logger.info("  Package C_uu nnz: %d  |  Package G_uu nnz: %d",
                     interface_stats['pkg_C_uu_nnz'],
                     interface_stats['pkg_G_uu_nnz'])
+        logger.info("  Assemble time: %.3fs", timings['assemble_transient_interface'])
+        if 'detect_interface_islands' in timings:
+            logger.info("  Detect islands time: %.3fs", timings['detect_interface_islands'])
+        logger.info("=== Total Prepare: %.3fs ===", timings['total_prepare_transient'])
 
     # Populate context fields
     ctx._interface_lu = interface_lu_result.solve

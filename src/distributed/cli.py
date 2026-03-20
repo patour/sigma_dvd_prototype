@@ -331,6 +331,9 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
                         help='Cholmod fill-reducing ordering (default: default)')
     parser.add_argument('--cholmod-use-long', action='store_true', default=None,
                         help='Force 64-bit indices in cholmod')
+    parser.add_argument('--partial-factor-threshold', type=int, default=None,
+                        help='Min ports for partial Cholesky Schur path '
+                             '(default: 500, 0=always, large=disable)')
 
     # Reporting / profiling
     parser.add_argument('--top-k', type=int, default=100,
@@ -436,6 +439,12 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
 
     backend_name = get_active_backend()
     logger.info("Solver backend: %s", backend_name)
+
+    # -- partial factor threshold -----------------------------------------------
+    from solver.coupled_system import set_partial_factor_threshold
+    pf_threshold = getattr(args, 'partial_factor_threshold', None)
+    if pf_threshold is not None:
+        set_partial_factor_threshold(pf_threshold)
 
     # Cholmod globals only affect the driver process; Ray workers inherit
     # their own defaults.  Warn if the user explicitly set cholmod options

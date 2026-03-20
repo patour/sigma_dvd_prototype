@@ -393,6 +393,16 @@ def _create_distributed_model_from_bundle(
     # 3. Create workers
     workers = be.create_actors(TileWorker, metadata.tile_configs)
 
+    # 3b. Propagate solver settings to workers
+    from solver.coupled_system import (
+        get_partial_factor_threshold, get_partial_factor_reg_resistance,
+    )
+    solver_settings = {
+        'partial_factor_threshold': get_partial_factor_threshold(),
+        'partial_factor_reg_ohms': get_partial_factor_reg_resistance(),
+    }
+    be.call_all(workers, 'configure', [(solver_settings,)] * len(workers))
+
     # 4. Setup workers: each loads its own .pkl and builds block system
     pkl_path = Path(bundle.pkl_dir)
     setup_args = [

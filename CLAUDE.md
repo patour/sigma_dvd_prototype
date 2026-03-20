@@ -166,6 +166,8 @@ src/
 - **DistributedQuasiStaticResult**: Lazy peak collection from workers; `as_flat()` / `as_per_tile()` / `dump()`
 - **DistributedTransientResult**: Extends quasi-static result with RC transient metadata
 - **generate_topk_report**: Shared top-K IR-drop report writer (used by both PDNSolver and DistributedDDMSolver)
+- **should_use_partial_factor(block_system)**: Shared predicate for auto-detecting partial Cholesky path (checks CHOLMOD + threshold + interior > 0)
+- **set/get_partial_factor_threshold**: Module-level config for partial Cholesky port threshold (default 500)
 
 ### Legacy Module (src/legacy/)
 - `generate_power_grid()`: Creates K-layer resistor mesh with `NodeID` keys
@@ -206,6 +208,10 @@ src/
 - **prepare_transient() is independent**: Does NOT internally call `prepare()`. Caller manages DC and transient contexts separately.
 - **solve_transient does NOT release dc_context**: Caller owns the lifecycle of both contexts.
 - **Context save/load**: `save()` must be called BEFORE `release()` (release clears S_global). After `load()`, call `refactor()` to rebuild coordinator LU from saved S_global. Workers need separate `factor()`.
+- **Ray worker globals**: Module-level globals (`_PARTIAL_FACTOR_THRESHOLD`, CHOLMOD settings) do NOT propagate to Ray workers (separate Python processes). Use `TileWorker.configure(settings)` called once during `create_distributed_model` to push settings to workers.
+- **Tile matrix SPD**: Per-tile full matrix `[[G_ii, G_ip], [G_pi, G_pp]]` may be PSD (not SPD) for tiles without ground connections. `_compute_schur_partial()` adds 1e-5 mS regularization to port diagonals and subtracts it from S after extraction. `G_ii` alone is always SPD (diagonal includes connections to ports).
+- **Partial Cholesky Schur path**: `compute_explicit_schur(use_partial_factor=True)` factors full `[interior, ports]` matrix and extracts `S = L22 @ L22.T`. Sets `lu_ii` via solve_L/Lt truncation trick. Threshold controlled by `set_partial_factor_threshold()` (default 500). CHOLMOD-only.
+- **`build_block_system_from_edges` vs `extract_block_matrices`**: The tile worker uses `build_block_system_from_edges` (no `exclude_port_to_port` param — includes all edges). The flat coupled solver uses `extract_block_matrices` (has `exclude_port_to_port` flag). Don't confuse them.
 
 ## Typical Workflow Patterns
 

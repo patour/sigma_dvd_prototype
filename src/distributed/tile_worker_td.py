@@ -252,6 +252,7 @@ class _TimeDomainMixin:
             BlockMatrixSystem,
             build_grounded_capacitance_diags,
             compute_explicit_schur,
+            should_use_partial_factor,
             _format_bytes,
         )
         import scipy.sparse as sp_mod
@@ -297,15 +298,26 @@ class _TimeDomainMixin:
             lu_ii=None,
         )
 
+        # Decide whether to use partial Cholesky path (same predicate as DC)
+        will_use_partial = should_use_partial_factor(transient_bs)
+
         t0 = time.perf_counter()
-        transient_bs.factor_interior()
+        if not will_use_partial:
+            transient_bs.factor_interior()
         factor_time = time.perf_counter() - t0
 
         self._transient_block_system = transient_bs
 
         t0 = time.perf_counter()
-        S_A, schur_stats = compute_explicit_schur(transient_bs)
+        S_A, schur_stats = compute_explicit_schur(
+            transient_bs,
+            use_partial_factor=will_use_partial,
+        )
         schur_time = time.perf_counter() - t0
+
+        # Backfill factor_time from partial path's internal timing
+        if will_use_partial:
+            factor_time = schur_stats.get('factor_s', 0) + schur_stats.get('analyze_s', 0)
 
         # Capacitance stats
         c_ii_cap_nodes = int(np.count_nonzero(self._c_ii_diag))
@@ -338,15 +350,17 @@ class _TimeDomainMixin:
             'c_ii_cap_nodes': c_ii_cap_nodes,
             'c_pp_cap_nodes': c_pp_cap_nodes,
             'C_coeff': C_coeff,
+            'schur_path': schur_stats.get('path', 'chunked'),
         }
 
+        schur_path = stats['schur_path']
         tid = self._tile_data.tile_id if self._tile_data else '?'
         logger.debug(
             "Tile %s factor_transient_system:\n"
             "  A_ii: %s x %s, nnz=%s  |  A_pp: %s x %s, nnz=%s\n"
             "  C_ii cap nodes: %s / %s  |  C_pp cap nodes: %s / %s\n"
             "  Total tile cap: %.0f fF  |  C_coeff: %.4f\n"
-            "  factor_interior: %.3fs  |  backend: %s\n"
+            "  factor_interior: %.3fs  |  backend: %s  |  path: %s\n"
             "  compute_schur: %.3fs  |  Schur: %s x %s dense (%s)  |  chunk_size: %s",
             tid,
             f"{n_interior:,}", f"{n_interior:,}", f"{A_ii_nnz:,}",
@@ -354,7 +368,7 @@ class _TimeDomainMixin:
             f"{c_ii_cap_nodes:,}", f"{n_interior:,}",
             f"{c_pp_cap_nodes:,}", f"{n_ports:,}",
             self._total_cap, C_coeff,
-            factor_time, backend_info,
+            factor_time, backend_info, schur_path,
             schur_time, f"{S_A.shape[0]:,}", f"{S_A.shape[1]:,}",
             _format_bytes(schur_stats['schur_mem_bytes']),
             schur_stats['chunk_size'],

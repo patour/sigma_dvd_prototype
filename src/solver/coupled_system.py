@@ -41,6 +41,7 @@ where r^B = i_p - G^B_pb * inv(G^B_bb) * i_b is the reduced RHS from bottom-grid
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -50,6 +51,70 @@ import scipy.sparse as sp
 from model.unified_model import UnifiedPowerGridModel
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Partial Cholesky factorization threshold
+# ---------------------------------------------------------------------------
+# When the number of port nodes exceeds this threshold, compute_explicit_schur()
+# uses a single full-matrix Cholesky factorization (ports last) and extracts
+# S = L22 @ L22.T instead of the chunked multi-RHS solve path.  Set to 0 to
+# always use the partial path (when CHOLMOD is available), or to a very large
+# value to disable it.
+_PARTIAL_FACTOR_THRESHOLD: int = 500
+_PARTIAL_FACTOR_REG_OHMS: float = 1e8  # regularization resistance in Ohms
+
+
+def set_partial_factor_threshold(value: int) -> None:
+    """Set the minimum number of ports for the partial Cholesky path.
+
+    Args:
+        value: Threshold (0 = always use partial when CHOLMOD available,
+               large value = effectively disable).
+    """
+    global _PARTIAL_FACTOR_THRESHOLD
+    _PARTIAL_FACTOR_THRESHOLD = value
+
+
+def get_partial_factor_threshold() -> int:
+    """Return the current partial Cholesky threshold."""
+    return _PARTIAL_FACTOR_THRESHOLD
+
+
+def set_partial_factor_reg_resistance(value: float) -> None:
+    """Set the regularization resistance (Ohms) for the partial Cholesky path.
+
+    A small grounding conductance ``1/R`` (in mS) is added to port diagonals
+    to ensure the full tile matrix is SPD.  Subtracted from S after extraction.
+
+    Args:
+        value: Resistance in Ohms (default 1e8 = 100 MΩ).
+    """
+    if value <= 0:
+        raise ValueError(
+            f"Regularization resistance must be positive, got {value}"
+        )
+    global _PARTIAL_FACTOR_REG_OHMS
+    _PARTIAL_FACTOR_REG_OHMS = value
+
+
+def get_partial_factor_reg_resistance() -> float:
+    """Return the current regularization resistance in Ohms."""
+    return _PARTIAL_FACTOR_REG_OHMS
+
+
+def should_use_partial_factor(block_system: 'BlockMatrixSystem') -> bool:
+    """Return True if the partial Cholesky path should be used for *block_system*.
+
+    Checks: CHOLMOD available, port count >= threshold, interior non-empty,
+    and the user hasn't forced the splu backend.
+    """
+    from .unified_solver import HAS_CHOLMOD, get_use_cholmod
+    return (
+        HAS_CHOLMOD
+        and block_system.n_ports >= _PARTIAL_FACTOR_THRESHOLD
+        and block_system.n_interior > 0
+        and get_use_cholmod() is not False
+    )
 
 
 def _sparse_mem_bytes(M) -> int:
@@ -422,45 +487,255 @@ def _ensure_dense(x):
     return x.toarray() if sp.issparse(x) else x
 
 
+def _make_partial_interior_solve(
+    cholmod_factor,
+    P_ii: np.ndarray,
+    n_interior: int,
+    n_ports: int,
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Create an interior solve closure using the full-matrix Cholesky factor.
+
+    The closure implements the solve_L / solve_Lt truncation trick: given a
+    Cholesky factor L of the full permuted matrix ``G_perm = L @ L.T`` with
+    interior nodes ordered first and ports last, an interior solve
+    ``G_ii^{-1} @ b`` is obtained by:
+
+    1. Permute b to AMD order, pad with port zeros.
+    2. Forward-solve: ``y = L^{-1} @ b_pad``.
+    3. Zero the port portion of y.
+    4. Backward-solve: ``x = L^{-T} @ y``.
+    5. Un-permute the interior portion of x.
+
+    Args:
+        cholmod_factor: CHOLMOD factor of the full permuted matrix.
+        P_ii: Fill-reducing permutation of interior indices (length n_interior).
+        n_interior: Number of interior nodes.
+        n_ports: Number of port nodes.
+
+    Returns:
+        Callable that maps ``b`` (1-D or 2-D, interior-sized) to
+        ``G_ii^{-1} @ b`` in original interior ordering.
+    """
+    inv_P_ii = np.argsort(P_ii)  # inverse permutation (pre-computed once)
+    n_full = n_interior + n_ports
+
+    def solve(b):
+        if b.ndim == 1:
+            b_pad = np.zeros(n_full, dtype=np.float64)
+            b_pad[:n_interior] = b[P_ii]
+            y = cholmod_factor.solve_L(b_pad, use_LDLt_decomposition=False)
+            y[n_interior:] = 0.0
+            x = cholmod_factor.solve_Lt(y, use_LDLt_decomposition=False)
+            return x[:n_interior][inv_P_ii]
+        else:
+            # Multi-RHS: handle sparse input (e.g. from G_ip chunks)
+            if sp.issparse(b):
+                b = b.toarray()
+            n_rhs = b.shape[1]
+            b_pad = np.zeros((n_full, n_rhs), dtype=np.float64)
+            b_pad[:n_interior] = b[P_ii]
+            y = cholmod_factor.solve_L(b_pad, use_LDLt_decomposition=False)
+            y[n_interior:] = 0.0
+            x = cholmod_factor.solve_Lt(y, use_LDLt_decomposition=False)
+            return x[:n_interior][inv_P_ii]
+
+    return solve
+
+
+def _compute_schur_partial(
+    block_system: BlockMatrixSystem,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Compute Schur complement via partial Cholesky of the full block matrix.
+
+    Factors ``G_full = [[G_ii, G_ip], [G_pi, G_pp]]`` with interior nodes in a
+    fill-reducing (AMD/METIS) order and ports appended last.  The Schur
+    complement is then ``S = L22 @ L22.T`` where L22 is the lower-right
+    ``n_ports x n_ports`` block of the Cholesky factor L.
+
+    This replaces the O(n_ports) column-solve chunked approach with a single
+    larger factorization + sparse slicing, which is faster when n_ports is large.
+
+    As a side-effect, sets ``block_system.lu_ii`` to a closure that performs
+    interior solves via the solve_L/solve_Lt truncation trick, and
+    ``block_system.factor_adapter`` to a ``SparseFactorAdapter`` wrapping the
+    full factor.
+
+    Args:
+        block_system: BlockMatrixSystem (lu_ii need NOT be pre-set).
+
+    Returns:
+        Tuple of (S, stats) where S is the dense Schur complement and stats
+        contains timing and metadata.
+    """
+    from sksparse.cholmod import cholesky as cholmod_cholesky, analyze as cholmod_analyze
+    from .unified_solver import (
+        SparseFactorAdapter,
+        get_cholmod_mode, get_cholmod_ordering, get_cholmod_use_long,
+    )
+
+    n_i = block_system.n_interior
+    n_p = block_system.n_ports
+    ordering = get_cholmod_ordering()
+    mode = get_cholmod_mode()
+    use_long = get_cholmod_use_long()
+
+    logger.debug(
+        "_compute_schur_partial: n_interior=%d, n_ports=%d, ordering=%s, mode=%s",
+        n_i, n_p, ordering, mode,
+    )
+
+    # --- Phase 1: Analyze G_ii to obtain fill-reducing permutation -----------
+    t0 = time.perf_counter()
+    G_ii_csc = block_system.G_ii.tocsc()
+    symbolic = cholmod_analyze(
+        G_ii_csc, mode=mode, ordering_method=ordering, use_long=use_long,
+    )
+    P_ii = symbolic.P()
+    t_analyze = time.perf_counter() - t0
+
+    # --- Phase 2: Build full permuted matrix and factor ----------------------
+    t0 = time.perf_counter()
+    G_full = sp.bmat(
+        [[block_system.G_ii, block_system.G_ip],
+         [block_system.G_pi, block_system.G_pp]],
+        format='csc',
+    )
+    full_perm = np.concatenate([P_ii, n_i + np.arange(n_p)])
+    G_perm = G_full[np.ix_(full_perm, full_perm)].tocsc()
+
+    # Regularize: add a small grounding conductance to port diagonals.
+    # Tiles without direct ground connections have a PSD (singular)
+    # Laplacian; this makes it SPD for Cholesky.  Subtracted from S after.
+    R_TO_KOHM = 1e-3  # Ohm -> kOhm
+    r_kohm = _PARTIAL_FACTOR_REG_OHMS * R_TO_KOHM
+    g_reg = 1.0 / r_kohm  # conductance in mS (= 1/kOhm)
+    diag = G_perm.diagonal()
+    diag[n_i:] += g_reg
+    G_perm.setdiag(diag)
+
+    # Factor with natural ordering (our permutation is already applied)
+    factor = cholmod_cholesky(
+        G_perm, mode=mode, ordering_method='natural', use_long=use_long,
+    )
+    t_factor = time.perf_counter() - t0
+
+    # --- Phase 3: Extract L22 and compute S ----------------------------------
+    t0 = time.perf_counter()
+    L = factor.L()  # sparse CSC, LL^T form (D absorbed)
+    L22 = L[n_i:, n_i:].toarray()  # dense n_p x n_p
+    S = L22 @ L22.T
+    # Subtract port regularization: S_reg = S_true + g_reg * I
+    np.fill_diagonal(S, S.diagonal() - g_reg)
+    t_extract = time.perf_counter() - t0
+
+    # --- Side-effects: set lu_ii and factor_adapter on block_system -----------
+    block_system.lu_ii = _make_partial_interior_solve(factor, P_ii, n_i, n_p)
+    use_long_str = 'auto' if use_long is None else ('64-bit' if use_long else '32-bit')
+    info_str = (
+        f"cholmod(partial, mode={mode}, ordering={ordering}, "
+        f"natural, idx={use_long_str})"
+    )
+    # NOTE: factor_adapter wraps the FULL (n_i + n_p) Cholesky factor, not
+    # the G_ii factor.  It is stored here ONLY for backend metadata
+    # (.backend, .backend_info).  Do NOT call factor_adapter.solve() --
+    # use lu_ii() for interior solves instead.
+    block_system.factor_adapter = SparseFactorAdapter(factor, 'cholmod', info_str)
+
+    stats = {
+        'path': 'partial_cholesky',
+        'ordering': ordering,
+        'mode': mode,
+        'chunk_size': 0,       # compat keys for callers that read these
+        'n_chunks': 0,
+        'schur_mem_bytes': S.nbytes,
+        'full_factor_nnz': L.nnz,
+        'L22_dense_shape': L22.shape,
+        'analyze_s': t_analyze,
+        'factor_s': t_factor,
+        'extract_s': t_extract,
+    }
+    logger.debug(
+        "_compute_schur_partial: S %dx%d (%s), L nnz=%d, "
+        "analyze %.3fs, factor %.3fs, extract %.3fs",
+        n_p, n_p, _format_bytes(S.nbytes), L.nnz,
+        t_analyze, t_factor, t_extract,
+    )
+    return S, stats
+
+
 def compute_explicit_schur(
     block_system: BlockMatrixSystem,
     max_memory_gb: float = 4.0,
+    use_partial_factor: Optional[bool] = None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Compute explicit Schur complement S = G_pp - G_pi * inv(G_ii) * G_ip.
 
-    Memory-efficient: keeps G_ip sparse, processes columns in chunks.
-    Chunk size auto-computed from memory budget, CHOLMOD index limits, and BLAS
-    efficiency. For large tiles (millions of interior nodes), this reduces peak
-    memory from O(n_interior * n_ports) dense to O(n_interior * chunk_size).
+    Two computation paths are available:
 
-    This is the explicit-form counterpart to SchurComplementOperator (matrix-free).
-    Use explicit form when S must be communicated (distributed assembly) or
-    when the interface system is solved directly.
+    **Partial Cholesky** (``use_partial_factor=True``): Factors the full block
+    matrix ``[[G_ii, G_ip], [G_pi, G_pp]]`` with a fill-reducing interior
+    ordering and ports last, then extracts S = L22 @ L22.T.  Does NOT require
+    ``lu_ii`` to be pre-set (factorization is done internally).  Requires
+    CHOLMOD.  Preferred when n_ports is large (>= threshold).
+
+    **Chunked multi-RHS** (``use_partial_factor=False``): Solves
+    ``G_ii^{-1} @ G_ip`` column-by-column in chunks.  Requires ``lu_ii`` to
+    be set (call ``factor_interior()`` first).  Works with both CHOLMOD and
+    splu backends.
+
+    When ``use_partial_factor`` is None (default), the path is auto-selected
+    based on CHOLMOD availability, port count, and user configuration.
 
     Args:
-        block_system: BlockMatrixSystem with factored interior (lu_ii must be set)
-        max_memory_gb: Memory budget for Z_chunk (default 4.0 GB). Chunk size is
-            computed to keep Z_chunk within this limit.
+        block_system: BlockMatrixSystem. For the chunked path, ``lu_ii`` must
+            be set. For the partial path, ``lu_ii`` is set as a side-effect.
+        max_memory_gb: Memory budget for Z_chunk in the chunked path
+            (default 4.0 GB).
+        use_partial_factor: If True, force the partial Cholesky path. If
+            False, force the chunked path. If None (default), auto-detect.
 
     Returns:
         Tuple of (S, stats) where S is the dense Schur complement matrix of
-        shape (n_ports, n_ports) and stats is a dict with ``chunk_size``,
-        ``n_chunks``, and ``schur_mem_bytes``.
+        shape (n_ports, n_ports) and stats is a dict with computation metadata.
+        Both paths include ``chunk_size``, ``n_chunks``, and
+        ``schur_mem_bytes`` keys for backward compatibility.
 
     Raises:
-        ValueError: If interior not factored (call factor_interior first)
+        ValueError: If the chunked path is selected but ``lu_ii`` is not set.
     """
-    if block_system.lu_ii is None:
-        raise ValueError("Interior not factored. Call factor_interior() first.")
-
     n_ports = block_system.n_ports
     n_interior = block_system.n_interior
 
     if n_interior == 0:
         # No interior nodes: Schur complement is just G_pp
         S = block_system.G_pp.toarray()
-        stats = {'chunk_size': 0, 'n_chunks': 0, 'schur_mem_bytes': S.nbytes}
+        stats = {
+            'path': 'trivial',
+            'chunk_size': 0,
+            'n_chunks': 0,
+            'schur_mem_bytes': S.nbytes,
+        }
         return S, stats
+
+    # --- Auto-detect path when use_partial_factor is None --------------------
+    from .unified_solver import HAS_CHOLMOD
+    if use_partial_factor is None:
+        use_partial = should_use_partial_factor(block_system)
+    else:
+        use_partial = use_partial_factor
+
+    # --- Partial Cholesky path -----------------------------------------------
+    if use_partial:
+        if not HAS_CHOLMOD:
+            raise ImportError(
+                "Partial Cholesky factorization requires sksparse.cholmod. "
+                "Install with: pip install scikit-sparse"
+            )
+        return _compute_schur_partial(block_system)
+
+    # --- Chunked multi-RHS path (existing) -----------------------------------
+    if block_system.lu_ii is None:
+        raise ValueError("Interior not factored. Call factor_interior() first.")
 
     # Compute optimal chunk size balancing memory, CHOLMOD limits, and BLAS efficiency
     INT_MAX = 2**31 - 1
@@ -492,6 +767,7 @@ def compute_explicit_schur(
         S[:, start:end] -= _ensure_dense(block_system.G_pi @ Z_chunk)
 
     stats = {
+        'path': 'chunked',
         'chunk_size': chunk_size,
         'n_chunks': n_chunks,
         'schur_mem_bytes': S.nbytes,

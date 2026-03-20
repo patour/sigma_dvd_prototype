@@ -90,6 +90,21 @@ class TileWorker(_TimeDomainMixin):
         self._tracked_nodes: Optional[Set[str]] = None
         self._tracked_waveforms: Dict[str, List[float]] = {}
 
+    def configure(self, settings: Dict[str, Any]) -> None:
+        """Apply solver configuration on this worker (call once after creation).
+
+        Propagates partial Cholesky settings so that Ray workers match the
+        driver-side configuration.
+        """
+        from solver.coupled_system import (
+            set_partial_factor_threshold,
+            set_partial_factor_reg_resistance,
+        )
+        if 'partial_factor_threshold' in settings:
+            set_partial_factor_threshold(settings['partial_factor_threshold'])
+        if 'partial_factor_reg_ohms' in settings:
+            set_partial_factor_reg_resistance(settings['partial_factor_reg_ohms'])
+
     def setup(
         self,
         tile_config_dict: Dict[str, Any],
@@ -270,27 +285,52 @@ class TileWorker(_TimeDomainMixin):
     def factor_and_compute_schur(self) -> Tuple[Any, List[str], Dict[str, Any]]:
         """Factor interior and compute explicit Schur complement.
 
+        When CHOLMOD is available and the tile has enough port nodes
+        (>= ``get_partial_factor_threshold()``), the partial Cholesky path
+        is used: a single full-matrix factorization replaces the separate
+        ``factor_interior()`` + chunked multi-RHS solve.  The partial path
+        sets ``lu_ii`` as a side-effect, so downstream RHS/recovery calls
+        work transparently.
+
         Returns:
             Tuple of (S_i as numpy array, boundary_node_list, stats dict)
         """
         from solver.coupled_system import (
-            compute_explicit_schur, _format_bytes, _sparse_mem_bytes,
+            compute_explicit_schur, should_use_partial_factor,
+            _format_bytes, _sparse_mem_bytes,
         )
 
+        bs = self._block_system
         t_total_start = time.perf_counter()
 
+        # Decide whether the partial Cholesky path will be used.
+        # Uses the shared predicate so we can skip the separate
+        # factor_interior() call when partial is active (partial
+        # factorization sets lu_ii internally).
+        will_use_partial = should_use_partial_factor(bs)
+
         t0 = time.perf_counter()
-        self._block_system.factor_interior()
+        if not will_use_partial:
+            bs.factor_interior()
         factor_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        S, schur_stats = compute_explicit_schur(self._block_system)
+        S, schur_stats = compute_explicit_schur(
+            bs, use_partial_factor=will_use_partial,
+        )
         schur_time = time.perf_counter() - t0
+
+        # Backfill factor_time from partial path's internal timing
+        # (when partial path is active, factor_interior() is skipped so
+        # factor_time ≈ 0; the actual analyze+factor time is in schur_stats)
+        if will_use_partial:
+            factor_time = schur_stats.get('factor_s', 0) + schur_stats.get('analyze_s', 0)
 
         total_time = time.perf_counter() - t_total_start
 
+        schur_path = schur_stats.get('path', 'chunked')
+
         # Build stats dict
-        bs = self._block_system
         stats = dict(bs.stats())  # n_ports, n_interior, G_ii_nnz, etc.
         stats.update({
             'factor_interior_s': factor_time,
@@ -299,6 +339,7 @@ class TileWorker(_TimeDomainMixin):
             'schur_shape': S.shape,
             'schur_mem_bytes': schur_stats['schur_mem_bytes'],
             'schur_chunk_size': schur_stats['chunk_size'],
+            'schur_path': schur_path,
         })
 
         # Backend info from factor_adapter (may be None if n_interior == 0)
@@ -323,7 +364,7 @@ class TileWorker(_TimeDomainMixin):
             "  G_pp: %s x %s, nnz=%s\n"
             "  G_pi: %s x %s, nnz=%s  |  G_ip: %s x %s, nnz=%s\n"
             "  Block system memory: %s\n"
-            "  factor_interior: %.3fs  |  backend: %s\n"
+            "  factor_interior: %.3fs  |  path: %s  |  backend: %s\n"
             "  compute_schur: %.3fs  |  Schur: %s x %s dense (%s)  |  chunk_size: %s",
             tid,
             f"{n_ii:,}", f"{n_ii:,}", f"{G_ii_nnz:,}", density, _format_bytes(G_ii_mem),
@@ -331,7 +372,7 @@ class TileWorker(_TimeDomainMixin):
             f"{n_pp:,}", f"{n_ii:,}", f"{stats['G_pi_nnz']:,}",
             f"{n_ii:,}", f"{n_pp:,}", f"{stats['G_ip_nnz']:,}",
             _format_bytes(stats['mem_bytes']),
-            factor_time, stats['factorization_backend_info'],
+            factor_time, schur_path, stats['factorization_backend_info'],
             schur_time, f"{S.shape[0]:,}", f"{S.shape[1]:,}",
             _format_bytes(schur_stats['schur_mem_bytes']),
             schur_stats['chunk_size'],
