@@ -18,5 +18,5 @@ netlist/netlist_brcm
 netlist/netlist_minion
 netlist_data/
 results/
-/parser/
-sim/
+/parser
+sim
