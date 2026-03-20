@@ -4,6 +4,8 @@ Test layout mirrors `src/`:
 
 ```
 tests/
+├── conftest.py     # Sets matplotlib Agg backend for headless testing
+├── fixtures.py     # Factory functions for edge case testing
 ├── graph/          # test_rx_graph, test_rx_algorithms
 ├── model/          # test_unified_core
 ├── solver/         # test_hierarchical_solver, test_coupled_hierarchical_solver,
@@ -21,8 +23,7 @@ tests/
 ├── reports/        # test_floating_nodes, test_topk_irdrop,
 │                   # test_floating_nodes_consistency (integration)
 ├── visualization/  # test_pdn_plotter, test_stripe_heatmap
-├── legacy/         # test_irdrop, test_partitioner
-└── fixtures.py     # Factory functions for edge case testing
+└── legacy/         # test_irdrop, test_partitioner
 ```
 
 ## Test Netlists
@@ -51,10 +52,10 @@ pytest -m unit
 # Run a specific integration test file
 pytest tests/distributed/test_distributed_integration.py -v
 
-# Run ALL integration tests (~4 min, slow — only when needed)
+# Run ALL integration tests (~6 min, slow — only when needed)
 pytest -m integration
 
-# Run everything (~4 min, slow — only as a final check)
+# Run everything (~10 min, slow — only as a final check)
 pytest
 
 # Specific module

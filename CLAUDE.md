@@ -105,10 +105,14 @@ src/
 │   ├── dynamic_solver.py       # DynamicIRDropSolver (batch DC)
 │   ├── transient_solver.py     # TransientIRDropSolver (RC)
 │   ├── adjoint_sensitivity.py  # IR-drop attribution
+│   ├── farfield_analysis.py    # Far-field to local boundary coupling analysis
 │   ├── pwl_smoothing.py        # PWLSmoother
-│   └── vectorized_sources.py   # VectorizedCurrentSources
+│   ├── vectorized_sources.py   # VectorizedCurrentSources
+│   └── dynamic_irdrop_decomposition.py  # CLI for dynamic IR-drop decomposition
 ├── parser/
 │   ├── netlist.py              # NetlistParser (main entry point)
+│   ├── pdn_parser.py           # CLI entry point for PDN parsing
+│   ├── sampled_netlist.py      # Sampled multi-tile netlist generator
 │   ├── spice_lexer.py          # SPICE element line tokenizer
 │   ├── current_sources.py      # CurrentSource, Pulse, PWL
 │   ├── graph_builder.py        # Builds rustworkx graph from tokens
@@ -143,6 +147,7 @@ src/
     ├── stimulus.py             # StimulusGenerator
     ├── grid_partitioner.py     # GridPartitioner
     ├── effective_resistance.py # EffectiveResistanceCalculator
+    ├── regional_voltage_solver.py # Regional IR-drop via effective resistance
     └── plot.py                 # plot_voltage_map, plot_ir_drop_map
 ```
 

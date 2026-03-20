@@ -5,6 +5,8 @@ SPICE-like tile-based netlist parsing. Entry point: `NetlistParser` in `netlist.
 ## Key Classes
 
 - **NetlistParser** (`netlist.py`): Main parser — gzip support, parallel parsing, net filtering
+- **pdn_parser.py**: CLI entry point for PDN netlist parsing
+- **sampled_netlist.py**: Sampled multi-tile netlist generator from netlist_minion
 - **parallel.py**: Worker functions and data classes for parallel tile parsing
 - **edge_attrs.py**: Memory-optimized edge attribute classes (ResistorEdge, CapacitorEdge, etc.)
 - **spice_lexer.py**: SPICE element line tokenizer

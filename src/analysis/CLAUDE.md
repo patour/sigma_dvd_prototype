@@ -1,6 +1,16 @@
 # Analysis Package
 
-Dynamic (time-domain) IR-drop analysis: quasi-static batch DC, transient RC, PWL smoothing, and adjoint sensitivity attribution.
+Dynamic (time-domain) IR-drop analysis: quasi-static batch DC, transient RC, PWL smoothing, adjoint sensitivity attribution, and far-field coupling analysis.
+
+## Files
+
+- `dynamic_solver.py` — DynamicIRDropSolver (batch DC at time points)
+- `transient_solver.py` — TransientIRDropSolver (implicit RC time integration)
+- `adjoint_sensitivity.py` — IR-drop attribution to aggressor sources
+- `farfield_analysis.py` — Far-field to local boundary coupling analysis
+- `pwl_smoothing.py` — PWLSmoother (analytical triangular LP filter)
+- `vectorized_sources.py` — VectorizedCurrentSources (batch evaluation)
+- `dynamic_irdrop_decomposition.py` — CLI for dynamic IR-drop decomposition
 
 ## Quasi-Static Analysis (Batch DC Solves)
 
