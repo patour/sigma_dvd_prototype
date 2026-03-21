@@ -42,9 +42,10 @@ from .tile_parsing import (  # noqa: F401
 )
 
 from .tile_worker_td import _TimeDomainMixin
+from .tile_worker_adjoint import _AdjointWorkerMixin
 
 
-class TileWorker(_TimeDomainMixin):
+class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
     """Per-tile actor for distributed DDM. Thin wrapper that delegates
     all math to coupled_system.py building blocks.
 
@@ -54,6 +55,10 @@ class TileWorker(_TimeDomainMixin):
     set_initial_voltages, init_peak_tracking, update_peak_stats,
     get_peak_stats, get_tracked_waveforms, use_smoothed_sources) are
     provided by _TimeDomainMixin in tile_worker_td.py.
+
+    Adjoint sensitivity methods (has_node, init_adjoint_source_mappings,
+    filter_adjoint_sources, reset_adjoint_state) are provided by
+    _AdjointWorkerMixin in tile_worker_adjoint.py.
     """
 
     def __init__(self):
@@ -89,6 +94,9 @@ class TileWorker(_TimeDomainMixin):
         self._peak_tracking_active: bool = False
         self._tracked_nodes: Optional[Set[str]] = None
         self._tracked_waveforms: Dict[str, List[float]] = {}
+
+        # --- Adjoint sensitivity state ---
+        self._init_adjoint_state()
 
     def configure(self, settings: Dict[str, Any]) -> None:
         """Apply solver configuration on this worker (call once after creation).

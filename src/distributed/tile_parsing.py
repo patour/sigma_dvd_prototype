@@ -12,6 +12,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
+
+
+def _parse_node_xy(node: str) -> Tuple[Optional[float], Optional[float]]:
+    """Extract ``(x, y)`` from a PDN node name ``<x>_<y>_<layer>``.
+
+    PDN node names encode coordinates as ``'1000_2000_M1'``.  This helper
+    splits on ``'_'`` and attempts to convert the first two parts to floats.
+
+    Returns ``(None, None)`` when parsing fails.
+    """
+    parts = str(node).split('_')
+    if len(parts) >= 2:
+        try:
+            return float(parts[0]), float(parts[1])
+        except ValueError:
+            pass
+    return None, None
+
 # Unit conversions matching pdn_parser.py
 R_TO_KOHM = 1e-3  # Ohm to kOhm
 C_TO_FF = 1e15  # Farad to femtoFarad

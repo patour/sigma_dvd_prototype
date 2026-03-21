@@ -4,6 +4,7 @@ Orchestrates the Schur complement domain decomposition across tiles.
 Follows the prepare/solve pattern matching the existing unified solver.
 Time-domain methods (quasi-static, transient) are provided by the
 _SolverTimeDomainMixin in solver_td.py.
+Adjoint sensitivity methods are provided by _AdjointMixin in solver_adjoint.py.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from .result import (
     DistributedSolverContext,
     TileSolveResult,
 )
+from .solver_adjoint import _AdjointMixin
 from .solver_td import _SolverTimeDomainMixin
 
 logger = logging.getLogger(__name__)
@@ -38,7 +40,7 @@ def _fmt_count(n: float) -> str:
     return f"{n:,.0f}"
 
 
-class DistributedDDMSolver(_SolverTimeDomainMixin):
+class DistributedDDMSolver(_AdjointMixin, _SolverTimeDomainMixin):
     """Solver for distributed DDM. Takes DistributedPowerGridModel.
 
     Follows the prepare/solve pattern:
@@ -46,11 +48,18 @@ class DistributedDDMSolver(_SolverTimeDomainMixin):
         solver = DistributedDDMSolver(model)
         ctx = solver.prepare()
         result = solver.solve_dc(ctx)
+
+    Time-domain methods (quasi-static, transient) are provided by the
+    _SolverTimeDomainMixin in solver_td.py.
+
+    Adjoint sensitivity methods (analyze_adjoint_static) are provided by
+    _AdjointMixin in solver_adjoint.py.
     """
 
     def __init__(self, model: DistributedPowerGridModel):
         self.model = model
         self._topology = None  # Cached DistributedTopologyContext for reuse
+        self._adjoint_sources_initialized = False  # For idempotent source init
 
     def prepare(self, verbose: bool = False) -> DistributedSolverContext:
         """Factor tiles + assemble/factor interface. Expensive, reusable for batch.

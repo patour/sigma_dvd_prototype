@@ -19,7 +19,8 @@ tests/
 │                   # test_parser_regression, test_pdn_integration (integration)
 ├── distributed/    # test_distributed_solver, test_distributed_heatmap,
 │                   # test_distributed_cli, test_time_domain,
-│                   # test_distributed_integration, test_time_domain_integration (integration)
+│                   # test_distributed_integration, test_time_domain_integration,
+│                   # test_adjoint_integration (integration)
 ├── reports/        # test_floating_nodes, test_topk_irdrop,
 │                   # test_floating_nodes_consistency (integration)
 ├── visualization/  # test_pdn_plotter, test_stripe_heatmap
@@ -64,6 +65,11 @@ pytest tests/solver/test_hierarchical_solver.py
 # Single test
 pytest tests/legacy/test_irdrop.py::TestIRDrop::test_no_load_currents_all_pad_voltage -v
 ```
+
+## Naming Conventions
+
+- **Unit tests**: `test_<topic>.py` — fast tests marked `@pytest.mark.unit`
+- **Integration tests**: `test_<topic>_integration.py` — slow tests marked `@pytest.mark.integration`, require real netlist data
 
 > **Test priority:** First run individual unit test files related to the affected
 > area, then `pytest -m unit` for full unit coverage. Run individual integration
