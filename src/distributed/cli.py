@@ -178,7 +178,7 @@ def _solve_quasi_static(
         verbose=args.verbose,
     )
 
-    _report_time_domain_result(result, args, t0, mode='quasi-static')
+    _report_time_domain_result(result, args, t0, mode='quasi-static', solver=solver)
 
 
 def _solve_transient(
@@ -215,7 +215,7 @@ def _solve_transient(
 
     dc_ctx.release()
     trans_ctx.release()
-    _report_time_domain_result(result, args, t0, mode='transient')
+    _report_time_domain_result(result, args, t0, mode='transient', solver=solver)
 
 
 def _report_time_domain_result(
@@ -223,6 +223,7 @@ def _report_time_domain_result(
     args: argparse.Namespace,
     t0: float,
     mode: str,
+    solver: Any = None,
 ) -> None:
     """Print summary and optionally save a time-domain result.
 
@@ -246,12 +247,19 @@ def _report_time_domain_result(
         result.dump(str(result_pkl))
         logger.info(f"Results saved to {result_pkl}")
 
-    # Heatmaps not yet supported for time-domain modes
-    if args.plot:
-        logger.info(
-            "Heatmap generation is not yet supported for %s mode. "
-            "Skipping --plot.", mode,
+    if args.plot and solver is not None:
+        plot_layers = args.plot_layers.split(',') if args.plot_layers else None
+        solver.generate_td_reports(
+            result,
+            output_dir=args.output or './results',
+            plot_layers=plot_layers,
+            max_stripes=args.max_stripes,
+            stripe_bin_size=args.stripe_bin_size,
+            top_k=args.top_k,
+            verbose=args.verbose,
         )
+    elif args.plot:
+        logger.warning("Cannot generate heatmaps: solver reference not available.")
 
 
 def cmd_run(args: argparse.Namespace) -> None:
