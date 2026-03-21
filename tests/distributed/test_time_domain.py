@@ -1794,3 +1794,209 @@ class TestRecoverAndSetInitialVoltages:
             assert stats['n_interior'] > 0
         finally:
             model.shutdown()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 15. Current node mask tests
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _make_worker_with_coordinate_nodes():
+    """Create a TileWorker with PDN-style coordinate node names.
+
+    Topology (single tile):
+        1000_2000_M0  (interior, x=1000, y=2000) --[1mS]-- 3000_4000_M0 (port)
+        1000_2000_M0  --[1mS]-- 0 (ground)
+        5000_6000_M0  (interior, x=5000, y=6000) --[2mS]-- 3000_4000_M0 (port)
+        5000_6000_M0  --[1mS]-- 0 (ground)
+
+    Port: {3000_4000_M0}
+    Interior: {1000_2000_M0, 5000_6000_M0}
+
+    Current injections: 1000_2000_M0 -> 0.5 mA, 5000_6000_M0 -> 0.3 mA
+
+    Returns:
+        Configured TileWorker instance with coordinate-parseable node names.
+    """
+    return _make_worker_with_tile(
+        edges=[
+            ('1000_2000_M0', '3000_4000_M0', 1.0),
+            ('1000_2000_M0', '0', 1.0),
+            ('5000_6000_M0', '3000_4000_M0', 2.0),
+            ('5000_6000_M0', '0', 1.0),
+        ],
+        port_nodes={'3000_4000_M0'},
+        currents={'1000_2000_M0': 0.5, '5000_6000_M0': 0.3},
+    )
+
+
+class TestCurrentNodeMask:
+    """Tests for set_current_node_mask and build_node_mask_for_window."""
+
+    def test_build_mask_inside_window(self):
+        """Mask selects nodes inside a spatial window; outside nodes are 0."""
+        worker = _make_worker_with_coordinate_nodes()
+
+        # Window covers (0..2000, 0..3000) => includes 1000_2000_M0 only
+        mask = worker.build_node_mask_for_window(
+            x_min=0, x_max=2000, y_min=0, y_max=3000, inside=True,
+        )
+
+        bs = worker._block_system
+        n_ports = bs.n_ports
+        # Node 1000_2000_M0 is interior, should be 1.0
+        idx_1000 = bs.interior_to_idx['1000_2000_M0'] + n_ports
+        assert mask[idx_1000] == 1.0
+
+        # Node 5000_6000_M0 is interior, outside the window, should be 0.0
+        idx_5000 = bs.interior_to_idx['5000_6000_M0'] + n_ports
+        assert mask[idx_5000] == 0.0
+
+        # Port node 3000_4000_M0: x=3000 > x_max=2000, outside window
+        idx_port = bs.port_to_idx['3000_4000_M0']
+        assert mask[idx_port] == 0.0
+
+    def test_build_mask_outside_window(self):
+        """With inside=False, mask selects nodes OUTSIDE the window."""
+        worker = _make_worker_with_coordinate_nodes()
+
+        # Window covers (0..2000, 0..3000) => 1000_2000_M0 inside
+        mask = worker.build_node_mask_for_window(
+            x_min=0, x_max=2000, y_min=0, y_max=3000, inside=False,
+        )
+
+        bs = worker._block_system
+        n_ports = bs.n_ports
+
+        # 1000_2000_M0 is inside window => masked OUT => 0.0
+        idx_1000 = bs.interior_to_idx['1000_2000_M0'] + n_ports
+        assert mask[idx_1000] == 0.0
+
+        # 5000_6000_M0 is outside window => selected => 1.0
+        idx_5000 = bs.interior_to_idx['5000_6000_M0'] + n_ports
+        assert mask[idx_5000] == 1.0
+
+        # 3000_4000_M0 is outside window => selected => 1.0
+        idx_port = bs.port_to_idx['3000_4000_M0']
+        assert mask[idx_port] == 1.0
+
+    def test_mask_shape(self):
+        """Returned mask has shape (n_ports + n_interior,)."""
+        worker = _make_worker_with_coordinate_nodes()
+
+        mask = worker.build_node_mask_for_window(
+            x_min=0, x_max=10000, y_min=0, y_max=10000, inside=True,
+        )
+
+        bs = worker._block_system
+        expected_size = bs.n_ports + bs.n_interior
+        assert mask.shape == (expected_size,)
+        assert mask.dtype == np.float64
+
+    def test_set_and_clear_mask(self):
+        """set_current_node_mask stores the mask; None clears it."""
+        worker = _make_worker_with_tile(
+            edges=[('a', 'b', 2.0), ('b', '0', 1.0)],
+            port_nodes={'a'},
+        )
+
+        bs = worker._block_system
+        n_total = bs.n_ports + bs.n_interior
+        mask = np.ones(n_total, dtype=np.float64)
+
+        # Set mask
+        worker.set_current_node_mask(mask)
+        assert worker._current_node_mask is not None
+        np.testing.assert_array_equal(worker._current_node_mask, mask)
+
+        # Clear mask
+        worker.set_current_node_mask(None)
+        assert worker._current_node_mask is None
+
+    def test_mask_zeros_currents_in_qs_path(self):
+        """All-zeros mask zeroes out all current contributions in evaluate_and_get_reduced_rhs.
+
+        With mask=0 everywhere, the reduced RHS should only contain the
+        Dirichlet contribution (no current from VCS). Compare with a call
+        without mask to verify they differ.
+        """
+        from analysis.vectorized_sources import VectorizedCurrentSources
+        from parser.current_sources import CurrentSource
+
+        worker = _make_worker_with_tile(
+            edges=[('a', 'b', 2.0), ('b', '0', 1.0)],
+            port_nodes={'a'},
+            currents={'b': 0.5},
+        )
+
+        # Build VCS with a DC source on interior node 'b'
+        bs = worker._block_system
+        n_ports = bs.n_ports
+        n_interior = bs.n_interior
+        n_nodes = n_ports + n_interior
+        node_to_idx = dict(bs.port_to_idx)
+        for node, idx in bs.interior_to_idx.items():
+            node_to_idx[node] = idx + n_ports
+
+        src = CurrentSource(name='i1', node1='b', node2='0', dc_value=1.0)
+        worker._vec_sources = VectorizedCurrentSources.from_current_sources(
+            {'i1': src}, node_to_idx, n_nodes,
+        )
+        worker._active_sources = worker._vec_sources
+
+        # Evaluate WITHOUT mask -> should have current contributions
+        g_no_mask, total_no_mask, _ = worker.evaluate_and_get_reduced_rhs(t=0.0)
+
+        # Set all-zero mask -> all currents zeroed
+        zero_mask = np.zeros(n_nodes, dtype=np.float64)
+        worker.set_current_node_mask(zero_mask)
+
+        g_with_mask, total_with_mask, _ = worker.evaluate_and_get_reduced_rhs(t=0.0)
+
+        # Zero mask should produce zero total current
+        np.testing.assert_allclose(total_with_mask, 0.0, atol=1e-15)
+
+        # The no-mask path should have nonzero total current
+        assert abs(total_no_mask) > 0.1, (
+            f"Expected nonzero total current without mask, got {total_no_mask}"
+        )
+
+        # The reduced RHS values must differ since current contributions change
+        assert not np.allclose(g_no_mask, g_with_mask, atol=1e-10), (
+            "Masked and unmasked reduced RHS should differ when VCS is active"
+        )
+
+    def test_none_mask_is_noop(self):
+        """Setting mask to None produces the same result as never setting one."""
+        from analysis.vectorized_sources import VectorizedCurrentSources
+        from parser.current_sources import CurrentSource
+
+        worker = _make_worker_with_tile(
+            edges=[('a', 'b', 2.0), ('b', '0', 1.0)],
+            port_nodes={'a'},
+            currents={'b': 0.5},
+        )
+
+        bs = worker._block_system
+        n_ports = bs.n_ports
+        n_interior = bs.n_interior
+        n_nodes = n_ports + n_interior
+        node_to_idx = dict(bs.port_to_idx)
+        for node, idx in bs.interior_to_idx.items():
+            node_to_idx[node] = idx + n_ports
+
+        src = CurrentSource(name='i1', node1='b', node2='0', dc_value=1.0)
+        worker._vec_sources = VectorizedCurrentSources.from_current_sources(
+            {'i1': src}, node_to_idx, n_nodes,
+        )
+        worker._active_sources = worker._vec_sources
+
+        # Evaluate with no mask ever set (default None)
+        g_default, total_default, _ = worker.evaluate_and_get_reduced_rhs(t=0.0)
+
+        # Explicitly set mask to None, evaluate again
+        worker.set_current_node_mask(None)
+        g_none, total_none, _ = worker.evaluate_and_get_reduced_rhs(t=0.0)
+
+        np.testing.assert_allclose(g_none, g_default, atol=1e-15)
+        np.testing.assert_allclose(total_none, total_default, atol=1e-15)

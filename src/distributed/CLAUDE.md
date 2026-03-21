@@ -10,9 +10,11 @@ Mixin pattern keeps files under ~800 lines:
 |------|------|
 | `solver.py` | `DistributedDDMSolver` — DC orchestration (`prepare`, `solve_dc`) |
 | `solver_td.py` | Time-domain mixin: `preprocess_sources`, `solve_quasi_static`, `prepare_transient`, `solve_transient` |
+| `solver_adjoint.py` | Adjoint mixin: `analyze_adjoint_static`, `analyze_adjoint` (backward sweep) |
 | `tile_worker.py` | `TileWorker` — per-tile actor wrapping `BlockMatrixSystem` |
-| `tile_worker_td.py` | Time-domain mixin: VCS init, transient factor/RHS, peak tracking |
-| `tile_parsing.py` | Stateless parsing: `TileData`, `_parse_tile_ckt`, `_iter_instance_sources` |
+| `tile_worker_td.py` | Time-domain mixin: VCS init, transient factor/RHS, peak tracking, current node masking |
+| `tile_worker_adjoint.py` | Adjoint worker mixin: terminal/step RHS, lambda recovery, contribution accumulation |
+| `tile_parsing.py` | Stateless parsing: `TileData`, `_parse_tile_ckt`, `_iter_instance_sources`, `_parse_node_xy` |
 | `model.py` | `DistributedPowerGridModel`, `ParsedTileBundle`, `create_distributed_model` |
 | `parser.py` | `DistributedNetlistParser` — parse + dump tiles to pkl |
 | `result.py` | Context/result dataclasses (`DistributedSolverContext`, `DistributedTransientContext`, etc.) |
@@ -56,6 +58,10 @@ prepare_transient()  -->  DistributedTransientContext   (transient)
 - Dirichlet RHS in time loop: use `rhs_dirichlet_G` (G-only), NOT `rhs_dirichlet_interface` (A-based, includes cap terms). BE: `+rhs_d_G`, TR: `+2*rhs_d_G`.
 - Unit scaling: `dt_scaled = dt_seconds * 1e12` (ps). `C_coeff = 1/dt_scaled` (BE) or `2/dt_scaled` (TR).
 - Tile matrix may be PSD (not SPD) without ground connections. `_compute_schur_partial()` adds 1e-5 mS regularization.
+
+## Current Node Masking (Near/Far Decomposition)
+
+`TileWorker.set_current_node_mask(mask)` / `build_node_mask_for_window(x0, x1, y0, y1, inside=True)` enable spatially-filtered transient solves. The mask is applied in both `evaluate_and_get_reduced_rhs` (QS) and `get_transient_reduced_rhs` (transient) after `evaluate_at_time(t)`. The transient factorization (A = G + C*C) is independent of currents and can be reused across masked solves.
 
 ## Key Entry Points
 

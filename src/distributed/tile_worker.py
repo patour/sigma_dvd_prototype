@@ -87,6 +87,8 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         self._last_f_i: Optional[np.ndarray] = None
         # Quasi-static: cached interior RHS from last evaluate_and_get_reduced_rhs
         self._last_qs_rhs_i: Optional[np.ndarray] = None
+        # Per-node current mask (float64): 1.0 = keep, 0.0 = zero out
+        self._current_node_mask: Optional[np.ndarray] = None
 
         # Peak tracking
         self._peak_per_node: Dict[str, Tuple[float, float]] = {}

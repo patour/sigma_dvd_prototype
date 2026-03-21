@@ -73,6 +73,7 @@ python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --mode tra
 - **Distributed QS**: `ctx = prepare()` -> `preprocess_sources()` -> `solve_quasi_static(ctx, t_array)` -> `DistributedQuasiStaticResult` (peaks lazy on workers)
 - **Distributed Transient**: `dc_ctx = prepare()` -> `trans_ctx = prepare_transient(dt, method)` -> `preprocess_sources()` -> `solve_transient(trans_ctx, dc_context=dc_ctx)` -> `DistributedTransientResult`
 - **Distributed Transient (ic_voltages)**: `trans_ctx = prepare_transient(dt, method)` -> `solve_transient(trans_ctx, ic_voltages=dc_result.voltages)` -> `DistributedTransientResult`
+- **Distributed Adjoint**: `dc_ctx = prepare()` -> `solver.analyze_adjoint_static(victim, T, dc_ctx)` or `solver.analyze_adjoint(victim, T, trans_ctx, trans_result)` -> `AdjointAttribution`
 
 **Key Constraint:** Pads (voltage sources) are Dirichlet BCs at Vdd, eliminated via Schur complement. LU factorization cached for batch solves.
 
@@ -217,6 +218,9 @@ src/
 - **Tile matrix SPD**: Per-tile full matrix `[[G_ii, G_ip], [G_pi, G_pp]]` may be PSD (not SPD) for tiles without ground connections. `_compute_schur_partial()` adds 1e-5 mS regularization to port diagonals and subtracts it from S after extraction. `G_ii` alone is always SPD (diagonal includes connections to ports).
 - **Partial Cholesky Schur path**: `compute_explicit_schur(use_partial_factor=True)` factors full `[interior, ports]` matrix and extracts `S = L22 @ L22.T`. Sets `lu_ii` via solve_L/Lt truncation trick. Threshold controlled by `set_partial_factor_threshold()` (default 500). CHOLMOD-only.
 - **`build_block_system_from_edges` vs `extract_block_matrices`**: The tile worker uses `build_block_system_from_edges` (no `exclude_port_to_port` param — includes all edges). The flat coupled solver uses `extract_block_matrices` (has `exclude_port_to_port` flag). Don't confuse them.
+- **`solve_quasi_static` default smoothing**: Calling without `smoothed_sources` triggers `preprocess_sources(smooth=True)`, silently overwriting `_active_sources` on workers. Always pass a `smoothed_sources` handle if VCS is already initialized.
+- **Notebook cwd for Ray**: Ray workers inherit the driver's cwd. Notebooks must `os.chdir` to the project root before creating the model so tile metadata relative paths resolve. Pattern: `os.chdir(Path(__file__).parent.parent if '__file__' in dir() else Path('..'))`
+- **`_parse_node_xy` shared utility**: Use `from distributed.tile_parsing import _parse_node_xy` for PDN coordinate parsing (`'1000_2000_M1'` → `(1000.0, 2000.0)`). Do not duplicate this function.
 
 ## Typical Workflow Patterns
 

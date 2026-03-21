@@ -155,6 +155,82 @@ class _TimeDomainMixin:
                 )
             self._active_sources = self._vec_sources
 
+    # --- 4c'. Current node masking (for near/far decomposition) --------
+
+    def set_current_node_mask(self, mask: Optional[np.ndarray]) -> None:
+        """Set per-node current mask for spatial source filtering.
+
+        When set, both :meth:`evaluate_and_get_reduced_rhs` and
+        :meth:`get_transient_reduced_rhs` multiply ``current_array`` by
+        the mask immediately after evaluating sources.
+
+        Args:
+            mask: Float64 array of shape ``(n_ports + n_interior,)``
+                where ``1.0`` keeps and ``0.0`` zeroes the current at
+                that node index.  Pass ``None`` to clear.
+        """
+        self._current_node_mask = mask
+
+    def build_node_mask_for_window(
+        self,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+        inside: bool = True,
+    ) -> np.ndarray:
+        """Build a per-node current mask from a spatial window.
+
+        Iterates ``port_to_idx`` and ``interior_to_idx``, parses
+        coordinates from node names via
+        :func:`~distributed.tile_parsing._parse_node_xy`, and returns
+        a float64 mask where ``1.0`` selects the node.
+
+        Args:
+            x_min: Left edge of the spatial window.
+            x_max: Right edge of the spatial window.
+            y_min: Bottom edge of the spatial window.
+            y_max: Top edge of the spatial window.
+            inside: If ``True``, select nodes **inside** the window.
+                If ``False``, select nodes **outside** the window.
+
+        Returns:
+            Float64 array of shape ``(n_ports + n_interior,)``
+            suitable for :meth:`set_current_node_mask`.
+        """
+        from .tile_parsing import _parse_node_xy
+
+        bs = self._block_system
+        n_ports = bs.n_ports
+        n_interior = bs.n_interior
+        n_total = n_ports + n_interior
+
+        mask = np.zeros(n_total, dtype=np.float64)
+
+        for node, idx in bs.port_to_idx.items():
+            x, y = _parse_node_xy(node)
+            if x is None:
+                # Can't determine position; include in "outside" set
+                if not inside:
+                    mask[idx] = 1.0
+                continue
+            in_window = (x_min <= x <= x_max) and (y_min <= y <= y_max)
+            if in_window == inside:
+                mask[idx] = 1.0
+
+        for node, idx in bs.interior_to_idx.items():
+            offset_idx = idx + n_ports
+            x, y = _parse_node_xy(node)
+            if x is None:
+                if not inside:
+                    mask[offset_idx] = 1.0
+                continue
+            in_window = (x_min <= x <= x_max) and (y_min <= y <= y_max)
+            if in_window == inside:
+                mask[offset_idx] = 1.0
+
+        return mask
+
     # --- 4d. Quasi-static evaluate + reduced RHS -----------------------
 
     def evaluate_and_get_reduced_rhs(
@@ -194,6 +270,8 @@ class _TimeDomainMixin:
             return rhs, total, stats
 
         current_array = self._active_sources.evaluate_at_time(t)
+        if self._current_node_mask is not None:
+            current_array = current_array * self._current_node_mask
         total_current = float(np.sum(current_array))
 
         I_p = current_array[:n_ports]
@@ -408,6 +486,8 @@ class _TimeDomainMixin:
         # Evaluate currents
         if self._active_sources is not None:
             current_array = self._active_sources.evaluate_at_time(t)
+            if self._current_node_mask is not None:
+                current_array = current_array * self._current_node_mask
             I_p = current_array[:n_ports]
             I_i = current_array[n_ports:n_ports + n_interior]
         else:
