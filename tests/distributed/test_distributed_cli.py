@@ -267,8 +267,8 @@ class TestTimeDomainReport:
         assert 'quasi-static' in caplog.text
         assert '5.000 mV' in caplog.text
 
-    def test_report_plot_skip_message(self, caplog):
-        """With --plot, should log that heatmaps are not yet supported."""
+    def test_report_plot_without_solver_warns(self, caplog):
+        """With --plot but no solver, should log a warning."""
         import time
         import numpy as np
         from distributed.cli import _report_time_domain_result
@@ -281,10 +281,44 @@ class TestTimeDomainReport:
         args = argparse.Namespace(output=None, plot=True)
 
         import logging
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.WARNING):
             _report_time_domain_result(mock_result, args, time.perf_counter(), 'transient')
 
-        assert 'not yet supported' in caplog.text
+        assert 'solver reference not available' in caplog.text
+
+    def test_report_plot_calls_generate_td_reports(self):
+        """With --plot and solver, should call solver.generate_td_reports()."""
+        import time
+        import numpy as np
+        from distributed.cli import _report_time_domain_result
+
+        mock_result = MagicMock()
+        mock_result.t_array = np.linspace(0, 100e-9, 10)
+        mock_result.peak_ir_drop = 0.001
+        mock_result.peak_ir_drop_time = 10e-9
+
+        mock_solver = MagicMock()
+
+        args = argparse.Namespace(
+            output='./results', plot=True,
+            plot_layers='M1,M2', max_stripes=500,
+            stripe_bin_size=100, top_k=50, verbose=True,
+        )
+
+        _report_time_domain_result(
+            mock_result, args, time.perf_counter(), 'transient',
+            solver=mock_solver,
+        )
+
+        mock_solver.generate_td_reports.assert_called_once_with(
+            mock_result,
+            output_dir='./results',
+            plot_layers=['M1', 'M2'],
+            max_stripes=500,
+            stripe_bin_size=100,
+            top_k=50,
+            verbose=True,
+        )
 
     def test_report_saves_result(self, tmp_path):
         """With --output, should call result.dump()."""

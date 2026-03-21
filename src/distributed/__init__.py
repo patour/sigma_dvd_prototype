@@ -48,6 +48,7 @@ from .heatmap import (
     merge_tile_prebins,
     compute_boundary_ownership,
     plot_distributed_heatmaps,
+    plot_distributed_td_heatmaps,
 )
 
 __all__ = [
@@ -89,4 +90,5 @@ __all__ = [
     "merge_tile_prebins",
     "compute_boundary_ownership",
     "plot_distributed_heatmaps",
+    "plot_distributed_td_heatmaps",
 ]

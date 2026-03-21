@@ -737,6 +737,33 @@ class _TimeDomainMixin:
         """Return ``{node: (max_drop, time_of_max)}``."""
         return self._peak_per_node
 
+    def prebin_peak_data(
+        self,
+        bin_spec: 'GlobalBinSpec',
+        exclude_set: Optional[Set[str]] = None,
+    ) -> Dict[str, List[Optional[np.ndarray]]]:
+        """Pre-bin peak IR-drop data into stripe bins for heatmap rendering.
+
+        Converts stored per-node peak drops back to voltages
+        (``voltage = vdd - drop``) before delegating to
+        :func:`distributed.heatmap.prebin_tile`, which expects voltage
+        inputs and internally computes IR-drop in mV.
+        """
+        if not self._peak_tracking_active or not self._peak_per_node:
+            return {}
+        vdd = self._peak_vdd
+        voltages = {node: vdd - drop for node, (drop, _t) in self._peak_per_node.items()}
+        from .heatmap import prebin_tile
+        return prebin_tile(voltages, bin_spec, exclude_set)
+
+    def get_top_k_peaks(self, k: int) -> List[Tuple[str, float, float]]:
+        """Return top-K nodes by peak IR-drop as ``[(node, drop, time), ...]``."""
+        if not self._peak_per_node:
+            return []
+        items = [(node, drop, t) for node, (drop, t) in self._peak_per_node.items()]
+        items.sort(key=lambda x: x[1], reverse=True)
+        return items[:k]
+
     def get_tracked_waveforms(self) -> Dict[str, List[float]]:
         """Return ``{node: [v0, v1, ...]}`` for tracked nodes."""
         return self._tracked_waveforms

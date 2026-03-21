@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -189,29 +189,10 @@ def build_global_bin_spec(
 ) -> GlobalBinSpec:
     """Build a shared ``GlobalBinSpec`` from merged per-tile layer metadata.
 
-    For each layer, unions bounding boxes, merges stripe coordinates,
-    determines orientation from aggregated edge counts, computes display
-    stripe boundaries, and creates uniform bin edges per stripe.
+    Unions bounding boxes, merges stripe coordinates, determines
+    orientation from edge counts, and creates uniform bin edges.
 
-    Parameters
-    ----------
-    tile_metadatas : list of dict
-        Results from ``TileWorker.get_layer_metadata()`` per tile. Each
-        dict maps ``layer -> { 'bbox', 'n_nodes', 'stripe_coords_h',
-        'stripe_coords_v', 'edge_orientation' }``.
-    nominal_voltage : float
-        Vdd in volts for IR-drop computation.
-    aggregation : str
-        ``'max'`` (IR-drop) or ``'sum'`` (current).
-    max_stripes : int
-        Maximum display stripes before consolidation.
-    stripe_bin_size : int or None
-        Bins per stripe along the parallel axis. ``None`` = auto (50).
-
-    Returns
-    -------
-    GlobalBinSpec
-        Shared binning specification for all tiles.
+    *tile_metadatas*: per-tile dicts from ``TileWorker.get_layer_metadata()``.
     """
     if aggregation not in _VALID_AGGREGATIONS:
         raise ValueError(
@@ -568,35 +549,10 @@ def plot_distributed_heatmaps(
     is_current: bool = False,
     verbose: bool = False,
 ) -> None:
-    """Generate per-layer stripe heatmaps from distributed DDM results.
+    """Generate per-layer stripe heatmaps from distributed DDM DC results.
 
-    Orchestrates the two-round-trip pipeline:
-
-    1. Collect ``get_layer_metadata()`` from all workers, merge, and build
-       a ``GlobalBinSpec``.
-    2. Pre-bin each tile's node values using ``prebin_tile()`` (via
-       ``map_func`` when available), then ``merge_tile_prebins()`` and
-       render.
-
-    Parameters
-    ----------
-    result : DistributedSolveResult
-        Per-tile solve result from ``DistributedDDMSolver.solve_dc()``.
-    model : DistributedPowerGridModel
-        The distributed model (needed for backend, workers, metadata).
-    output_dir : str
-        Directory to write PNG files.
-    plot_layers : list of str or None
-        Layers to plot. ``None`` = all detected layers.
-    max_stripes : int
-        Maximum display stripes before consolidation.
-    stripe_bin_size : int or None
-        Bins per stripe. ``None`` = auto.
-    is_current : bool
-        If ``True``, plot current magnitude (sum aggregation) instead of
-        IR-drop (max aggregation).
-    verbose : bool
-        Log progress.
+    Two round-trips: (1) metadata -> ``GlobalBinSpec``,
+    (2) per-tile prebinning via ``map_func`` -> merge -> render.
     """
     import time
 
@@ -683,47 +639,127 @@ def plot_distributed_heatmaps(
     )
 
 
+def plot_distributed_td_heatmaps(
+    model: Any,  # DistributedPowerGridModel
+    nominal_voltage: float,
+    net_name: Optional[str] = None,
+    output_dir: str = './plots',
+    plot_layers: Optional[List[str]] = None,
+    max_stripes: int = 2000,
+    stripe_bin_size: Optional[int] = None,
+    title_prefix: str = 'Peak IR-Drop',
+    verbose: bool = False,
+) -> None:
+    """Generate per-layer stripe heatmaps from worker-side peak IR-drop data.
+
+    Like :func:`plot_distributed_heatmaps` but reads peak data directly
+    from workers via ``prebin_peak_data()`` — no ``result`` dict needed.
+    Only compact pre-binned arrays are transferred to the coordinator.
+    """
+    import time
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # -- Round trip 1: collect layer metadata ---------------------------------
+    t0 = time.perf_counter()
+    tile_metadatas = model.backend.call_all(model.workers, 'get_layer_metadata')
+    t_meta = time.perf_counter() - t0
+
+    if verbose:
+        logger.info("TD heatmap: collected metadata from %d tiles in %.3fs",
+                     len(tile_metadatas), t_meta)
+
+    bin_spec = build_global_bin_spec(
+        tile_metadatas=tile_metadatas,
+        nominal_voltage=nominal_voltage,
+        aggregation='max',
+        max_stripes=max_stripes,
+        stripe_bin_size=stripe_bin_size,
+    )
+
+    if verbose:
+        for layer, spec in bin_spec.layers.items():
+            logger.info("  Layer %s: %s, %d stripes",
+                         layer, spec.orientation, len(spec.stripe_edges))
+
+    # -- Round trip 2: workers prebin peak data locally -----------------------
+    t0 = time.perf_counter()
+
+    exclusion_map = compute_boundary_ownership(model)
+    prebin_args = [
+        (bin_spec, exclusion_map.get(i, set()))
+        for i in range(len(model.metadata.tile_configs))
+    ]
+
+    tile_prebins = model.backend.call_all(
+        model.workers, 'prebin_peak_data', args_per_actor=prebin_args,
+    )
+    t_prebin = time.perf_counter() - t0
+
+    if verbose:
+        logger.info("TD heatmap: pre-binned %d tiles in %.3fs",
+                     len(tile_prebins), t_prebin)
+
+    if all(not tp for tp in tile_prebins):
+        logger.warning(
+            "TD heatmap: all tiles returned empty prebins. "
+            "Was peak tracking enabled via init_peak_tracking()?"
+        )
+        return
+
+    # -- Merge and render -----------------------------------------------------
+    t0 = time.perf_counter()
+    merged = merge_tile_prebins(tile_prebins, bin_spec)
+    t_merge = time.perf_counter() - t0
+
+    if verbose:
+        logger.info("TD heatmap: merged prebins in %.3fs", t_merge)
+
+    if plot_layers is not None:
+        merged = {k: v for k, v in merged.items() if k in plot_layers}
+
+    _render_merged_heatmaps(
+        merged_data=merged,
+        bin_spec=bin_spec,
+        output_dir=output_dir,
+        title_prefix=title_prefix,
+        net_name=net_name,
+        verbose=verbose,
+    )
+
+
 def _render_merged_heatmaps(
     merged_data: Dict[str, List[Tuple[float, float, np.ndarray, np.ndarray]]],
     bin_spec: GlobalBinSpec,
     output_dir: str,
     is_current: bool = False,
     net_name: Optional[str] = None,
+    title_prefix: Optional[str] = None,
     verbose: bool = False,
 ) -> None:
-    """Render merged stripe data to PNG files.
+    """Render merged stripe data to per-layer PNG files.
 
-    Delegates per-layer rendering to
-    ``visualization.stripe_heatmap.render_from_prebinned_stripe_data()``.
-
-    Parameters
-    ----------
-    merged_data : dict
-        ``layer -> [(stripe_start, stripe_end, bin_edges, bin_values), ...]``
-    bin_spec : GlobalBinSpec
-        For orientation info.
-    output_dir : str
-        Directory to save PNGs.
-    is_current : bool
-        Whether this is a current heatmap.
-    net_name : str or None
-        Net name for title.
-    verbose : bool
-        Log progress.
+    When *title_prefix* is ``None``, defaults to ``'IR-Drop'`` or
+    ``'Current'`` based on *is_current*.  A custom prefix also sets the
+    value label for non-current mode (e.g. ``"Peak IR-Drop (mV)"``).
     """
     from visualization.stripe_heatmap import render_from_prebinned_stripe_data
 
     if is_current:
         cmap = 'hot_r'
         value_label = 'Current (mA)'
-        title_prefix = 'Current'
+        default_prefix = 'Current'
     else:
         cmap = 'RdYlGn_r'
-        value_label = 'IR-Drop (mV)'
-        title_prefix = 'IR-Drop'
+        default_prefix = 'IR-Drop'
+
+    effective_prefix = title_prefix if title_prefix is not None else default_prefix
+
+    if not is_current:
+        value_label = f'{effective_prefix} (mV)'
 
     if net_name:
-        title_prefix = f'{title_prefix} ({net_name})'
+        effective_prefix = f'{effective_prefix} ({net_name})'
 
     for layer, stripes in merged_data.items():
         spec = bin_spec.layers[layer]
@@ -745,7 +781,7 @@ def _render_merged_heatmaps(
         # Build output filename matching the previous naming convention
         output_file = os.path.join(
             output_dir,
-            f'{title_prefix.lower().replace(" ", "_").replace("(", "").replace(")", "")}'
+            f'{effective_prefix.lower().replace(" ", "_").replace("(", "").replace(")", "")}'
             f'_heatmap_{layer}.png',
         )
 
@@ -755,7 +791,7 @@ def _render_merged_heatmaps(
             output_path=output_file,
             layer=layer,
             cmap=cmap,
-            title_prefix=title_prefix,
+            title_prefix=effective_prefix,
             value_label=value_label,
             n_nodes=spec.n_nodes,
         )

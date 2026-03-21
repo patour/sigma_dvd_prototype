@@ -397,3 +397,146 @@ class DistributedDDMSolver(_AdjointMixin, _SolverTimeDomainMixin):
         plot_distributed_heatmaps(
             result=result, is_current=True, **common_kwargs
         )
+
+    def generate_td_reports(
+        self,
+        result,  # DistributedQuasiStaticResult or DistributedTransientResult
+        output_dir: str = './results',
+        plot_layers: Optional[List[str]] = None,
+        max_stripes: int = 2000,
+        stripe_bin_size: Optional[int] = None,
+        top_k: int = 100,
+        verbose: bool = False,
+    ) -> None:
+        """Generate top-K report and peak IR-drop heatmaps for time-domain results.
+
+        Worker-distributed: top-K peaks are collected from workers (each
+        returns its local top-K), merged on the coordinator, and written
+        as a ranked report. Peak IR-drop heatmaps are generated via
+        worker-side pre-binning (no full voltage dict transfer).
+
+        Parameters
+        ----------
+        result : DistributedQuasiStaticResult or DistributedTransientResult
+            Time-domain result from ``solve_quasi_static()`` or
+            ``solve_transient()``.
+        output_dir : str
+            Directory to write report files and PNG heatmaps.
+        plot_layers : list of str or None
+            Layers to plot. ``None`` = all detected layers.
+        max_stripes : int
+            Maximum display stripes before consolidation.
+        stripe_bin_size : int or None
+            Bins per stripe along the parallel axis. ``None`` = auto.
+        top_k : int
+            Number of worst IR-drop nodes to include in the top-K report.
+        verbose : bool
+            Log progress during report generation.
+        """
+        from pathlib import Path
+        from .heatmap import plot_distributed_td_heatmaps
+        from .result import DistributedTransientResult
+        from reports.topk_irdrop import generate_topk_report
+
+        model = self.model
+        vdd = model.vdd
+        net_name = model.net_name or 'unknown'
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        # --- Top-K report (worker-distributed) ---
+        # NOTE: This is an approximate distributed top-K. Each tile returns its
+        # local top-K, which are then merged. This is exact when K >= max nodes
+        # per tile, and a very good approximation in practice since the global
+        # top-K nodes tend to cluster in a few hot-spot tiles.
+
+        # 1. Collect local top-K from each worker
+        topk_args = [(top_k,)] * len(model.metadata.tile_configs)
+        try:
+            per_tile_topk = model.backend.call_all(
+                model.workers, 'get_top_k_peaks', args_per_actor=topk_args,
+            )
+        except Exception:
+            logger.error(
+                "Failed to collect peak data from workers. "
+                "Was peak tracking initialized during the time-domain solve?",
+                exc_info=True,
+            )
+            return
+
+        # 2. Merge per-tile top-K lists: combine, sort by drop desc, take global top-K
+        merged_items: List[Tuple[str, float, float]] = []
+        seen: Dict[str, int] = {}  # node -> index in merged_items (keep highest drop)
+        for tile_list in per_tile_topk:
+            for node, drop, t in tile_list:
+                idx = seen.get(node)
+                if idx is not None:
+                    if drop > merged_items[idx][1]:
+                        merged_items[idx] = (node, drop, t)
+                else:
+                    seen[node] = len(merged_items)
+                    merged_items.append((node, drop, t))
+
+        merged_items.sort(key=lambda x: x[1], reverse=True)
+        top_items = merged_items[:top_k]
+
+        # 3. Convert to voltage dict for generate_topk_report
+        voltages: Dict[str, float] = {node: vdd - drop for node, drop, _ in top_items}
+        # Add pad nodes at nominal voltage
+        for pad in model.pad_nodes:
+            voltages[pad] = vdd
+
+        # 4. Instance name lookup (parallel across tile workers)
+        target_nodes = {node for node, _, _ in top_items}
+        tile_configs = model.metadata.tile_configs
+        lookup_args = [
+            (target_nodes, tc.instance_path, tc.nd_path, tc.net_filter)
+            for tc in tile_configs
+        ]
+        try:
+            per_tile_maps = model.backend.call_all(
+                model.workers, 'lookup_instance_names', lookup_args,
+            )
+        except Exception:
+            logger.warning(
+                "Instance name lookup failed; report will show N/A for instances",
+                exc_info=True,
+            )
+            per_tile_maps = []
+
+        node_to_instance: Dict[str, str] = {}
+        for tile_map in per_tile_maps:
+            node_to_instance.update(tile_map)
+
+        # 5. Build extra header lines with mode and peak info
+        is_transient = isinstance(result, DistributedTransientResult)
+        mode_label = 'Transient (RC)' if is_transient else 'Quasi-Static (batch DC)'
+        extra_header_lines = [
+            f"Mode: {mode_label}",
+            f"Time steps: {len(result.t_array)}",
+            f"Peak IR-drop: {result.peak_ir_drop * 1000:.3f} mV "
+            f"at t = {result.peak_ir_drop_time * 1e9:.3f} ns",
+        ]
+
+        generate_topk_report(
+            voltages=voltages,
+            nominal_voltage=vdd,
+            net_name=net_name,
+            pad_nodes=model.pad_nodes,
+            output_dir=output_dir,
+            top_k=top_k,
+            node_to_instance=node_to_instance,
+            extra_header_lines=extra_header_lines,
+        )
+
+        # --- Peak IR-drop heatmaps ---
+        plot_distributed_td_heatmaps(
+            model=model,
+            nominal_voltage=vdd,
+            net_name=net_name,
+            output_dir=output_dir,
+            plot_layers=plot_layers,
+            max_stripes=max_stripes,
+            stripe_bin_size=stripe_bin_size,
+            title_prefix='Peak IR-Drop',
+            verbose=verbose,
+        )
