@@ -231,6 +231,33 @@ class _TimeDomainMixin:
 
         return mask
 
+    def build_and_set_window_mask(
+        self,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+        inside: bool = True,
+    ) -> int:
+        """Build spatial mask and apply it in one call.
+
+        Combines :meth:`build_node_mask_for_window` and
+        :meth:`set_current_node_mask` to avoid two worker round-trips.
+
+        Args:
+            x_min: Left edge of the spatial window.
+            x_max: Right edge of the spatial window.
+            y_min: Bottom edge of the spatial window.
+            y_max: Top edge of the spatial window.
+            inside: If True, keep nodes inside the window. If False, keep outside.
+
+        Returns:
+            Number of active (masked-in) nodes.
+        """
+        mask = self.build_node_mask_for_window(x_min, x_max, y_min, y_max, inside)
+        self.set_current_node_mask(mask)
+        return int(np.sum(mask > 0))
+
     # --- 4d. Quasi-static evaluate + reduced RHS -----------------------
 
     def evaluate_and_get_reduced_rhs(

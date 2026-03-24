@@ -2000,3 +2000,41 @@ class TestCurrentNodeMask:
 
         np.testing.assert_allclose(g_none, g_default, atol=1e-15)
         np.testing.assert_allclose(total_none, total_default, atol=1e-15)
+
+    def test_build_and_set_window_mask_sets_mask_and_returns_count(self):
+        """build_and_set_window_mask stores the mask and returns active count."""
+        worker = _make_worker_with_coordinate_nodes()
+
+        # Window covers (0..2000, 0..3000) => only 1000_2000_M0 inside
+        count = worker.build_and_set_window_mask(
+            x_min=0, x_max=2000, y_min=0, y_max=3000, inside=True,
+        )
+
+        # Mask must be stored on the worker
+        assert worker._current_node_mask is not None
+
+        # The returned count must match the number of nonzero mask entries
+        expected_count = int(np.sum(worker._current_node_mask > 0))
+        assert count == expected_count
+
+        # Only 1000_2000_M0 is inside the window (1 node active)
+        assert count == 1
+
+    def test_build_and_set_window_mask_matches_manual_build(self):
+        """build_and_set_window_mask produces the same mask as calling
+        build_node_mask_for_window + set_current_node_mask separately."""
+        worker = _make_worker_with_coordinate_nodes()
+
+        window = dict(x_min=0, x_max=4000, y_min=0, y_max=5000, inside=True)
+
+        # Build the mask independently (without setting it)
+        expected_mask = worker.build_node_mask_for_window(**window)
+
+        # Now use the combined method
+        count = worker.build_and_set_window_mask(**window)
+
+        # The stored mask must be identical to the independently built one
+        np.testing.assert_array_equal(worker._current_node_mask, expected_mask)
+
+        # Count must agree with the mask
+        assert count == int(np.sum(expected_mask > 0))

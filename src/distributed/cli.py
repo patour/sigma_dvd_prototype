@@ -1,9 +1,10 @@
 """CLI for distributed PDN parser/solver pipeline.
 
 Subcommands:
-    parse  - Parse netlist, dump per-tile .pkl files
-    solve  - Load .pkl partitions, run DDM solver
-    run    - Parse + dump + solve in one shot
+    parse      - Parse netlist, dump per-tile .pkl files
+    solve      - Load .pkl partitions, run DDM solver
+    run        - Parse + dump + solve in one shot
+    decompose  - Near/far IR-drop decomposition analysis
 
 Usage:
     python -m distributed parse  ./netlist/netlist_sampled --net VDD_XLV -o ./pkl_out
@@ -11,6 +12,7 @@ Usage:
     python -m distributed solve  ./pkl_out --mode quasi-static --t-end 100e-9 --n-points 51
     python -m distributed solve  ./pkl_out --mode transient --t-end 100e-9 --dt 0.1e-9
     python -m distributed run    ./netlist/netlist_sampled --net VDD_XLV -o ./results
+    python -m distributed decompose ./netlist/netlist_sampled --net VDD_XLV --top-k 2 --verbose
 """
 
 from __future__ import annotations
@@ -315,6 +317,130 @@ def cmd_run(args: argparse.Namespace) -> None:
         model.shutdown()
 
 
+def cmd_decompose(args: argparse.Namespace) -> None:
+    """Run distributed near/far IR-drop decomposition analysis."""
+    from .decomposition import analyze_distributed_decomposition
+    from analysis.dynamic_irdrop_decomposition import (
+        Logger,
+        generate_plots,
+        print_results,
+    )
+
+    _setup_logging(args.verbose)
+
+    # Load decompose-specific YAML config before the shared cholmod handler.
+    decompose_config: dict = {}
+    if getattr(args, 'config', None):
+        decompose_config = _load_decompose_config(args.config)
+        # Prevent _load_and_apply_config from re-loading the same file
+        # via pdn_solver.merge_config_with_args (wrong schema).  The
+        # solver/cholmod keys are already handled by _merge_decompose_config.
+        args.config = None
+
+    # Merge decompose-specific parameters (CLI takes precedence).
+    # This also resolves args.smooth from None -> True/False.
+    if decompose_config:
+        args = _merge_decompose_config(decompose_config, args)
+
+    # Resolve smooth sentinel when no config was loaded.
+    if args.smooth is None:
+        args.smooth = True
+
+    # Apply cholmod / solver backend settings (reads args.use_cholmod etc.).
+    args = _load_and_apply_config(args)
+    t0 = time.perf_counter()
+
+    # Derive pkl_dir from netlist_dir.  Auto-parse if tile pkls don't exist.
+    netlist_dir = args.netlist_dir
+    net_filter = getattr(args, 'net', None)
+    pkl_dir = str(Path(netlist_dir) / 'distributed_pkl')
+
+    tile_pkls = list(Path(pkl_dir).glob('tile_*.pkl'))
+    if not tile_pkls:
+        from .parser import DistributedNetlistParser
+
+        logger.info(
+            "No tile pkls in %s — parsing netlist %s (net=%s)",
+            pkl_dir, netlist_dir, net_filter or 'all',
+        )
+        t_parse = time.perf_counter()
+        parser_obj = DistributedNetlistParser(
+            netlist_dir, net_filter=net_filter,
+        )
+        parser_obj.parse_and_dump(pkl_dir, backend=args.backend)
+        logger.info("Parse phase: %.3fs", time.perf_counter() - t_parse)
+    else:
+        logger.info(
+            "Using %d cached tile pkls from %s",
+            len(tile_pkls), pkl_dir,
+        )
+
+    # Parse --instances if provided (comma-separated node names)
+    instances = None
+    if args.instances:
+        instances = [s.strip() for s in args.instances.split(',') if s.strip()]
+
+    output_dir = args.output
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    result, solver, model = None, None, None
+    try:
+        result, solver, model = analyze_distributed_decomposition(
+            pkl_dir=pkl_dir,
+            backend=args.backend,
+            t_start=args.t_start,
+            t_end=args.t_end,
+            dt=args.dt,
+            top_k=args.top_k,
+            window_percent=args.window_percent,
+            integration_method=args.method,
+            instances=instances,
+            smooth_sources=args.smooth,
+            aggressor_top_k=args.aggressor_top_k,
+            adjoint_method=args.adjoint_method,
+            adjoint_memory_window=args.adjoint_memory_window,
+            verbose=args.verbose,
+        )
+
+        elapsed = time.perf_counter() - t0
+        logger.info(
+            "Decomposition completed in %.3fs: %d victims analyzed",
+            elapsed, len(result.worst_instances),
+        )
+
+        # Print results to console and log file
+        log_file = str(Path(output_dir) / 'analysis.log')
+        log = Logger(log_file)
+        try:
+            print_results(result, log)
+        finally:
+            log.close()
+
+        # Save JSON
+        json_file = str(Path(output_dir) / 'results.json')
+        result.save_json(json_file)
+        logger.info("Results saved to %s", json_file)
+
+        # Generate plots
+        if not args.no_plot:
+            plot_dir = str(Path(output_dir) / 'plots')
+            heatmap_layers = (
+                args.plot_layers.split(',') if args.plot_layers else None
+            )
+            generate_plots(
+                result,
+                plot_dir,
+                show=False,
+                heatmap_layers=heatmap_layers,
+                max_stripes=args.max_stripes,
+                verbose=args.verbose,
+            )
+
+    finally:
+        if model is not None:
+            model.shutdown()
+
+
 def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
     """Add --config, cholmod backend, and profiling flags to a subparser.
 
@@ -374,6 +500,201 @@ def _add_time_domain_args(parser: argparse.ArgumentParser) -> None:
                     help='Enable PWL smoothing (default: enabled)')
     td.add_argument('--no-smooth', dest='smooth', action='store_false',
                     help='Disable PWL smoothing')
+
+
+def _load_decompose_config(config_path: str) -> dict:
+    """Load a YAML config file and return the raw dict.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to a ``.yaml`` / ``.yml`` config file.
+
+    Returns
+    -------
+    dict
+        Parsed config dict (may be empty if file is empty).
+
+    Raises
+    ------
+    SystemExit
+        If the file is missing or unparseable.
+    """
+    try:
+        import yaml
+    except ImportError:
+        logger.error(
+            "PyYAML is required for config file support. "
+            "Install with: pip install pyyaml"
+        )
+        raise SystemExit(1)
+
+    p = Path(config_path)
+    if not p.exists():
+        logger.error("Config file not found: %s", config_path)
+        raise SystemExit(1)
+    try:
+        with open(p, 'r') as f:
+            data = yaml.safe_load(f)
+        return data if data is not None else {}
+    except Exception as exc:
+        logger.error("Failed to load config %s: %s", config_path, exc)
+        raise SystemExit(1)
+
+
+def _merge_decompose_config(
+    config: dict,
+    args: argparse.Namespace,
+) -> argparse.Namespace:
+    """Merge YAML config with CLI args for the ``decompose`` subcommand.
+
+    CLI arguments take precedence over config values.  The precedence rule is:
+    "if the CLI value differs from the argparse default, the user explicitly
+    provided it, so it wins."
+
+    Parameters
+    ----------
+    config : dict
+        Raw dict loaded from the YAML config file.
+    args : argparse.Namespace
+        Parsed CLI arguments (mutated in-place and returned).
+
+    Returns
+    -------
+    argparse.Namespace
+        The updated arguments namespace.
+    """
+    from analysis.dynamic_irdrop_decomposition import parse_time_value
+
+    # -- netlist_dir / net / backend -----------------------------------------
+    # netlist_dir is the primary positional arg; config can override it.
+    if config.get('netlist_dir') and not getattr(args, 'netlist_dir', None):
+        args.netlist_dir = str(config['netlist_dir'])
+    if config.get('net') and not getattr(args, 'net', None):
+        args.net = str(config['net'])
+
+    if config.get('backend') and args.backend == 'local':
+        args.backend = config['backend']
+
+    # -- time section ----------------------------------------------------
+    time_cfg = config.get('time', {})
+
+    # Argparse defaults for the decompose subcommand.
+    # Keep in sync with build_parser() decompose section + set_defaults().
+    # See test_defaults_dict_matches_argparse for automated validation.
+    _DEFAULTS = {
+        't_start': 0.0,
+        't_end': 100e-9,
+        'dt': 0.1e-9,
+        'method': 'be',
+        'top_k': 5,
+        'window_percent': 10.0,
+        'aggressor_top_k': 0,
+        'adjoint_method': 'dynamic',
+        'adjoint_memory_window': 20,
+        'output': './irdrop_decomp_results',
+        'no_plot': False,
+        'plot_layers': None,
+        'max_stripes': 500,
+        'verbose': False,
+        'instances': None,
+    }
+
+    def _cli_is_default(attr: str) -> bool:
+        """Return True if the CLI value is the argparse default."""
+        return getattr(args, attr, None) == _DEFAULTS.get(attr)
+
+    if time_cfg.get('start') is not None and _cli_is_default('t_start'):
+        args.t_start = parse_time_value(time_cfg['start'])
+    if time_cfg.get('end') is not None and _cli_is_default('t_end'):
+        args.t_end = parse_time_value(time_cfg['end'])
+    if time_cfg.get('dt') is not None and _cli_is_default('dt'):
+        args.dt = parse_time_value(time_cfg['dt'])
+
+    # -- analysis section ------------------------------------------------
+    analysis_cfg = config.get('analysis', {})
+
+    if analysis_cfg.get('top_k') is not None and _cli_is_default('top_k'):
+        args.top_k = int(analysis_cfg['top_k'])
+    if analysis_cfg.get('window_percent') is not None and _cli_is_default('window_percent'):
+        args.window_percent = float(analysis_cfg['window_percent'])
+    if analysis_cfg.get('integration') is not None and _cli_is_default('method'):
+        args.method = str(analysis_cfg['integration'])
+
+    # Smooth: three-way merge (CLI explicit > config > default True).
+    # args.smooth is None when user didn't pass --smooth or --no-smooth.
+    if args.smooth is None:
+        cfg_smooth = analysis_cfg.get('smooth_sources')
+        if cfg_smooth is not None:
+            args.smooth = bool(cfg_smooth)
+        else:
+            args.smooth = True  # ultimate default
+    # else: CLI was explicit (True from --smooth, False from --no-smooth)
+
+    # Instances: CLI string > config list > config instances_file > None
+    if args.instances is None:
+        cfg_instances = analysis_cfg.get('instances')
+        cfg_instances_file = analysis_cfg.get('instances_file')
+        if cfg_instances and isinstance(cfg_instances, list):
+            # Store as comma-separated string to match CLI format
+            args.instances = ','.join(str(i) for i in cfg_instances)
+        elif cfg_instances_file:
+            p = Path(cfg_instances_file)
+            if p.exists():
+                with open(p, 'r') as f:
+                    nodes = [line.strip() for line in f if line.strip()]
+                if nodes:
+                    args.instances = ','.join(nodes)
+            else:
+                logger.warning(
+                    "instances_file not found: %s", cfg_instances_file
+                )
+
+    # -- aggressor section -----------------------------------------------
+    # Accept both 'aggressor:' top-level section and 'analysis.aggressor_top_k'
+    # (flat config compat).  Dedicated 'aggressor:' section takes priority.
+    agg_cfg = config.get('aggressor', {})
+
+    if agg_cfg.get('top_k') is not None and _cli_is_default('aggressor_top_k'):
+        args.aggressor_top_k = int(agg_cfg['top_k'])
+    if agg_cfg.get('method') is not None and _cli_is_default('adjoint_method'):
+        args.adjoint_method = str(agg_cfg['method'])
+    if agg_cfg.get('memory_window') is not None and _cli_is_default('adjoint_memory_window'):
+        args.adjoint_memory_window = int(agg_cfg['memory_window'])
+
+    # -- output section --------------------------------------------------
+    output_cfg = config.get('output', {})
+
+    if output_cfg.get('output_dir') is not None and _cli_is_default('output'):
+        args.output = str(output_cfg['output_dir'])
+    if output_cfg.get('no_plot') is not None and _cli_is_default('no_plot'):
+        args.no_plot = bool(output_cfg['no_plot'])
+    if output_cfg.get('plot_layers') is not None and _cli_is_default('plot_layers'):
+        layers = output_cfg['plot_layers']
+        if isinstance(layers, list):
+            args.plot_layers = ','.join(str(layer) for layer in layers)
+        else:
+            args.plot_layers = str(layers)
+    if output_cfg.get('max_stripes') is not None and _cli_is_default('max_stripes'):
+        args.max_stripes = int(output_cfg['max_stripes'])
+    if output_cfg.get('verbose') is not None and _cli_is_default('verbose'):
+        args.verbose = bool(output_cfg['verbose'])
+
+    # -- solver section (cholmod settings) --------------------------------
+    solver_cfg = config.get('solver', {})
+
+    if solver_cfg.get('use_cholmod') is not None:
+        if getattr(args, 'use_cholmod', None) is None:
+            args.use_cholmod = bool(solver_cfg['use_cholmod'])
+    if solver_cfg.get('ordering') is not None:
+        if getattr(args, 'cholmod_ordering', 'default') == 'default':
+            args.cholmod_ordering = str(solver_cfg['ordering'])
+    if solver_cfg.get('mode') is not None:
+        if getattr(args, 'cholmod_mode', 'auto') == 'auto':
+            args.cholmod_mode = str(solver_cfg['mode'])
+
+    logger.info("Merged decompose config from YAML")
+    return args
 
 
 def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
@@ -528,6 +849,92 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_and_solver_args(p_run)
     _add_time_domain_args(p_run)
     p_run.set_defaults(func=cmd_run)
+
+    # ── decompose ─────────────────────────────────────────────────
+    p_decompose = sub.add_parser(
+        'decompose',
+        help='Near/far IR-drop decomposition analysis',
+    )
+    p_decompose.add_argument(
+        'netlist_dir',
+        help='Path to netlist directory (auto-parses if '
+             '<netlist_dir>/distributed_pkl does not exist)',
+    )
+    p_decompose.add_argument(
+        '--net', '-n', type=str, default=None,
+        help='Net name to filter (e.g., VDD_XLV)',
+    )
+    p_decompose.add_argument(
+        '--backend', '-b', default='local', choices=['local', 'ray'],
+        help='Compute backend (default: local)',
+    )
+    p_decompose.add_argument(
+        '--output', '-o', default='./irdrop_decomp_results',
+        help='Output directory for results (default: ./irdrop_decomp_results)',
+    )
+    p_decompose.add_argument('--verbose', '-v', action='store_true')
+    p_decompose.add_argument(
+        '--no-plot', action='store_true',
+        help='Skip plot generation',
+    )
+
+    # Shared solver/config args (adds --top-k with default=100)
+    _add_config_and_solver_args(p_decompose)
+
+    # Time-domain args relevant to decompose (no --mode or --n-points).
+    td = p_decompose.add_argument_group('time-domain analysis')
+    td.add_argument('--t-start', type=float, default=0.0,
+                     help='Start time in seconds (default: 0.0)')
+    td.add_argument('--t-end', type=float, default=100e-9,
+                     help='End time in seconds (default: 100e-9)')
+    td.add_argument('--dt', type=float, default=0.1e-9,
+                     help='Time step for transient in seconds (default: 0.1e-9)')
+    td.add_argument('--method', type=str, default='be',
+                     choices=['be', 'trap'],
+                     help='Integration method for transient (default: be)')
+    td.add_argument('--smooth', action='store_true', default=None,
+                     help='Enable PWL smoothing (default: enabled)')
+    td.add_argument('--no-smooth', dest='smooth', action='store_false',
+                     help='Disable PWL smoothing')
+
+    # Decomposition parameters
+    decomp = p_decompose.add_argument_group('decomposition')
+    decomp.add_argument(
+        '--window-percent', type=float, default=10.0,
+        help='Near-window size as %% of design extent (default: 10.0)',
+    )
+    decomp.add_argument(
+        '--instances', type=str, default=None,
+        help='Comma-separated victim node names (skips initial transient)',
+    )
+
+    # Aggressor parameters
+    agg_group = p_decompose.add_argument_group('aggressor analysis')
+    agg_group.add_argument(
+        '--aggressor-top-k', type=int, default=0,
+        help='Number of top aggressors per victim (0=disabled, default: 0)',
+    )
+    agg_group.add_argument(
+        '--adjoint-method', choices=['static', 'dynamic'], default='dynamic',
+        help='Adjoint analysis method (default: dynamic)',
+    )
+    agg_group.add_argument(
+        '--adjoint-memory-window', type=int, default=20,
+        help='Backward sweep memory window in time steps (default: 20)',
+    )
+
+    # Plot parameters
+    p_decompose.add_argument(
+        '--plot-layers', type=str, default=None,
+        help='Layers for heatmaps (comma-separated, e.g. M1,M2)',
+    )
+    p_decompose.add_argument(
+        '--max-stripes', type=int, default=500,
+        help='Maximum stripes for heatmap (default: 500)',
+    )
+
+    # Override --top-k default for decompose (5 victims, not 100 report nodes)
+    p_decompose.set_defaults(func=cmd_decompose, top_k=5)
 
     return top
 

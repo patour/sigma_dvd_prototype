@@ -63,6 +63,7 @@ Example output:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import math
 import os
@@ -201,6 +202,7 @@ class InstanceDecomposition:
     self_contribution_mV: float = 0.0
     self_contribution_pct: float = 0.0
     attribution_efficiency: float = 0.0
+    near_total_mV: Optional[float] = None  # Total near-window contribution (mV); populated by distributed adjoint only
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to JSON-serializable dictionary.
@@ -234,12 +236,15 @@ class InstanceDecomposition:
         }
         # Add aggressor data if present
         if self.top_aggressors:
-            result['aggressor_analysis'] = {
+            aggressor_data: Dict[str, Any] = {
                 'self_contribution_mV': self.self_contribution_mV,
                 'self_contribution_pct': self.self_contribution_pct,
                 'attribution_efficiency': self.attribution_efficiency,
                 'top_aggressors': [agg.to_dict() for agg in self.top_aggressors],
             }
+            if self.near_total_mV is not None:
+                aggressor_data['near_total_mV'] = self.near_total_mV
+            result['aggressor_analysis'] = aggressor_data
         return result
 
 
@@ -786,6 +791,17 @@ def print_results(result: DecompositionResult, logger: Optional[Logger] = None) 
                 log(f"  {j:<5} {node_short:<25} {agg.contribution_mV:<12.3f} "
                     f"{agg.contribution_pct:<8.1f} {agg.distance_um:<12.1f}")
 
+            # Summary lines after aggressor table
+            top_k_total = inst.self_contribution_mV + sum(
+                agg.contribution_mV for agg in inst.top_aggressors
+            )
+            top_k_pct = 100.0 * top_k_total / inst.peak_total_mV if inst.peak_total_mV > 0 else 0.0
+            log(f"  Top-{len(inst.top_aggressors)} + self: {top_k_total:.3f} mV ({top_k_pct:.1f}%)")
+
+            if inst.near_total_mV is not None:
+                near_pct = 100.0 * inst.near_total_mV / inst.peak_total_mV if inst.peak_total_mV > 0 else 0.0
+                log(f"  Near-window total: {inst.near_total_mV:.3f} mV ({near_pct:.1f}%)")
+
     log()
     log("Timing breakdown:")
     for key, val in result.timings.items():
@@ -837,6 +853,15 @@ def generate_plots(
         return
 
     os.makedirs(plot_dir, exist_ok=True)
+
+    # Clean stale plots from previous runs so leftover files don't
+    # confuse users (e.g. old aggressors_*.png when adjoint is now disabled).
+    for pattern in ('waveform_*.png', 'aggressors_*.png'):
+        for old_file in glob.glob(os.path.join(plot_dir, pattern)):
+            try:
+                os.remove(old_file)
+            except OSError:
+                pass
 
     # 1. Design-wide total current plot
     if len(result.total_current_waveform) > 0 and len(result.t_array) > 0:

@@ -40,6 +40,9 @@ from .model import (
 from .solver import (
     DistributedDDMSolver,
 )
+from .decomposition import (
+    analyze_distributed_decomposition,
+)
 from .heatmap import (
     LayerBinSpec,
     GlobalBinSpec,
@@ -82,6 +85,8 @@ __all__ = [
     "load_distributed_partitions",
     # Solver
     "DistributedDDMSolver",
+    # Decomposition
+    "analyze_distributed_decomposition",
     # Heatmap
     "LayerBinSpec",
     "GlobalBinSpec",

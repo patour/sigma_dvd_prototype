@@ -392,6 +392,12 @@ class _AdjointMixin:
         self_contribution_mV = node_contributions.pop(victim_node, 0.0)
         self_sources = node_to_sources.get(victim_node, [])
 
+        # Compute total attributed from full dict BEFORE top-K truncation (O(N) dict sum)
+        total_attributed = self_contribution_mV + sum(node_contributions.values())
+
+        # Snapshot all node contributions for downstream spatial partitioning
+        all_node_contribs = dict(node_contributions)
+
         # Compute self percentage
         self_contribution_pct = (
             100.0 * self_contribution_mV / ir_drop_at_T
@@ -444,15 +450,6 @@ class _AdjointMixin:
                 current_waveform=node_waveform,
             ))
 
-        # Total attributed
-        total_attributed = self_contribution_mV + sum(
-            agg.contribution_mV for agg in top_aggressors
-        )
-        # Add contributions from nodes not in top-K
-        for node, contrib in node_contributions.items():
-            if node not in {agg.node for agg in top_aggressors}:
-                total_attributed += contrib
-
         attribution_efficiency = (
             total_attributed / ir_drop_at_T if ir_drop_at_T > 0 else 0.0
         )
@@ -482,6 +479,7 @@ class _AdjointMixin:
             timings=timings,
             initial_condition=initial_condition,
             dc_ir_drop_mV=dc_ir_drop_mV,
+            all_node_contributions=all_node_contribs,
         )
 
     # ------------------------------------------------------------------
@@ -970,21 +968,17 @@ class _AdjointMixin:
             for i, node in enumerate(trans_ctx.interface_nodes):
                 lambda_p_dict[node] = float(lambda_p[i])
 
-            # Extract source terms from RHS results for recovery
-            # get_adjoint_step_reduced_rhs returns (g, stats) where stats has 's_i', 's_p'
-
             # 13. Workers recover lambda_i and accumulate at t = k * dt
+            # Uses cached s_i/s_p from get_adjoint_step_reduced_rhs to avoid
+            # transferring large arrays back through the coordinator.
             t0_recover = time_module.perf_counter()
-            recover_args = []
-            for i, (g_i, stats) in enumerate(step_rhs_results):
-                s_i = stats.get('s_i')
-                s_p = stats.get('s_p')
-                recover_args.append(
-                    (lambda_p_dict, t_val, s_i, s_p, include_waveforms)
-                )
+            cached_recover_args = [
+                (lambda_p_dict, t_val, include_waveforms)
+            ] * len(tile_configs)
 
             model.backend.call_all(
-                model.workers, 'recover_and_accumulate_adjoint', recover_args,
+                model.workers, 'recover_and_accumulate_adjoint_cached',
+                cached_recover_args,
             )
             cum_recover_time += time_module.perf_counter() - t0_recover
 

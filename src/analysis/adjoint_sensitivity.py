@@ -113,6 +113,11 @@ class AdjointAttribution:
         initial_condition: Initial condition used ('zero' or 'dc')
         dc_ir_drop_mV: DC baseline IR-drop (mV), only populated when using 'dc'.
                        Incremental IR-drop = ir_drop_at_T - dc_ir_drop_mV
+        all_node_contributions: Optional raw per-node contributions in mV for
+            downstream spatial partitioning. Keys are node names, values are
+            the total contribution of all sources attached to that node.
+            Does not include the victim's self-contribution (which is in
+            self_contribution_mV). Only populated by the distributed solver.
     """
     victim_node: Any
     observation_time: float
@@ -130,6 +135,7 @@ class AdjointAttribution:
     timings: Dict[str, float]
     initial_condition: str = 'zero'
     dc_ir_drop_mV: Optional[float] = None
+    all_node_contributions: Optional[Dict[str, float]] = None
 
 
 @dataclass

@@ -42,7 +42,7 @@ class _AdjointWorkerMixin:
     """Mixin providing adjoint sensitivity methods for TileWorker.
 
     Expects the host class to provide:
-        _block_system, _tile_data, _vec_sources,
+        _block_system, _tile_data, _active_sources,
         _block_system.port_to_idx, _block_system.interior_to_idx,
         _block_system.port_nodes, _block_system.interior_nodes
     """
@@ -70,8 +70,15 @@ class _AdjointWorkerMixin:
         # Per-step adjoint variable for interior nodes (set during backward sweep)
         self._adjoint_lambda_interior: Optional[np.ndarray] = None
 
-        # Accumulated per-source contributions (source_name -> float, in V)
-        self._adjoint_contributions: Dict[str, float] = {}
+        # Cached s_i/s_p from get_adjoint_step_reduced_rhs for cached recovery
+        self._adjoint_cached_s_i: Optional[np.ndarray] = None
+        self._adjoint_cached_s_p: Optional[np.ndarray] = None
+
+        # Vectorized accumulation: pre-computed index array and accumulator
+        # Maps source_idx -> index in concatenated [lambda_p, lambda_i] vector
+        # -1 for sources with no valid node match
+        self._adjoint_source_lambda_indices: Optional[np.ndarray] = None
+        self._adjoint_contributions_array: Optional[np.ndarray] = None
 
         # Spatial window boolean mask over sources (n_sources,) or None
         self._adjoint_source_mask: Optional[np.ndarray] = None
@@ -192,11 +199,23 @@ class _AdjointWorkerMixin:
 
         # Clear any stale mask / contributions from a prior run
         self._adjoint_source_mask = None
-        self._adjoint_contributions = {}
         self._adjoint_waveforms = {}
         self._adjoint_lambda_interior = None
 
+        # Pre-compute numpy index array for vectorized accumulation.
+        # Maps source_idx -> index in concatenated [lambda_p, lambda_i] vector.
+        # -1 for sources with no valid node match.
         n_sources = len(name_to_idx)
+        n_ports_val = bs.n_ports
+        source_lambda_indices = np.full(n_sources, -1, dtype=np.int64)
+        for source_idx_val, src_name in enumerate(idx_to_name):
+            node_j = source_to_node[src_name]
+            if node_j in bs.port_to_idx:
+                source_lambda_indices[source_idx_val] = bs.port_to_idx[node_j]
+            elif node_j in bs.interior_to_idx:
+                source_lambda_indices[source_idx_val] = n_ports_val + bs.interior_to_idx[node_j]
+        self._adjoint_source_lambda_indices = source_lambda_indices
+        self._adjoint_contributions_array = np.zeros(n_sources, dtype=np.float64)
         n_nodes_with_sources = len(node_to_sources)
 
         tid = self._tile_data.tile_id if self._tile_data else '?'
@@ -292,7 +311,10 @@ class _AdjointWorkerMixin:
 
         # Clear per-analysis state:
         self._adjoint_lambda_interior = None
-        self._adjoint_contributions = {}
+        self._adjoint_cached_s_i = None
+        self._adjoint_cached_s_p = None
+        if self._adjoint_contributions_array is not None:
+            self._adjoint_contributions_array[:] = 0.0
         self._adjoint_source_mask = None
         self._adjoint_waveforms = {}
 
@@ -320,6 +342,10 @@ class _AdjointWorkerMixin:
         where ``lambda[node_j]`` is looked up from *lambda_i* (interior) or
         *lambda_p* (port), and ``I_j(t)`` comes from the VCS evaluation.
 
+        Uses vectorized numpy operations with a pre-computed index array
+        (built by ``init_adjoint_source_mappings``) for O(N) batch indexing
+        instead of per-source Python dict lookups.
+
         Args:
             lambda_i: Recovered interior lambda vector (may be empty).
             lambda_p: Interface lambda vector of shape ``(n_ports,)``.
@@ -332,14 +358,12 @@ class _AdjointWorkerMixin:
         Raises:
             RuntimeError: If adjoint/VCS index alignment is broken.
         """
-        if self._vec_sources is None or len(self._adjoint_source_idx_to_name) == 0:
+        if self._active_sources is None or len(self._adjoint_source_idx_to_name) == 0:
             return 0
-
-        bs = self._block_system
 
         # Validate index alignment (defensive check -- see module docstring)
         n_adjoint = len(self._adjoint_source_idx_to_name)
-        n_vcs = self._vec_sources.n_sources
+        n_vcs = self._active_sources.n_sources
         if n_adjoint != n_vcs:
             raise RuntimeError(
                 f"Index alignment mismatch: adjoint has {n_adjoint} sources, "
@@ -347,45 +371,39 @@ class _AdjointWorkerMixin:
                 f"init_vectorized_sources() use the same arguments."
             )
 
-        per_source_currents = self._vec_sources.evaluate_per_source_at_time(t)
-        n_accumulated = 0
+        per_source_currents = self._active_sources.evaluate_per_source_at_time(t)
 
-        for source_idx, source_name in enumerate(self._adjoint_source_idx_to_name):
-            if self._adjoint_source_mask is not None:
-                if not self._adjoint_source_mask[source_idx]:
-                    continue
+        # Build concatenated lambda vector: [lambda_p, lambda_i]
+        # Index array maps source_idx -> index in this concatenated vector
+        if len(lambda_i) > 0:
+            lambda_full = np.concatenate([lambda_p, lambda_i])
+        else:
+            lambda_full = lambda_p
 
-            I_j = per_source_currents[source_idx]
+        indices = self._adjoint_source_lambda_indices
+        valid = indices >= 0
+        if self._adjoint_source_mask is not None:
+            valid = valid & self._adjoint_source_mask
 
-            node_j = self._adjoint_source_to_node.get(source_name)
-            if node_j is None:
-                continue
+        # Safe indexing: use 0 for invalid indices, then mask out with np.where
+        safe_indices = np.where(valid, indices, 0)
+        lambda_at_nodes = lambda_full[safe_indices]
+        # Discrete adjoint contribution (no dt factor):
+        # lambda has units of kOhm (from A^{-1} where A is in mS)
+        # current has units of mA
+        # lambda * current has units: kOhm * mA = V
+        contributions = np.where(valid, lambda_at_nodes * per_source_currents, 0.0)
+        self._adjoint_contributions_array += contributions
+        n_accumulated = int(np.sum(valid))
 
-            # Look up lambda at the node where source j is attached
-            lambda_at_node: float = 0.0
-            if node_j in bs.interior_to_idx:
-                idx = bs.interior_to_idx[node_j]
-                if idx < len(lambda_i):
-                    lambda_at_node = lambda_i[idx]
-            elif node_j in bs.port_to_idx:
-                idx = bs.port_to_idx[node_j]
-                lambda_at_node = lambda_p[idx]
-
-            # Discrete adjoint contribution (no dt factor):
-            # lambda has units of kOhm (from A^{-1} where A is in mS)
-            # current has units of mA
-            # lambda * current has units: kOhm * mA = V
-            contribution = lambda_at_node * I_j
-
-            if source_name not in self._adjoint_contributions:
-                self._adjoint_contributions[source_name] = 0.0
-            self._adjoint_contributions[source_name] += contribution
-            n_accumulated += 1
-
-            if include_waveforms:
+        # Waveform recording stays as Python loop (only for reporting, not hot path)
+        if include_waveforms:
+            for source_idx in np.nonzero(valid)[0]:
+                source_name = self._adjoint_source_idx_to_name[source_idx]
+                I_j = float(per_source_currents[source_idx])
                 if source_name not in self._adjoint_waveforms:
                     self._adjoint_waveforms[source_name] = []
-                self._adjoint_waveforms[source_name].append((t, float(I_j)))
+                self._adjoint_waveforms[source_name].append((t, I_j))
 
         return n_accumulated
 
@@ -562,13 +580,15 @@ class _AdjointWorkerMixin:
         else:
             g = s_p
 
+        # Cache s_i/s_p for use by recover_and_accumulate_adjoint_cached()
+        self._adjoint_cached_s_i = s_i
+        self._adjoint_cached_s_p = s_p
+
         stats = {
             'C_coeff': C_coeff,
             's_i_norm': float(np.linalg.norm(s_i)),
             's_p_norm': float(np.linalg.norm(s_p)),
             'g_norm': float(np.linalg.norm(g)),
-            's_i': s_i,
-            's_p': s_p,
         }
 
         tid = self._tile_data.tile_id if self._tile_data else '?'
@@ -692,6 +712,42 @@ class _AdjointWorkerMixin:
             'n_accumulated': n_accumulated,
             'lambda_i_norm': lambda_i_norm,
         }
+
+    def recover_and_accumulate_adjoint_cached(
+        self,
+        lambda_p_dict: Dict[str, float],
+        t: float,
+        include_waveforms: bool,
+    ) -> Dict[str, Any]:
+        """Like recover_and_accumulate_adjoint but uses cached s_i/s_p.
+
+        Avoids transferring the (potentially large) s_i/s_p arrays back
+        from workers to coordinator and then back again.  Instead, uses
+        the values cached by the most recent ``get_adjoint_step_reduced_rhs()``
+        call.
+
+        Args:
+            lambda_p_dict: Interface lambda values from coordinator solve,
+                keyed by node name.
+            t: Current time point (seconds).
+            include_waveforms: Whether to record (t, I) waveform data per source.
+
+        Returns:
+            Stats dict with ``'n_accumulated'``, ``'lambda_i_norm'``.
+
+        Raises:
+            RuntimeError: If no cached s_i/s_p from a prior
+                ``get_adjoint_step_reduced_rhs()`` call.
+        """
+        if self._adjoint_cached_s_i is None or self._adjoint_cached_s_p is None:
+            raise RuntimeError(
+                "No cached s_i/s_p from get_adjoint_step_reduced_rhs()"
+            )
+        return self.recover_and_accumulate_adjoint(
+            lambda_p_dict, t,
+            self._adjoint_cached_s_i, self._adjoint_cached_s_p,
+            include_waveforms,
+        )
 
     def recover_and_accumulate_adjoint_terminal(
         self,
@@ -873,6 +929,9 @@ class _AdjointWorkerMixin:
     ) -> Tuple[Dict[str, float], Dict[str, str], Dict[str, List[Tuple[float, float]]]]:
         """Return accumulated contributions and supporting data.
 
+        Converts from the vectorized accumulator array back to a dict,
+        filtering out zero-contribution sources for efficiency.
+
         Returns:
             Tuple of:
             - contributions: Dict mapping source_name to total contribution (V).
@@ -884,8 +943,16 @@ class _AdjointWorkerMixin:
               tuples. Empty if ``include_waveforms=False`` was used during
               accumulation.
         """
+        # Convert vectorized accumulator to dict (skip zeros for efficiency)
+        contributions: Dict[str, float] = {}
+        if self._adjoint_contributions_array is not None and len(self._adjoint_contributions_array) > 0:
+            for idx, name in enumerate(self._adjoint_source_idx_to_name):
+                val = self._adjoint_contributions_array[idx]
+                if val != 0.0:
+                    contributions[name] = float(val)
+
         return (
-            dict(self._adjoint_contributions),
-            dict(self._adjoint_source_to_node),
-            dict(self._adjoint_waveforms),
+            contributions,
+            self._adjoint_source_to_node,
+            self._adjoint_waveforms,
         )
