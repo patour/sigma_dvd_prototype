@@ -106,7 +106,6 @@ class TestComputeExplicitSchur(unittest.TestCase):
         block, rhs_d = build_block_system_from_edges(
             edges, port_nodes, ground_node='0',
         )
-        block.factor_interior()
 
         S_explicit, _ = compute_explicit_schur(block)
         n = block.n_ports
@@ -133,42 +132,8 @@ class TestComputeExplicitSchur(unittest.TestCase):
         block, _ = build_block_system_from_edges(
             edges, port_nodes, ground_node='0',
         )
-        block.factor_interior()
         S, _ = compute_explicit_schur(block)
         np.testing.assert_allclose(S, S.T, atol=1e-12)
-
-    def test_chunked_path_matches_single_solve(self):
-        """Force chunked path via tiny memory budget; result must match single solve."""
-        edges, port_nodes = _build_20x20_grid()
-        block, _ = build_block_system_from_edges(edges, port_nodes, ground_node='0')
-        block.factor_interior()
-
-        n_ports = block.n_ports
-        n_interior = block.n_interior
-        self.assertGreater(n_ports, 32, "Need >32 ports for chunked path test")
-
-        # Single solve (large memory budget)
-        S_single, _ = compute_explicit_schur(block, max_memory_gb=100.0)
-
-        # Force chunked path: tiny memory budget -> chunk_size = 32 (BLAS floor)
-        # With 76 ports and chunk_size=32, we get 3 chunks
-        S_chunked, _ = compute_explicit_schur(block, max_memory_gb=1e-9)
-
-        # Verify chunked path was actually taken
-        # chunk_size = max(min(memory_chunk, ..., 256), 32) = 32 < 76 = n_ports
-        INT_MAX = 2**31 - 1
-        bytes_per_col = n_interior * 8 * 0.5
-        memory_chunk = max(1, int(1e-9 * 1e9 / bytes_per_col))
-        index_chunk = max(1, INT_MAX // max(n_interior, 1))
-        chunk_size = min(memory_chunk, index_chunk, n_ports, 256)
-        chunk_size = max(chunk_size, min(32, n_ports))
-        self.assertLess(chunk_size, n_ports,
-                        f"Expected chunked path: chunk_size={chunk_size}, n_ports={n_ports}")
-
-        np.testing.assert_allclose(S_chunked, S_single, atol=1e-12,
-                                   err_msg="Chunked path result differs from single solve")
-        np.testing.assert_allclose(S_chunked, S_chunked.T, atol=1e-12,
-                                   err_msg="Chunked Schur complement not symmetric")
 
 
 
@@ -2341,7 +2306,7 @@ class TestFactorAndComputeSchurReturnsStats(unittest.TestCase):
         # Check all expected keys
         expected_keys = {
             'factor_interior_s', 'compute_schur_s', 'total_s',
-            'schur_shape', 'schur_mem_bytes', 'schur_chunk_size',
+            'schur_shape', 'schur_mem_bytes',
             'schur_path',
             'factorization_backend', 'factorization_backend_info',
             'n_ports', 'n_interior',
@@ -2352,7 +2317,6 @@ class TestFactorAndComputeSchurReturnsStats(unittest.TestCase):
             self.assertIn(key, stats, f"Missing stats key: {key}")
 
         self.assertIsInstance(stats['factorization_backend_info'], str)
-        self.assertGreaterEqual(stats['schur_chunk_size'], 0)
         self.assertIn(stats['schur_path'],
                        ('chunked', 'partial_cholesky', 'trivial'))
 
@@ -2828,60 +2792,15 @@ from solver.unified_solver import HAS_CHOLMOD
 class TestPartialCholesky(unittest.TestCase):
     """Test the partial Cholesky factorization path in compute_explicit_schur."""
 
-    def test_partial_vs_chunked_toy(self):
-        """S from partial path matches chunked path on toy graph."""
-        from solver.coupled_system import compute_explicit_schur
-
-        edges, port_nodes = _build_toy_graph()
-
-        # Chunked path
-        block, _ = build_block_system_from_edges(
-            edges, port_nodes, ground_node='0',
-        )
-        block.factor_interior()
-        S_chunked, stats_chunked = compute_explicit_schur(block, use_partial_factor=False)
-        self.assertEqual(stats_chunked['path'], 'chunked')
-
-        # Partial path (fresh block system — no factor_interior needed)
-        block2, _ = build_block_system_from_edges(
-            edges, port_nodes, ground_node='0',
-        )
-        S_partial, stats_partial = compute_explicit_schur(block2, use_partial_factor=True)
-        self.assertEqual(stats_partial['path'], 'partial_cholesky')
-
-        np.testing.assert_allclose(
-            S_partial, S_chunked, atol=1e-12,
-            err_msg="Partial and chunked Schur complements differ on toy graph",
-        )
-
-    def test_partial_vs_chunked_grid(self):
-        """S from partial path matches chunked path on 20x20 grid."""
-        from solver.coupled_system import compute_explicit_schur
-
-        edges, port_nodes = _build_20x20_grid()
-
-        # Chunked path
-        block, _ = build_block_system_from_edges(edges, port_nodes, ground_node='0')
-        block.factor_interior()
-        S_chunked, _ = compute_explicit_schur(block, use_partial_factor=False)
-
-        # Partial path
-        block2, _ = build_block_system_from_edges(edges, port_nodes, ground_node='0')
-        S_partial, _ = compute_explicit_schur(block2, use_partial_factor=True)
-
-        np.testing.assert_allclose(
-            S_partial, S_chunked, atol=1e-12,
-            err_msg="Partial and chunked Schur complements differ on 20x20 grid",
-        )
-
     def test_partial_schur_symmetric(self):
         """Schur complement from partial path must be symmetric."""
         from solver.coupled_system import compute_explicit_schur
 
         edges, port_nodes = _build_20x20_grid()
         block, _ = build_block_system_from_edges(edges, port_nodes, ground_node='0')
-        S, _ = compute_explicit_schur(block, use_partial_factor=True)
+        S, stats = compute_explicit_schur(block)
 
+        self.assertEqual(stats['path'], 'partial_cholesky')
         np.testing.assert_allclose(
             S, S.T, atol=1e-12,
             err_msg="Partial Cholesky Schur complement is not symmetric",
@@ -2893,11 +2812,11 @@ class TestPartialCholesky(unittest.TestCase):
 
         edges, port_nodes = _build_20x20_grid()
 
-        # Partial path: sets lu_ii via solve_L/Lt truncation trick
+        # Partial path: sets lu_ii via compute_explicit_schur
         block_partial, _ = build_block_system_from_edges(
             edges, port_nodes, ground_node='0',
         )
-        compute_explicit_schur(block_partial, use_partial_factor=True)
+        compute_explicit_schur(block_partial)
         lu_partial = block_partial.lu_ii
 
         # Standard path: sets lu_ii via factor_interior()
@@ -2941,66 +2860,23 @@ class TestPartialCholesky(unittest.TestCase):
             err_msg="Partial lu_ii(b) differs for sparse 2D input",
         )
 
-    def test_partial_threshold_auto(self):
-        """Auto-detect respects threshold: high -> chunked, low -> partial."""
-        from solver.coupled_system import (
-            compute_explicit_schur,
-            set_partial_factor_threshold, get_partial_factor_threshold,
-        )
-
-        edges, port_nodes = _build_toy_graph()
-        original_threshold = get_partial_factor_threshold()
-
-        try:
-            # High threshold: toy graph has only 2 ports, so chunked path should be chosen
-            set_partial_factor_threshold(999999)
-            block_high, _ = build_block_system_from_edges(
-                edges, port_nodes, ground_node='0',
-            )
-            block_high.factor_interior()
-            _, stats_high = compute_explicit_schur(block_high, use_partial_factor=None)
-            self.assertEqual(stats_high['path'], 'chunked')
-
-            # Low threshold (1): even 2 ports >= 1, so partial path should be chosen
-            set_partial_factor_threshold(1)
-            block_low, _ = build_block_system_from_edges(
-                edges, port_nodes, ground_node='0',
-            )
-            _, stats_low = compute_explicit_schur(block_low, use_partial_factor=None)
-            self.assertEqual(stats_low['path'], 'partial_cholesky')
-        finally:
-            set_partial_factor_threshold(original_threshold)
-
-    def test_partial_splu_fallback(self):
-        """When CHOLMOD is disabled, should_use_partial_factor returns False."""
-        from solver.coupled_system import (
-            should_use_partial_factor, set_partial_factor_threshold,
-            get_partial_factor_threshold,
-        )
+    def test_splu_fallback_when_cholmod_disabled(self):
+        """When CHOLMOD is disabled, compute_explicit_schur uses chunked path."""
+        from solver.coupled_system import compute_explicit_schur
         from solver.unified_solver import set_use_cholmod, get_use_cholmod
 
         edges, port_nodes = _build_toy_graph()
         original_use_cholmod = get_use_cholmod()
-        original_threshold = get_partial_factor_threshold()
 
         try:
-            # Set threshold to 1 so ports (2) >= threshold, ensuring partial
-            # would be selected if CHOLMOD were enabled.
-            set_partial_factor_threshold(1)
+            set_use_cholmod(False)
             block, _ = build_block_system_from_edges(
                 edges, port_nodes, ground_node='0',
             )
-
-            # With CHOLMOD enabled, partial path should be selected
-            set_use_cholmod(None)  # auto (CHOLMOD available)
-            self.assertTrue(should_use_partial_factor(block))
-
-            # With CHOLMOD disabled, partial path must NOT be selected
-            set_use_cholmod(False)
-            self.assertFalse(should_use_partial_factor(block))
+            _, stats = compute_explicit_schur(block)
+            self.assertEqual(stats['path'], 'chunked')
         finally:
             set_use_cholmod(original_use_cholmod)
-            set_partial_factor_threshold(original_threshold)
 
     def test_partial_stats_keys(self):
         """Stats dict from partial path has expected keys."""
@@ -3010,7 +2886,7 @@ class TestPartialCholesky(unittest.TestCase):
         block, _ = build_block_system_from_edges(
             edges, port_nodes, ground_node='0',
         )
-        _, stats = compute_explicit_schur(block, use_partial_factor=True)
+        _, stats = compute_explicit_schur(block)
 
         expected_keys = {
             'path', 'ordering', 'mode',
@@ -3038,20 +2914,32 @@ class TestTileWorkerConfigure(unittest.TestCase):
     """Test TileWorker.configure() propagates settings."""
 
     @pytest.mark.unit
-    def test_configure_propagates_threshold(self):
-        """TileWorker.configure() sets partial_factor_threshold on worker."""
-        from solver.coupled_system import (
-            get_partial_factor_threshold, set_partial_factor_threshold,
-        )
+    def test_configure_propagates_use_cholmod(self):
+        """TileWorker.configure() sets use_cholmod on worker."""
+        from solver.unified_solver import get_use_cholmod, set_use_cholmod
         from distributed.tile_worker import TileWorker
 
-        original = get_partial_factor_threshold()
+        original = get_use_cholmod()
         try:
             worker = TileWorker()
-            worker.configure({'partial_factor_threshold': 42})
-            self.assertEqual(get_partial_factor_threshold(), 42)
+            worker.configure({'use_cholmod': False})
+            self.assertEqual(get_use_cholmod(), False)
         finally:
-            set_partial_factor_threshold(original)
+            set_use_cholmod(original)
+
+    @pytest.mark.unit
+    def test_configure_propagates_cholmod_mode(self):
+        """TileWorker.configure() sets cholmod_mode on worker."""
+        from solver.unified_solver import get_cholmod_mode, set_cholmod_mode
+        from distributed.tile_worker import TileWorker
+
+        original = get_cholmod_mode()
+        try:
+            worker = TileWorker()
+            worker.configure({'cholmod_mode': 'supernodal'})
+            self.assertEqual(get_cholmod_mode(), 'supernodal')
+        finally:
+            set_cholmod_mode(original)
 
     @pytest.mark.unit
     def test_configure_propagates_reg_resistance(self):

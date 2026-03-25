@@ -97,7 +97,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             "  G_pi: %s x %s, nnz=%s  |  G_ip: %s x %s, nnz=%s\n"
             "  Block system memory: %s\n"
             "  factor_interior: %.3fs  |  backend: %s\n"
-            "  compute_schur: %.3fs  |  Schur: %s dense (%s)  |  chunk_size: %s",
+            "  compute_schur: %.3fs  |  Schur: %s dense (%s)",
             tid,
             f"{n_ii:,}", f"{n_ii:,}", f"{G_ii_nnz:,}", density,
             _format_bytes(ts.get('mem_bytes', 0)),
@@ -110,7 +110,6 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             "%s x %s" % (f"{ts.get('schur_shape', (0, 0))[0]:,}",
                          f"{ts.get('schur_shape', (0, 0))[1]:,}"),
             _format_bytes(ts.get('schur_mem_bytes', 0)),
-            ts.get('schur_chunk_size', 0),
         )
 
     # 2. Assemble global interface system
@@ -430,7 +429,7 @@ def _factor_transient_context(
             "  C_ii cap nodes: %d / %d  |  C_pp cap nodes: %d / %d\n"
             "  Total tile cap: %.1f fF  |  C_coeff: %.4f\n"
             "  factor_interior: %.3fs  |  backend: %s\n"
-            "  compute_schur: %.3fs  |  Schur: %s x %s dense (%s)  |  chunk_size: %s",
+            "  compute_schur: %.3fs  |  Schur: %s x %s dense (%s)",
             tid,
             _fmt_count(ts.get('A_ii_nnz', 0)), _fmt_count(ts.get('A_pp_nnz', 0)),
             ts.get('c_ii_cap_nodes', 0), ts.get('n_interior', 0),
@@ -440,7 +439,6 @@ def _factor_transient_context(
             ts.get('compute_schur_s', 0),
             f"{n_pp:,}", f"{n_pp:,}",
             _format_bytes(ts.get('schur_mem_bytes', 0)),
-            ts.get('schur_chunk_size', 0),
         )
 
     # 2. Build combined package edges: resistive + effective cap edges

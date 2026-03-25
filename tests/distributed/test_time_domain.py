@@ -1102,7 +1102,6 @@ class TestTimeDomainWorkerStats:
             'A_ii_nnz',
             'A_pp_nnz',
             'schur_mem_bytes',
-            'schur_chunk_size',
             'factorization_backend',
             'factorization_backend_info',
             'n_ports',

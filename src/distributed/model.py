@@ -394,12 +394,17 @@ def _create_distributed_model_from_bundle(
     workers = be.create_actors(TileWorker, metadata.tile_configs)
 
     # 3b. Propagate solver settings to workers
-    from solver.coupled_system import (
-        get_partial_factor_threshold, get_partial_factor_reg_resistance,
+    from solver.coupled_system import get_partial_factor_reg_resistance
+    from solver.unified_solver import (
+        get_use_cholmod, get_cholmod_mode,
+        get_cholmod_ordering, get_cholmod_use_long,
     )
     solver_settings = {
-        'partial_factor_threshold': get_partial_factor_threshold(),
         'partial_factor_reg_ohms': get_partial_factor_reg_resistance(),
+        'use_cholmod': get_use_cholmod(),
+        'cholmod_mode': get_cholmod_mode(),
+        'cholmod_ordering': get_cholmod_ordering(),
+        'cholmod_use_long': get_cholmod_use_long(),
     }
     be.call_all(workers, 'configure', [(solver_settings,)] * len(workers))
 

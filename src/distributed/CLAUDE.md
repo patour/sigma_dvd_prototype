@@ -49,7 +49,7 @@ prepare_transient()  -->  DistributedTransientContext   (transient)
 
 ## Ray Worker Gotchas
 
-- Module-level globals (`_PARTIAL_FACTOR_THRESHOLD`, CHOLMOD settings) do NOT propagate to Ray workers (separate processes). Use `TileWorker.configure(settings)` during `create_distributed_model`.
+- Module-level globals (CHOLMOD settings, regularization) do NOT propagate to Ray workers (separate processes). Use `TileWorker.configure(settings)` during `create_distributed_model`. CHOLMOD backend settings (`use_cholmod`, `cholmod_mode`, `cholmod_ordering`, `cholmod_use_long`) are now propagated automatically via the settings dict.
 - `tile_parsing.py` duplicates unit constants (`R_TO_KOHM`, `C_TO_FF`, `I_TO_MA`) from `parser.py` to avoid circular imports.
 
 ## Transient Numerics

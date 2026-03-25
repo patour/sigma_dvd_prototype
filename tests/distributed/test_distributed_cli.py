@@ -763,7 +763,7 @@ class TestDecomposeConfigMerge:
             plot_layers=None, max_stripes=500,
             config=None, use_cholmod=None, use_splu=False,
             cholmod_mode='auto', cholmod_ordering='default',
-            cholmod_use_long=None, partial_factor_threshold=None,
+            cholmod_use_long=None,
             profile_memory=False,
         )
         defaults.update(overrides)
@@ -1213,7 +1213,7 @@ class TestDecomposeConfigIntegration:
             config=str(cfg_file),
             use_cholmod=None, use_splu=False,
             cholmod_mode='auto', cholmod_ordering='default',
-            cholmod_use_long=None, partial_factor_threshold=None,
+            cholmod_use_long=None,
             profile_memory=False,
         )
 
@@ -1276,7 +1276,7 @@ class TestDecomposeConfigIntegration:
             config=str(cfg_file),
             use_cholmod=None, use_splu=False,
             cholmod_mode='auto', cholmod_ordering='default',
-            cholmod_use_long=None, partial_factor_threshold=None,
+            cholmod_use_long=None,
             profile_memory=False,
         )
 
@@ -1323,7 +1323,7 @@ class TestDecomposeConfigIntegration:
             config=None,
             use_cholmod=None, use_splu=False,
             cholmod_mode='auto', cholmod_ordering='default',
-            cholmod_use_long=None, partial_factor_threshold=None,
+            cholmod_use_long=None,
             profile_memory=False,
         )
 
