@@ -14,17 +14,25 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
+from .tile_worker_peak import _PeakTrackingMixin
+
 logger = logging.getLogger(__name__)
 
 
-class _TimeDomainMixin:
+class _TimeDomainMixin(_PeakTrackingMixin):
     """Mixin providing time-domain methods for TileWorker.
+
+    Peak tracking methods (init_peak_tracking, update_peak_stats,
+    get_peak_stats, prebin_peak_data, get_top_k_peaks,
+    get_tracked_waveforms, recover_and_update_peaks,
+    recover_transient_and_update_peaks) are provided by
+    _PeakTrackingMixin in tile_worker_peak.py.
 
     Expects the host class to provide:
         _block_system, _rhs_dirichlet, _tile_data, _vec_sources,
         _smoothed_sources, _active_sources, _transient_block_system,
         _c_pp_diag, _c_ii_diag, _total_cap, _C_coeff, _dt_scaled,
-        _transient_method, _rhs_dirichlet_transient, _v_interior_old,
+        _transient_method, _v_interior_old,
         _last_f_i, _peak_per_node, _peak_vdd,
         _peak_tracking_active, _tracked_nodes, _tracked_waveforms,
         get_reduced_rhs()
@@ -711,180 +719,8 @@ class _TimeDomainMixin:
         self._v_interior_old = None
         return {'had_transient_system': had}
 
-    # --- 4i. Peak tracking ---------------------------------------------
-
-    def init_peak_tracking(
-        self,
-        track_nodes: Optional[List[str]] = None,
-        vdd: float = 0.0,
-    ) -> None:
-        """Initialize per-node peak IR-drop tracking."""
-        if vdd <= 0:
-            raise ValueError(f"vdd must be positive, got {vdd}")
-        self._peak_per_node = {}
-        self._peak_vdd = vdd
-        self._peak_tracking_active = True
-        self._tracked_nodes = set(track_nodes) if track_nodes else None
-        self._tracked_waveforms = {}
-
-    def update_peak_stats(
-        self,
-        voltages: Dict[str, float],
-        t: float,
-    ) -> float:
-        """Update per-node peaks and tracked waveforms.  Returns step max drop."""
-        max_drop = 0.0
-        vdd = self._peak_vdd
-        for node, v in voltages.items():
-            drop = vdd - v
-            if drop > max_drop:
-                max_drop = drop
-            prev = self._peak_per_node.get(node)
-            if prev is None or drop > prev[0]:
-                self._peak_per_node[node] = (drop, t)
-            if self._tracked_nodes is not None and node in self._tracked_nodes:
-                self._tracked_waveforms.setdefault(node, []).append(v)
-        return max_drop
-
-    def get_peak_stats(self) -> Dict[str, Tuple[float, float]]:
-        """Return ``{node: (max_drop, time_of_max)}``."""
-        return self._peak_per_node
-
-    def prebin_peak_data(
-        self,
-        bin_spec: 'GlobalBinSpec',
-        exclude_set: Optional[Set[str]] = None,
-    ) -> Dict[str, List[Optional[np.ndarray]]]:
-        """Pre-bin peak IR-drop data into stripe bins for heatmap rendering.
-
-        Converts stored per-node peak drops back to voltages
-        (``voltage = vdd - drop``) before delegating to
-        :func:`distributed.heatmap.prebin_tile`, which expects voltage
-        inputs and internally computes IR-drop in mV.
-        """
-        if not self._peak_tracking_active or not self._peak_per_node:
-            return {}
-        vdd = self._peak_vdd
-        voltages = {node: vdd - drop for node, (drop, _t) in self._peak_per_node.items()}
-        from .heatmap import prebin_tile
-        return prebin_tile(voltages, bin_spec, exclude_set)
-
-    def get_top_k_peaks(self, k: int) -> List[Tuple[str, float, float]]:
-        """Return top-K nodes by peak IR-drop as ``[(node, drop, time), ...]``."""
-        if not self._peak_per_node:
-            return []
-        items = [(node, drop, t) for node, (drop, t) in self._peak_per_node.items()]
-        items.sort(key=lambda x: x[1], reverse=True)
-        return items[:k]
-
-    def get_tracked_waveforms(self) -> Dict[str, List[float]]:
-        """Return ``{node: [v0, v1, ...]}`` for tracked nodes."""
-        return self._tracked_waveforms
-
-    # --- 4j. Combined recover + peak update (coordinator convenience) ----
-
-    def recover_and_update_peaks(
-        self,
-        boundary_voltages_dict: Dict[str, float],
-        t: float,
-    ) -> float:
-        """Recover interior voltages and update peak stats in one call.
-
-        When called after :meth:`evaluate_and_get_reduced_rhs`, uses the
-        cached interior RHS (which includes time-varying VCS currents) to
-        recover interior voltages consistently with the reduced RHS that
-        was used to solve the interface system.
-
-        Falls back to :meth:`get_interior_voltages` (static DC currents)
-        when no cached interior RHS is available.
-
-        Args:
-            boundary_voltages_dict: Solved port voltages ``{node: V}``.
-            t: Current time in seconds.
-
-        Returns:
-            Scalar max IR-drop for this tile at this time step.
-        """
-        if self._last_qs_rhs_i is not None:
-            # Use cached interior RHS from evaluate_and_get_reduced_rhs
-            voltages = self._recover_interior_from_cached_rhs(
-                boundary_voltages_dict
-            )
-            self._last_qs_rhs_i = None  # Consumed; prevent stale use
-        else:
-            voltages, _recovery_stats = self.get_interior_voltages(boundary_voltages_dict)
-
-        if self._peak_tracking_active:
-            return self.update_peak_stats(voltages, t)
-        vdd = self._peak_vdd if self._peak_vdd > 0 else 0.0
-        if vdd > 0:
-            return max((vdd - v for v in voltages.values()), default=0.0)
-        return 0.0
-
-    def _recover_interior_from_cached_rhs(
-        self,
-        boundary_voltages_dict: Dict[str, float],
-    ) -> Dict[str, float]:
-        """Recover interior voltages using the cached interior RHS.
-
-        This produces interior voltages consistent with the time-varying
-        currents evaluated in the last :meth:`evaluate_and_get_reduced_rhs`
-        call, avoiding the static-current mismatch that would occur when
-        using :meth:`get_interior_voltages` in the quasi-static loop.
-
-        Args:
-            boundary_voltages_dict: Solved port voltages ``{node: V}``.
-
-        Returns:
-            Dict mapping all tile nodes (interior + boundary) -> voltage.
-        """
-        bs = self._block_system
-        n_ports = bs.n_ports
-
-        # Build port voltage array
-        v_p = np.zeros(n_ports, dtype=np.float64)
-        for node, idx in bs.port_to_idx.items():
-            if node in boundary_voltages_dict:
-                v_p[idx] = boundary_voltages_dict[node]
-
-        # v_i = inv(G_ii) @ (rhs_i - G_ip @ v_p)
-        if bs.n_interior > 0 and bs.lu_ii is not None:
-            v_i = bs.lu_ii(self._last_qs_rhs_i - bs.G_ip @ v_p)
-        else:
-            v_i = np.array([], dtype=np.float64)
-
-        # Build all-node voltage dict
-        all_voltages: Dict[str, float] = {}
-        for i, node in enumerate(bs.interior_nodes):
-            all_voltages[node] = float(v_i[i])
-        for node in bs.port_nodes:
-            if node in boundary_voltages_dict:
-                all_voltages[node] = boundary_voltages_dict[node]
-
-        return all_voltages
-
-    def recover_transient_and_update_peaks(
-        self,
-        boundary_voltages_dict: Dict[str, float],
-        t: float,
-    ) -> float:
-        """Recover transient interior voltages and update peak stats in one call.
-
-        Combines :meth:`get_transient_interior_voltages` with
-        :meth:`update_peak_stats` to avoid two round-trips per time step
-        in the transient loop.
-
-        Args:
-            boundary_voltages_dict: Solved port voltages ``{node: V}``.
-            t: Current time in seconds.
-
-        Returns:
-            Scalar max IR-drop for this tile at this time step.
-        """
-        voltages = self.get_transient_interior_voltages(boundary_voltages_dict)
-        if self._peak_tracking_active:
-            return self.update_peak_stats(voltages, t)
-        vdd = self._peak_vdd if self._peak_vdd > 0 else 0.0
-        if vdd > 0:
-            return max((vdd - v for v in voltages.values()), default=0.0)
-        return 0.0
+    # Peak tracking methods (init_peak_tracking, update_peak_stats,
+    # get_peak_stats, prebin_peak_data, get_top_k_peaks,
+    # get_tracked_waveforms, recover_and_update_peaks,
+    # recover_transient_and_update_peaks) are provided by
+    # _PeakTrackingMixin in tile_worker_peak.py.

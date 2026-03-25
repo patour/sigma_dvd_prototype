@@ -653,6 +653,127 @@ class TestPeakTracking:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 6b. Vectorized (array-based) peak tracking for transient path
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestVectorizedPeakTracking:
+    """Test the array-based peak tracking path used by transient recovery."""
+
+    def _make_transient_worker(self, edges, port_nodes, cap_edges,
+                                currents=None):
+        """Create worker with transient factorization ready."""
+        worker = _make_worker_with_tile(
+            edges=edges, port_nodes=port_nodes,
+            currents=currents, cap_edges=cap_edges,
+        )
+        worker.factor_transient_system(dt_scaled=100.0, method='be')
+        worker.init_peak_tracking(vdd=1.0)
+        return worker
+
+    def test_transient_peak_uses_arrays(self):
+        """recover_transient_and_update_peaks sets _peak_use_arrays."""
+        worker = self._make_transient_worker(
+            edges=[('a', 'b', 2.0), ('b', '0', 1.0)],
+            port_nodes={'a'}, cap_edges=[('b', '0', 10.0)],
+        )
+        worker.set_initial_voltages({'a': 1.0, 'b': 1.0})
+        worker.get_transient_reduced_rhs(t=1e-9, boundary_v_old={'a': 1.0})
+        worker.recover_transient_and_update_peaks({'a': 0.95}, t=1e-9)
+
+        assert worker._peak_use_arrays is True
+
+    def test_get_peak_stats_from_arrays(self):
+        """get_peak_stats reconstructs dict correctly from arrays."""
+        worker = self._make_transient_worker(
+            edges=[('a', 'b', 2.0), ('b', '0', 1.0)],
+            port_nodes={'a'}, cap_edges=[('b', '0', 10.0)],
+        )
+        worker.set_initial_voltages({'a': 1.0, 'b': 1.0})
+
+        # Two steps: second has worse drop
+        worker.get_transient_reduced_rhs(t=1e-9, boundary_v_old={'a': 1.0})
+        worker.recover_transient_and_update_peaks({'a': 0.95}, t=1e-9)
+        worker.get_transient_reduced_rhs(t=2e-9, boundary_v_old={'a': 0.95})
+        drop = worker.recover_transient_and_update_peaks({'a': 0.90}, t=2e-9)
+
+        assert drop > 0
+        stats = worker.get_peak_stats()
+        assert 'a' in stats
+        # Port 'a' at 0.90 -> drop = 0.10
+        np.testing.assert_allclose(stats['a'][0], 0.10, atol=1e-12)
+        np.testing.assert_allclose(stats['a'][1], 2e-9, atol=1e-15)
+        # Interior 'b' should also have peaks
+        assert 'b' in stats
+        assert stats['b'][0] > 0
+
+    def test_get_top_k_peaks_from_arrays(self):
+        """get_top_k_peaks uses argpartition on arrays."""
+        worker = self._make_transient_worker(
+            edges=[('a', 'b', 2.0), ('b', '0', 1.0)],
+            port_nodes={'a'}, cap_edges=[('b', '0', 10.0)],
+        )
+        worker.set_initial_voltages({'a': 1.0, 'b': 1.0})
+        worker.get_transient_reduced_rhs(t=1e-9, boundary_v_old={'a': 1.0})
+        worker.recover_transient_and_update_peaks({'a': 0.90}, t=1e-9)
+
+        top = worker.get_top_k_peaks(k=1)
+        assert len(top) == 1
+        node, drop, time = top[0]
+        assert drop > 0
+        assert time == 1e-9
+
+        # Top-2 should include both nodes
+        top2 = worker.get_top_k_peaks(k=2)
+        assert len(top2) == 2
+        # First should have larger or equal drop
+        assert top2[0][1] >= top2[1][1]
+
+    def test_port_only_tile_no_interior(self):
+        """Tile with n_interior == 0 doesn't crash."""
+        worker = _make_worker_with_tile(
+            edges=[('a', '0', 1.0)],
+            port_nodes={'a'},
+            cap_edges=[('a', '0', 10.0)],
+        )
+        worker.factor_transient_system(dt_scaled=100.0, method='be')
+        worker.init_peak_tracking(vdd=1.0)
+        worker.set_initial_voltages({'a': 1.0})
+        worker.get_transient_reduced_rhs(t=1e-9, boundary_v_old={'a': 1.0})
+        drop = worker.recover_transient_and_update_peaks({'a': 0.95}, t=1e-9)
+
+        np.testing.assert_allclose(drop, 0.05, atol=1e-12)
+        stats = worker.get_peak_stats()
+        assert 'a' in stats
+        np.testing.assert_allclose(stats['a'][0], 0.05, atol=1e-12)
+
+    def test_tracked_waveforms_via_transient_path(self):
+        """Tracked waveforms are recorded through the vectorized path."""
+        worker = _make_worker_with_tile(
+            edges=[('a', 'b', 2.0), ('b', '0', 1.0)],
+            port_nodes={'a'},
+            cap_edges=[('b', '0', 10.0)],
+        )
+        worker.factor_transient_system(dt_scaled=100.0, method='be')
+        worker.init_peak_tracking(track_nodes=['a'], vdd=1.0)
+        worker.set_initial_voltages({'a': 1.0, 'b': 1.0})
+
+        for i, bv_a in enumerate([0.95, 0.90, 0.92]):
+            t = (i + 1) * 1e-9
+            worker.get_transient_reduced_rhs(
+                t=t, boundary_v_old={'a': bv_a if i == 0 else prev_bv},
+            )
+            worker.recover_transient_and_update_peaks({'a': bv_a}, t=t)
+            prev_bv = bv_a
+
+        wf = worker.get_tracked_waveforms()
+        assert 'a' in wf
+        assert len(wf['a']) == 3
+        np.testing.assert_allclose(wf['a'], [0.95, 0.90, 0.92], atol=1e-12)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 7. Cached RHS recovery (quasi-static bug fix)
 # ──────────────────────────────────────────────────────────────────────
 

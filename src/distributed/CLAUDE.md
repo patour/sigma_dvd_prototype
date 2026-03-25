@@ -12,7 +12,8 @@ Mixin pattern keeps files under ~800 lines:
 | `solver_td.py` | Time-domain mixin: `preprocess_sources`, `solve_quasi_static`, `prepare_transient`, `solve_transient` |
 | `solver_adjoint.py` | Adjoint mixin: `analyze_adjoint_static`, `analyze_adjoint` (backward sweep) |
 | `tile_worker.py` | `TileWorker` — per-tile actor wrapping `BlockMatrixSystem` |
-| `tile_worker_td.py` | Time-domain mixin: VCS init, transient factor/RHS, peak tracking, current node masking |
+| `tile_worker_td.py` | Time-domain mixin: VCS init, transient factor/RHS/recovery, current node masking |
+| `tile_worker_peak.py` | Peak tracking mixin: init, dict/array update, accessors, combined recover+peak |
 | `tile_worker_adjoint.py` | Adjoint worker mixin: terminal/step RHS, lambda recovery, contribution accumulation |
 | `tile_parsing.py` | Stateless parsing: `TileData`, `_parse_tile_ckt`, `_iter_instance_sources`, `_parse_node_xy` |
 | `model.py` | `DistributedPowerGridModel`, `ParsedTileBundle`, `create_distributed_model` |

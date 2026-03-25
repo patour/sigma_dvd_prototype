@@ -90,12 +90,17 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         # Per-node current mask (float64): 1.0 = keep, 0.0 = zero out
         self._current_node_mask: Optional[np.ndarray] = None
 
-        # Peak tracking
+        # Peak tracking (dict-based for QS, array-based for transient)
         self._peak_per_node: Dict[str, Tuple[float, float]] = {}
         self._peak_vdd: float = 0.0
         self._peak_tracking_active: bool = False
         self._tracked_nodes: Optional[Set[str]] = None
         self._tracked_waveforms: Dict[str, List[float]] = {}
+        # Vectorized peak arrays (init_peak_tracking sets these)
+        self._peak_drops_array: Optional[np.ndarray] = None
+        self._peak_times_array: Optional[np.ndarray] = None
+        self._peak_use_arrays: bool = False
+        self._tracked_node_indices: Dict[str, int] = {}
 
         # --- Adjoint sensitivity state ---
         self._init_adjoint_state()
