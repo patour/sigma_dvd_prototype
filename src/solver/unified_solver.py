@@ -15,6 +15,7 @@ import logging
 import math
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -58,6 +59,73 @@ _CHOLMOD_ORDERING: str = 'default'
 # - True: Force 64-bit (long) indices
 # - False: Force 32-bit (int) indices
 _CHOLMOD_USE_LONG: Optional[bool] = None
+
+_VALID_CHOLMOD_MODES = ('auto', 'simplicial', 'supernodal')
+_VALID_CHOLMOD_ORDERINGS = (
+    'default', 'natural', 'amd', 'metis', 'nesdis', 'colamd', 'best',
+)
+
+
+@dataclass(frozen=True)
+class SolverBackendConfig:
+    """Immutable bundle of solver backend settings.
+
+    Used to pass per-role (coordinator vs worker) settings explicitly,
+    rather than relying on module-level globals.  Fields with ``None``
+    values trigger auto-detection at point of use (e.g., CHOLMOD is
+    used if available).  Use :meth:`from_globals` to snapshot the
+    current module globals into a config.
+    """
+
+    use_cholmod: Optional[bool] = None
+    cholmod_mode: str = 'auto'
+    cholmod_ordering: str = 'default'
+    cholmod_use_long: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        # Validate enum-like fields.  No HAS_CHOLMOD check here:
+        # configs must be constructable on the coordinator even when
+        # CHOLMOD is only available on remote workers.  The check
+        # fires at factorization time in _factor_conductance_matrix.
+        if self.cholmod_mode not in _VALID_CHOLMOD_MODES:
+            raise ValueError(
+                f"Invalid cholmod mode '{self.cholmod_mode}'. "
+                f"Must be one of: {_VALID_CHOLMOD_MODES}"
+            )
+        if self.cholmod_ordering not in _VALID_CHOLMOD_ORDERINGS:
+            raise ValueError(
+                f"Invalid cholmod ordering '{self.cholmod_ordering}'. "
+                f"Must be one of: {_VALID_CHOLMOD_ORDERINGS}"
+            )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a dict with CHOLMOD backend keys for TileWorker.configure()."""
+        import dataclasses as _dc
+        return _dc.asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'SolverBackendConfig':
+        """Construct from a dict, ignoring unknown keys.
+
+        Uses ``or`` fallback so that explicit ``None`` values (common in
+        YAML/JSON configs) are treated as "use default".
+        """
+        return cls(
+            use_cholmod=d.get('use_cholmod'),
+            cholmod_mode=d.get('cholmod_mode') or 'auto',
+            cholmod_ordering=d.get('cholmod_ordering') or 'default',
+            cholmod_use_long=d.get('cholmod_use_long'),
+        )
+
+    @classmethod
+    def from_globals(cls) -> 'SolverBackendConfig':
+        """Snapshot the current module-level globals into a config."""
+        return cls(
+            use_cholmod=_USE_CHOLMOD,
+            cholmod_mode=_CHOLMOD_MODE,
+            cholmod_ordering=_CHOLMOD_ORDERING,
+            cholmod_use_long=_CHOLMOD_USE_LONG,
+        )
 
 
 def set_use_cholmod(value: Optional[bool]) -> None:
@@ -116,9 +184,8 @@ def set_cholmod_mode(mode: str) -> None:
         ValueError: If mode is not one of the valid options.
     """
     global _CHOLMOD_MODE
-    valid_modes = ('auto', 'simplicial', 'supernodal')
-    if mode not in valid_modes:
-        raise ValueError(f"Invalid cholmod mode '{mode}'. Must be one of: {valid_modes}")
+    if mode not in _VALID_CHOLMOD_MODES:
+        raise ValueError(f"Invalid cholmod mode '{mode}'. Must be one of: {_VALID_CHOLMOD_MODES}")
     _CHOLMOD_MODE = mode
 
 
@@ -148,9 +215,8 @@ def set_cholmod_ordering(ordering: str) -> None:
         ValueError: If ordering is not one of the valid options.
     """
     global _CHOLMOD_ORDERING
-    valid_orderings = ('default', 'natural', 'amd', 'metis', 'nesdis', 'colamd', 'best')
-    if ordering not in valid_orderings:
-        raise ValueError(f"Invalid cholmod ordering '{ordering}'. Must be one of: {valid_orderings}")
+    if ordering not in _VALID_CHOLMOD_ORDERINGS:
+        raise ValueError(f"Invalid cholmod ordering '{ordering}'. Must be one of: {_VALID_CHOLMOD_ORDERINGS}")
     _CHOLMOD_ORDERING = ordering
 
 
@@ -318,38 +384,54 @@ def _factor_conductance_matrix(
     matrix: sp.spmatrix,
     verbose: bool = False,
     use_cholmod: Optional[bool] = None,
+    config: Optional[SolverBackendConfig] = None,
 ) -> SparseFactorAdapter:
     """Factor a conductance matrix using the best available backend.
-    
+
     Uses sksparse.cholmod for Cholesky factorization if available,
     otherwise falls back to scipy.sparse.linalg.splu.
-    
+
     The conductance matrix must be symmetric positive definite (SPD).
     In debug mode, symmetry is verified before factorization.
-    
+
     Args:
         matrix: Sparse conductance matrix (will be converted to CSC if needed)
         verbose: If True, print which backend is being used and timing info
         use_cholmod: If True, force cholmod (raises if unavailable).
                      If False, force splu. If None (default), use the global
-                     setting from set_use_cholmod().
-    
+                     setting from set_use_cholmod().  Takes precedence over
+                     ``config.use_cholmod`` when both are provided.
+        config: Optional :class:`SolverBackendConfig` supplying all backend
+                settings.  When provided, its fields are used instead of
+                module-level globals.  When ``None`` (default), module
+                globals are used (backward-compatible behavior).
+
     Returns:
         SparseFactorAdapter wrapping the factorization
-        
+
     Raises:
         ImportError: If use_cholmod=True but sksparse not installed
         ValueError: If matrix is not symmetric (in debug mode)
     """
-    import time
-    
+    # Resolve effective settings: explicit use_cholmod > config > globals
+    if config is not None:
+        eff_mode = config.cholmod_mode
+        eff_ordering = config.cholmod_ordering
+        eff_use_long = config.cholmod_use_long
+        eff_use_cholmod = config.use_cholmod if use_cholmod is None else use_cholmod
+    else:
+        eff_mode = _CHOLMOD_MODE
+        eff_ordering = _CHOLMOD_ORDERING
+        eff_use_long = _CHOLMOD_USE_LONG
+        eff_use_cholmod = _USE_CHOLMOD if use_cholmod is None else use_cholmod
+
     # Auto-convert to CSC format (required by both backends)
     t_csc_start = time.perf_counter()
     if not sp.isspmatrix_csc(matrix):
         matrix = matrix.tocsc()
     t_csc_end = time.perf_counter()
     csc_time_ms = (t_csc_end - t_csc_start) * 1000
-    
+
     # Debug-mode symmetry check
     if __debug__:
         # Use Frobenius norm of (A - A^T) for symmetry check
@@ -362,29 +444,27 @@ def _factor_conductance_matrix(
                 f"Conductance matrix is not symmetric: "
                 f"||A - A^T|| / ||A|| = {rel_err:.2e}"
             )
-    
-    # Determine which backend to use (local override > global setting > auto-detect)
-    if use_cholmod is None:
-        use_cholmod = _USE_CHOLMOD  # Use global setting
-    if use_cholmod is None:
-        use_cholmod = HAS_CHOLMOD  # Auto-detect
-    elif use_cholmod and not HAS_CHOLMOD:
+
+    # Determine which backend to use (local override > config > global > auto-detect)
+    if eff_use_cholmod is None:
+        eff_use_cholmod = HAS_CHOLMOD  # Auto-detect
+    elif eff_use_cholmod and not HAS_CHOLMOD:
         raise ImportError(
             "sksparse.cholmod requested but not available. "
             "Install with: pip install scikit-sparse"
         )
-    
+
     t_factor_start = time.perf_counter()
-    if use_cholmod:
+    if eff_use_cholmod:
         factor = cholmod_cholesky(
             matrix,
-            mode=_CHOLMOD_MODE,
-            ordering_method=_CHOLMOD_ORDERING,
-            use_long=_CHOLMOD_USE_LONG,
+            mode=eff_mode,
+            ordering_method=eff_ordering,
+            use_long=eff_use_long,
         )
         backend = 'cholmod'
-        use_long_str = 'auto' if _CHOLMOD_USE_LONG is None else ('64-bit' if _CHOLMOD_USE_LONG else '32-bit')
-        backend_info = f"cholmod(mode={_CHOLMOD_MODE}, ordering={_CHOLMOD_ORDERING}, idx={use_long_str})"
+        use_long_str = 'auto' if eff_use_long is None else ('64-bit' if eff_use_long else '32-bit')
+        backend_info = f"cholmod(mode={eff_mode}, ordering={eff_ordering}, idx={use_long_str})"
     else:
         factor = spla.splu(matrix)
         backend = 'splu'
@@ -411,6 +491,7 @@ __all__ = [
     'TileSolveResult',
     'TiledBottomGridResult',
     'HAS_CHOLMOD',
+    'SolverBackendConfig',
     'SparseFactorAdapter',
     '_factor_conductance_matrix',
     'set_use_cholmod',

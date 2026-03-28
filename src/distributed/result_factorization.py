@@ -28,8 +28,50 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Shared helper
+# Shared helpers
 # ---------------------------------------------------------------------------
+
+
+def _save_role_configs(model: Optional['DistributedPowerGridModel']) -> dict:
+    """Extract per-role solver configs from model for checkpoint serialization.
+
+    Serializes configs as plain dicts (via ``to_dict()``) rather than raw
+    dataclass instances, ensuring forward compatibility if fields change.
+    """
+    if model is None:
+        return {'coordinator_solver_config': None, 'worker_solver_config': None}
+    return {
+        'coordinator_solver_config': (
+            model.coordinator_solver_config.to_dict()
+            if model.coordinator_solver_config is not None else None
+        ),
+        'worker_solver_config': (
+            model.worker_solver_config.to_dict()
+            if model.worker_solver_config is not None else None
+        ),
+    }
+
+
+def _restore_role_configs(
+    data: dict, model: Optional['DistributedPowerGridModel'],
+) -> None:
+    """Restore per-role solver configs from checkpoint data onto model.
+
+    Only restores a config if the model's field is currently None
+    (i.e., don't overwrite explicitly-set configs).  Accepts both
+    plain dicts (new format) and ``SolverBackendConfig`` instances
+    (legacy pickled checkpoints).
+    """
+    if model is None:
+        return
+    from solver.unified_solver import SolverBackendConfig
+
+    for attr in ('coordinator_solver_config', 'worker_solver_config'):
+        saved = data.get(attr)
+        if saved is not None and getattr(model, attr) is None:
+            if isinstance(saved, dict):
+                saved = SolverBackendConfig.from_dict(saved)
+            setattr(model, attr, saved)
 
 
 def _default_checkpoint_path(
@@ -168,7 +210,9 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
     t0 = _time.perf_counter()
     from solver.unified_solver import _factor_conductance_matrix
 
-    interface_lu_result = _factor_conductance_matrix(S_global, verbose=False)
+    interface_lu_result = _factor_conductance_matrix(
+        S_global, verbose=False, config=model.coordinator_solver_config,
+    )
     timings['factor_interface'] = _time.perf_counter() - t0
 
     # 4. Build tile index maps (local port indices -> global interface indices)
@@ -317,6 +361,7 @@ def _save_dc_context(ctx: 'DistributedSolverContext', path: Optional[str] = None
         'topology': ctx.topology,
         'S_global': ctx._S_global,
         'timings': ctx.timings,
+        **_save_role_configs(ctx.model),
     }
 
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -345,6 +390,7 @@ def _load_dc_context(
     ctx = cls(model=model, topology=data['topology'])
     ctx._S_global = data.get('S_global')
     ctx.timings = data.get('timings', {})
+    _restore_role_configs(data, model)
     # NOT factored -- caller must call refactor() or factor()
     logger.info("Loaded DC context from %s (is_factored=False)", path)
     return ctx
@@ -360,9 +406,10 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
         )
     from solver.unified_solver import _factor_conductance_matrix
 
+    coord_config = ctx.model.coordinator_solver_config if ctx.model is not None else None
     t0 = _time.perf_counter()
     interface_lu_result = _factor_conductance_matrix(
-        ctx._S_global, verbose=verbose,
+        ctx._S_global, verbose=verbose, config=coord_config,
     )
     elapsed = _time.perf_counter() - t0
 
@@ -511,7 +558,9 @@ def _factor_transient_context(
     t0 = _time.perf_counter()
     from solver.unified_solver import _factor_conductance_matrix
 
-    interface_lu_result = _factor_conductance_matrix(S_global, verbose=verbose)
+    interface_lu_result = _factor_conductance_matrix(
+        S_global, verbose=verbose, config=model.coordinator_solver_config,
+    )
     timings['factor_transient_interface'] = _time.perf_counter() - t0
 
     # 6. Build tile index maps
@@ -669,6 +718,7 @@ def _save_transient_context(
         'C_package_uu': ctx.C_package_uu,
         'G_package_uu': ctx._G_package_uu,
         'timings': ctx.timings,
+        **_save_role_configs(ctx.model),
     }
 
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -707,6 +757,7 @@ def _load_transient_context(
     ctx.C_package_uu = data.get('C_package_uu')
     ctx._G_package_uu = data.get('G_package_uu')
     ctx.timings = data.get('timings', {})
+    _restore_role_configs(data, model)
     # NOT factored -- caller must call refactor() or factor()
     logger.info(
         "Loaded transient context from %s (is_factored=False)", path,
@@ -726,9 +777,10 @@ def _refactor_transient_context(
         )
     from solver.unified_solver import _factor_conductance_matrix
 
+    coord_config = ctx.model.coordinator_solver_config if ctx.model is not None else None
     t0 = _time.perf_counter()
     interface_lu_result = _factor_conductance_matrix(
-        ctx._S_global, verbose=verbose,
+        ctx._S_global, verbose=verbose, config=coord_config,
     )
     elapsed = _time.perf_counter() - t0
 

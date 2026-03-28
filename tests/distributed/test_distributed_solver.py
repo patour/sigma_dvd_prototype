@@ -2958,5 +2958,419 @@ class TestTileWorkerConfigure(unittest.TestCase):
             set_partial_factor_reg_resistance(original)
 
 
+class TestSolverBackendConfig(unittest.TestCase):
+    """Test SolverBackendConfig dataclass and per-role settings."""
+
+    @pytest.mark.unit
+    def test_default_construction(self):
+        """Default SolverBackendConfig has auto/default values."""
+        from solver.unified_solver import SolverBackendConfig
+
+        cfg = SolverBackendConfig()
+        self.assertIsNone(cfg.use_cholmod)
+        self.assertEqual(cfg.cholmod_mode, 'auto')
+        self.assertEqual(cfg.cholmod_ordering, 'default')
+        self.assertIsNone(cfg.cholmod_use_long)
+
+    @pytest.mark.unit
+    def test_validation_rejects_invalid_mode(self):
+        """__post_init__ rejects invalid cholmod_mode."""
+        from solver.unified_solver import SolverBackendConfig
+
+        with self.assertRaises(ValueError):
+            SolverBackendConfig(cholmod_mode='invalid')
+
+    @pytest.mark.unit
+    def test_validation_rejects_invalid_ordering(self):
+        """__post_init__ rejects invalid cholmod_ordering."""
+        from solver.unified_solver import SolverBackendConfig
+
+        with self.assertRaises(ValueError):
+            SolverBackendConfig(cholmod_ordering='bogus')
+
+    @pytest.mark.unit
+    def test_to_dict_roundtrip(self):
+        """to_dict() -> from_dict() produces equal config."""
+        from solver.unified_solver import SolverBackendConfig
+
+        cfg = SolverBackendConfig(
+            use_cholmod=False,
+            cholmod_mode='simplicial',
+            cholmod_ordering='amd',
+            cholmod_use_long=True,
+        )
+        d = cfg.to_dict()
+        cfg2 = SolverBackendConfig.from_dict(d)
+        self.assertEqual(cfg, cfg2)
+
+    @pytest.mark.unit
+    def test_from_dict_ignores_unknown_keys(self):
+        """from_dict() ignores keys not in the dataclass."""
+        from solver.unified_solver import SolverBackendConfig
+
+        d = {
+            'use_cholmod': False,
+            'partial_factor_reg_ohms': 1e6,
+            'some_unknown_key': 42,
+        }
+        cfg = SolverBackendConfig.from_dict(d)
+        self.assertFalse(cfg.use_cholmod)
+        self.assertEqual(cfg.cholmod_mode, 'auto')
+
+    @pytest.mark.unit
+    def test_from_dict_empty_produces_defaults(self):
+        """from_dict({}) returns defaults."""
+        from solver.unified_solver import SolverBackendConfig
+
+        cfg = SolverBackendConfig.from_dict({})
+        self.assertEqual(cfg, SolverBackendConfig())
+
+    @pytest.mark.unit
+    def test_from_dict_coalesces_none_string_fields(self):
+        """from_dict with explicit None for string fields returns defaults."""
+        from solver.unified_solver import SolverBackendConfig
+
+        cfg = SolverBackendConfig.from_dict({
+            'cholmod_mode': None,
+            'cholmod_ordering': None,
+        })
+        self.assertEqual(cfg.cholmod_mode, 'auto')
+        self.assertEqual(cfg.cholmod_ordering, 'default')
+
+    @pytest.mark.unit
+    def test_from_globals_snapshots_current_state(self):
+        """from_globals() captures module-level globals."""
+        from solver.unified_solver import (
+            SolverBackendConfig,
+            get_use_cholmod, set_use_cholmod,
+            get_cholmod_mode, set_cholmod_mode,
+        )
+
+        orig_cholmod = get_use_cholmod()
+        orig_mode = get_cholmod_mode()
+        try:
+            set_use_cholmod(False)
+            set_cholmod_mode('simplicial')
+            cfg = SolverBackendConfig.from_globals()
+            self.assertFalse(cfg.use_cholmod)
+            self.assertEqual(cfg.cholmod_mode, 'simplicial')
+        finally:
+            set_use_cholmod(orig_cholmod)
+            set_cholmod_mode(orig_mode)
+
+    @pytest.mark.unit
+    def test_frozen_immutability(self):
+        """Frozen dataclass rejects attribute assignment."""
+        from solver.unified_solver import SolverBackendConfig
+        import dataclasses
+
+        cfg = SolverBackendConfig()
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            cfg.use_cholmod = True
+
+    @pytest.mark.unit
+    def test_pickle_roundtrip(self):
+        """SolverBackendConfig survives pickle round-trip."""
+        import pickle
+        from solver.unified_solver import SolverBackendConfig
+
+        cfg = SolverBackendConfig(
+            use_cholmod=False,
+            cholmod_mode='supernodal',
+            cholmod_ordering='metis',
+            cholmod_use_long=True,
+        )
+        data = pickle.dumps(cfg)
+        cfg2 = pickle.loads(data)
+        self.assertEqual(cfg, cfg2)
+
+    @pytest.mark.unit
+    def test_to_dict_keys_match_configure(self):
+        """to_dict() output keys are a subset of TileWorker.configure() keys."""
+        from solver.unified_solver import SolverBackendConfig
+
+        cfg = SolverBackendConfig()
+        d = cfg.to_dict()
+        # These are the 4 CHOLMOD keys that configure() handles
+        expected_keys = {'use_cholmod', 'cholmod_mode',
+                         'cholmod_ordering', 'cholmod_use_long'}
+        self.assertEqual(set(d.keys()), expected_keys)
+
+    @pytest.mark.unit
+    def test_factor_conductance_matrix_with_config(self):
+        """_factor_conductance_matrix respects config parameter."""
+        import numpy as np
+        import scipy.sparse as sp
+        from solver.unified_solver import (
+            SolverBackendConfig, _factor_conductance_matrix,
+            set_use_cholmod, get_use_cholmod,
+        )
+
+        # Build a small SPD matrix
+        n = 5
+        A = sp.eye(n, format='csc') * 2.0
+
+        # Force globals to cholmod (if available), but config says splu
+        orig = get_use_cholmod()
+        try:
+            cfg = SolverBackendConfig(use_cholmod=False)
+            result = _factor_conductance_matrix(A, config=cfg)
+            self.assertEqual(result.backend, 'splu')
+        finally:
+            set_use_cholmod(orig)
+
+    @pytest.mark.unit
+    def test_collect_role_config_returns_none_no_flags(self):
+        """_collect_role_config returns None when no role flags set."""
+        import argparse
+        from distributed.cli import _collect_role_config
+
+        args = argparse.Namespace(
+            coordinator_use_cholmod=None,
+            coordinator_use_splu=False,
+            coordinator_cholmod_mode=None,
+            coordinator_cholmod_ordering=None,
+            coordinator_cholmod_use_long=None,
+        )
+        self.assertIsNone(_collect_role_config(args, 'coordinator'))
+
+    @pytest.mark.unit
+    def test_collect_role_config_builds_config(self):
+        """_collect_role_config builds SolverBackendConfig from flags."""
+        import argparse
+        from distributed.cli import _collect_role_config
+
+        args = argparse.Namespace(
+            worker_use_cholmod=None,
+            worker_use_splu=True,
+            worker_cholmod_mode='supernodal',
+            worker_cholmod_ordering=None,
+            worker_cholmod_use_long=None,
+        )
+        cfg = _collect_role_config(args, 'worker')
+        self.assertIsNotNone(cfg)
+        self.assertFalse(cfg.use_cholmod)  # use_splu -> False
+        self.assertEqual(cfg.cholmod_mode, 'supernodal')
+
+
+class TestYamlRoleConfigs(unittest.TestCase):
+    """Test YAML per-role config parsing and precedence."""
+
+    @pytest.mark.unit
+    def test_build_config_from_yaml_basic(self):
+        """_build_config_from_yaml_section merges section with parent."""
+        from distributed.cli import _build_config_from_yaml_section
+
+        parent = {'use_cholmod': True, 'ordering': 'amd'}
+        section = {'use_cholmod': False}
+        cfg = _build_config_from_yaml_section(section, parent)
+        self.assertIsNotNone(cfg)
+        self.assertFalse(cfg.use_cholmod)
+        self.assertEqual(cfg.cholmod_ordering, 'amd')  # inherited from parent
+
+    @pytest.mark.unit
+    def test_build_config_from_yaml_empty_returns_none(self):
+        """_build_config_from_yaml_section returns None for empty section."""
+        from distributed.cli import _build_config_from_yaml_section
+
+        cfg = _build_config_from_yaml_section({}, {})
+        self.assertIsNone(cfg)
+
+    @pytest.mark.unit
+    def test_build_config_use_long_false(self):
+        """Explicit cholmod_use_long: false is preserved (not treated as falsy)."""
+        from distributed.cli import _build_config_from_yaml_section
+
+        section = {'cholmod_use_long': False}
+        cfg = _build_config_from_yaml_section(section, {})
+        self.assertIsNotNone(cfg)
+        self.assertFalse(cfg.cholmod_use_long)
+
+    @pytest.mark.unit
+    def test_apply_yaml_role_configs_sets_configs(self):
+        """_apply_yaml_role_configs sets configs from YAML sub-dicts."""
+        import argparse
+        from distributed.cli import _apply_yaml_role_configs
+
+        solver_cfg = {
+            'use_cholmod': True,
+            'coordinator': {'use_cholmod': False},
+            'worker': {'mode': 'supernodal'},
+        }
+        args = argparse.Namespace()
+        args.coordinator_solver_config = None
+        args.worker_solver_config = None
+
+        _apply_yaml_role_configs(solver_cfg, args)
+
+        self.assertIsNotNone(args.coordinator_solver_config)
+        self.assertFalse(args.coordinator_solver_config.use_cholmod)
+        self.assertIsNotNone(args.worker_solver_config)
+        self.assertEqual(args.worker_solver_config.cholmod_mode, 'supernodal')
+
+    @pytest.mark.unit
+    def test_apply_yaml_role_configs_respects_cli_precedence(self):
+        """_apply_yaml_role_configs does not overwrite existing CLI config."""
+        import argparse
+        from solver.unified_solver import SolverBackendConfig
+        from distributed.cli import _apply_yaml_role_configs
+
+        cli_config = SolverBackendConfig(use_cholmod=False)
+        args = argparse.Namespace()
+        args.coordinator_solver_config = cli_config
+        args.worker_solver_config = None
+
+        solver_cfg = {
+            'coordinator': {'use_cholmod': True},
+            'worker': {'mode': 'simplicial'},
+        }
+        _apply_yaml_role_configs(solver_cfg, args)
+
+        # CLI config should be preserved
+        self.assertIs(args.coordinator_solver_config, cli_config)
+        # Worker config should be set from YAML
+        self.assertIsNotNone(args.worker_solver_config)
+        self.assertEqual(args.worker_solver_config.cholmod_mode, 'simplicial')
+
+
+class TestConfigValidation(unittest.TestCase):
+    """Negative tests: unknown YAML/config keys raise ValueError."""
+
+    @pytest.mark.unit
+    def test_solver_yaml_unknown_key_rejected(self):
+        """Unknown key in solver: section raises ValueError."""
+        from distributed.cli import _validate_solver_yaml_keys
+
+        with self.assertRaises(ValueError, msg="should reject 'backend'"):
+            _validate_solver_yaml_keys({'backend': 'cholmod'})
+
+    @pytest.mark.unit
+    def test_solver_yaml_unknown_key_in_coordinator(self):
+        """Unknown key in solver.coordinator: sub-dict raises ValueError."""
+        from distributed.cli import _validate_solver_yaml_keys
+
+        with self.assertRaises(ValueError, msg="should reject 'backend' in coordinator"):
+            _validate_solver_yaml_keys({
+                'coordinator': {'backend': 'splu'},
+            })
+
+    @pytest.mark.unit
+    def test_solver_yaml_unknown_key_in_worker(self):
+        """Unknown key in solver.worker: sub-dict raises ValueError."""
+        from distributed.cli import _validate_solver_yaml_keys
+
+        with self.assertRaises(ValueError, msg="should reject 'threads' in worker"):
+            _validate_solver_yaml_keys({
+                'worker': {'threads': 4},
+            })
+
+    @pytest.mark.unit
+    def test_solver_yaml_valid_keys_accepted(self):
+        """All valid solver keys are accepted without error."""
+        from distributed.cli import _validate_solver_yaml_keys
+
+        # Should not raise
+        _validate_solver_yaml_keys({
+            'use_cholmod': True,
+            'mode': 'supernodal',
+            'ordering': 'amd',
+            'cholmod_use_long': False,
+            'coordinator': {'use_cholmod': False, 'mode': 'simplicial'},
+            'worker': {'ordering': 'metis', 'use_long': True},
+        })
+
+    @pytest.mark.unit
+    def test_solver_yaml_empty_accepted(self):
+        """Empty solver section is accepted."""
+        from distributed.cli import _validate_solver_yaml_keys
+
+        _validate_solver_yaml_keys({})
+
+    @pytest.mark.unit
+    def test_decompose_config_unknown_top_level_key(self):
+        """Unknown top-level key in decompose config raises ValueError."""
+        import argparse
+        from distributed.cli import _merge_decompose_config
+
+        config = {'bogus_section': {'foo': 'bar'}}
+        args = argparse.Namespace(
+            netlist_dir='/tmp', net=None, backend='local',
+            verbose=False, smooth=None, instances=None,
+            t_start=0.0, t_end=100e-9, dt=0.1e-9,
+            method='be', top_k=5, window_percent=10.0,
+            aggressor_top_k=0, adjoint_method='dynamic',
+            adjoint_memory_window=20, output='./out',
+            no_plot=False, plot_layers=None, max_stripes=500,
+        )
+        with self.assertRaises(ValueError, msg="should reject 'bogus_section'"):
+            _merge_decompose_config(config, args)
+
+    @pytest.mark.unit
+    def test_decompose_config_valid_sections_accepted(self):
+        """All valid decompose top-level sections are accepted."""
+        import argparse
+        from distributed.cli import _merge_decompose_config
+
+        config = {
+            'time': {'end': '100ns'},
+            'analysis': {'top_k': 3},
+            'solver': {'use_cholmod': True},
+            'output': {'verbose': True},
+        }
+        args = argparse.Namespace(
+            netlist_dir='/tmp', net=None, backend='local',
+            verbose=False, smooth=None, instances=None,
+            t_start=0.0, t_end=100e-9, dt=0.1e-9,
+            method='be', top_k=5, window_percent=10.0,
+            aggressor_top_k=0, adjoint_method='dynamic',
+            adjoint_memory_window=20, output='./out',
+            no_plot=False, plot_layers=None, max_stripes=500,
+            use_cholmod=None, cholmod_ordering='default',
+            cholmod_mode='auto',
+        )
+        # Should not raise
+        _merge_decompose_config(config, args)
+
+    @pytest.mark.unit
+    def test_merge_config_with_args_unknown_key_rejected(self):
+        """Unknown key in flat config raises ValueError."""
+        import argparse
+        from solver.pdn_solver import merge_config_with_args
+
+        config = {'unknown_setting': 42}
+        args = argparse.Namespace()
+        with self.assertRaises(ValueError, msg="should reject 'unknown_setting'"):
+            merge_config_with_args(config, args)
+
+    @pytest.mark.unit
+    def test_merge_config_with_args_solver_section_allowed(self):
+        """'solver' key is allowed in flat config (nested section)."""
+        import argparse
+        from solver.pdn_solver import merge_config_with_args
+
+        config = {
+            'verbose': True,
+            'solver': {'coordinator': {'use_cholmod': False}},
+        }
+        args = argparse.Namespace(verbose=False)
+        # Should not raise
+        merged = merge_config_with_args(config, args)
+        self.assertTrue(merged.verbose)
+
+    @pytest.mark.unit
+    def test_error_message_lists_valid_keys(self):
+        """Error message includes valid key names for discoverability."""
+        from distributed.cli import _validate_solver_yaml_keys
+
+        try:
+            _validate_solver_yaml_keys({'typo_key': 'value'})
+            self.fail("Should have raised ValueError")
+        except ValueError as e:
+            msg = str(e)
+            self.assertIn('typo_key', msg)
+            self.assertIn('use_cholmod', msg)
+            self.assertIn('Valid keys', msg)
+
+
 if __name__ == '__main__':
     unittest.main()

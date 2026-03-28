@@ -54,6 +54,14 @@ from .heatmap import (
     plot_distributed_td_heatmaps,
 )
 
+def __getattr__(name: str):
+    """Lazy import for SolverBackendConfig to avoid eager cross-package load."""
+    if name == 'SolverBackendConfig':
+        from solver.unified_solver import SolverBackendConfig
+        return SolverBackendConfig
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     # Result / Context
     "TileSolveResult",
@@ -85,6 +93,8 @@ __all__ = [
     "load_distributed_partitions",
     # Solver
     "DistributedDDMSolver",
+    # Config
+    "SolverBackendConfig",
     # Decomposition
     "analyze_distributed_decomposition",
     # Heatmap

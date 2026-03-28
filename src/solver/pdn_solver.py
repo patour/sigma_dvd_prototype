@@ -803,6 +803,18 @@ def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> 
     _int_keys = {'n_points', 'top_k', 'max_stripes', 'stripe_bin_size',
                  'plot_bin_size', 'bin_aspect_ratio'}
 
+    # Reject unknown config keys.
+    # 'solver' is allowed as a nested section (per-role solver configs)
+    # but not mapped to an arg — it's consumed separately by the
+    # distributed CLI's _apply_yaml_role_configs().
+    _allowed_extra = {'solver'}
+    unknown = set(config.keys()) - set(key_mapping.keys()) - _allowed_extra
+    if unknown:
+        raise ValueError(
+            f"Unknown config key(s): {', '.join(sorted(unknown))}. "
+            f"Valid keys: {', '.join(sorted(set(key_mapping.keys()) | _allowed_extra))}"
+        )
+
     for config_key, arg_name in key_mapping.items():
         if config_key in config:
             value = config[config_key]

@@ -440,6 +440,8 @@ class TestDecomposeDispatch:
             adjoint_method='dynamic',
             adjoint_memory_window=20,
             verbose=False,
+            coordinator_solver_config=None,
+            worker_solver_config=None,
         )
         mock_print.assert_called_once()
         mock_result.save_json.assert_called_once()

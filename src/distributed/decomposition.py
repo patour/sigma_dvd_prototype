@@ -24,7 +24,10 @@ from __future__ import annotations
 import logging
 import math
 import time as time_module
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from solver.unified_solver import SolverBackendConfig
 
 import numpy as np
 
@@ -263,6 +266,8 @@ def analyze_distributed_decomposition(
     adjoint_method: str = 'dynamic',
     adjoint_memory_window: int = 20,
     verbose: bool = False,
+    coordinator_solver_config: Optional[SolverBackendConfig] = None,
+    worker_solver_config: Optional[SolverBackendConfig] = None,
 ) -> Tuple[DecompositionResult, Any, Any]:
     """Run distributed near/far IR-drop decomposition analysis.
 
@@ -327,7 +332,11 @@ def analyze_distributed_decomposition(
         logger.info("Phase 0: Loading distributed partitions from %s", pkl_dir)
 
     bundle = load_distributed_partitions(pkl_dir)
-    model = create_distributed_model(bundle, backend=backend)
+    model = create_distributed_model(
+        bundle, backend=backend,
+        coordinator_solver_config=coordinator_solver_config,
+        worker_solver_config=worker_solver_config,
+    )
     solver = DistributedDDMSolver(model)
     timings['load_model'] = time_module.perf_counter() - t0
 

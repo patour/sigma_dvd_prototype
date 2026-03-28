@@ -11,11 +11,14 @@ import pickle
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 from .backend import ComputeBackend, LocalBackend, RayBackend
 from .parser import PackageData, PowerGridMetaData, TileConfig
 from .tile_worker import TileData, TileWorker
+
+if TYPE_CHECKING:
+    from solver.unified_solver import SolverBackendConfig
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,10 @@ class DistributedPowerGridModel:
     metadata: PowerGridMetaData
     island_stats: Dict[Tuple[int, int], Dict] = field(default_factory=dict)
     tile_kept_nonlargest_iface: Dict[Tuple[int, int], List[str]] = field(default_factory=dict)
+
+    # Per-role solver backend configs (None = use module globals)
+    coordinator_solver_config: Optional[SolverBackendConfig] = field(default=None, repr=False)
+    worker_solver_config: Optional[SolverBackendConfig] = field(default=None, repr=False)
 
     # Internal: temp pkl_dir created by legacy shim (cleaned up in shutdown)
     _owns_pkl_dir: Optional[str] = field(default=None, repr=False)
@@ -207,6 +214,8 @@ def create_distributed_model(
     bundle_or_metadata,
     backend: str = 'local',
     n_workers: Optional[int] = None,
+    coordinator_solver_config: Optional[SolverBackendConfig] = None,
+    worker_solver_config: Optional[SolverBackendConfig] = None,
     # Legacy kwargs (deprecated -- use ParsedTileBundle instead)
     use_pkl: bool = False,
     pkl_dir: Optional[str] = None,
@@ -230,6 +239,10 @@ def create_distributed_model(
             ``PowerGridMetaData`` (legacy, deprecated).
         backend: 'local' or 'ray'
         n_workers: Number of workers (only for ray backend)
+        coordinator_solver_config: Backend settings for the coordinator
+            (interface factorization).  ``None`` = use module globals.
+        worker_solver_config: Backend settings for tile workers.
+            ``None`` = use module globals.
         use_pkl: (Deprecated) If True, use pre-parsed TileData.
         pkl_dir: (Deprecated) Directory containing tile_X_Y.pkl files.
         boundary_nodes: (Deprecated) Pre-collected boundary nodes.
@@ -265,7 +278,12 @@ def create_distributed_model(
             f"got {type(bundle_or_metadata).__name__}"
         )
 
-    model = _create_distributed_model_from_bundle(bundle, backend, **backend_kwargs)
+    model = _create_distributed_model_from_bundle(
+        bundle, backend,
+        coordinator_solver_config=coordinator_solver_config,
+        worker_solver_config=worker_solver_config,
+        **backend_kwargs,
+    )
     if _legacy_temp_dir:
         model._owns_pkl_dir = _legacy_temp_dir
     return model
@@ -364,6 +382,8 @@ def _dump_tile_data_to_dir(
 def _create_distributed_model_from_bundle(
     bundle: ParsedTileBundle,
     backend: str = 'local',
+    coordinator_solver_config: Optional[SolverBackendConfig] = None,
+    worker_solver_config: Optional[SolverBackendConfig] = None,
     **backend_kwargs,
 ) -> DistributedPowerGridModel:
     """Core factory: create model from a ParsedTileBundle.
@@ -395,16 +415,14 @@ def _create_distributed_model_from_bundle(
 
     # 3b. Propagate solver settings to workers
     from solver.coupled_system import get_partial_factor_reg_resistance
-    from solver.unified_solver import (
-        get_use_cholmod, get_cholmod_mode,
-        get_cholmod_ordering, get_cholmod_use_long,
-    )
+
+    # Build worker settings dict: use explicit config or snapshot globals.
+    # partial_factor_reg_ohms is a separate concern (coupled_system.py),
+    # not included in SolverBackendConfig; always inherited from globals.
+    from solver.unified_solver import SolverBackendConfig as _SBC
     solver_settings = {
+        **(worker_solver_config or _SBC.from_globals()).to_dict(),
         'partial_factor_reg_ohms': get_partial_factor_reg_resistance(),
-        'use_cholmod': get_use_cholmod(),
-        'cholmod_mode': get_cholmod_mode(),
-        'cholmod_ordering': get_cholmod_ordering(),
-        'cholmod_use_long': get_cholmod_use_long(),
     }
     be.call_all(workers, 'configure', [(solver_settings,)] * len(workers))
 
@@ -439,4 +457,6 @@ def _create_distributed_model_from_bundle(
         metadata=metadata,
         island_stats=island_stats,
         tile_kept_nonlargest_iface=tile_kept_nonlargest_iface,
+        coordinator_solver_config=coordinator_solver_config,
+        worker_solver_config=worker_solver_config,
     )

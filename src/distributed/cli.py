@@ -21,7 +21,7 @@ import argparse
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,8 @@ def cmd_solve(args: argparse.Namespace) -> None:
     model = create_distributed_model(
         bundle,
         backend=args.backend,
+        coordinator_solver_config=getattr(args, 'coordinator_solver_config', None),
+        worker_solver_config=getattr(args, 'worker_solver_config', None),
     )
 
     try:
@@ -289,6 +291,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     model = create_distributed_model(
         bundle,
         backend=args.backend,
+        coordinator_solver_config=getattr(args, 'coordinator_solver_config', None),
+        worker_solver_config=getattr(args, 'worker_solver_config', None),
     )
     t_model = time.perf_counter() - t0
     logger.info(f"Model creation: {t_model:.3f}s")
@@ -400,6 +404,8 @@ def cmd_decompose(args: argparse.Namespace) -> None:
             adjoint_method=args.adjoint_method,
             adjoint_memory_window=args.adjoint_memory_window,
             verbose=args.verbose,
+            coordinator_solver_config=getattr(args, 'coordinator_solver_config', None),
+            worker_solver_config=getattr(args, 'worker_solver_config', None),
         )
 
         elapsed = time.perf_counter() - t0
@@ -452,19 +458,38 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
                         help='Config file path (.yaml, .yml, or .json)')
 
     # Solver backend (cholmod / splu)
+    from solver.unified_solver import _VALID_CHOLMOD_MODES, _VALID_CHOLMOD_ORDERINGS
+    _modes = list(_VALID_CHOLMOD_MODES)
+    _orderings = list(_VALID_CHOLMOD_ORDERINGS)
+
     parser.add_argument('--use-cholmod', action='store_true', default=None,
                         help='Force cholmod backend (requires sksparse)')
     parser.add_argument('--use-splu', action='store_true',
                         help='Force splu backend (scipy)')
     parser.add_argument('--cholmod-mode', type=str, default='auto',
-                        choices=['auto', 'simplicial', 'supernodal'],
+                        choices=_modes,
                         help='Cholmod factorization mode (default: auto)')
     parser.add_argument('--cholmod-ordering', type=str, default='default',
-                        choices=['default', 'natural', 'amd', 'metis',
-                                 'nesdis', 'colamd', 'best'],
+                        choices=_orderings,
                         help='Cholmod fill-reducing ordering (default: default)')
     parser.add_argument('--cholmod-use-long', action='store_true', default=None,
                         help='Force 64-bit indices in cholmod')
+
+    # Per-role solver backend overrides (coordinator / worker)
+    for role in ('coordinator', 'worker'):
+        grp = parser.add_argument_group(f'{role} solver backend overrides')
+        grp.add_argument(f'--{role}-use-cholmod', action='store_true', default=None,
+                         help=f'Force cholmod backend for {role}')
+        grp.add_argument(f'--{role}-use-splu', action='store_true',
+                         help=f'Force splu backend for {role}')
+        grp.add_argument(f'--{role}-cholmod-mode', type=str, default=None,
+                         choices=_modes,
+                         help=f'Cholmod mode for {role}')
+        grp.add_argument(f'--{role}-cholmod-ordering', type=str, default=None,
+                         choices=_orderings,
+                         help=f'Cholmod ordering for {role}')
+        grp.add_argument(f'--{role}-cholmod-use-long', action='store_true', default=None,
+                         help=f'Force 64-bit indices for {role}')
 
     # Reporting / profiling
     parser.add_argument('--top-k', type=int, default=100,
@@ -562,6 +587,15 @@ def _merge_decompose_config(
         The updated arguments namespace.
     """
     from analysis.dynamic_irdrop_decomposition import parse_time_value
+
+    # Validate top-level config sections
+    unknown_top = set(config.keys()) - _VALID_DECOMPOSE_TOP_KEYS
+    if unknown_top:
+        raise ValueError(
+            f"Unknown top-level key(s) in decompose config: "
+            f"{', '.join(sorted(unknown_top))}. "
+            f"Valid keys: {', '.join(sorted(_VALID_DECOMPOSE_TOP_KEYS))}"
+        )
 
     # -- netlist_dir / net / backend -----------------------------------------
     # netlist_dir is the primary positional arg; config can override it.
@@ -679,6 +713,7 @@ def _merge_decompose_config(
 
     # -- solver section (cholmod settings) --------------------------------
     solver_cfg = config.get('solver', {})
+    _validate_solver_yaml_keys(solver_cfg, 'solver')
 
     if solver_cfg.get('use_cholmod') is not None:
         if getattr(args, 'use_cholmod', None) is None:
@@ -690,8 +725,114 @@ def _merge_decompose_config(
         if getattr(args, 'cholmod_mode', 'auto') == 'auto':
             args.cholmod_mode = str(solver_cfg['mode'])
 
+    # Per-role overrides from solver: coordinator: / worker: sub-dicts
+    _apply_yaml_role_configs(solver_cfg, args)
+
     logger.info("Merged decompose config from YAML")
     return args
+
+
+# Valid keys for solver: YAML section and coordinator:/worker: sub-dicts
+_VALID_SOLVER_YAML_KEYS = frozenset({
+    'use_cholmod', 'mode', 'cholmod_mode', 'ordering', 'cholmod_ordering',
+    'cholmod_use_long', 'use_long', 'coordinator', 'worker',
+})
+_VALID_ROLE_YAML_KEYS = _VALID_SOLVER_YAML_KEYS - {'coordinator', 'worker'}
+_VALID_DECOMPOSE_TOP_KEYS = frozenset({
+    'netlist_dir', 'net', 'backend', 'time', 'analysis',
+    'aggressor', 'output', 'solver',
+})
+
+
+def _validate_solver_yaml_keys(
+    solver_cfg: dict, section_name: str = 'solver',
+) -> None:
+    """Raise ValueError if solver YAML section contains unknown keys."""
+    if not solver_cfg:
+        return
+    unknown = set(solver_cfg.keys()) - _VALID_SOLVER_YAML_KEYS
+    if unknown:
+        raise ValueError(
+            f"Unknown key(s) in {section_name}: {', '.join(sorted(unknown))}. "
+            f"Valid keys: {', '.join(sorted(_VALID_SOLVER_YAML_KEYS))}"
+        )
+    for role in ('coordinator', 'worker'):
+        sub = solver_cfg.get(role)
+        if sub and isinstance(sub, dict):
+            role_unknown = set(sub.keys()) - _VALID_ROLE_YAML_KEYS
+            if role_unknown:
+                raise ValueError(
+                    f"Unknown key(s) in {section_name}.{role}: "
+                    f"{', '.join(sorted(role_unknown))}. "
+                    f"Valid keys: {', '.join(sorted(_VALID_ROLE_YAML_KEYS))}"
+                )
+
+
+def _build_config_from_yaml_section(
+    section: dict,
+    parent: dict,
+) -> Optional[SolverBackendConfig]:
+    """Build a SolverBackendConfig from a YAML role sub-dict.
+
+    Values in *section* override values from *parent* (the top-level
+    ``solver:`` dict).  Returns ``None`` if the section is empty or
+    absent.
+    """
+    if not section:
+        return None
+    from solver.unified_solver import SolverBackendConfig
+
+    # Merge: parent scalar settings provide defaults, section overrides.
+    # Filter parent to exclude sub-dicts (coordinator/worker).
+    parent_scalars = {k: v for k, v in parent.items() if not isinstance(v, dict)}
+    merged = {**parent_scalars, **section}
+
+    # Normalize YAML key names (ordering/mode) -> config field names.
+    # Use explicit None checks to avoid treating False as falsy.
+    use_cholmod = merged.get('use_cholmod')
+
+    mode = merged.get('mode')
+    if mode is None:
+        mode = merged.get('cholmod_mode')
+    mode = mode or 'auto'
+
+    ordering = merged.get('ordering')
+    if ordering is None:
+        ordering = merged.get('cholmod_ordering')
+    ordering = ordering or 'default'
+
+    use_long = merged.get('cholmod_use_long')
+    if use_long is None:
+        use_long = merged.get('use_long')
+
+    return SolverBackendConfig(
+        use_cholmod=bool(use_cholmod) if use_cholmod is not None else None,
+        cholmod_mode=mode,
+        cholmod_ordering=ordering,
+        cholmod_use_long=bool(use_long) if use_long is not None else None,
+    )
+
+
+def _apply_yaml_role_configs(
+    solver_cfg: dict,
+    args: argparse.Namespace,
+) -> None:
+    """Extract coordinator/worker sub-dicts from solver YAML section.
+
+    Only sets ``args.coordinator_solver_config`` / ``args.worker_solver_config``
+    if the corresponding sub-dict is present AND no CLI per-role flag already
+    produced a config.
+    """
+    for role in ('coordinator', 'worker'):
+        attr = f'{role}_solver_config'
+        # CLI flags take precedence
+        if getattr(args, attr, None) is not None:
+            continue
+        sub = solver_cfg.get(role)
+        if sub and isinstance(sub, dict):
+            cfg = _build_config_from_yaml_section(sub, solver_cfg)
+            if cfg is not None:
+                setattr(args, attr, cfg)
 
 
 def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
@@ -712,18 +853,22 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
         The (potentially merged) arguments.
     """
     # -- config file --------------------------------------------------------
+    _raw_config: Optional[dict] = None
     if getattr(args, 'config', None):
         from solver.pdn_solver import load_config, merge_config_with_args
 
         try:
-            config = load_config(args.config)
+            _raw_config = load_config(args.config)
         except FileNotFoundError:
             logger.error("Config file not found: %s", args.config)
             raise SystemExit(1)
         except (ValueError, Exception) as exc:
             logger.error("Failed to load config %s: %s", args.config, exc)
             raise SystemExit(1)
-        args = merge_config_with_args(config, args)
+        args = merge_config_with_args(_raw_config, args)
+        # Validate solver: sub-section if present
+        if 'solver' in _raw_config and isinstance(_raw_config['solver'], dict):
+            _validate_solver_yaml_keys(_raw_config['solver'], 'solver')
         logger.info("Loaded config from: %s", args.config)
 
     # -- cholmod backend ----------------------------------------------------
@@ -766,7 +911,74 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
     backend_name = get_active_backend()
     logger.info("Solver backend: %s", backend_name)
 
+    # -- per-role overrides (YAML first, then CLI flags take precedence) ----
+    # Only initialize if not already set (e.g., by _merge_decompose_config)
+    if not hasattr(args, 'coordinator_solver_config'):
+        args.coordinator_solver_config = None
+    if not hasattr(args, 'worker_solver_config'):
+        args.worker_solver_config = None
+    if _raw_config is not None:
+        _apply_yaml_role_configs(_raw_config.get('solver', {}), args)
+
+    # CLI --coordinator-*/--worker-* flags override YAML
+    cli_coord = _collect_role_config(args, 'coordinator')
+    cli_worker = _collect_role_config(args, 'worker')
+    if cli_coord is not None:
+        args.coordinator_solver_config = cli_coord
+    if cli_worker is not None:
+        args.worker_solver_config = cli_worker
+
+    if args.coordinator_solver_config is not None:
+        logger.info("Coordinator backend override: %s",
+                     args.coordinator_solver_config)
+    if args.worker_solver_config is not None:
+        logger.info("Worker backend override: %s",
+                     args.worker_solver_config)
+
     return args
+
+
+def _collect_role_config(
+    args: argparse.Namespace,
+    role: str,
+) -> Optional[SolverBackendConfig]:
+    """Build a SolverBackendConfig from ``--<role>-*`` CLI flags.
+
+    Returns ``None`` if no role-specific flags were set.
+    """
+    from solver.unified_solver import SolverBackendConfig
+
+    prefix = role.replace('-', '_')
+    use_cholmod_flag = getattr(args, f'{prefix}_use_cholmod', None)
+    use_splu_flag = getattr(args, f'{prefix}_use_splu', False)
+    mode = getattr(args, f'{prefix}_cholmod_mode', None)
+    ordering = getattr(args, f'{prefix}_cholmod_ordering', None)
+    use_long = getattr(args, f'{prefix}_cholmod_use_long', None)
+
+    # Check if any role-specific flag was explicitly provided
+    has_override = (
+        use_cholmod_flag is not None
+        or use_splu_flag
+        or mode is not None
+        or ordering is not None
+        or use_long is not None
+    )
+    if not has_override:
+        return None
+
+    # Resolve use_cholmod from the two boolean flags
+    use_cholmod = None
+    if use_cholmod_flag is True:
+        use_cholmod = True
+    elif use_splu_flag:
+        use_cholmod = False
+
+    return SolverBackendConfig(
+        use_cholmod=use_cholmod,
+        cholmod_mode=mode or 'auto',
+        cholmod_ordering=ordering or 'default',
+        cholmod_use_long=use_long,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
