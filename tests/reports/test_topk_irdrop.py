@@ -363,6 +363,99 @@ class TestTopKReport:
         assert len(rows) == 1
         assert rows[0][1] == '1000_2000_M1'
 
+    # ------------------------------------------------------------------
+    # Peak time column
+    # ------------------------------------------------------------------
+    def test_peak_time_column_present(self):
+        """When node_to_peak_time is provided, PeakTime(ns) column appears."""
+        node_to_peak_time = {
+            '1000_2000_M1': 5.0e-9,     # 5.000 ns
+            '1000_2100_M1': 10.5e-9,    # 10.500 ns
+            '2000_3000_M2': 2.3e-9,     # 2.300 ns
+            '3000_4000_M3': 7.0e-9,     # 7.000 ns
+            '4000_5000_M1': 1.0e-9,     # 1.000 ns
+        }
+
+        generate_topk_report(
+            voltages=VOLTAGES_BASIC,
+            nominal_voltage=1.0,
+            net_name='VDD',
+            pad_nodes=PAD_NODES,
+            output_dir=self.tmpdir,
+            top_k=100,
+            node_to_peak_time=node_to_peak_time,
+        )
+
+        report_path = os.path.join(self.tmpdir, 'topk_irdrop_VDD.txt')
+        with open(report_path, 'r') as f:
+            content = f.read()
+
+        assert 'PeakTime(ns)' in content
+
+        _, rows = _parse_report_file(report_path)
+        assert len(rows) == 5
+        # With peak time, each row has 10 columns (Rank, Node, Layer, X, Y,
+        # Voltage, Drop(mV), Drop(%), PeakTime(ns), Instance)
+        assert len(rows[0]) == 10
+
+        # Worst node is 2000_3000_M2 (30mV drop), peak at 2.300 ns
+        assert rows[0][1] == '2000_3000_M2'
+        assert float(rows[0][8]) == pytest.approx(2.3, abs=0.001)
+
+        # Instance column shifted to index 9
+        assert rows[0][9] == 'N/A'
+
+    def test_peak_time_column_absent_by_default(self):
+        """Without node_to_peak_time, PeakTime(ns) column must not appear."""
+        generate_topk_report(
+            voltages=VOLTAGES_BASIC,
+            nominal_voltage=1.0,
+            net_name='VDD',
+            pad_nodes=PAD_NODES,
+            output_dir=self.tmpdir,
+            top_k=100,
+        )
+
+        report_path = os.path.join(self.tmpdir, 'topk_irdrop_VDD.txt')
+        with open(report_path, 'r') as f:
+            content = f.read()
+
+        assert 'PeakTime(ns)' not in content
+
+        _, rows = _parse_report_file(report_path)
+        # Standard 9 columns (no peak time)
+        assert len(rows[0]) == 9
+
+    def test_peak_time_partial_mapping(self):
+        """Nodes without peak time mapping show N/A in PeakTime column."""
+        # Only provide peak time for a subset
+        node_to_peak_time = {
+            '2000_3000_M2': 3.0e-9,
+            '1000_2000_M1': 8.0e-9,
+        }
+
+        generate_topk_report(
+            voltages=VOLTAGES_BASIC,
+            nominal_voltage=1.0,
+            net_name='VDD',
+            pad_nodes=PAD_NODES,
+            output_dir=self.tmpdir,
+            top_k=100,
+            node_to_peak_time=node_to_peak_time,
+        )
+
+        report_path = os.path.join(self.tmpdir, 'topk_irdrop_VDD.txt')
+        _, rows = _parse_report_file(report_path)
+
+        by_node = {r[1]: r for r in rows}
+        # Mapped nodes have numeric values
+        assert float(by_node['2000_3000_M2'][8]) == pytest.approx(3.0, abs=0.001)
+        assert float(by_node['1000_2000_M1'][8]) == pytest.approx(8.0, abs=0.001)
+        # Unmapped nodes show N/A
+        assert by_node['3000_4000_M3'][8] == 'N/A'
+        assert by_node['1000_2100_M1'][8] == 'N/A'
+        assert by_node['4000_5000_M1'][8] == 'N/A'
+
     def test_extra_header_lines(self):
         """Extra header lines appear between 'Nominal Voltage' and first separator."""
         generate_topk_report(

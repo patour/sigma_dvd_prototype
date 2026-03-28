@@ -20,20 +20,59 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+_LOG_FORMAT = '%(asctime)s %(name)s %(levelname)s: %(message)s'
+_LOG_DATEFMT = '%H:%M:%S'
+
 
 def _setup_logging(verbose: bool) -> None:
     """Configure logging for CLI usage."""
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s %(name)s %(levelname)s: %(message)s',
-        datefmt='%H:%M:%S',
-    )
+    logging.basicConfig(level=level, format=_LOG_FORMAT, datefmt=_LOG_DATEFMT)
+
+
+def _add_file_logging(output_dir: str, mode: str) -> Optional[logging.FileHandler]:
+    """Add a file handler to the root logger.
+
+    The caller should close the handler when done via
+    ``_close_file_logging(handler)``.
+
+    Args:
+        output_dir: Directory for the log file.  Created if it does not exist.
+        mode: Analysis mode label (e.g. ``'dc'``, ``'quasi-static'``).
+
+    Returns:
+        The ``FileHandler``, or ``None`` if *output_dir* is falsy.
+    """
+    if not output_dir:
+        return None
+
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    mode_slug = mode.replace('-', '_')
+    log_path = out_path / f'{mode_slug}_{timestamp}.log'
+
+    file_handler = logging.FileHandler(str(log_path), mode='w')
+    file_handler.setLevel(logging.NOTSET)
+    file_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+    logging.getLogger().addHandler(file_handler)
+    logger.info("Logging to file: %s", log_path)
+    return file_handler
+
+
+def _close_file_logging(handler: Optional[logging.FileHandler]) -> None:
+    """Remove and close a file handler previously added by ``_add_file_logging``."""
+    if handler is None:
+        return
+    logging.getLogger().removeHandler(handler)
+    handler.close()
 
 
 def cmd_parse(args: argparse.Namespace) -> None:
@@ -41,14 +80,20 @@ def cmd_parse(args: argparse.Namespace) -> None:
     from .parser import DistributedNetlistParser
 
     _setup_logging(args.verbose)
-    t0 = time.perf_counter()
 
-    parser = DistributedNetlistParser(args.netlist_dir, net_filter=args.net)
     out_dir = args.output or str(Path(args.netlist_dir) / 'distributed_pkl')
-    out_path, _bundle = parser.parse_and_dump(out_dir, backend=args.backend)
+    fh = _add_file_logging(out_dir, 'parse')
 
-    elapsed = time.perf_counter() - t0
-    logger.info(f"parse_and_dump completed in {elapsed:.3f}s -> {out_path}")
+    try:
+        t0 = time.perf_counter()
+
+        parser = DistributedNetlistParser(args.netlist_dir, net_filter=args.net)
+        out_path, _bundle = parser.parse_and_dump(out_dir, backend=args.backend)
+
+        elapsed = time.perf_counter() - t0
+        logger.info(f"parse_and_dump completed in {elapsed:.3f}s -> {out_path}")
+    finally:
+        _close_file_logging(fh)
 
 
 def cmd_solve(args: argparse.Namespace) -> None:
@@ -58,9 +103,11 @@ def cmd_solve(args: argparse.Namespace) -> None:
 
     _setup_logging(args.verbose)
     args = _load_and_apply_config(args)
-    t0 = time.perf_counter()
 
     mode = getattr(args, 'mode', 'dc')
+    fh = _add_file_logging(args.output, mode)
+
+    t0 = time.perf_counter()
 
     bundle = load_distributed_partitions(args.pkl_dir)
 
@@ -87,6 +134,7 @@ def cmd_solve(args: argparse.Namespace) -> None:
             raise SystemExit(1)
     finally:
         model.shutdown()
+        _close_file_logging(fh)
 
 
 def _solve_dc(
@@ -274,9 +322,11 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     _setup_logging(args.verbose)
     args = _load_and_apply_config(args)
-    t_total = time.perf_counter()
 
     mode = getattr(args, 'mode', 'dc')
+    fh = _add_file_logging(args.output, mode)
+
+    t_total = time.perf_counter()
 
     # Parse and dump
     t0 = time.perf_counter()
@@ -319,6 +369,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             raise SystemExit(1)
     finally:
         model.shutdown()
+        _close_file_logging(fh)
 
 
 def cmd_decompose(args: argparse.Namespace) -> None:
@@ -385,7 +436,7 @@ def cmd_decompose(args: argparse.Namespace) -> None:
         instances = [s.strip() for s in args.instances.split(',') if s.strip()]
 
     output_dir = args.output
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    fh = _add_file_logging(output_dir, 'decompose')
 
     result, solver, model = None, None, None
     try:
@@ -445,6 +496,7 @@ def cmd_decompose(args: argparse.Namespace) -> None:
     finally:
         if model is not None:
             model.shutdown()
+        _close_file_logging(fh)
 
 
 def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:

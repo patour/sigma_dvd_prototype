@@ -1335,3 +1335,62 @@ class TestDecomposeConfigIntegration:
         assert call_kwargs['smooth_sources'] is True  # resolved from None
         assert call_kwargs['t_end'] == 100e-9
         assert call_kwargs['top_k'] == 5
+
+
+class TestFileLogging:
+    """Tests for _add_file_logging() and _close_file_logging()."""
+
+    def test_none_output_dir_returns_none(self):
+        """Falsy output_dir should return None without creating a handler."""
+        from distributed.cli import _add_file_logging
+        assert _add_file_logging(None, 'dc') is None
+        assert _add_file_logging('', 'dc') is None
+
+    def test_creates_log_file(self, tmp_path):
+        """Should create a log file matching the mode slug pattern."""
+        from distributed.cli import _add_file_logging, _close_file_logging
+
+        fh = _add_file_logging(str(tmp_path), 'dc')
+        try:
+            assert fh is not None
+            log_files = list(tmp_path.glob('dc_*.log'))
+            assert len(log_files) == 1
+        finally:
+            _close_file_logging(fh)
+
+    def test_mode_slug_sanitization(self, tmp_path):
+        """Hyphens in mode should be replaced with underscores in filename."""
+        from distributed.cli import _add_file_logging, _close_file_logging
+
+        fh = _add_file_logging(str(tmp_path), 'quasi-static')
+        try:
+            log_files = list(tmp_path.glob('quasi_static_*.log'))
+            assert len(log_files) == 1
+            assert 'quasi-static' not in log_files[0].name
+        finally:
+            _close_file_logging(fh)
+
+    def test_handler_removed_after_close(self, tmp_path):
+        """_close_file_logging should remove the handler from root logger."""
+        import logging
+        from distributed.cli import _add_file_logging, _close_file_logging
+
+        root = logging.getLogger()
+        n_before = len(root.handlers)
+        fh = _add_file_logging(str(tmp_path), 'transient')
+        assert len(root.handlers) == n_before + 1
+        _close_file_logging(fh)
+        assert len(root.handlers) == n_before
+
+    def test_creates_output_dir_if_missing(self, tmp_path):
+        """Should create nested output directories."""
+        from distributed.cli import _add_file_logging, _close_file_logging
+
+        nested = tmp_path / 'sub' / 'dir'
+        assert not nested.exists()
+        fh = _add_file_logging(str(nested), 'parse')
+        try:
+            assert nested.is_dir()
+            assert len(list(nested.glob('parse_*.log'))) == 1
+        finally:
+            _close_file_logging(fh)

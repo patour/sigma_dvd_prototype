@@ -21,6 +21,15 @@ from visualization.stripe_heatmap import parse_node_info
 logger = logging.getLogger(__name__)
 
 
+def _fmt_peak_time(peak_time: Optional[float], show: bool) -> str:
+    """Format peak time column value. Returns empty string when disabled."""
+    if not show:
+        return ''
+    if peak_time is not None:
+        return f"{peak_time * 1e9:<14.3f} "
+    return f"{'N/A':<14} "
+
+
 def generate_topk_report(
     voltages: Dict[str, float],
     nominal_voltage: float,
@@ -30,6 +39,7 @@ def generate_topk_report(
     top_k: int = 100,
     node_to_instance: Optional[Dict[str, str]] = None,
     extra_header_lines: Optional[List[str]] = None,
+    node_to_peak_time: Optional[Dict[str, float]] = None,
 ) -> None:
     """Write a top-K worst IR-drop report file and log the top-10 to console.
 
@@ -47,9 +57,14 @@ def generate_topk_report(
         extra_header_lines: Optional list of additional header lines inserted
             between the "Nominal Voltage" line and the first ``===`` separator
             (e.g. ``['Backend: splu', 'Solve Time: 12.34 ms']``).
+        node_to_peak_time: Optional mapping of node name to peak time in
+            seconds.  When provided, a ``PeakTime(ns)`` column is added to
+            the report.  Nodes without a mapping show ``N/A``.
     """
     if node_to_instance is None:
         node_to_instance = {}
+
+    show_peak_time = node_to_peak_time is not None
 
     # ------------------------------------------------------------------
     # Build per-node records, excluding pads and ground
@@ -63,6 +78,7 @@ def generate_topk_report(
         drop_pct = (drop / nominal_voltage * 100) if nominal_voltage > 0 else 0.0
 
         x, y, layer = parse_node_info(node)
+        peak_time = node_to_peak_time.get(node) if node_to_peak_time else None
         node_data.append({
             'node': node,
             'voltage': voltage,
@@ -72,6 +88,7 @@ def generate_topk_report(
             'x': x if x is not None else 'N/A',
             'y': y if y is not None else 'N/A',
             'instance': node_to_instance.get(node, 'N/A'),
+            'peak_time': peak_time,
         })
 
     # Descending by IR-drop magnitude
@@ -83,6 +100,14 @@ def generate_topk_report(
     os.makedirs(output_dir, exist_ok=True)
     report_file = os.path.join(output_dir, f'topk_irdrop_{net_name}.txt')
 
+    peak_time_hdr = f"{'PeakTime(ns)':<14} " if show_peak_time else ''
+    header_line = (
+        f"{'Rank':<6} {'Node':<30} {'Layer':<8} {'X':<10} {'Y':<10} "
+        f"{'Voltage(V)':<12} {'Drop(mV)':<12} {'Drop(%)':<10} "
+        f"{peak_time_hdr}{'Instance':<30}"
+    )
+    sep_width = len(header_line)
+
     with open(report_file, 'w') as f:
         f.write(f"Top-{top_k} Worst IR-Drop Report\n")
         f.write(f"Net: {net_name}\n")
@@ -90,19 +115,17 @@ def generate_topk_report(
         if extra_header_lines:
             for hline in extra_header_lines:
                 f.write(f"{hline}\n")
-        f.write(f"{'=' * 120}\n")
-        f.write(
-            f"{'Rank':<6} {'Node':<30} {'Layer':<8} {'X':<10} {'Y':<10} "
-            f"{'Voltage(V)':<12} {'Drop(mV)':<12} {'Drop(%)':<10} {'Instance':<30}\n"
-        )
-        f.write(f"{'=' * 120}\n")
+        f.write(f"{'=' * sep_width}\n")
+        f.write(f"{header_line}\n")
+        f.write(f"{'=' * sep_width}\n")
 
         for i, data in enumerate(node_data[:top_k], 1):
+            pt_str = _fmt_peak_time(data['peak_time'], show_peak_time)
             f.write(
                 f"{i:<6} {data['node']:<30} {str(data['layer']):<8} "
                 f"{str(data['x']):<10} {str(data['y']):<10} "
                 f"{data['voltage']:<12.6f} {data['drop'] * 1000:<12.3f} "
-                f"{data['drop_pct']:<10.2f} {data['instance']:<30}\n"
+                f"{data['drop_pct']:<10.2f} {pt_str}{data['instance']:<30}\n"
             )
 
     logger.info(f"  Saved top-K report: {report_file}")
@@ -110,13 +133,17 @@ def generate_topk_report(
     # ------------------------------------------------------------------
     # Console summary (top-10)
     # ------------------------------------------------------------------
-    logger.info(f"\n  Top-10 Worst IR-Drop Nodes for {net_name}:")
-    logger.info(
-        f"  {'Rank':<6} {'Node':<30} {'Layer':<8} {'Drop(mV)':<12} {'Drop(%)':<10}"
+    peak_time_con_hdr = f"{'PeakTime(ns)':<14} " if show_peak_time else ''
+    con_header = (
+        f"{'Rank':<6} {'Node':<30} {'Layer':<8} {'Drop(mV)':<12} {'Drop(%)':<10} "
+        f"{peak_time_con_hdr}"
     )
-    logger.info(f"  {'-' * 66}")
+    logger.info(f"\n  Top-10 Worst IR-Drop Nodes for {net_name}:")
+    logger.info(f"  {con_header}")
+    logger.info(f"  {'-' * len(con_header)}")
     for i, data in enumerate(node_data[:10], 1):
         logger.info(
             f"  {i:<6} {data['node']:<30} {str(data['layer']):<8} "
-            f"{data['drop'] * 1000:<12.3f} {data['drop_pct']:<10.2f}"
+            f"{data['drop'] * 1000:<12.3f} {data['drop_pct']:<10.2f} "
+            f"{_fmt_peak_time(data['peak_time'], show_peak_time)}"
         )

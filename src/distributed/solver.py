@@ -479,8 +479,9 @@ class DistributedDDMSolver(_AdjointMixin, _SolverTimeDomainMixin):
         merged_items.sort(key=lambda x: x[1], reverse=True)
         top_items = merged_items[:top_k]
 
-        # 3. Convert to voltage dict for generate_topk_report
+        # 3. Convert to voltage dict and peak time dict for generate_topk_report
         voltages: Dict[str, float] = {node: vdd - drop for node, drop, _ in top_items}
+        node_to_peak_time: Dict[str, float] = {node: t for node, _, t in top_items}
         # Add pad nodes at nominal voltage
         for pad in model.pad_nodes:
             voltages[pad] = vdd
@@ -526,6 +527,7 @@ class DistributedDDMSolver(_AdjointMixin, _SolverTimeDomainMixin):
             top_k=top_k,
             node_to_instance=node_to_instance,
             extra_header_lines=extra_header_lines,
+            node_to_peak_time=node_to_peak_time,
         )
 
         # --- Peak IR-drop heatmaps ---
