@@ -170,9 +170,9 @@ class TestBuildGlobalBinSpec(unittest.TestCase):
         self.assertEqual(layer.orientation, 'H')
         self.assertEqual(len(layer.stripe_edges), 3)
         self.assertEqual(len(layer.bin_edges_list), 3)
-        # Each bin_edges array should have 21 entries (20 bins + 1)
+        # stripe_bin_size=20 (physical), x_range=100 -> int(100/20)=5 bins -> 6 edges
         for be in layer.bin_edges_list:
-            self.assertEqual(len(be), 21)
+            self.assertEqual(len(be), 6)
         self.assertAlmostEqual(spec.nominal_voltage, 0.8)
         self.assertEqual(spec.aggregation, 'max')
 
@@ -255,14 +255,26 @@ class TestBuildGlobalBinSpec(unittest.TestCase):
         self.assertLessEqual(len(layer.stripe_edges), 10)
 
     def test_default_stripe_bin_size(self):
-        """Default stripe_bin_size should be 50."""
+        """Default stripe_bin_size (auto) should target ~500 bins."""
         meta = _make_single_layer_metadata(stripe_coords_h=[10.0])
         spec = build_global_bin_spec(
             tile_metadatas=[meta],
             nominal_voltage=1.0,
         )
-        # 50 bins -> 51 edges
-        self.assertEqual(len(spec.layers['M1'].bin_edges_list[0]), 51)
+        # auto -> 500 bins -> 501 edges
+        self.assertEqual(len(spec.layers['M1'].bin_edges_list[0]), 501)
+
+    def test_stripe_bin_size_physical(self):
+        """stripe_bin_size as physical size should compute correct bin count."""
+        # bbox x_range = 100.0, stripe_bin_size = 20 -> int(100/20) = 5 bins
+        meta = _make_single_layer_metadata(stripe_coords_h=[10.0])
+        spec = build_global_bin_spec(
+            tile_metadatas=[meta],
+            nominal_voltage=1.0,
+            stripe_bin_size=20,
+        )
+        # 5 bins -> 6 edges
+        self.assertEqual(len(spec.layers['M1'].bin_edges_list[0]), 6)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -400,8 +412,33 @@ class TestPrebinTile(unittest.TestCase):
         )
         s0 = result['M1'][0]
         self.assertIsNotNone(s0)
-        self.assertAlmostEqual(s0[0], 0.0, places=5)  # excluded
+        self.assertTrue(np.isnan(s0[0]))                  # excluded -> NaN
         self.assertAlmostEqual(s0[1], 0.3, places=5)   # counted
+
+    def test_sum_empty_bins_are_nan(self):
+        """Sum aggregation: untouched bins should be NaN, not zero."""
+        bin_spec = GlobalBinSpec(
+            layers={
+                'M1': LayerBinSpec(
+                    orientation='H',
+                    stripe_edges=[(0.0, 100.0)],
+                    bin_edges_list=[np.linspace(0.0, 100.0, 6)],  # 5 bins
+                ),
+            },
+            nominal_voltage=1.0,
+            aggregation='sum',
+        )
+        # Single node in bin 2 only (x=50 -> bin 2 of [0,20,40,60,80,100])
+        voltages = {'50_50_M1': 0.7}
+        result = prebin_tile(voltages, bin_spec)
+        s0 = result['M1'][0]
+        self.assertIsNotNone(s0)
+        # Only bin 2 should have data; others should be NaN
+        self.assertTrue(np.isnan(s0[0]))
+        self.assertTrue(np.isnan(s0[1]))
+        self.assertAlmostEqual(s0[2], 0.7, places=5)
+        self.assertTrue(np.isnan(s0[3]))
+        self.assertTrue(np.isnan(s0[4]))
 
     def test_single_node_tile(self):
         """Single-node tile should produce data in exactly one bin."""
@@ -501,6 +538,28 @@ class TestMergeTilePrebins(unittest.TestCase):
         merged = merge_tile_prebins([prebin1, prebin2], spec)
         bin_values = merged['M1'][0][3]
         self.assertTrue(np.all(np.isnan(bin_values)))
+
+    def test_all_none_returns_nan_for_sum(self):
+        """All-None stripe should produce NaN for sum aggregation."""
+        spec = self._make_spec(n_bins=3, aggregation='sum')
+        prebin1 = {'M1': [None]}
+        prebin2 = {'M1': [None]}
+        merged = merge_tile_prebins([prebin1, prebin2], spec)
+        bin_values = merged['M1'][0][3]
+        self.assertTrue(np.all(np.isnan(bin_values)))
+
+    def test_sum_merge_preserves_nan_for_all_nan_bins(self):
+        """Sum merge: bins where ALL tiles have NaN should remain NaN."""
+        spec = self._make_spec(n_bins=3, aggregation='sum')
+        # Tile 1: bin 0 has data, bins 1-2 are NaN (no nodes)
+        prebin1 = {'M1': [np.array([1.0, np.nan, np.nan])]}
+        # Tile 2: bins 0-1 have data, bin 2 is NaN
+        prebin2 = {'M1': [np.array([2.0, 4.0, np.nan])]}
+        merged = merge_tile_prebins([prebin1, prebin2], spec)
+        bin_values = merged['M1'][0][3]
+        self.assertAlmostEqual(bin_values[0], 3.0)   # 1.0 + 2.0
+        self.assertAlmostEqual(bin_values[1], 4.0)   # NaN + 4.0
+        self.assertTrue(np.isnan(bin_values[2]))       # NaN + NaN -> NaN
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -64,6 +64,11 @@ class LayerBinSpec:
 
 _VALID_AGGREGATIONS = frozenset({'max', 'sum'})
 
+# Default bin resolution for auto-calculated stripe heatmaps.
+# Matches the flat solver's target_bins_per_stripe (500) and max_bins (100000).
+_TARGET_BINS = 500
+_MAX_BINS = 100000
+
 
 @dataclass
 class GlobalBinSpec:
@@ -192,16 +197,21 @@ def build_global_bin_spec(
     Unions bounding boxes, merges stripe coordinates, determines
     orientation from edge counts, and creates uniform bin edges.
 
-    *tile_metadatas*: per-tile dicts from ``TileWorker.get_layer_metadata()``.
+    Parameters
+    ----------
+    tile_metadatas : list of dict
+        Per-tile dicts from ``TileWorker.get_layer_metadata()``.
+    stripe_bin_size : int or None
+        Physical bin size in coordinate units (matching the flat solver
+        semantics).  Converted to a bin count per-layer via
+        ``int(parallel_range / stripe_bin_size)``.  ``None`` targets
+        ~500 bins per layer automatically.
     """
     if aggregation not in _VALID_AGGREGATIONS:
         raise ValueError(
             f"Invalid aggregation '{aggregation}'. "
             f"Must be one of {sorted(_VALID_AGGREGATIONS)}."
         )
-
-    if stripe_bin_size is None:
-        stripe_bin_size = 50
 
     # Collect per-layer info across all tiles
     layer_bboxes: Dict[str, List[Tuple[float, float, float, float]]] = {}
@@ -273,9 +283,17 @@ def build_global_bin_spec(
         if parallel_range <= 0:
             parallel_range = 1.0
 
+        # Compute number of bins for this layer.
+        # stripe_bin_size is a physical size (units); convert to bin count.
+        if stripe_bin_size is not None and stripe_bin_size > 0:
+            n_bins = max(1, int(parallel_range / stripe_bin_size))
+        else:
+            n_bins = _TARGET_BINS
+        n_bins = min(n_bins, _MAX_BINS)
+
         # Share a single bin_edges array across all stripes in this layer
         # (they all span the same parallel range with the same bin count).
-        shared_edges = np.linspace(parallel_min, parallel_max, stripe_bin_size + 1)
+        shared_edges = np.linspace(parallel_min, parallel_max, n_bins + 1)
         bin_edges_list: List[np.ndarray] = [shared_edges] * len(stripe_edges)
 
         layers_spec[layer] = LayerBinSpec(
@@ -319,8 +337,8 @@ def prebin_tile(
     dict
         ``layer -> list[Optional[np.ndarray]]`` where each entry is a
         partial bin-values array for one display stripe (``None`` if the
-        tile has no nodes in that stripe). For ``'max'``: NaN means empty
-        bin. For ``'sum'``: 0.0 means empty bin.
+        tile has no nodes in that stripe). For both ``'max'`` and
+        ``'sum'``: NaN means no node contributed to the bin.
     """
     from visualization.stripe_heatmap import parse_node_info
 
@@ -405,7 +423,10 @@ def prebin_tile(
                 # np.fmax.at handles NaN correctly (ignores NaN operands)
                 np.fmax.at(partial, bin_idx, stripe_vals)
             else:
-                partial = np.zeros(n_bins, dtype=np.float64)
+                partial = np.full(n_bins, np.nan, dtype=np.float64)
+                touched_mask = np.zeros(n_bins, dtype=bool)
+                touched_mask[bin_idx] = True
+                partial[touched_mask] = 0.0
                 np.add.at(partial, bin_idx, stripe_vals)
 
             stripe_partials[si] = partial
@@ -426,7 +447,8 @@ def merge_tile_prebins(
     """Merge per-tile pre-binned arrays into final stripe data.
 
     For ``'max'`` aggregation: takes element-wise ``nanmax`` across tiles.
-    For ``'sum'`` aggregation: takes element-wise ``nansum`` across tiles.
+    For ``'sum'`` aggregation: takes element-wise ``nansum`` across tiles,
+    preserving ``NaN`` for bins where no tile contributed data.
 
     Parameters
     ----------
@@ -462,10 +484,7 @@ def merge_tile_prebins(
 
             if not partials:
                 # No tile contributed to this stripe
-                if aggregation == 'max':
-                    merged = np.full(n_bins, np.nan, dtype=np.float64)
-                else:
-                    merged = np.zeros(n_bins, dtype=np.float64)
+                merged = np.full(n_bins, np.nan, dtype=np.float64)
             elif len(partials) == 1:
                 merged = partials[0].copy()
             else:
@@ -477,7 +496,9 @@ def merge_tile_prebins(
                 else:
                     with warnings.catch_warnings():
                         warnings.simplefilter('ignore', RuntimeWarning)
+                        all_nan_mask = np.all(np.isnan(stacked), axis=0)
                         merged = np.nansum(stacked, axis=0)
+                        merged[all_nan_mask] = np.nan
 
             layer_stripes.append((s_start, s_end, bin_edges, merged))
 

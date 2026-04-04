@@ -1064,7 +1064,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_solve.add_argument('--max-stripes', type=int, default=2000,
                          help='Maximum number of stripes per heatmap')
     p_solve.add_argument('--stripe-bin-size', type=int, default=None,
-                         help='Number of bins per stripe (auto if not set)')
+                         help='Bin size for within-stripe aggregation (auto if not set)')
     p_solve.add_argument('--show-voltage', dest='show_irdrop', action='store_false',
                          default=True, help='Show voltage instead of IR-drop')
     _add_config_and_solver_args(p_solve)
@@ -1087,7 +1087,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument('--max-stripes', type=int, default=2000,
                        help='Maximum number of stripes per heatmap')
     p_run.add_argument('--stripe-bin-size', type=int, default=None,
-                       help='Number of bins per stripe (auto if not set)')
+                       help='Bin size for within-stripe aggregation (auto if not set)')
     p_run.add_argument('--show-voltage', dest='show_irdrop', action='store_false',
                        default=True, help='Show voltage instead of IR-drop')
     _add_config_and_solver_args(p_run)

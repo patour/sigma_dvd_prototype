@@ -896,7 +896,7 @@ def render_from_prebinned_stripe_data(
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
 ) -> None:
-    """Render pre-binned stripe data to a PNG file using PatchCollection.
+    """Render pre-binned stripe data to a PNG file using pcolormesh.
 
     This function accepts stripe data that has already been binned and
     aggregated (e.g., output of ``merge_tile_prebins()`` in the distributed
@@ -913,7 +913,10 @@ def render_from_prebinned_stripe_data(
         - ``bin_edges``: 1-D array of bin edges along the parallel axis
           (length ``n_bins + 1``).
         - ``bin_values``: 1-D array of aggregated values per bin.
-          ``NaN`` entries indicate empty bins (no rectangle is drawn).
+          ``NaN`` entries indicate empty bins (rendered transparent).
+
+        All stripes must share the same ``bin_edges`` array (uniform
+        grid required by ``pcolormesh``).
     orientation : str
         ``'H'`` (stripes run along Y, bins along X) or
         ``'V'`` (stripes run along X, bins along Y).
@@ -938,63 +941,61 @@ def render_from_prebinned_stripe_data(
         if matplotlib.get_backend().lower() != 'agg':
             matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle
-        from matplotlib.collections import PatchCollection
     except ImportError:
         print("Warning: matplotlib not available, skipping rendering")
         return
 
-    # Collect all valid (non-NaN) values for auto colorbar range
-    all_vals: List[float] = []
-    for _s_start, _s_end, _bin_edges, bin_values in stripe_data:
-        valid = bin_values[~np.isnan(bin_values)]
-        if len(valid) > 0:
-            all_vals.extend(valid.tolist())
+    n_stripes = len(stripe_data)
+    if n_stripes == 0:
+        return
 
-    if not all_vals:
+    # Build 2D grid: rows = stripes, cols = bins.
+    # All stripes share the same bin edges (from build_global_bin_spec).
+    bin_edges = stripe_data[0][2]
+    n_bins = len(bin_edges) - 1
+
+    grid = np.full((n_stripes, n_bins), np.nan)
+    stripe_edges = np.empty(n_stripes + 1)
+    for si, (s_start, s_end, _be, bin_values) in enumerate(stripe_data):
+        if len(bin_values) != n_bins:
+            raise ValueError(
+                f"Stripe {si} has {len(bin_values)} bins, expected {n_bins}. "
+                f"All stripes must share the same bin edges for pcolormesh rendering."
+            )
+        grid[si, :] = bin_values
+        stripe_edges[si] = s_start
+    stripe_edges[n_stripes] = stripe_data[-1][1]
+
+    # Check for any valid data
+    if np.isnan(grid).all():
         return  # nothing to render
 
     # Determine colorbar range
     if vmin is None:
-        vmin = min(all_vals)
+        vmin = float(np.nanmin(grid))
     if vmax is None:
-        vmax = max(all_vals)
+        vmax = float(np.nanmax(grid))
     if vmin == vmax:
         vmax = vmin + 1.0
 
     fig, ax = plt.subplots(figsize=(10, 8))
     norm = plt.Normalize(vmin=vmin, vmax=vmax)
 
-    rects: List[Rectangle] = []
-    colors: List[float] = []
+    # Render with pcolormesh (vectorized, no Python-level Rectangle loop)
+    if orientation == 'H':
+        # X axis = bins (parallel), Y axis = stripes (perpendicular)
+        im = ax.pcolormesh(
+            bin_edges, stripe_edges, grid,
+            cmap=cmap, norm=norm, shading='flat',
+        )
+    else:  # 'V'
+        # X axis = stripes (perpendicular), Y axis = bins (parallel)
+        im = ax.pcolormesh(
+            stripe_edges, bin_edges, grid.T,
+            cmap=cmap, norm=norm, shading='flat',
+        )
 
-    for s_start, s_end, bin_edges, bin_values in stripe_data:
-        stripe_size = s_end - s_start
-        for bi in range(len(bin_edges) - 1):
-            if np.isnan(bin_values[bi]):
-                continue
-            b_start = bin_edges[bi]
-            b_end = bin_edges[bi + 1]
-
-            if orientation == 'H':
-                rect = Rectangle(
-                    (b_start, s_start), b_end - b_start, stripe_size
-                )
-            else:  # 'V'
-                rect = Rectangle(
-                    (s_start, b_start), stripe_size, b_end - b_start
-                )
-            rects.append(rect)
-            colors.append(bin_values[bi])
-
-    if rects:
-        pc = PatchCollection(rects, cmap=cmap, norm=norm, edgecolors='none')
-        pc.set_array(np.array(colors))
-        ax.add_collection(pc)
-
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-        plt.colorbar(sm, ax=ax, label=value_label)
+    plt.colorbar(im, ax=ax, label=value_label)
 
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
@@ -1006,7 +1007,7 @@ def render_from_prebinned_stripe_data(
         title = f'{title_prefix} - Layer {layer} ({orientation})'
     ax.set_title(title)
 
-    ax.set_aspect('equal', adjustable='box')
+    ax.set_aspect('auto')
     ax.autoscale_view()
 
     plt.tight_layout()

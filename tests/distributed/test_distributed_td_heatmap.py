@@ -236,7 +236,7 @@ class TestPlotDistributedTdHeatmaps(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             plot_distributed_td_heatmaps(
                 model=model, nominal_voltage=1.0,
-                output_dir=tmpdir, stripe_bin_size=5,
+                output_dir=tmpdir, stripe_bin_size=20,  # physical: int(100/20)=5 bins
             )
             pngs = [f for f in os.listdir(tmpdir) if f.endswith('.png')]
             self.assertGreater(len(pngs), 0, "Expected at least one PNG")

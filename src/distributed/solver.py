@@ -304,7 +304,8 @@ class DistributedDDMSolver(_AdjointMixin, _SolverTimeDomainMixin):
         max_stripes : int
             Maximum display stripes before consolidation.
         stripe_bin_size : int or None
-            Bins per stripe along the parallel axis. ``None`` = auto.
+            Physical bin size in coordinate units. ``None`` = auto
+            (~500 bins per layer).
         show_irdrop : bool
             If True (default), generate IR-drop heatmaps in addition to
             current heatmaps.
@@ -427,7 +428,8 @@ class DistributedDDMSolver(_AdjointMixin, _SolverTimeDomainMixin):
         max_stripes : int
             Maximum display stripes before consolidation.
         stripe_bin_size : int or None
-            Bins per stripe along the parallel axis. ``None`` = auto.
+            Physical bin size in coordinate units. ``None`` = auto
+            (~500 bins per layer).
         top_k : int
             Number of worst IR-drop nodes to include in the top-K report.
         verbose : bool
