@@ -1357,13 +1357,37 @@ def analyze_dynamic_irdrop_decomposition(
         # Free initial transient result - no longer needed (~80 MB)
         del initial_result, results
 
-    # Decomposition analysis for each worst instance
+    # Decomposition analysis for each worst instance (merged with adjoint analysis
+    # so result_full can flow directly into analyze_victim(transient_result=...) and
+    # avoid an O(observation_time/dt) per-victim forward sweep).
     decompositions: List[InstanceDecomposition] = []
-    t0_decomp = time_module.perf_counter()
+    cum_transient_s = 0.0
+    cum_adjoint_s = 0.0
 
     method_enum = IntegrationMethod.TRAPEZOIDAL if integration_method == 'trap' else IntegrationMethod.BACKWARD_EULER
 
+    # Construct adjoint solver/context once before the loop, gated on aggressor_top_k > 0
+    # so we don't pay setup cost when adjoint analysis is disabled.
+    adjoint_solver = None
+    adjoint_ctx = None
+    if aggressor_top_k > 0:
+        if verbose:
+            print()
+            print("Running adjoint sensitivity analysis for top aggressors...")
+
+        # Create adjoint solver from transient solver (shares RC system)
+        adjoint_solver = AdjointSensitivitySolver.from_transient_solver(solver)
+
+        # Prepare adjoint context for batch solving (reuses LU factorization).
+        # The integration method MUST match solve_transient_multi_rhs above so
+        # that the BE/TR forward operator and its dual share the same A, B
+        # matrices -- otherwise contribution sums are dual to a different
+        # operator than result_full was integrated under, breaking
+        # attribution_efficiency for trap mode.
+        adjoint_ctx = adjoint_solver.prepare(dt=dt, method=method_enum)
+
     for rank, (inst_name, node, x, y, _) in enumerate(worst_instances, 1):
+        t_iter_start = time_module.perf_counter()
         if verbose:
             print(f"Analyzing instance {rank}/{len(worst_instances)}: {inst_name}")
 
@@ -1409,28 +1433,15 @@ def analyze_dynamic_irdrop_decomposition(
             total_current_waveform = np.array(result_full.total_current_per_time)
             result_t_array = result_full.t_array.copy()
 
-        # Free TransientResult objects - waveforms already extracted (~80 MB per instance)
-        del results, result_full, result_near, result_far
+        cum_transient_s += time_module.perf_counter() - t_iter_start
 
-    timings['decomposition'] = time_module.perf_counter() - t0_decomp
-
-    # Adjoint aggressor analysis (if enabled)
-    if aggressor_top_k > 0 and decompositions:
-        if verbose:
-            print()
-            print("Running adjoint sensitivity analysis for top aggressors...")
-
-        t0_adjoint = time_module.perf_counter()
-
-        # Create adjoint solver from transient solver (shares RC system)
-        adjoint_solver = AdjointSensitivitySolver.from_transient_solver(solver)
-
-        # Prepare adjoint context for batch solving (reuses LU factorization)
-        adjoint_ctx = adjoint_solver.prepare(dt=dt)
-
-        for rank, decomp in enumerate(decompositions, 1):
+        # Adjoint aggressor analysis for this victim (if enabled). Runs while
+        # result_full is still alive so we can pass it as transient_result and
+        # skip the per-victim forward sweep inside analyze_victim.
+        if aggressor_top_k > 0:
+            t_adj_start = time_module.perf_counter()
             if verbose:
-                print(f"  Analyzing aggressors for victim {rank}/{len(decompositions)}: {decomp.node}")
+                print(f"  Analyzing aggressors for victim {rank}/{len(worst_instances)}: {decomp.node}")
 
             # Get peak time in seconds
             peak_time_s = decomp.peak_time_ns * 1e-9
@@ -1446,6 +1457,9 @@ def analyze_dynamic_irdrop_decomposition(
                     spatial_window=decomp.window_bounds,
                     use_static=(adjoint_method == 'static'),
                     context=adjoint_ctx,
+                    method=method_enum,
+                    transient_result=result_full,
+                    smoothed_sources=smoothed_sources,
                 )
 
                 # Compute distances and build AggressorResult list
@@ -1475,7 +1489,15 @@ def analyze_dynamic_irdrop_decomposition(
                 if verbose:
                     print(f"    Warning: Adjoint analysis failed for {decomp.node}: {e}")
 
-        timings['adjoint_analysis'] = time_module.perf_counter() - t0_adjoint
+            cum_adjoint_s += time_module.perf_counter() - t_adj_start
+
+        # Free TransientResult objects - waveforms already extracted (~80 MB per instance).
+        # Released only after adjoint is done with result_full.
+        del results, result_full, result_near, result_far
+
+    timings['decomposition'] = cum_transient_s
+    if aggressor_top_k > 0:
+        timings['adjoint_analysis'] = cum_adjoint_s
     timings['total'] = time_module.perf_counter() - t0_total
 
     return (

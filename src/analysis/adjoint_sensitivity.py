@@ -62,7 +62,7 @@ import scipy.sparse as sp
 
 from model.unified_model import UnifiedPowerGridModel
 from solver.unified_solver import _factor_conductance_matrix
-from .transient_solver import TransientIRDropSolver, RCSystem, IntegrationMethod
+from .transient_solver import TransientIRDropSolver, RCSystem, IntegrationMethod, TransientResult
 from .vectorized_sources import VectorizedCurrentSources
 
 
@@ -147,13 +147,14 @@ class AdjointSolverContext:
     rc_system: RCSystem
     dt: float
     dt_scaled: float
-    A: sp.csr_matrix                   # G_uu + C_uu/dt
-    lu_A: Callable                     # Cached LU factorization
-    B: sp.csr_matrix                   # C_uu/dt
+    A: sp.csr_matrix                   # G_uu + C_uu/dt (BE) or G_uu + 2*C_uu/dt (TR)
+    lu_A: Callable                     # Cached LU factorization of A
+    B: sp.csr_matrix                   # C_uu/dt (BE) or 2*C_uu/dt (TR)
     vdd: float
     unknown_nodes: List[Any]
     unknown_to_idx: Dict[Any, int]
     n_unknown: int
+    method: IntegrationMethod = IntegrationMethod.BACKWARD_EULER
 
 
 class AdjointSensitivitySolver:
@@ -166,6 +167,11 @@ class AdjointSensitivitySolver:
     The adjoint method propagates sensitivities backward through time,
     capturing how current perturbations at different times affect the
     final voltage at the victim.
+
+    Thread-safety: instances are NOT safe for concurrent use across threads.
+    ``analyze_victim`` / ``analyze_victim_static`` temporarily swap
+    ``self._vec_sources`` when ``smoothed_sources`` is supplied, so
+    overlapping calls on the same instance can race.
     """
 
     def __init__(
@@ -419,6 +425,7 @@ class AdjointSensitivitySolver:
             unknown_nodes=rc.unknown_nodes,
             unknown_to_idx=rc.unknown_to_idx,
             n_unknown=rc.n_unknown,
+            method=method,
         )
 
     def analyze_victim_static(
@@ -430,6 +437,7 @@ class AdjointSensitivitySolver:
         window_margin: float = 0.0,
         include_waveforms: bool = False,
         initial_condition: str = 'zero',
+        smoothed_sources: Optional[VectorizedCurrentSources] = None,
     ) -> AdjointAttribution:
         """Static sensitivity analysis for stiff RC systems.
 
@@ -453,10 +461,48 @@ class AdjointSensitivitySolver:
                 - 'zero': Assume V=VDD at start, attribute total IR-drop (default)
                 - 'dc': Start from DC operating point, attribute incremental IR-drop
                         (IR-drop above the DC baseline from static currents)
+            smoothed_sources: Pre-smoothed VectorizedCurrentSources to evaluate
+                currents against. **Must match the handle passed to
+                ``TransientIRDropSolver.solve_transient(smoothed_sources=...)``
+                used to compute the forward solve being attributed.** Adjoint
+                duality (``e_v^T V = lambda^T I``) requires the same ``I`` in
+                both forward and backward sweeps; passing a different (or
+                None) handle here breaks contribution-sums-to-IR-drop.
 
         Returns:
             AdjointAttribution with static sensitivity results
         """
+        # Temporarily swap in smoothed sources if provided, mirroring the
+        # solve_transient(smoothed_sources=...) pattern. Restored in finally
+        # so other code paths (forward eval, repeated analyses) see the
+        # unchanged raw VCS.
+        original_sources = self._vec_sources
+        if smoothed_sources is not None:
+            self._vec_sources = smoothed_sources
+        try:
+            return self._analyze_victim_static_impl(
+                victim_node=victim_node,
+                observation_time=observation_time,
+                top_k=top_k,
+                spatial_window=spatial_window,
+                window_margin=window_margin,
+                include_waveforms=include_waveforms,
+                initial_condition=initial_condition,
+            )
+        finally:
+            self._vec_sources = original_sources
+
+    def _analyze_victim_static_impl(
+        self,
+        victim_node: Any,
+        observation_time: float,
+        top_k: int,
+        spatial_window: Optional[Tuple[float, float, float, float]],
+        window_margin: float,
+        include_waveforms: bool,
+        initial_condition: str,
+    ) -> AdjointAttribution:
+        """Implementation of analyze_victim_static after source swap."""
         timings: Dict[str, float] = {}
         t0_total = time_module.perf_counter()
 
@@ -701,6 +747,8 @@ class AdjointSensitivitySolver:
         method: IntegrationMethod = IntegrationMethod.BACKWARD_EULER,
         use_static: bool = False,
         initial_condition: str = 'zero',
+        smoothed_sources: Optional[VectorizedCurrentSources] = None,
+        transient_result: Optional[TransientResult] = None,
     ) -> AdjointAttribution:
         """Analyze aggressor contributions to IR-drop at victim node.
 
@@ -726,12 +774,42 @@ class AdjointSensitivitySolver:
                 - 'zero': Assume V=VDD at start, attribute total IR-drop (default)
                 - 'dc': Start from DC operating point, attribute incremental IR-drop
                         (IR-drop above the DC baseline from static currents)
+            smoothed_sources: Pre-smoothed VectorizedCurrentSources to evaluate
+                currents against. **Must match the handle passed to
+                ``TransientIRDropSolver.solve_transient(smoothed_sources=...)``
+                used to compute the forward solve being attributed.** Adjoint
+                duality (``e_v^T V = lambda^T I``) requires the same ``I`` in
+                both forward and backward sweeps; passing a different (or
+                None) handle here breaks contribution-sums-to-IR-drop.
+            transient_result: Optional pre-computed TransientResult. When
+                provided and ``victim_node`` is in
+                ``transient_result.tracked_ir_drop``, ``ir_drop_at_T`` is
+                looked up from the tracked waveform at the timestep nearest
+                ``observation_time`` instead of running a full forward
+                transient sweep -- eliminating the dominant per-victim cost
+                in production loops. **Consistency contract**: the
+                TransientResult MUST come from a ``solve_transient(...)``
+                call that used the same ``dt``, the same integration
+                ``method``, the same ``smoothed_sources`` handle (if any),
+                and the DC operating-point initial condition at t=0 (the
+                default of both ``solve_transient`` and the fallback
+                forward sweep). The victim must have been listed in
+                ``track_nodes`` of the forward solve. Violating any of
+                these silently yields an ``ir_drop_at_T`` inconsistent
+                with the contributions sum and corrupts
+                ``attribution_efficiency``. If the victim was not tracked,
+                the lookup returns ``None`` internally and the fallback
+                forward sweep runs.
 
         Returns:
             AdjointAttribution with victim analysis and top aggressors
 
         Raises:
-            ValueError: If victim_node is not in the unknown nodes
+            ValueError: If victim_node is not in the unknown nodes, or
+                ``transient_result.t_array`` step does not match
+                ``context.dt``, or ``observation_time`` falls outside the
+                ``transient_result.t_array`` range by more than half a
+                step.
         """
         # For stiff systems, use static sensitivity
         if use_static:
@@ -743,8 +821,50 @@ class AdjointSensitivitySolver:
                 window_margin=window_margin,
                 include_waveforms=include_waveforms,
                 initial_condition=initial_condition,
+                smoothed_sources=smoothed_sources,
             )
 
+        # Temporarily swap in smoothed sources if provided, mirroring the
+        # solve_transient(smoothed_sources=...) pattern. Restored in finally
+        # so other code paths (forward eval, repeated analyses) see the
+        # unchanged raw VCS.
+        original_sources = self._vec_sources
+        if smoothed_sources is not None:
+            self._vec_sources = smoothed_sources
+        try:
+            return self._analyze_victim_dynamic_impl(
+                victim_node=victim_node,
+                observation_time=observation_time,
+                memory_window=memory_window,
+                dt=dt,
+                top_k=top_k,
+                spatial_window=spatial_window,
+                window_margin=window_margin,
+                include_waveforms=include_waveforms,
+                context=context,
+                method=method,
+                initial_condition=initial_condition,
+                transient_result=transient_result,
+            )
+        finally:
+            self._vec_sources = original_sources
+
+    def _analyze_victim_dynamic_impl(
+        self,
+        victim_node: Any,
+        observation_time: float,
+        memory_window: int,
+        dt: float,
+        top_k: int,
+        spatial_window: Optional[Tuple[float, float, float, float]],
+        window_margin: float,
+        include_waveforms: bool,
+        context: Optional[AdjointSolverContext],
+        method: IntegrationMethod,
+        initial_condition: str,
+        transient_result: Optional[TransientResult] = None,
+    ) -> AdjointAttribution:
+        """Implementation of analyze_victim (dynamic) after source swap."""
         timings: Dict[str, float] = {}
         t0_total = time_module.perf_counter()
 
@@ -752,6 +872,14 @@ class AdjointSensitivitySolver:
         t0_prep = time_module.perf_counter()
         if context is None:
             context = self.prepare(dt, method)
+        elif context.method != method:
+            raise ValueError(
+                f"context.method={context.method} disagrees with analyze_victim "
+                f"method={method}; the context's lu_A was factored under the "
+                f"context's method, so applying a different rhs formula yields "
+                f"silently wrong results. Re-run prepare(dt, method) or pass "
+                f"the matching method= to analyze_victim()."
+            )
         timings['prepare'] = time_module.perf_counter() - t0_prep
 
         rc = context.rc_system
@@ -820,11 +948,26 @@ class AdjointSensitivitySolver:
         )
         timings['adjoint_solve'] = time_module.perf_counter() - t0_adjoint
 
-        # Compute IR-drop at T via forward evaluation at final time
+        # Compute IR-drop at T via a forward TRANSIENT sweep (BE/TR), not a
+        # quasi-static solve. By the discrete adjoint duality
+        # ``e_v^T V_L = sum_k lambda_k^T I_k`` (zero IC), the contribution
+        # sum equals the actual transient V at observation_time -- NOT the
+        # quasi-static value at I(t=T). Reporting the QSS here would make
+        # ir_drop_at_T match the static-adjoint number even though dynamic
+        # contributions sum to the transient value, breaking
+        # attribution_efficiency. The forward sweep reuses the cached lu_A
+        # and B from the adjoint context (same matrices the backward sweep
+        # used).
         t0_forward = time_module.perf_counter()
-        ir_drop_at_T = self._evaluate_ir_drop_at_time(
-            victim_node, observation_time, context
-        )
+        ir_drop_at_T: Optional[float] = None
+        if transient_result is not None:
+            ir_drop_at_T = self._lookup_transient_ir_drop_at_time(
+                victim_node, observation_time, context, transient_result,
+            )
+        if ir_drop_at_T is None:
+            ir_drop_at_T = self._evaluate_transient_ir_drop_at_time(
+                victim_node, observation_time, context,
+            )
         timings['forward_eval'] = time_module.perf_counter() - t0_forward
 
         # ir_drop_at_T is always the total IR-drop
@@ -1189,6 +1332,31 @@ class AdjointSensitivitySolver:
 
         return result
 
+    def _scatter_raw_sources_into(
+        self,
+        t: float,
+        I_u: np.ndarray,
+        context: AdjointSolverContext,
+    ) -> None:
+        """Raw-source scatter (legacy fallback when ``_vec_sources is None``).
+
+        Adds ``-I_j(t)`` for each raw source j attached to an unknown node into
+        the pre-allocated ``I_u`` in place. The vectorized fast path uses
+        ``VectorizedCurrentSources.evaluate_to_rhs_array`` directly with cached
+        ``(source_to_unknown, valid_mask)`` arrays — see the transient solver
+        for the same pattern.
+        """
+        all_sources = {
+            name: (node, context.unknown_to_idx[node])
+            for name, node in self._source_to_node.items()
+            if node in context.unknown_to_idx
+        }
+        source_currents = self._evaluate_currents_from_raw_sources(
+            t, all_sources,
+        )
+        for src_name, (_node, unknown_idx) in all_sources.items():
+            I_u[unknown_idx] -= source_currents.get(src_name, 0.0)
+
     def _evaluate_ir_drop_at_time(
         self,
         victim_node: Any,
@@ -1215,27 +1383,14 @@ class AdjointSensitivitySolver:
         I_u = np.zeros(n_unknown, dtype=np.float64)
 
         if self._vec_sources is not None:
-            # Get currents at time t using vectorized evaluation
-            currents = self._vec_sources.evaluate_at_time(t)
-
-            # Scatter to RHS
-            for node_idx in range(self._vec_sources.n_nodes):
-                if currents[node_idx] != 0:
-                    node = self.model.edge_cache.idx_to_node[node_idx]
-                    if node in context.unknown_to_idx:
-                        unknown_idx = context.unknown_to_idx[node]
-                        I_u[unknown_idx] -= currents[node_idx]
+            source_to_unknown, valid_mask = self._vec_sources.build_source_to_unknown_map(
+                context.unknown_to_idx, self.model.edge_cache.idx_to_node,
+            )
+            self._vec_sources.evaluate_to_rhs_array(
+                t, I_u, source_to_unknown, valid_mask,
+            )
         else:
-            # Use raw source evaluation - get all sources and their currents
-            all_sources = {
-                name: (node, context.unknown_to_idx[node])
-                for name, node in self._source_to_node.items()
-                if node in context.unknown_to_idx
-            }
-            source_currents = self._evaluate_currents_from_raw_sources(t, all_sources)
-            for src_name, (node, unknown_idx) in all_sources.items():
-                current = source_currents.get(src_name, 0.0)
-                I_u[unknown_idx] -= current  # Negative for sinks
+            self._scatter_raw_sources_into(t, I_u, context)
 
         # Pad contribution
         V_p = np.full(len(rc.pad_nodes), vdd, dtype=float)
@@ -1255,6 +1410,166 @@ class AdjointSensitivitySolver:
 
         # Convert to mV
         return ir_drop * 1000.0
+
+    def _evaluate_transient_ir_drop_at_time(
+        self,
+        victim_node: Any,
+        t_target: float,
+        context: AdjointSolverContext,
+    ) -> float:
+        """IR-drop at the victim from a forward transient sweep at t=t_target.
+
+        Runs a BE or TR integration from t=0 (DC operating point as initial
+        condition, matching ``TransientIRDropSolver.solve_transient``) to
+        ``t_target`` using the cached ``context.lu_A`` and ``context.B``.
+        The integration method is taken from ``context.method`` so the rhs
+        formula and the factorization in ``context.lu_A`` cannot disagree.
+        The result is the actual transient ``V(victim, t_target)`` -- the
+        quantity the dynamic adjoint contribution sum is dual to.
+
+        Differs from ``_evaluate_ir_drop_at_time`` (which is quasi-static)
+        and is the right thing to report from the dynamic adjoint path.
+
+        Args:
+            victim_node: Node to evaluate.
+            t_target: Time in seconds.
+            context: AdjointSolverContext with cached lu_A, B, and method.
+
+        Returns:
+            IR-drop at victim at t_target in mV.
+        """
+        method = context.method
+        rc = context.rc_system
+        vdd = context.vdd
+        dt = context.dt
+        n_unknown = context.n_unknown
+
+        if victim_node not in context.unknown_to_idx:
+            raise ValueError(
+                f"Victim {victim_node} not in unknown nodes"
+            )
+        victim_idx = context.unknown_to_idx[victim_node]
+
+        # Pad voltage contribution (constant in time)
+        V_p = np.full(len(rc.pad_nodes), vdd, dtype=float)
+        if rc.G_up.shape[1] > 0:
+            G_up_Vp = rc.G_up @ V_p
+        else:
+            G_up_Vp = np.zeros(n_unknown)
+
+        # Build the source -> unknown mapping once for the vectorized fast
+        # path; the per-step loop then becomes a single in-place scatter via
+        # evaluate_to_rhs_array (matches transient_solver.py:838-841).
+        if self._vec_sources is not None:
+            source_to_unknown, valid_mask = self._vec_sources.build_source_to_unknown_map(
+                context.unknown_to_idx, self.model.edge_cache.idx_to_node,
+            )
+        else:
+            source_to_unknown = None
+            valid_mask = None
+
+        I_u = np.zeros(n_unknown, dtype=np.float64)
+
+        def _fill_I_u(t: float) -> None:
+            I_u.fill(0.0)
+            if self._vec_sources is not None:
+                self._vec_sources.evaluate_to_rhs_array(
+                    t, I_u, source_to_unknown, valid_mask,
+                )
+            else:
+                self._scatter_raw_sources_into(t, I_u, context)
+
+        # Initial condition: DC operating point at t=0, same as
+        # TransientIRDropSolver.solve_transient (transient_solver.py:806-808)
+        _fill_I_u(0.0)
+        lu_G = _factor_conductance_matrix(rc.G_uu)
+        V_u = lu_G.solve(I_u - G_up_Vp)
+        del lu_G  # Free DC factorization promptly
+
+        # If observation_time is at or before t=0, return the DC IR-drop
+        if t_target <= 0.0:
+            return float((vdd - V_u[victim_idx]) * 1000.0)
+
+        # Forward integrate to t_target
+        n_steps = max(1, int(round(t_target / dt)))
+        for k in range(1, n_steps + 1):
+            t = k * dt
+            _fill_I_u(t)
+            if method == IntegrationMethod.BACKWARD_EULER:
+                # BE RHS: I + (C/dt) V_old - G_up V_p
+                rhs = I_u + context.B @ V_u - G_up_Vp
+            else:
+                # Trapezoidal RHS: 2I + (2C/dt) V_old - G V_old - 2 G_up V_p
+                rhs = (
+                    2.0 * I_u
+                    + context.B @ V_u
+                    - rc.G_uu @ V_u
+                    - 2.0 * G_up_Vp
+                )
+            V_u = context.lu_A.solve(rhs)
+
+        return float((vdd - V_u[victim_idx]) * 1000.0)
+
+    def _lookup_transient_ir_drop_at_time(
+        self,
+        victim_node: Any,
+        t_target: float,
+        context: AdjointSolverContext,
+        transient_result: TransientResult,
+    ) -> Optional[float]:
+        """Look up IR-drop at victim from a pre-computed transient result.
+
+        Returns IR-drop in mV at the timestep nearest ``t_target``, or
+        ``None`` if the victim was not in ``track_nodes`` of the forward
+        solve (signals "fall back to forward sweep"). Nearest-step (not
+        interpolation) matches the fallback's ``round(t_target/dt)``
+        rounding, so a swap-in is behavior-preserving when both paths
+        would land on the same step.
+
+        Returns:
+            IR-drop in mV at the nearest timestep, or ``None`` if the
+            victim was not tracked.
+
+        Raises:
+            ValueError: If ``transient_result.t_array`` step does not
+                match ``context.dt`` to within 1e-15 s, or ``t_target``
+                is outside ``t_array`` by more than half a step.
+        """
+        if victim_node not in transient_result.tracked_ir_drop:
+            return None
+
+        t_array = transient_result.t_array
+        if len(t_array) >= 2:
+            dt_result = float(t_array[1] - t_array[0])
+        else:
+            dt_result = context.dt
+
+        if dt_result <= 0:
+            raise ValueError(
+                f"transient_result has non-positive t_array step "
+                f"(dt_result={dt_result}); cannot validate against context.dt"
+            )
+        if abs(dt_result - context.dt) > 1e-15:
+            raise ValueError(
+                f"transient_result dt={dt_result} does not match "
+                f"context.dt={context.dt}"
+            )
+
+        t0 = float(t_array[0])
+        tL = float(t_array[-1])
+        if t_target < t0 - 0.5 * dt_result or t_target > tL + 0.5 * dt_result:
+            raise ValueError(
+                f"observation_time {t_target} outside transient_result range "
+                f"[{t0}, {tL}] (dt={dt_result})"
+            )
+
+        # t_array is uniformly spaced (enforced by the dt match check above),
+        # so the nearest index is O(1) arithmetic; the clamp is defensive
+        # against floating-point on the half-step boundary.
+        k = int(round((t_target - t0) / dt_result))
+        k = max(0, min(len(t_array) - 1, k))
+        # tracked_ir_drop[node] = (vdd - V_node) in volts; convert to mV
+        return float(transient_result.tracked_ir_drop[victim_node][k] * 1000.0)
 
     def _build_top_k_results(
         self,

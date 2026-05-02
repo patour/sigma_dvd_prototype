@@ -124,13 +124,20 @@ def _get_interior_nodes_with_sources(dist_model, interface_nodes_set) -> List[st
             if node and node != '0':
                 nodes_with_sources.add(node)
 
-    # Filter to interior nodes (not interface)
-    interior_with_sources = [
+    # Filter to interior nodes (not interface).
+    # Iteration order over a set is hash-randomized across PYTHONHASHSEED
+    # values, so callers depending on `[0]` or `[:N]` slicing would otherwise
+    # be flaky. Sorting makes the choice deterministic. Note: this also
+    # happens to pick alphabetically-first nodes that exist in some tile on
+    # fixtures like netlist_sampled. If a future fixture has its first
+    # alphabetical instance-current-source node missing from all tile block
+    # systems (e.g. a parser/topology quirk), distributed analyze_adjoint
+    # will raise RuntimeError; harden the helper to verify tile membership
+    # in that case.
+    return sorted(
         node for node in nodes_with_sources
         if node not in interface_nodes_set and not node.endswith('_vsrc')
-    ]
-
-    return interior_with_sources
+    )
 
 
 def _get_boundary_nodes(dist_ctx) -> List[str]:
@@ -331,16 +338,23 @@ class TestDistributedVsFlatAdjointDynamic(unittest.TestCase):
     """
 
     # Absolute tolerance for contributions in mV.
-    CONTRIB_ATOL_MV = 5e-3  # 5 uV (slightly looser for dynamic)
+    CONTRIB_ATOL_MV = 1e-6  # 1 nV — flat and distributed both use smoothed sources
 
     @classmethod
     def setUpClass(cls):
         """Create distributed and flat solvers, run transient analysis."""
+        from analysis.transient_solver import IntegrationMethod, TransientIRDropSolver
+
         logging.disable(logging.WARNING)
 
         cls.dist_model, cls.dist_solver = _create_distributed_model()
-        cls.flat_model, cls.flat_graph, cls.flat_solver = _create_flat_solver()
+        cls.flat_model, cls.flat_graph, _ = _create_flat_solver()
         cls.flat_adjoint = _create_flat_adjoint_solver(cls.flat_model, cls.flat_graph)
+        # Dedicated transient solver for the flat-side forward solve (so we can
+        # reuse the same VCS handle and tracked_ir_drop in the adjoint lookup).
+        cls.flat_trans_solver = TransientIRDropSolver(
+            cls.flat_model, cls.flat_graph, vectorize_threshold=0,
+        )
 
         # Parameters
         cls.dt = 1e-9  # 1 ns
@@ -348,22 +362,15 @@ class TestDistributedVsFlatAdjointDynamic(unittest.TestCase):
         cls.observation_time = cls.t_end
         cls.memory_window = 5
 
-        # Prepare contexts
+        # Prepare distributed contexts
         cls.dist_dc_ctx = cls.dist_solver.prepare(verbose=False)
         cls.dist_trans_ctx = cls.dist_solver.prepare_transient(
             dt=cls.dt, method='BE', verbose=False,
         )
 
-        # Run distributed transient
-        cls.dist_trans_result = cls.dist_solver.solve_transient(
-            cls.dist_trans_ctx,
-            dc_context=cls.dist_dc_ctx,
-            t_start=0.0,
-            t_end=cls.t_end,
-            verbose=False,
-        )
-
-        # Find a victim node
+        # Pick the victim BEFORE running either transient so the flat solver
+        # can include it in track_nodes (so the flat adjoint lookup path can
+        # read tracked_ir_drop[victim] without a separate forward sweep).
         interface_nodes_set = set(cls.dist_dc_ctx.interface_nodes)
         interior_nodes = _get_interior_nodes_with_sources(
             cls.dist_model, interface_nodes_set
@@ -373,6 +380,41 @@ class TestDistributedVsFlatAdjointDynamic(unittest.TestCase):
         else:
             rc = cls.flat_adjoint._ensure_rc_system()
             cls.victim_node = rc.unknown_nodes[0]
+
+        # Use smoothed sources on both flat and distributed sides so the
+        # forward solve and adjoint backward sweep see the same waveforms
+        # — this is the apples-to-apples cross-solver comparison.
+        cls.dist_sources = cls.dist_solver.preprocess_sources(
+            time_step=cls.dt,
+            t_start=0.0,
+            t_end=cls.t_end,
+            smooth=True,
+            verbose=False,
+        )
+
+        # Run distributed transient
+        cls.dist_trans_result = cls.dist_solver.solve_transient(
+            cls.dist_trans_ctx,
+            dc_context=cls.dist_dc_ctx,
+            t_start=0.0,
+            t_end=cls.t_end,
+            smoothed_sources=cls.dist_sources,
+            verbose=False,
+        )
+
+        # Build flat smoothed sources (note: flat uses dt=, distributed uses time_step=)
+        cls.flat_smoothed = cls.flat_trans_solver.preprocess_sources(
+            dt=cls.dt, t_start=0.0, t_end=cls.t_end,
+        )
+
+        # Run flat transient with the same dt/method, smoothed sources, and
+        # track the victim so the flat adjoint can look up V(victim, T).
+        cls.flat_trans_result = cls.flat_trans_solver.solve_transient(
+            t_start=0.0, t_end=cls.t_end, dt=cls.dt,
+            method=IntegrationMethod.BACKWARD_EULER,
+            track_nodes=[cls.victim_node],
+            smoothed_sources=cls.flat_smoothed,
+        )
 
         logging.disable(logging.NOTSET)
 
@@ -403,6 +445,8 @@ class TestDistributedVsFlatAdjointDynamic(unittest.TestCase):
             dt=self.dt,
             top_k=10,
             use_static=False,
+            smoothed_sources=self.flat_smoothed,
+            transient_result=self.flat_trans_result,
         )
 
         # Check overlap of top aggressors
@@ -436,6 +480,8 @@ class TestDistributedVsFlatAdjointDynamic(unittest.TestCase):
             dt=self.dt,
             top_k=20,
             use_static=False,
+            smoothed_sources=self.flat_smoothed,
+            transient_result=self.flat_trans_result,
         )
 
         # Compare contributions for common nodes
