@@ -1,0 +1,1222 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="PDN Analysis Team" />
+  <title> </title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css/github-markdown.min.css" />
+  <script defer=""
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js"
+  type="text/javascript"></script>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title"> </h1>
+<p class="author">PDN Analysis Team</p>
+<p class="date">March 2026</p>
+<div class="abstract">
+<div class="abstract-title">Abstract</div>
+<p>This report derives the method for decomposing dynamic IR-drop at a
+victim node into exact per-instance aggressor contributions under a
+linear time-invariant RC model. The primary derivation uses the impulse
+response (Green’s function) of the RC network: by superposition, the
+victim’s droop is a convolution of each source’s current waveform with
+the network’s sensitivity kernel. A single backward-in-time evaluation
+of this kernel yields all aggressor contributions simultaneously. The
+Lagrangian adjoint formulation, which generalizes to nonlinear and
+time-varying systems, is presented in an appendix along with the
+spectral interpretation.</p>
+</div>
+</header>
+<h1 id="introduction-and-problem-statement">1. Introduction and Problem
+Statement</h1>
+<h2 id="the-blame-question">1.1 The Blame Question</h2>
+<p>Consider a power distribution network (PDN) modeled as an RC mesh
+with <span class="math inline">\(N\)</span> nodes, <span
+class="math inline">\(P\)</span> voltage-source pads held at <span
+class="math inline">\(V_{dd}\)</span>, and <span
+class="math inline">\(M\)</span> time-varying current sources <span
+class="math inline">\(I_1(t), \ldots, I_M(t)\)</span> representing
+switching loads. At observation time <span
+class="math inline">\(T\)</span>, the voltage at a victim node <span
+class="math inline">\(v\)</span> has drooped below <span
+class="math inline">\(V_{dd}\)</span>:</p>
+<p><span class="math display">\[\Delta V_v(T) \;=\; V_{dd} - V_v(T)
+\;&gt;\; 0 \qquad (\text{mV}).\]</span></p>
+<p>The <strong>blame assignment problem</strong> asks: <em>how much of
+<span class="math inline">\(\Delta V_v(T)\)</span> is attributable to
+each aggressor instance?</em> That is, find scalars <span
+class="math inline">\(\{c_j\}_{j=1}^{M}\)</span> such that</p>
+<p><span class="math display">\[\Delta V_v(T) \;=\; \sum_{j=1}^{M}
+c_j,\]</span></p>
+<p>where <span class="math inline">\(c_j\)</span> quantifies the
+contribution of current source <span class="math inline">\(j\)</span> to
+the victim’s droop. Once computed, the top-<span
+class="math inline">\(K\)</span> aggressors by <span
+class="math inline">\(|c_j|\)</span> identify the dominant switching
+noise contributors for design remediation.</p>
+<h2 id="linearity-enables-exact-decomposition">1.2 Linearity Enables
+Exact Decomposition</h2>
+<p>The key enabler is <strong>linearity</strong>. Under the LTI RC
+model, the nodal voltage <span class="math inline">\(V_v(T)\)</span> is
+a linear functional of the current excitations. By superposition, the
+response to the combined excitation <span class="math inline">\(I(t) =
+\sum_j I_j(t)\)</span> equals the sum of individual responses:</p>
+<p><span class="math display">\[V_v(T) \;=\; V_v^{(0)}(T) +
+\sum_{j=1}^{M} V_v^{(j)}(T),\]</span></p>
+<p>where <span class="math inline">\(V_v^{(j)}\)</span> is the voltage
+response to source <span class="math inline">\(j\)</span> alone and
+<span class="math inline">\(V_v^{(0)}\)</span> is the homogeneous
+response from the initial condition and pad voltages.</p>
+<p>Rather than running <span class="math inline">\(M\)</span> separate
+forward simulations (prohibitively expensive for <span
+class="math inline">\(M &gt; 10^5\)</span> sources in production PDNs),
+the <strong>impulse response method</strong> computes all <span
+class="math inline">\(M\)</span> contributions with a single
+backward-in-time evaluation of the network’s sensitivity kernel.</p>
+<h1 id="system-formulation">2. System Formulation</h1>
+<h2 id="nodal-equations">2.1 Nodal Equations</h2>
+<p>The complete set of nodal equations for the RC network is:</p>
+<p><span class="math display">\[C \frac{dV}{dt} + G\, V = -\,
+I(t),\]</span></p>
+<p>where <span class="math inline">\(G\)</span> is the conductance
+matrix (mS), <span class="math inline">\(C\)</span> is the capacitance
+matrix (fF), <span class="math inline">\(V\)</span> is the node voltage
+vector, and <span class="math inline">\(I(t)\)</span> is the vector of
+injected load currents (mA). The negative sign follows the convention
+that positive current denotes a <em>sink</em> drawing current from the
+grid.</p>
+<h2 id="reduced-system">2.2 Reduced System</h2>
+<p>Pad nodes are held at constant voltage <span
+class="math inline">\(V_p = V_{dd}\)</span> (Dirichlet boundary
+conditions). Eliminating the pad rows and columns via standard Schur
+complement reduction yields the <strong>reduced system</strong> on the
+<span class="math inline">\(N_u\)</span> unknown (non-pad) nodes:</p>
+<p><span class="math display">\[\boxed{C_{uu}\, \dot{V}_u + G_{uu}\, V_u
+= -I_u(t), \qquad V_u(0) = V_u^{(0)},}\]</span></p>
+<p>where <span class="math inline">\(I_u(t)\)</span> is the load current
+vector on the unknown nodes (positive = sink). The constant pad
+contribution through resistive coupling is absorbed into the equilibrium
+voltage and does not affect the time-varying blame decomposition. Both
+<span class="math inline">\(G_{uu}\)</span> and <span
+class="math inline">\(C_{uu}\)</span> are symmetric positive
+semi-definite for a passive RC network; <span
+class="math inline">\(G_{uu}\)</span> is SPD when every unknown node has
+a resistive path to at least one pad. In the PDN, all tile-level
+capacitors are grounded, so <span class="math inline">\(C_{uu}\)</span>
+is diagonal.</p>
+<h2 id="unit-system">2.3 Unit System</h2>
+<p>The PDN uses internally consistent units: resistance in k<span
+class="math inline">\(\Omega\)</span>, conductance in mS, capacitance in
+fF, current in mA, voltage in V. This gives <span
+class="math inline">\(RC\)</span> time constants in ns (k<span
+class="math inline">\(\Omega \times\)</span> fF = ns). For time
+discretization, the time step is scaled to picoseconds: <span
+class="math inline">\(\Delta t_s = \Delta t \times 10^{12}\)</span>,
+ensuring dimensional consistency: <span
+class="math inline">\(G\text{[mS]} + C\text{[fF]} / \Delta
+t_s\text{[ps]} = \text{mS}\)</span>.</p>
+<h1 id="blame-via-impulse-response">3. Blame via Impulse Response</h1>
+<p>This section derives the blame decomposition using only linearity and
+the impulse response of the RC network. No variational calculus or
+Lagrange multipliers are needed.</p>
+<h2 id="solution-of-the-reduced-lti-system">3.1 Solution of the Reduced
+LTI System</h2>
+<p>The reduced ODE from Section 2.2 is a linear, time-invariant system.
+Its solution is given by the standard variation-of-parameters
+formula:</p>
+<p><span class="math display">\[V_u(T) = \Phi(T)\, V_u^{(0)} - \int_0^T
+\mathcal{G}(T - \tau)\, I_u(\tau)\, d\tau,\]</span></p>
+<p>where:</p>
+<ul>
+<li><span class="math inline">\(\Phi(s) = \exp\!\bigl(-C_{uu}^{-1}
+G_{uu}\, s\bigr)\)</span> is the <strong>state transition
+matrix</strong>, describing how the homogeneous (unforced) system
+evolves.</li>
+<li><span class="math inline">\(\mathcal{G}(s) = \Phi(s)\,
+C_{uu}^{-1}\)</span> is the <strong>impulse response matrix</strong>
+(Green’s function) of the RC network.</li>
+</ul>
+<p>The entry <span class="math inline">\(\mathcal{G}_{ij}(s)\)</span>
+has a direct physical meaning: it is the voltage at node <span
+class="math inline">\(i\)</span> measured <span
+class="math inline">\(s\)</span> seconds after a unit impulse of current
+(<span class="math inline">\(1\;\text{mA} \cdot \text{ps}\)</span>) is
+injected at node <span class="math inline">\(j\)</span>. The impulse
+response satisfies:</p>
+<p><span class="math display">\[C_{uu}\, \frac{d\mathcal{G}}{ds} +
+G_{uu}\, \mathcal{G}(s) = 0, \qquad s &gt; 0, \qquad \mathcal{G}(0^+) =
+C_{uu}^{-1}.\]</span></p>
+<p>Since <span class="math inline">\(G_{uu}\)</span> and <span
+class="math inline">\(C_{uu}\)</span> are symmetric, so is <span
+class="math inline">\(\mathcal{G}(s)\)</span>: the voltage at node <span
+class="math inline">\(i\)</span> from an impulse at <span
+class="math inline">\(j\)</span> equals the voltage at <span
+class="math inline">\(j\)</span> from an impulse at <span
+class="math inline">\(i\)</span>. This is the
+<strong>reciprocity</strong> property of passive RC networks.</p>
+<h2 id="blame-as-convolution">3.2 Blame as Convolution</h2>
+<p>The current source vector decomposes as <span
+class="math inline">\(I_u(\tau) = \sum_{j=1}^{M} e_{n_j}\,
+I_j(\tau)\)</span>, where <span class="math inline">\(e_{n_j}\)</span>
+is the unit vector at the grid node <span
+class="math inline">\(n_j\)</span> where source <span
+class="math inline">\(j\)</span> injects current. Substituting into the
+solution and projecting onto the victim node <span
+class="math inline">\(v\)</span>:</p>
+<p><span class="math display">\[V_v(T) = \underbrace{e_v^\top \Phi(T)\,
+V_u^{(0)}}_{V_v^{\text{hom}}(T)\;(\text{IC contribution})} \;-\;
+\sum_{j=1}^{M} \int_0^T \mathcal{G}_{v, n_j}(T-\tau)\, I_j(\tau)\,
+d\tau.\]</span></p>
+<p>The IR-drop contributed by source <span
+class="math inline">\(j\)</span> is therefore:</p>
+<p><span class="math display">\[\boxed{c_j = \int_0^T \mathcal{G}_{v,
+n_j}(T - \tau)\; I_j(\tau)\; d\tau.}\]</span></p>
+<p>This is a <strong>convolution</strong> of the impulse response with
+the source’s current waveform. The result is <strong>exact</strong> — it
+follows from nothing more than linearity and the definition of the
+impulse response.</p>
+<p><strong>Conservation.</strong> Summing over all sources:</p>
+<p><span class="math display">\[\sum_{j=1}^{M} c_j = V_v^{\text{hom}}(T)
+- V_v(T) = \Delta V_v(T) - \Delta V_v^{\text{hom}}(T).\]</span></p>
+<p>For zero initial conditions (<span class="math inline">\(V_u^{(0)} =
+V_{dd} \cdot \mathbf{1}\)</span>), the homogeneous response maintains
+<span class="math inline">\(V_{dd}\)</span> and the sum equals the total
+IR-drop <span class="math inline">\(\Delta V_v(T)\)</span>.</p>
+<h2 id="efficient-evaluation-the-sensitivity-kernel">3.3 Efficient
+Evaluation: The Sensitivity Kernel</h2>
+<p>Computing the blame integral for all <span
+class="math inline">\(M\)</span> sources naively would require
+evaluating <span class="math inline">\(M\)</span> different entries
+<span class="math inline">\(\mathcal{G}_{v, n_j}(s)\)</span> of the
+impulse response matrix. But there is a crucial simplification:
+<strong>all <span class="math inline">\(M\)</span> blames share the same
+column of <span class="math inline">\(\mathcal{G}\)</span>.</strong></p>
+<p>Define the <strong>sensitivity kernel</strong>:</p>
+<p><span class="math display">\[h(s) = \mathcal{G}(s)\,
+e_v,\]</span></p>
+<p>the <span class="math inline">\(v\)</span>-th column of the impulse
+response matrix. Then:</p>
+<p><span class="math display">\[c_j = \int_0^T h_{n_j}(T - \tau)\;
+I_j(\tau)\; d\tau,\]</span></p>
+<p>where <span class="math inline">\(h_{n_j}(s)\)</span> is the <span
+class="math inline">\(n_j\)</span>-th component of <span
+class="math inline">\(h(s)\)</span>. All <span
+class="math inline">\(M\)</span> blame integrals are computed from the
+<strong>single vector-valued function</strong> <span
+class="math inline">\(h(s)\)</span>.</p>
+<p>The sensitivity kernel satisfies the homogeneous RC ODE with a jump
+initial condition:</p>
+<p><span class="math display">\[C_{uu}\, \frac{dh}{ds} + G_{uu}\, h(s) =
+0, \qquad s &gt; 0, \qquad C_{uu}\, h(0^+) = e_v.\]</span></p>
+<p>Equivalently, extending <span class="math inline">\(h(s) = 0\)</span>
+for <span class="math inline">\(s &lt; 0\)</span>, the kernel satisfies
+the distributional ODE with a <strong>Dirac source</strong>:</p>
+<p><span class="math display">\[\boxed{C_{uu}\, \frac{dh}{ds} + G_{uu}\,
+h(s) = e_v\, \delta(s).}\]</span></p>
+<p>The two forms are equivalent: integrating across <span
+class="math inline">\(s = 0\)</span> gives <span
+class="math inline">\(C_{uu}[h(0^+) - h(0^-)] = e_v\)</span>, and since
+<span class="math inline">\(h(0^-) = 0\)</span> this recovers the jump
+condition <span class="math inline">\(C_{uu}\, h(0^+) = e_v\)</span>.
+The Dirac form unifies the initial impulse with the dynamics into a
+single equation and maps naturally to the discrete formulation (Section
+4.2).</p>
+<p>Physically, <span class="math inline">\(h(s)\)</span> is a standard
+RC decay from an impulse concentrated at the victim node. The
+<strong>backward sweep</strong> of the blame assignment algorithm is
+precisely the numerical evaluation of <span
+class="math inline">\(h(s)\)</span> at discrete lag values <span
+class="math inline">\(s = 0, \Delta t, 2\Delta t, \ldots\)</span></p>
+<pre><code>    Impulse at victim v                    Sensitivity kernel h(s)
+           |                               decays outward from v
+    t=T    |  s=0: h(0) = C_uu^{-1} e_v   (concentrated at v)
+           |
+    t=T-dt |  s=dt: h(dt)                  (spread to neighbors)
+           |
+    t=T-2dt|  s=2dt: h(2dt)               (further spread)
+           |
+           v
+    t=0    |  s=T: h(T)                    (decayed to near-zero)
+
+    At each lag s = T - t_k:
+      c_j += h_{n_j}(s) * I_j(t_k)
+
+    Figure 1: The sensitivity kernel h(s) starts as a unit impulse at
+    the victim and decays outward through the RC network. At each time
+    step, the kernel value at each source&#39;s node is multiplied by the
+    source&#39;s current to accumulate blame.</code></pre>
+<h1 id="discrete-time-formulation-backward-euler">4. Discrete-Time
+Formulation (Backward Euler)</h1>
+<h2 id="forward-discretization">4.1 Forward Discretization</h2>
+<p>Discretize the reduced ODE (Section 2.2) using Backward Euler at
+uniform time step <span class="math inline">\(\Delta t\)</span>
+(seconds). With <span class="math inline">\(\Delta t_s = \Delta t \times
+10^{12}\)</span> (ps), the discrete forward system is:</p>
+<p><span class="math display">\[A\, V_u^{n+1} = -I_u(t_{n+1}) + B\,
+V_u^n,\]</span></p>
+<p>where:</p>
+<p><span class="math display">\[A = G_{uu} + \frac{C_{uu}}{\Delta t_s},
+\qquad B = \frac{C_{uu}}{\Delta t_s}.\]</span></p>
+<p>The matrix <span class="math inline">\(A\)</span> is SPD, admitting a
+sparse Cholesky factorization.</p>
+<h2 id="discrete-impulse-response">4.2 Discrete Impulse Response</h2>
+<p>Apply Backward Euler to the Dirac form of the sensitivity kernel ODE
+(Section 3.3), <span class="math inline">\(C_{uu}\, \dot{h} + G_{uu}\, h
+= e_v\, \delta(s)\)</span>. Denote the sampled continuous kernel at lag
+<span class="math inline">\(s = l \cdot \Delta t\)</span> by <span
+class="math inline">\(h_l\)</span>. With <span
+class="math inline">\(h_{-1} = 0\)</span>:</p>
+<p><span class="math display">\[\frac{C_{uu}}{\Delta t_s}(h_l - h_{l-1})
++ G_{uu}\, h_l = \frac{e_v}{\Delta t_s}\, \delta_{l,0},\]</span></p>
+<p>where <span class="math inline">\(\delta_{l,0}\)</span> is the
+Kronecker delta and <span class="math inline">\(1/\Delta t_s\)</span> is
+the Dirac-to-Kronecker conversion. Rearranging:</p>
+<p><span class="math display">\[A\, h_l = B\, h_{l-1} +
+\frac{e_v}{\Delta t_s}\, \delta_{l,0}.\]</span></p>
+<p>The continuous blame is an integral (<span class="math inline">\(\int
+h\, I\, d\tau\)</span>), but the discrete blame is a sum (<span
+class="math inline">\(\sum \lambda\, I\)</span>). Define the
+<strong>discrete kernel</strong> <span class="math inline">\(\lambda_l =
+\Delta t_s \cdot h_l\)</span> to absorb the integration measure.
+Multiplying through by <span class="math inline">\(\Delta
+t_s\)</span>:</p>
+<p><span class="math display">\[\boxed{A\, \lambda_l = B\, \lambda_{l-1}
++ e_v\, \delta_{l,0}.}\]</span></p>
+<p>At <span class="math inline">\(l = 0\)</span>: <span
+class="math inline">\(A\, \lambda_0 = e_v\)</span>, so <span
+class="math inline">\(\lambda_0 = A^{-1}\, e_v\)</span>. For <span
+class="math inline">\(l \geq 1\)</span>: <span class="math inline">\(A\,
+\lambda_l = B\, \lambda_{l-1}\)</span>.</p>
+<p>Re-indexing to backward time notation (as used in the
+implementation), with <span class="math inline">\(\lambda_k \equiv
+\lambda_{N-1-k}\)</span> where <span class="math inline">\(k\)</span>
+now indexes forward time:</p>
+<p><span class="math display">\[\boxed{\lambda_{N-1} = A^{-1}\, e_v,
+\qquad A\, \lambda_k = B\, \lambda_{k+1} \quad (k = N-2, \ldots,
+0).}\]</span></p>
+<p>This is the <strong>backward sweep</strong>: the same <span
+class="math inline">\(A\)</span> factorization is reused at every
+step.</p>
+<p><strong>Verification from the discrete forward equations.</strong>
+The same result follows independently from differentiating the forward
+system <span class="math inline">\(A\, V^{n+1} = -I_u^{n+1} + B\,
+V^n\)</span>. The sensitivity of the victim’s IR-drop to the forcing at
+step <span class="math inline">\(k\)</span> is <span
+class="math inline">\(e_v^\top (A^{-1} B)^{N-1-k} A^{-1}\)</span>. At
+the final step this is <span class="math inline">\(e_v^\top
+A^{-1}\)</span>, so <span class="math inline">\(\lambda_{N-1} = A^{-1}
+e_v\)</span> captures this sensitivity by symmetry of <span
+class="math inline">\(A\)</span>, confirming the terminal condition from
+a purely discrete perspective.</p>
+<h2 id="discrete-blame-formula">4.3 Discrete Blame Formula</h2>
+<p>The discrete blame is:</p>
+<p><span class="math display">\[\boxed{c_j = \sum_{k=0}^{N-1}
+\lambda_k[n_j] \;\cdot\; I_j(t_k).}\]</span></p>
+<p><strong>No <span class="math inline">\(\Delta t\)</span>
+factor.</strong> The <span class="math inline">\(\Delta t_s\)</span> is
+already absorbed into <span class="math inline">\(\lambda\)</span>:
+since <span class="math inline">\(\lambda_l = \Delta t_s \cdot
+h_l\)</span>, the discrete sum <span class="math inline">\(\sum_k
+\lambda_k \cdot I_j(t_k)\)</span> approximates the continuous integral
+<span class="math inline">\(\int h_{n_j}(T-\tau)\, I_j(\tau)\,
+d\tau\)</span> directly.</p>
+<p><strong>Side-by-side comparison:</strong></p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Continuous</th>
+<th>Discrete (BE)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><span class="math inline">\(c_j = \int_0^T h_{n_j}(T-\tau)\,
+I_j(\tau)\, d\tau\)</span></td>
+<td><span class="math inline">\(c_j = \sum_{k=0}^{N-1} \lambda_k[n_j]
+\cdot I_j(t_k)\)</span></td>
+</tr>
+<tr>
+<td><span class="math inline">\(C_{uu}\, \dot{h} + G_{uu}\, h = e_v\,
+\delta(s)\)</span></td>
+<td><span class="math inline">\(A\, \lambda_l = B\, \lambda_{l-1} +
+e_v\, \delta_{l,0}\)</span></td>
+</tr>
+<tr>
+<td><span class="math inline">\(h(s)\)</span> has units k<span
+class="math inline">\(\Omega\)</span>/ps</td>
+<td><span class="math inline">\(\lambda_k\)</span> has units k<span
+class="math inline">\(\Omega\)</span> (= V/mA), absorbs <span
+class="math inline">\(\Delta t_s\)</span></td>
+</tr>
+</tbody>
+</table>
+<h2 id="unit-analysis">4.4 Unit Analysis</h2>
+<table>
+<colgroup>
+<col style="width: 27%" />
+<col style="width: 21%" />
+<col style="width: 18%" />
+<col style="width: 32%" />
+</colgroup>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Symbol</th>
+<th>Units</th>
+<th>Derivation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>System matrix</td>
+<td><span class="math inline">\(A\)</span></td>
+<td>mS</td>
+<td><span class="math inline">\(G_{uu}\text{[mS]} + C_{uu}\text{[fF]} /
+\Delta t_s\text{[ps]}\)</span></td>
+</tr>
+<tr>
+<td>History matrix</td>
+<td><span class="math inline">\(B\)</span></td>
+<td>mS</td>
+<td><span class="math inline">\(C_{uu}\text{[fF]} / \Delta
+t_s\text{[ps]}\)</span></td>
+</tr>
+<tr>
+<td>Sensitivity kernel (discrete)</td>
+<td><span class="math inline">\(\lambda_k\)</span></td>
+<td>k<span class="math inline">\(\Omega\)</span> (= V/mA)</td>
+<td>From <span class="math inline">\(A^{-1}\)</span> where <span
+class="math inline">\([A] =\)</span> mS</td>
+</tr>
+<tr>
+<td>Source current</td>
+<td><span class="math inline">\(I_j(t_k)\)</span></td>
+<td>mA</td>
+<td>PDN convention</td>
+</tr>
+<tr>
+<td>Single-step contribution</td>
+<td><span class="math inline">\(\lambda_k[n_j] \cdot I_j\)</span></td>
+<td>V</td>
+<td>k<span class="math inline">\(\Omega \times\)</span> mA</td>
+</tr>
+<tr>
+<td>Blame (accumulated)</td>
+<td><span class="math inline">\(c_j\)</span></td>
+<td>V (reported as mV)</td>
+<td><span class="math inline">\(\sum_k\)</span> of above, <span
+class="math inline">\(\times 1000\)</span></td>
+</tr>
+</tbody>
+</table>
+<pre><code>    ALGORITHM: Backward Sweep (Discrete Impulse Response)
+    ======================================================
+
+    Input:  victim index v, time array [t_0, ..., t_{N-1}],
+            factored A (LU or Cholesky), matrix B,
+            current sources {I_j(t)}
+
+    Output: blame {c_j} for each source j
+
+    1. FACTOR A (or reuse from forward transient solve)
+       lu_A = cholesky(A)             // O(nnz^{3/2}), one-time
+
+    2. TERMINAL CONDITION (impulse response at lag 0)
+       e_v = zeros(n_unknown)
+       e_v[v] = 1.0
+       lambda_next = lu_A.solve(e_v)  // O(nnz)
+
+    3. INITIALIZE accumulators
+       c[j] = 0   for all j
+
+    4. BACKWARD SWEEP: k = N-1, N-2, ..., 0
+
+       if k == N-1:
+           lambda_current = lambda_next
+       else:
+           rhs = B * lambda_next       // sparse matvec, O(nnz)
+           lambda_current = lu_A.solve(rhs)  // O(nnz)
+
+       // Evaluate currents and accumulate (O(M))
+       for each source j:
+           c[j] += lambda_current[n_j] * I_j(t_k)
+
+       swap(lambda_current, lambda_next)
+
+    5. CONVERT to mV:  c[j] *= 1000
+
+    Memory: O(n + M)  -- only 2 lambda vectors + M accumulators
+    Time:   O(N * (nnz + M))  -- N back-solves + N * M accumulations
+
+    Figure 2: Algorithmic flowchart. The LU factorization from the
+    forward transient solve is reused (symmetric A). Only two lambda
+    vectors are kept in memory at any time (O(n) swap trick).</code></pre>
+<h1 id="initial-conditions">5. Initial Conditions</h1>
+<h2 id="zero-ic-mode">5.1 Zero IC Mode</h2>
+<p>In <strong>zero IC mode</strong>, the initial condition is <span
+class="math inline">\(V_u(0) = V_{dd} \cdot \mathbf{1}\)</span> (zero
+IR-drop at <span class="math inline">\(t = 0\)</span>). The blame
+attributes the <strong>total IR-drop</strong> at the victim:</p>
+<p><span class="math display">\[c_j^{\text{zero}} = \sum_{k=0}^{N-1}
+\lambda_k[n_j] \;\cdot\; I_j(t_k).\]</span></p>
+<p>The sum <span class="math inline">\(\sum_j c_j^{\text{zero}} = \Delta
+V_v(T)\)</span> accounts for the entire droop from the pristine <span
+class="math inline">\(V_{dd}\)</span> state.</p>
+<p><strong>When to use:</strong> When the engineer wants total
+accountability of all switching activity within the observation window.
+Appropriate when the memory window encompasses the full simulation from
+startup.</p>
+<h2 id="dc-ic-mode">5.2 DC IC Mode</h2>
+<p>In <strong>DC IC mode</strong>, the initial condition is the DC
+operating point <span class="math inline">\(V_u(0) = V_{DC}\)</span>,
+computed by solving the static system:</p>
+<p><span class="math display">\[G_{uu}\, V_{DC} = -I_{DC} \qquad
+(\text{pad contribution implicit}),\]</span></p>
+<p>where <span class="math inline">\(I_{DC}\)</span> is the static (DC)
+component of the load currents. The blame then attributes only the
+<strong>incremental IR-drop</strong> above the DC baseline:</p>
+<p><span class="math display">\[c_j^{\text{inc}} = \sum_{k=0}^{N-1}
+\lambda_k[n_j] \;\cdot\; \bigl(I_j(t_k) - I_{j,DC}\bigr).\]</span></p>
+<p>The DC baseline IR-drop is <span class="math inline">\(\Delta
+V_v^{DC} = V_{dd} - V_{DC,v}\)</span> (mV).</p>
+<h2 id="relationship-between-modes">5.3 Relationship Between Modes</h2>
+<p>Define the <strong>static contribution</strong> of source <span
+class="math inline">\(j\)</span>:</p>
+<p><span class="math display">\[c_j^{\text{static}} = \sum_{k=0}^{N-1}
+\lambda_k[n_j] \;\cdot\; I_{j,DC}.\]</span></p>
+<p>Then:</p>
+<p><span class="math display">\[\boxed{c_j^{\text{zero}} =
+c_j^{\text{inc}} + c_j^{\text{static}}.}\]</span></p>
+<p>This identity holds exactly by linearity. The total blame decomposes
+into an incremental part (switching above DC level) and a static part
+(constant background current). DC IC mode isolates switching noise from
+the static voltage map.</p>
+<h1 id="per-instance-blame-aggregation-and-top-k-ranking">6.
+Per-Instance Blame Aggregation and Top-K Ranking</h1>
+<h2 id="aggregation-hierarchy">6.1 Aggregation Hierarchy</h2>
+<p>The blame formula (Section 4.3) computes blame at the level of
+individual current sources <span class="math inline">\(c_j\)</span>. In
+practice, multiple sources may be associated with a single design
+instance. The aggregation proceeds:</p>
+<ol type="1">
+<li><strong>Per-source:</strong> <span
+class="math inline">\(c_j\)</span> for each current source <span
+class="math inline">\(j\)</span>.</li>
+<li><strong>Per-node:</strong> <span
+class="math inline">\(c_{\text{node}} = \sum_{j: \text{node}(j) =
+\text{node}} c_j\)</span> summing all sources at the same grid
+node.</li>
+<li><strong>Per-instance:</strong> <span
+class="math inline">\(c_{\text{inst}} = \sum_{j \in \text{inst}}
+c_j\)</span> summing all sources belonging to the same physical instance
+(cell/macro).</li>
+</ol>
+<p>The per-instance level is the most actionable for design: it tells
+the engineer which block to resize, move, or add decap near.</p>
+<h2 id="self-contribution">6.2 Self-Contribution</h2>
+<p>The victim’s own current sources (if any) are separated:</p>
+<p><span class="math display">\[c_{\text{self}} = \sum_{j \in
+\text{sources}(v)} c_j.\]</span></p>
+<p>This quantifies how much of the droop is self-inflicted versus caused
+by remote aggressors.</p>
+<h2 id="top-k-ranking">6.3 Top-K Ranking</h2>
+<p>After aggregation, sort instances by <span
+class="math inline">\(|c_{\text{inst}}|\)</span> descending and report
+the top <span class="math inline">\(K\)</span>. Each entry includes:</p>
+<ul>
+<li>Instance identifier</li>
+<li>Contribution in mV and as a percentage of total IR-drop</li>
+<li>List of constituent source names</li>
+<li>(Optional) Current waveform over the memory window</li>
+</ul>
+<h2 id="attribution-efficiency">6.4 Attribution Efficiency</h2>
+<p>Define:</p>
+<p><span class="math display">\[\eta = \frac{\sum_{j=1}^{M} c_j}{\Delta
+V_v(T)}.\]</span></p>
+<p>For a linear system with the memory window encompassing all relevant
+history, <span class="math inline">\(\eta = 1.0\)</span> exactly.
+Deviations from unity indicate truncation or numerical artifacts (see
+Section 8).</p>
+<h1 id="algorithmic-complexity-and-implementation-notes">7. Algorithmic
+Complexity and Implementation Notes</h1>
+<h2 id="cost-breakdown">7.1 Cost Breakdown</h2>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 35%" />
+<col style="width: 30%" />
+<col style="width: 35%" />
+</colgroup>
+<thead>
+<tr>
+<th>Phase</th>
+<th>Cost</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LU factorization of <span class="math inline">\(A\)</span></td>
+<td><span class="math inline">\(O(n_{\text{nnz}}^{3/2})\)</span></td>
+<td>One-time; shared with forward transient</td>
+</tr>
+<tr>
+<td>Terminal condition solve</td>
+<td><span class="math inline">\(O(n_{\text{nnz}})\)</span></td>
+<td>Single back-substitution</td>
+</tr>
+<tr>
+<td>Each backward step</td>
+<td><span class="math inline">\(O(n_{\text{nnz}})\)</span></td>
+<td>SpMV (<span class="math inline">\(B \cdot \lambda\)</span>) +
+back-sub</td>
+</tr>
+<tr>
+<td>Current evaluation per step</td>
+<td><span class="math inline">\(O(M)\)</span></td>
+<td>Vectorized PWL evaluation</td>
+</tr>
+<tr>
+<td>Contribution accumulation per step</td>
+<td><span class="math inline">\(O(M)\)</span></td>
+<td>Dot product per source</td>
+</tr>
+<tr>
+<td><strong>Total backward sweep</strong></td>
+<td><strong><span class="math inline">\(O(L \cdot (n_{\text{nnz}} +
+M))\)</span></strong></td>
+<td><span class="math inline">\(L\)</span> = number of time steps</td>
+</tr>
+</tbody>
+</table>
+<p>For typical PDN sizes (<span class="math inline">\(n \sim
+10^6\)</span> unknowns, <span class="math inline">\(M \sim 10^5\)</span>
+sources, <span class="math inline">\(L \sim 100\)</span> steps), the
+backward sweep is dominated by the <span
+class="math inline">\(L\)</span> sparse triangular solves.</p>
+<h2 id="memory">7.2 Memory</h2>
+<p>The backward sweep requires only <strong>two <span
+class="math inline">\(\lambda\)</span> vectors</strong> (<span
+class="math inline">\(2 \times n\)</span> doubles) via the swap trick,
+plus <span class="math inline">\(M\)</span> scalar accumulators. Total:
+<span class="math inline">\(O(n + M)\)</span>. The LU factors (from the
+forward solve) are the dominant memory consumer.</p>
+<h2 id="lu-reuse">7.3 LU Reuse</h2>
+<p>The system matrix <span class="math inline">\(A = G_{uu} +
+C_{uu}/\Delta t_s\)</span> is identical for the forward transient and
+backward sweep (since <span class="math inline">\(A^\top = A\)</span>
+for symmetric <span class="math inline">\(G_{uu}\)</span>, <span
+class="math inline">\(C_{uu}\)</span>). The implementation shares the
+cached factorization, avoiding a redundant <span
+class="math inline">\(O(n_{\text{nnz}}^{3/2})\)</span> factorization.
+This typically saves 200–500 MB of memory.</p>
+<h2 id="vectorized-current-evaluation">7.4 Vectorized Current
+Evaluation</h2>
+<p>Current sources are stored in a <code>VectorizedCurrentSources</code>
+structure that supports <span class="math inline">\(O(M)\)</span> batch
+evaluation of all PWL/pulse waveforms at a given time <span
+class="math inline">\(t\)</span>. The per-source evaluation returns
+individual source currents needed for the accumulation inner loop.</p>
+<h2 id="spatial-filtering">7.5 Spatial Filtering</h2>
+<p>When only nearby aggressors are of interest (e.g., within a spatial
+window around the victim), the candidate source set can be pruned <em>a
+priori</em>. This reduces the inner-loop cost from <span
+class="math inline">\(O(M)\)</span> to <span
+class="math inline">\(O(M_{\text{window}})\)</span> per step. The
+sensitivity kernel <span class="math inline">\(\lambda\)</span> is still
+computed over the full grid.</p>
+<h1 id="practical-considerations-and-sensitivity-analysis">8. Practical
+Considerations and Sensitivity Analysis</h1>
+<h2 id="attribution-efficiency-deviations">8.1 Attribution Efficiency
+Deviations</h2>
+<p>The attribution efficiency <span class="math inline">\(\eta\)</span>
+(Section 6.4) should be exactly 1.0 for a linear system when the memory
+window and source set are complete. In practice, <span
+class="math inline">\(\eta\)</span> deviates due to:</p>
+<ol type="1">
+<li><p><strong>Memory window truncation</strong>: If the backward sweep
+starts at <span class="math inline">\(t_0 &gt; 0\)</span> rather than
+<span class="math inline">\(t = 0\)</span>, contributions from the
+interval <span class="math inline">\([0, t_0)\)</span> are
+missed.</p></li>
+<li><p><strong>Spatial window exclusion</strong>: Sources outside the
+spatial window are not counted, even though they contribute through the
+grid’s far-field coupling modes (see Appendix B).</p></li>
+<li><p><strong>Numerical precision</strong>: Accumulation over many
+small terms introduces floating-point rounding errors, typically at the
+<span class="math inline">\(10^{-10}\)</span> level.</p></li>
+</ol>
+<h2 id="sensitivity-to-memory-window-length">8.2 Sensitivity to Memory
+Window Length</h2>
+<p>The sensitivity kernel decays exponentially with lag. The spectral
+radius of the one-step propagator <span class="math inline">\(A^{-1}
+B\)</span> determines the decay rate:</p>
+<p><span class="math display">\[\rho(A^{-1} B) = \max_k \frac{1/\Delta
+t_s}{\mu_k + 1/\Delta t_s} = \frac{\tau_{\max}}{\tau_{\max} + \Delta
+t_s},\]</span></p>
+<p>where <span class="math inline">\(\tau_{\max} = 1/\mu_{\min}\)</span>
+is the slowest RC time constant (see Appendix B for the spectral
+decomposition). After <span class="math inline">\(L\)</span> steps, the
+residual kernel magnitude is bounded by:</p>
+<p><span class="math display">\[\|\lambda_{N-1-L}\| \leq
+\|\lambda_{N-1}\| \cdot \rho^L.\]</span></p>
+<p>To ensure truncation error below a fraction <span
+class="math inline">\(\epsilon\)</span>:</p>
+<p><span class="math display">\[L &gt;
+\frac{\ln(1/\epsilon)}{\ln(1/\rho)} \approx \frac{\tau_{\max}}{\Delta
+t_s} \cdot \ln(1/\epsilon).\]</span></p>
+<p><strong>Rule of thumb:</strong> For <span
+class="math inline">\(\epsilon = 1\%\)</span> (<span
+class="math inline">\(\eta &gt; 0.99\)</span>), set <span
+class="math inline">\(L \cdot \Delta t &gt; 5 \cdot
+\tau_{\max}\)</span>. For <span class="math inline">\(\epsilon =
+0.1\%\)</span>, use <span class="math inline">\(7 \cdot
+\tau_{\max}\)</span>.</p>
+<pre><code>    Attribution efficiency eta vs. memory window length
+    (normalized to tau_max)
+
+    eta
+    1.00 |                              _______________
+         |                         ____/
+    0.95 |                    ____/
+         |               ____/
+    0.90 |          ____/
+         |     ____/
+    0.85 | ___/
+         |/
+    0.80 +----------+----------+----------+----------+--&gt;
+         0       2*tau      4*tau      6*tau      8*tau
+                         Memory window length
+
+    Figure 3: Attribution efficiency as a function of memory window
+    length. The curve approaches 1.0 exponentially; 5*tau_max gives
+    &gt;99% efficiency for most PDN topologies.</code></pre>
+<h2 id="sensitivity-to-time-step-delta-t">8.3 Sensitivity to Time Step
+<span class="math inline">\(\Delta t\)</span></h2>
+<p><strong>Stiff regime</strong> (<span
+class="math inline">\(\tau_{\max} \ll \Delta t\)</span>): The kernel
+decays to near-zero in a single step (<span class="math inline">\(\rho
+\approx 0\)</span>). Only the terminal step contributes:</p>
+<p><span class="math display">\[c_j \approx \lambda_{N-1}[n_j] \cdot
+I_j(T) = (A^{-1} e_v)[n_j] \cdot I_j(T) \approx (G_{uu}^{-1} e_v)[n_j]
+\cdot I_j(T).\]</span></p>
+<p>This converges to the <strong>static sensitivity</strong> <span
+class="math inline">\(G_{uu}^{-1}\)</span>. In the stiff limit, a single
+matrix solve suffices.</p>
+<p><strong>Non-stiff regime</strong> (<span
+class="math inline">\(\tau_{\max} \gg \Delta t\)</span>): Memory extends
+over many steps. Multiple past time steps contribute significantly.
+Reducing <span class="math inline">\(\Delta t\)</span> improves temporal
+resolution at the cost of more backward steps.</p>
+<p><strong>Crossover:</strong> At <span class="math inline">\(\Delta t
+\approx \tau_{\max}\)</span>, the ranking transitions from being
+dominated by recent/local activity to including historical/distant
+contributions.</p>
+<h2 id="sensitivity-to-spatial-window">8.4 Sensitivity to Spatial
+Window</h2>
+<p>Restricting the spatial window (Section 7.5) trades completeness for
+speed. The “leakage” — blame attributed to sources outside the window —
+is carried by the low-frequency eigenmodes of the RC network (see
+Appendix B for the spectral interpretation):</p>
+<ul>
+<li><strong>Near-field modes</strong> (localized, fast decay): fully
+captured by a moderate window.</li>
+<li><strong>Far-field modes</strong> (global, slow decay): extend across
+the grid. Sources outside the window contribute through these modes, and
+their blame is <em>missed</em>.</li>
+</ul>
+<p>For PDNs with strong far-field coupling (sparse pad placement,
+uniform current loads), a large spatial window or no window is
+needed.</p>
+<h2 id="sensitivity-to-instance-grouping">8.5 Sensitivity to Instance
+Grouping</h2>
+<p>The top-K ranking can change depending on the aggregation level:</p>
+<ul>
+<li><strong>Per-node ranking</strong>: Fine-grained. Two sources on
+different nodes of the same instance appear as separate entries.</li>
+<li><strong>Per-instance ranking</strong>: Coarse-grained. An instance
+with many small-contribution sources may rank higher than a single
+large-contribution source.</li>
+</ul>
+<p><strong>Recommendation:</strong> Report both per-instance blame and
+the number of constituent sources. An instance with 50 sources each
+contributing 0.1 mV (total 5 mV) has a qualitatively different character
+than one source contributing 5 mV.</p>
+<h1 id="validation">9. Validation</h1>
+<p>The blame assignment can be validated through four independent
+checks:</p>
+<h2 id="aggressor-only-simulation">9.1 Aggressor-Only Simulation</h2>
+<p>For each top aggressor <span class="math inline">\(j\)</span>, run a
+forward transient with <em>only</em> source <span
+class="math inline">\(j\)</span> active (all others zeroed), starting
+from <span class="math inline">\(V_u(0) = V_{dd}\)</span>. The IR-drop
+at the victim at time <span class="math inline">\(T\)</span> should
+match the blame:</p>
+<p><span class="math display">\[\Delta V_v^{(j)}(T) \approx
+c_j.\]</span></p>
+<p>The match is exact when the memory window encompasses the full
+simulation interval.</p>
+<h2 id="superposition-check">9.2 Superposition Check</h2>
+<p>Run the full forward transient and verify:</p>
+<p><span class="math display">\[\sum_{j=1}^{M} c_j \approx \Delta
+V_v(T), \qquad \eta \approx 1.0.\]</span></p>
+<h2 id="stiff-system-convergence">9.3 Stiff-System Convergence</h2>
+<p>For <span class="math inline">\(\tau_{\max} \ll \Delta t\)</span>,
+verify that the dynamic blame matches the static sensitivity <span
+class="math inline">\(G_{uu}^{-1} e_v \cdot I_j(T)\)</span>.</p>
+<h2 id="dc-mode-decomposition">9.4 DC Mode Decomposition</h2>
+<p>Verify the identity from Section 5.3:</p>
+<p><span class="math display">\[c_j^{\text{inc}} + c_j^{\text{static}} =
+c_j^{\text{zero}} \qquad \forall\, j.\]</span></p>
+<p>This holds to machine precision by linearity.</p>
+<h1 id="conclusion">10. Conclusion</h1>
+<h2 id="summary">Summary</h2>
+<p>This report derived the impulse-response-based method for exact
+per-instance decomposition of dynamic IR-drop in LTI RC power
+distribution networks. The key results are:</p>
+<ol type="1">
+<li><p><strong>Exact decomposition</strong>: The victim’s IR-drop is a
+sum of convolutions of the impulse response with each source’s current
+waveform. Linearity guarantees exactness.</p></li>
+<li><p><strong>Single backward sweep</strong>: The sensitivity kernel
+<span class="math inline">\(h(s)\)</span> — a single column of the
+impulse response matrix — captures all <span
+class="math inline">\(M\)</span> aggressor contributions. Computational
+cost: <span class="math inline">\(O(L \cdot (n_{\text{nnz}} +
+M))\)</span> with <span class="math inline">\(O(n + M)\)</span>
+memory.</p></li>
+<li><p><strong>Physical interpretation</strong>: <span
+class="math inline">\(h(s)\)</span> is the RC network’s response to an
+impulse at the victim, decaying outward with distance and time. Nearby,
+recent switching dominates; distant, historical switching contributes
+through slow global modes (Appendix B).</p></li>
+<li><p><strong>Generalization</strong>: The Lagrangian adjoint
+formulation (Appendix C) recovers the same result for LTI systems and
+extends to nonlinear and time-varying networks where the impulse
+response approach does not apply.</p></li>
+</ol>
+<h2 id="limitations">Limitations</h2>
+<ul>
+<li><strong>Memory truncation</strong>: Contributions from before the
+backward sweep window are invisible.</li>
+<li><strong>No inductance</strong>: Package-level <span
+class="math inline">\(Ldi/dt\)</span> droop is not captured. Extending
+to RLC requires a non-symmetric formulation.</li>
+<li><strong>Flat formulation</strong>: The distributed DDM extension
+(tile-based Schur complement) is implemented but documented
+separately.</li>
+</ul>
+<h2 id="extensions">Extensions</h2>
+<ul>
+<li><strong>Trapezoidal rule</strong>: Uses <span
+class="math inline">\(A = G_{uu} + 2C_{uu}/\Delta t_s\)</span>, <span
+class="math inline">\(B = 2C_{uu}/\Delta t_s - G_{uu}\)</span>.</li>
+<li><strong>Distributed DDM</strong>: Per-tile local sweeps with a
+coordinator interface solve.</li>
+<li><strong>RLC networks</strong>: Coupled backward sweep on voltage and
+current variables.</li>
+</ul>
+<h1 id="appendix-a-notation-table">Appendix A: Notation Table</h1>
+<table>
+<colgroup>
+<col style="width: 28%" />
+<col style="width: 46%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Symbol</th>
+<th>Description</th>
+<th>Units</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><span class="math inline">\(G_{uu}\)</span></td>
+<td>Reduced conductance matrix (unknowns only)</td>
+<td>mS</td>
+</tr>
+<tr>
+<td><span class="math inline">\(C_{uu}\)</span></td>
+<td>Reduced capacitance matrix (unknowns only)</td>
+<td>fF</td>
+</tr>
+<tr>
+<td><span class="math inline">\(A\)</span></td>
+<td>System matrix: <span class="math inline">\(G_{uu} + C_{uu}/\Delta
+t_s\)</span></td>
+<td>mS</td>
+</tr>
+<tr>
+<td><span class="math inline">\(B\)</span></td>
+<td>History matrix: <span class="math inline">\(C_{uu}/\Delta
+t_s\)</span></td>
+<td>mS</td>
+</tr>
+<tr>
+<td><span class="math inline">\(V_u\)</span></td>
+<td>Voltage vector at unknown nodes</td>
+<td>V</td>
+</tr>
+<tr>
+<td><span class="math inline">\(V_{dd}\)</span></td>
+<td>Supply voltage</td>
+<td>V</td>
+</tr>
+<tr>
+<td><span class="math inline">\(I_j(t)\)</span></td>
+<td>Current drawn by source <span class="math inline">\(j\)</span> at
+time <span class="math inline">\(t\)</span></td>
+<td>mA (positive = sink)</td>
+</tr>
+<tr>
+<td><span class="math inline">\(e_v\)</span></td>
+<td>Unit vector at victim index <span
+class="math inline">\(v\)</span></td>
+<td>dimensionless</td>
+</tr>
+<tr>
+<td><span class="math inline">\(\Phi(s)\)</span></td>
+<td>State transition matrix: <span
+class="math inline">\(\exp(-C_{uu}^{-1} G_{uu}\, s)\)</span></td>
+<td>dimensionless</td>
+</tr>
+<tr>
+<td><span class="math inline">\(\mathcal{G}(s)\)</span></td>
+<td>Impulse response matrix: <span class="math inline">\(\Phi(s)\,
+C_{uu}^{-1}\)</span></td>
+<td>k<span class="math inline">\(\Omega\)</span>/ps</td>
+</tr>
+<tr>
+<td><span class="math inline">\(h(s)\)</span></td>
+<td>Sensitivity kernel: <span class="math inline">\(\mathcal{G}(s)\,
+e_v\)</span> (<span class="math inline">\(v\)</span>-th column)</td>
+<td>k<span class="math inline">\(\Omega\)</span>/ps</td>
+</tr>
+<tr>
+<td><span class="math inline">\(\lambda_k\)</span></td>
+<td>Discrete sensitivity kernel at step <span
+class="math inline">\(k\)</span> (<span class="math inline">\(= \Delta
+t_s \cdot h_k\)</span>, absorbs integration measure)</td>
+<td>k<span class="math inline">\(\Omega\)</span> (= V/mA)</td>
+</tr>
+<tr>
+<td><span class="math inline">\(c_j\)</span></td>
+<td>Blame contribution of source <span
+class="math inline">\(j\)</span></td>
+<td>mV</td>
+</tr>
+<tr>
+<td><span class="math inline">\(\Delta V_v(T)\)</span></td>
+<td>IR-drop at victim: <span class="math inline">\(V_{dd} -
+V_v(T)\)</span></td>
+<td>mV</td>
+</tr>
+<tr>
+<td><span class="math inline">\(\eta\)</span></td>
+<td>Attribution efficiency: <span class="math inline">\(\sum c_j /
+\Delta V_v(T)\)</span></td>
+<td>dimensionless</td>
+</tr>
+<tr>
+<td><span class="math inline">\(\Delta t\)</span></td>
+<td>Time step</td>
+<td>seconds</td>
+</tr>
+<tr>
+<td><span class="math inline">\(\Delta t_s\)</span></td>
+<td>Scaled time step: <span class="math inline">\(\Delta t \times
+10^{12}\)</span></td>
+<td>ps</td>
+</tr>
+<tr>
+<td><span class="math inline">\(T\)</span></td>
+<td>Observation time</td>
+<td>seconds</td>
+</tr>
+<tr>
+<td><span class="math inline">\(L\)</span></td>
+<td>Number of backward steps (memory window)</td>
+<td>integer</td>
+</tr>
+<tr>
+<td><span class="math inline">\(\tau_k = 1/\mu_k\)</span></td>
+<td><span class="math inline">\(k\)</span>-th RC time constant</td>
+<td>ns</td>
+</tr>
+<tr>
+<td><span class="math inline">\(\rho\)</span></td>
+<td>Spectral radius of <span class="math inline">\(A^{-1}B\)</span></td>
+<td>dimensionless</td>
+</tr>
+<tr>
+<td><span class="math inline">\(\phi_k\)</span></td>
+<td><span class="math inline">\(k\)</span>-th eigenmode of <span
+class="math inline">\(C_{uu}^{-1} G_{uu}\)</span></td>
+<td>(normalized)</td>
+</tr>
+<tr>
+<td><span class="math inline">\(n_j\)</span></td>
+<td>Grid node at which source <span class="math inline">\(j\)</span>
+injects current</td>
+<td>(node ID)</td>
+</tr>
+<tr>
+<td><span class="math inline">\(N_u\)</span></td>
+<td>Number of unknown nodes</td>
+<td>integer</td>
+</tr>
+<tr>
+<td><span class="math inline">\(M\)</span></td>
+<td>Number of current sources</td>
+<td>integer</td>
+</tr>
+</tbody>
+</table>
+<h1 id="appendix-b-spectral-interpretation">Appendix B: Spectral
+Interpretation</h1>
+<h2 id="b.1-eigenmode-decomposition">B.1 Eigenmode Decomposition</h2>
+<p>Consider the generalized eigenproblem:</p>
+<p><span class="math display">\[G_{uu}\, \phi_k = \mu_k\, C_{uu}\,
+\phi_k, \qquad \phi_k^\top C_{uu}\, \phi_l = \delta_{kl}.\]</span></p>
+<p>The eigenvalues <span class="math inline">\(\mu_k &gt; 0\)</span> set
+the <strong>RC time constants</strong> <span
+class="math inline">\(\tau_k = 1/\mu_k\)</span>. The eigenmodes <span
+class="math inline">\(\phi_k\)</span> are spatial patterns on the grid.
+The impulse response decomposes as:</p>
+<p><span class="math display">\[\mathcal{G}(s) = \sum_{k=1}^{N_u}
+\phi_k\, \phi_k^\top\, e^{-\mu_k s}.\]</span></p>
+<p>Substituting into the blame integral (Section 3.2):</p>
+<p><span class="math display">\[c_j = \sum_{k=1}^{N_u} \phi_k(v)\;
+\phi_k(n_j)\; \underbrace{\int_0^T e^{-\mu_k(T-\tau)}\, I_j(\tau)\,
+d\tau}_{\text{filtered current through mode } k}.\]</span></p>
+<h2 id="b.2-spatial-temporal-factorization-of-blame">B.2
+Spatial-Temporal Factorization of Blame</h2>
+<p>The spectral form reveals a fundamental factorization:</p>
+<p><span class="math display">\[c_j = \sum_k \underbrace{\phi_k(v)\;
+\phi_k(n_j)}_{\text{spatial coupling}} \;\times\;
+\underbrace{\hat{I}_{j,k}(T)}_{\text{temporally filtered
+current}}.\]</span></p>
+<p><strong>Low-frequency modes</strong> (small <span
+class="math inline">\(\mu_k\)</span>, large <span
+class="math inline">\(\tau_k\)</span>): - Spatially smooth, extending
+across the grid - Decay slowly (<span class="math inline">\(e^{-\mu_k
+s}\)</span> persists for large <span class="math inline">\(s\)</span>) -
+Carry <strong>far-field blame</strong>: distant aggressors contribute
+through these global modes - Integrate long current history</p>
+<p><strong>High-frequency modes</strong> (large <span
+class="math inline">\(\mu_k\)</span>, small <span
+class="math inline">\(\tau_k\)</span>): - Spatially localized,
+concentrated near the source - Decay rapidly (<span
+class="math inline">\(e^{-\mu_k s} \to 0\)</span> quickly) - Carry
+<strong>near-field blame</strong>: only local, recent switching events
+contribute - Respond primarily to the current at or near time <span
+class="math inline">\(T\)</span></p>
+<p>This explains why distant aggressors contribute to IR-drop primarily
+through slow, global RC modes, and nearby aggressors dominate due to
+fast, local modes with large <span class="math inline">\(\phi_k(v) \cdot
+\phi_k(n_j)\)</span> products.</p>
+<pre><code>    Mode k=1 (global, slow decay):
+     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  tau_1 = large
+     Spatially smooth across entire grid
+
+    Mode k=2 (intermediate):
+     ~~~~  ~~~~  ~~~~  ~~~~  ~~~~          tau_2 = moderate
+     Half-wavelength oscillation
+
+    Mode k=N (local, fast decay):
+     ___|___                               tau_N = small
+     Sharp peak near source location
+
+    Decay envelopes:
+    exp(-mu_k * s)
+      |
+    1 |---___  k=1 (slow)
+      |      ---___
+      |   ----___   k=2
+      |          ---___
+      |  -------___     k=N (fast)
+      |___________________|______&gt; s (time lag)
+      0          5*tau_1
+
+    Figure B.1: Spatial eigenmodes (top) and their temporal decay
+    envelopes (bottom). Low-frequency modes are spatially global and
+    persist in time; high-frequency modes are spatially local and
+    decay rapidly.</code></pre>
+<h1 id="appendix-c-lagrangian-adjoint-generalization">Appendix C:
+Lagrangian Adjoint — Generalization</h1>
+<h2 id="c.1-motivation-beyond-lti">C.1 Motivation: Beyond LTI</h2>
+<p>The impulse response approach of Section 3 exploits two properties of
+the PDN model: <strong>linearity</strong> (superposition) and
+<strong>time-invariance</strong> (the impulse response <span
+class="math inline">\(\mathcal{G}(s)\)</span> depends only on the lag
+<span class="math inline">\(s = T - \tau\)</span>, not on <span
+class="math inline">\(\tau\)</span> itself). For systems that violate
+either property — nonlinear circuit elements, time-varying topology, or
+constrained optimization over design parameters — the impulse response
+does not exist as a fixed kernel.</p>
+<p>The <strong>Lagrangian adjoint method</strong> generalizes blame
+assignment to these settings. For our LTI RC PDN, it recovers exactly
+the same result as Section 3, providing an independent validation.</p>
+<h2 id="c.2-continuous-lagrangian-derivation">C.2 Continuous Lagrangian
+Derivation</h2>
+<p>Working on the reduced system (Section 2.2), define the output of
+interest:</p>
+<p><span class="math display">\[J = e_v^\top V_u(T).\]</span></p>
+<p>Introduce the adjoint variable <span
+class="math inline">\(\lambda(t)\)</span> as a Lagrange multiplier
+enforcing the forward ODE. The Lagrangian is:</p>
+<p><span class="math display">\[\mathcal{L} = e_v^\top V_u(T) + \int_0^T
+\lambda(t)^\top \bigl[ -I_u(t) - C_{uu}\, \dot{V}_u(t) - G_{uu}\, V_u(t)
+\bigr]\, dt.\]</span></p>
+<p>Integrate the <span class="math inline">\(\lambda^\top C_{uu}\,
+\dot{V}_u\)</span> term by parts:</p>
+<p><span class="math display">\[\int_0^T \lambda^\top C_{uu}\,
+\dot{V}_u\, dt = \bigl[\lambda^\top C_{uu}\, V_u\bigr]_0^T - \int_0^T
+\dot{\lambda}^\top C_{uu}\, V_u\, dt.\]</span></p>
+<p>Substituting and collecting terms involving <span
+class="math inline">\(V_u\)</span>:</p>
+<p><span class="math display">\[\mathcal{L} = \bigl(e_v -
+C_{uu}\lambda(T)\bigr)^\top V_u(T) + \lambda(0)^\top C_{uu}\, V_u(0) +
+\int_0^T \bigl[\dot{\lambda}^\top C_{uu} - \lambda^\top G_{uu}\bigr]
+V_u\, dt - \int_0^T \lambda^\top I_u\, dt.\]</span></p>
+<p>Setting the variation <span class="math inline">\(\delta \mathcal{L}
+/ \delta V_u = 0\)</span> yields:</p>
+<p><strong>Adjoint ODE:</strong></p>
+<p><span class="math display">\[-C_{uu}\, \dot{\lambda}(t) + G_{uu}\,
+\lambda(t) = 0, \qquad t \in [0, T).\]</span></p>
+<p><strong>Terminal condition</strong> (from the boundary term at <span
+class="math inline">\(T\)</span>):</p>
+<p><span class="math display">\[C_{uu}\, \lambda(T) = e_v.\]</span></p>
+<p>The <strong>blame</strong> of source <span
+class="math inline">\(j\)</span> is obtained from the variation with
+respect to <span class="math inline">\(I_j\)</span>:</p>
+<p><span class="math display">\[c_j = \int_0^T \lambda_{n_j}(\tau)\;
+I_j(\tau)\; d\tau.\]</span></p>
+<h2 id="c.3-equivalence-with-the-impulse-response">C.3 Equivalence with
+the Impulse Response</h2>
+<p><strong>Claim:</strong> <span class="math inline">\(\lambda(\tau) =
+h(T - \tau)\)</span> where <span class="math inline">\(h(s)\)</span> is
+the sensitivity kernel from Section 3.3.</p>
+<p><strong>Proof.</strong> The sensitivity kernel satisfies:</p>
+<p><span class="math display">\[C_{uu}\, \frac{dh}{ds} + G_{uu}\, h(s) =
+0, \qquad C_{uu}\, h(0^+) = e_v.\]</span></p>
+<p>Define <span class="math inline">\(\lambda(\tau) = h(T -
+\tau)\)</span>. Then <span class="math inline">\(\dot{\lambda}(\tau) =
+-h&#39;(T - \tau)\)</span>, so:</p>
+<p><span class="math display">\[-C_{uu}\, \dot{\lambda}(\tau) + G_{uu}\,
+\lambda(\tau) = C_{uu}\, h&#39;(T-\tau) + G_{uu}\, h(T-\tau) =
+0.\]</span></p>
+<p>And at <span class="math inline">\(\tau = T\)</span>: <span
+class="math inline">\(C_{uu}\, \lambda(T) = C_{uu}\, h(0^+) =
+e_v\)</span>.</p>
+<p>So <span class="math inline">\(\lambda\)</span> and <span
+class="math inline">\(h\)</span> satisfy the same ODE with the same
+boundary condition, just parameterized differently: <span
+class="math inline">\(\lambda\)</span> runs backward in physical time
+<span class="math inline">\(\tau\)</span>, while <span
+class="math inline">\(h\)</span> runs forward in lag <span
+class="math inline">\(s = T - \tau\)</span>. The blame integrals are
+identical. <span class="math inline">\(\square\)</span></p>
+<h2 id="c.4-discrete-lagrangian-derivation">C.4 Discrete Lagrangian
+Derivation</h2>
+<p>The discrete Lagrangian over time steps <span class="math inline">\(n
+= 0, \ldots, N-1\)</span>:</p>
+<p><span class="math display">\[\mathcal{L}_d = e_v^\top V_u^{N-1} +
+\sum_{n=0}^{N-2} \lambda_n^\top \bigl[ -I_u^{n+1} + B\, V_u^n - A\,
+V_u^{n+1} \bigr].\]</span></p>
+<p>Taking variations with respect to <span
+class="math inline">\(V_u^k\)</span> for <span class="math inline">\(0
+&lt; k &lt; N-1\)</span> gives the <strong>discrete adjoint
+recurrence</strong>:</p>
+<p><span class="math display">\[A^\top \lambda_{k-1} = B^\top
+\lambda_k.\]</span></p>
+<p>For symmetric <span class="math inline">\(A\)</span> and <span
+class="math inline">\(B\)</span> (passive RC): <span
+class="math inline">\(A\, \lambda_k = B\, \lambda_{k+1}\)</span>, with
+terminal condition <span class="math inline">\(A\, \lambda_{N-1} =
+e_v\)</span>. This is identical to the discrete impulse response
+recurrence (Section 4.2), confirming consistency.</p>
+<p>The discrete Lagrangian also explains the <strong>no-<span
+class="math inline">\(\Delta t\)</span>-factor</strong>: varying <span
+class="math inline">\(\mathcal{L}_d\)</span> with respect to <span
+class="math inline">\(I_j(t_k)\)</span> gives <span
+class="math inline">\(\partial \mathcal{L}_d / \partial I_j(t_k) =
+\lambda_k[n_j]\)</span>, so the blame <span class="math inline">\(c_j =
+\sum_k \lambda_k[n_j] \cdot I_j(t_k)\)</span> has no explicit <span
+class="math inline">\(\Delta t\)</span>.</p>
+<h2 id="c.5-when-the-lagrangian-is-needed">C.5 When the Lagrangian is
+Needed</h2>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 37%" />
+<col style="width: 42%" />
+</colgroup>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Impulse Response</th>
+<th>Lagrangian Adjoint</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LTI RC (this report)</td>
+<td>Primary method</td>
+<td>Equivalent, provides validation</td>
+</tr>
+<tr>
+<td>Nonlinear elements</td>
+<td>Not applicable (no superposition)</td>
+<td>Required</td>
+</tr>
+<tr>
+<td>Time-varying systems</td>
+<td>Kernel depends on both <span class="math inline">\(t\)</span> and
+<span class="math inline">\(\tau\)</span></td>
+<td>Handles naturally</td>
+</tr>
+<tr>
+<td>Optimization (decap placement)</td>
+<td>Not applicable</td>
+<td>Natural framework</td>
+</tr>
+<tr>
+<td>RLC with inductance</td>
+<td>Requires non-symmetric extension</td>
+<td>Handles naturally</td>
+</tr>
+</tbody>
+</table>
+<p>For our LTI RC PDN, the impulse response derivation (Section 3) is
+complete and sufficient. The Lagrangian is not needed but validates the
+result from a different mathematical angle and provides the
+generalization path for future extensions.</p>
+</body>
+</html>
