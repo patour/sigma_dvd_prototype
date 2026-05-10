@@ -81,6 +81,31 @@ class TestDataExtraction(unittest.TestCase):
         self.assertIn(0.02, values)
         self.assertIn(0.015, values)
 
+    def test_extract_node_data_vectorized_normalizes_node_keys_and_values(self):
+        """Test extraction accepts non-string keys without caller-side copying."""
+
+        class NodeKey:
+            def __init__(self, name):
+                self.name = name
+
+            def __str__(self):
+                return self.name
+
+        node_values = {
+            NodeKey("1000_2000_M1"): np.float32(0.01),
+            NodeKey("1500_2500_M2"): np.float64(0.02),
+            NodeKey("VDD_vsrc"): np.float32(1.0),  # Invalid - should be skipped
+        }
+
+        nodes, xs, ys, layers, values = extract_node_data_vectorized(node_values)
+
+        self.assertEqual(nodes.tolist(), ["1000_2000_M1", "1500_2500_M2"])
+        self.assertTrue(np.issubdtype(values.dtype, np.floating))
+        self.assertTrue(np.allclose(values, [0.01, 0.02]))
+        self.assertTrue(np.allclose(xs, [1000.0, 1500.0]))
+        self.assertTrue(np.allclose(ys, [2000.0, 2500.0]))
+        self.assertEqual(layers.tolist(), ["M1", "M2"])
+
 
 class TestOrientationDetection(unittest.TestCase):
     """Tests for orientation detection."""

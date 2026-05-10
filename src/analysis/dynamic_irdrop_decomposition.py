@@ -64,17 +64,25 @@ from __future__ import annotations
 
 import argparse
 import glob
+import gzip
 import json
 import math
 import os
 import re
+import shutil
 import sys
 import time as time_module
-from dataclasses import dataclass, field, asdict
+import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping, Optional, Set, Tuple
 
 import numpy as np
+from visualization.stripe_heatmap import extract_node_data_vectorized, parse_node_info
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
 
 # Optional YAML support
 try:
@@ -130,6 +138,8 @@ def format_time_ns(t_seconds: float) -> str:
 # =============================================================================
 # Data Classes
 # =============================================================================
+
+PEAK_IR_DROP_DATA_FILENAME = 'peak_ir_drop_per_node.json.gz'
 
 @dataclass
 class AggressorResult:
@@ -293,6 +303,9 @@ class DecompositionResult:
                 'max_mV': max(self.peak_ir_drop_per_node.values()) * 1000 if self.peak_ir_drop_per_node else 0,
                 'min_mV': min(self.peak_ir_drop_per_node.values()) * 1000 if self.peak_ir_drop_per_node else 0,
             } if self.peak_ir_drop_per_node else None,
+            'peak_ir_drop_data_file': (
+                PEAK_IR_DROP_DATA_FILENAME if self.peak_ir_drop_per_node else None
+            ),
             # Note: total_current_waveform and t_array are NOT serialized to keep JSON compact.
             # Use the dataclass attributes directly for plotting.
         }
@@ -302,9 +315,1016 @@ class DecompositionResult:
         return json.dumps(self.to_dict(), indent=indent)
 
     def save_json(self, path: str) -> None:
-        """Save results to JSON file."""
+        """Save results to JSON and persist peak IR-drop sidecar when present."""
         with open(path, 'w') as f:
             f.write(self.to_json())
+        if self.peak_ir_drop_per_node:
+            save_peak_ir_drop_data(
+                self.peak_ir_drop_per_node,
+                Path(path).with_name(PEAK_IR_DROP_DATA_FILENAME),
+            )
+
+
+def save_peak_ir_drop_data(
+    peak_ir_drop_per_node: Mapping[str, float],
+    path: str | Path,
+) -> str:
+    """Persist peak IR-drop data for later post-processing."""
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(out_path, 'wt', encoding='utf-8') as f:
+        json.dump(dict(peak_ir_drop_per_node), f, separators=(',', ':'))
+    return str(out_path)
+
+
+def load_peak_ir_drop_data(path: str | Path) -> Dict[str, float]:
+    """Load persisted peak IR-drop data from JSON or gzip-compressed JSON."""
+    in_path = Path(path)
+    open_fn = gzip.open if in_path.suffix == '.gz' else open
+    with open_fn(in_path, 'rt', encoding='utf-8') as f:
+        data = json.load(f)
+    if not isinstance(data, Mapping):
+        raise ValueError(f"Peak IR-drop data at {in_path} must be a JSON object")
+    return {str(node): float(value) for node, value in data.items()}
+
+
+def load_saved_decomposition_result(path: str | Path) -> Dict[str, Any]:
+    """Load a saved decomposition results.json file."""
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Saved decomposition result at {path} must be a JSON object")
+    return data
+
+
+def resolve_peak_ir_drop_data_path(
+    results_json_path: str | Path,
+    saved_result: Mapping[str, Any],
+    *,
+    peak_ir_drop_data_path: Optional[str | Path] = None,
+) -> Path:
+    """Resolve the persisted peak IR-drop sidecar for a saved results.json file."""
+    results_path = Path(results_json_path).resolve()
+    results_dir = results_path.parent
+
+    if peak_ir_drop_data_path is not None:
+        candidate = Path(peak_ir_drop_data_path)
+        if candidate.is_file():
+            return candidate
+        raise FileNotFoundError(
+            f"Persisted peak IR-drop data file not found: {candidate}"
+        )
+
+    candidates: List[Path] = []
+    configured_name = saved_result.get('peak_ir_drop_data_file')
+    if configured_name:
+        candidates.append(results_dir / str(configured_name))
+    candidates.append(results_dir / PEAK_IR_DROP_DATA_FILENAME)
+    candidates.append(results_dir / 'peak_ir_drop_per_node.json')
+
+    seen: Set[Path] = set()
+    deduped_candidates: List[Path] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            deduped_candidates.append(candidate)
+
+    for candidate in deduped_candidates:
+        if candidate.is_file():
+            return candidate
+
+    candidate_list = ', '.join(str(path) for path in deduped_candidates)
+    raise FileNotFoundError(
+        "Saved decomposition output is missing persisted peak IR-drop data. "
+        f"Looked for: {candidate_list}. "
+        "results.json only stores peak_ir_drop_stats, so regenerate the saved output "
+        "with the updated save_json() path or provide --peak-ir-drop-data."
+    )
+
+
+def _find_legacy_peak_ir_drop_plot_artifacts(
+    plot_dir: str | Path,
+) -> List[Path]:
+    """Return legacy peak IR-drop plot artifacts already present on disk."""
+    base_dir = Path(plot_dir)
+    artifacts: List[Path] = []
+    for pattern in (
+        'peak_ir-drop_heatmap_*.png',
+        os.path.join('peak_ir_drop_overlays', '*.png'),
+    ):
+        artifacts.extend(
+            path for path in sorted(base_dir.glob(pattern))
+            if path.is_file()
+        )
+    return artifacts
+
+
+def _count_legacy_peak_ir_drop_plot_artifacts(
+    artifacts: List[Path],
+) -> Tuple[int, int]:
+    """Count recovered legacy heatmap and overlay artifacts."""
+    heatmap_count = 0
+    overlay_count = 0
+    for artifact in artifacts:
+        if artifact.parent.name == 'peak_ir_drop_overlays':
+            overlay_count += 1
+        else:
+            heatmap_count += 1
+    return heatmap_count, overlay_count
+
+
+def _format_count_with_label(count: int, singular: str, plural: str) -> str:
+    """Return a count with the correct singular/plural label."""
+    label = singular if count == 1 else plural
+    return f"{count} {label}"
+
+
+def _remove_stale_peak_ir_drop_outputs(plot_dir: str | Path) -> None:
+    """Remove peak IR-drop artifacts that can survive narrower reruns."""
+    base_dir = Path(plot_dir)
+
+    def _unlink_or_warn(old_file: Path) -> None:
+        try:
+            old_file.unlink()
+        except OSError as exc:
+            warnings.warn(
+                f"Failed to remove stale peak IR-drop artifact '{old_file}': {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    for old_file in base_dir.glob('peak_ir-drop_heatmap_*.png'):
+        _unlink_or_warn(old_file)
+
+    overlay_dir = base_dir / 'peak_ir_drop_overlays'
+    for old_file in overlay_dir.glob('*.png'):
+        _unlink_or_warn(old_file)
+
+
+def recover_legacy_peak_ir_drop_plot_artifacts(
+    results_json_path: str | Path,
+    *,
+    plot_dir: Optional[str | Path] = None,
+    verbose: bool = False,
+) -> Optional[str]:
+    """Reuse legacy saved peak plot artifacts when no per-node sidecar exists."""
+    results_path = Path(results_json_path).resolve()
+    legacy_plot_dir = results_path.parent / 'plots'
+    artifacts = _find_legacy_peak_ir_drop_plot_artifacts(legacy_plot_dir)
+    if not artifacts:
+        return None
+
+    target_plot_dir = (
+        Path(plot_dir).resolve() if plot_dir is not None else legacy_plot_dir
+    )
+    target_plot_dir.mkdir(parents=True, exist_ok=True)
+    if target_plot_dir != legacy_plot_dir:
+        _remove_stale_peak_ir_drop_outputs(target_plot_dir)
+
+    for src in artifacts:
+        dst = target_plot_dir / src.relative_to(legacy_plot_dir)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.resolve() != dst.resolve():
+            shutil.copy2(src, dst)
+
+    heatmap_count, overlay_count = _count_legacy_peak_ir_drop_plot_artifacts(artifacts)
+    if verbose:
+        print(
+            "Persisted peak IR-drop sidecar not found; "
+            f"reusing legacy plot artifacts from: {legacy_plot_dir}"
+        )
+        print(
+            "Recovered legacy peak IR-drop artifacts: "
+            f"{len(artifacts)} total "
+            f"({_format_count_with_label(heatmap_count, 'heatmap', 'heatmaps')}, "
+            f"{_format_count_with_label(overlay_count, 'overlay', 'overlays')}). "
+            "Only files already present on disk were reused."
+        )
+
+    return str(target_plot_dir)
+
+
+# =============================================================================
+# Overlay Plot Preparation
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class OverlayMarkerMetadata:
+    """Prepared marker metadata for victim/aggressor overlay plots."""
+
+    node: str
+    x: float
+    y: float
+    layer: str
+    marker: str
+    edge_color: str
+    face_color: Optional[str]
+    filled: bool
+    face_color_mode: Literal['none', 'fixed', 'strength_mapped'] = 'none'
+    color_value: Optional[float] = None
+    contribution_mV: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class OverlayWindowMetadata:
+    """Prepared near-window metadata for victim overlay plots."""
+
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+    layer: str
+    edge_color: str = 'red'
+
+
+@dataclass(frozen=True)
+class VictimOverlayPlotData:
+    """Prepared per-victim overlay inputs for live or saved decomposition results."""
+
+    instance_name: str
+    victim_node: str
+    victim_layer: str
+    victim_location: Tuple[float, float]
+    zoom_bounds: Tuple[float, float, float, float]
+    victim_marker: OverlayMarkerMetadata
+    aggressor_markers: List[OverlayMarkerMetadata]
+    near_window_box: OverlayWindowMetadata
+
+
+@dataclass(frozen=True)
+class AggressorBarMetadata:
+    """Prepared bar metadata for aggressor contribution plots."""
+
+    node: str
+    contribution_mV: float
+    contribution_pct: float
+    color_value: float
+
+
+@dataclass(frozen=True)
+class VictimAggressorBarPlotData:
+    """Prepared per-victim aggressor bar-chart inputs."""
+
+    instance_name: str
+    victim_node: str
+    peak_total_mV: float
+    self_contribution_mV: float
+    aggressors: List[AggressorBarMetadata]
+
+
+@dataclass(frozen=True)
+class _PreparedPeakIRDropOverlayData:
+    """Parsed peak IR-drop arrays reused across overlay renders."""
+
+    xs: np.ndarray
+    ys: np.ndarray
+    layers: np.ndarray
+    values: np.ndarray
+
+
+def _get_instance_field(
+    instance: InstanceDecomposition | Mapping[str, Any],
+    field_name: str,
+    default: Any = None,
+) -> Any:
+    """Read an instance field from a live dataclass or saved-result mapping."""
+    if isinstance(instance, Mapping):
+        return instance.get(field_name, default)
+    return getattr(instance, field_name, default)
+
+
+def _get_top_aggressors(
+    instance: InstanceDecomposition | Mapping[str, Any],
+) -> List[AggressorResult | Mapping[str, Any]]:
+    """Return top aggressors from a live instance or saved JSON instance."""
+    if isinstance(instance, Mapping):
+        aggressor_analysis = instance.get('aggressor_analysis') or {}
+        top_aggressors = aggressor_analysis.get('top_aggressors') or []
+        return list(top_aggressors)
+    return list(instance.top_aggressors)
+
+
+def _get_aggressor_field(
+    aggressor: AggressorResult | Mapping[str, Any],
+    field_name: str,
+    default: Any = None,
+) -> Any:
+    """Read an aggressor field from a live dataclass or saved-result mapping."""
+    if isinstance(aggressor, Mapping):
+        return aggressor.get(field_name, default)
+    return getattr(aggressor, field_name, default)
+
+
+def _compute_victim_centered_zoom_bounds(
+    victim_x: float,
+    victim_y: float,
+    window_bounds: Tuple[float, float, float, float],
+    aggressor_coords: List[Tuple[float, float]],
+    padding_ratio: float = 0.10,
+) -> Tuple[float, float, float, float]:
+    """Compute victim-centered zoom bounds covering window and aggressors."""
+    x_min, x_max, y_min, y_max = window_bounds
+    x_radius = max(abs(victim_x - x_min), abs(x_max - victim_x), 1.0)
+    y_radius = max(abs(victim_y - y_min), abs(y_max - victim_y), 1.0)
+
+    for agg_x, agg_y in aggressor_coords:
+        x_radius = max(x_radius, abs(agg_x - victim_x))
+        y_radius = max(y_radius, abs(agg_y - victim_y))
+
+    x_radius *= (1.0 + padding_ratio)
+    y_radius *= (1.0 + padding_ratio)
+
+    return (
+        victim_x - x_radius,
+        victim_x + x_radius,
+        victim_y - y_radius,
+        victim_y + y_radius,
+    )
+
+
+def _compute_relative_strength_values(strengths: List[float]) -> List[float]:
+    """Normalize aggressor strengths onto the [0, 1] range."""
+    if not strengths:
+        return []
+
+    min_strength = min(strengths)
+    max_strength = max(strengths)
+    strength_span = max_strength - min_strength
+    if strength_span == 0.0:
+        return [1.0 for _ in strengths]
+    return [
+        (strength - min_strength) / strength_span
+        for strength in strengths
+    ]
+
+
+def _get_instance_peak_total_mV(
+    instance: InstanceDecomposition | Mapping[str, Any],
+) -> float:
+    """Return peak total IR-drop in mV from a live or saved instance."""
+    if isinstance(instance, Mapping):
+        peak_ir_drop = instance.get('peak_ir_drop') or {}
+        if isinstance(peak_ir_drop, Mapping) and 'total_mV' in peak_ir_drop:
+            return float(peak_ir_drop.get('total_mV', 0.0))
+    return float(_get_instance_field(instance, 'peak_total_mV', 0.0))
+
+
+def _get_instance_self_contribution_mV(
+    instance: InstanceDecomposition | Mapping[str, Any],
+) -> float:
+    """Return victim self-contribution in mV from a live or saved instance."""
+    if isinstance(instance, Mapping):
+        aggressor_analysis = instance.get('aggressor_analysis') or {}
+        if isinstance(aggressor_analysis, Mapping):
+            return float(aggressor_analysis.get('self_contribution_mV', 0.0))
+    return float(_get_instance_field(instance, 'self_contribution_mV', 0.0))
+
+
+def prepare_victim_overlay_plot_data(
+    instance: InstanceDecomposition | Mapping[str, Any],
+    max_aggressors: int = 10,
+) -> Optional[VictimOverlayPlotData]:
+    """Prepare per-victim overlay inputs from a live instance or saved result.
+
+    Args:
+        instance: InstanceDecomposition or saved-result mapping from results.json.
+        max_aggressors: Maximum number of same-layer aggressors to prepare.
+
+    Returns:
+        Prepared overlay inputs, or None if victim coordinates/layer cannot be derived.
+    """
+    victim_node = _get_instance_field(instance, 'node')
+    instance_name = _get_instance_field(instance, 'instance_name', victim_node)
+    victim_x, victim_y, victim_layer = parse_node_info(victim_node)
+
+    location = _get_instance_field(instance, 'location')
+    if location and len(location) >= 2:
+        victim_x = float(location[0])
+        victim_y = float(location[1])
+    else:
+        victim_x = _get_instance_field(instance, 'x', victim_x)
+        victim_y = _get_instance_field(instance, 'y', victim_y)
+
+    if victim_x is None or victim_y is None or victim_layer is None:
+        return None
+
+    window_bounds_raw = _get_instance_field(instance, 'window_bounds')
+    if window_bounds_raw is None or len(window_bounds_raw) != 4:
+        return None
+    window_bounds = tuple(float(v) for v in window_bounds_raw)
+
+    same_layer_aggressors: List[OverlayMarkerMetadata] = []
+    strengths: List[float] = []
+    max_aggressors = max(0, max_aggressors)
+
+    for aggressor in _get_top_aggressors(instance):
+        if len(same_layer_aggressors) >= max_aggressors:
+            break
+        aggressor_node = _get_aggressor_field(aggressor, 'node')
+        agg_x, agg_y, agg_layer = parse_node_info(aggressor_node)
+        if agg_x is None or agg_y is None or agg_layer != victim_layer:
+            continue
+
+        contribution_mV = float(_get_aggressor_field(aggressor, 'contribution_mV', 0.0))
+        strength = abs(contribution_mV)
+        strengths.append(strength)
+        same_layer_aggressors.append(
+            OverlayMarkerMetadata(
+                node=aggressor_node,
+                x=agg_x,
+                y=agg_y,
+                layer=agg_layer,
+                marker='o',
+                edge_color='none',
+                face_color=None,
+                filled=True,
+                face_color_mode='strength_mapped',
+                contribution_mV=contribution_mV,
+            )
+        )
+
+    if strengths:
+        color_values = _compute_relative_strength_values(strengths)
+        aggressor_markers = []
+        for marker, color_value in zip(same_layer_aggressors, color_values):
+            aggressor_markers.append(
+                OverlayMarkerMetadata(
+                    node=marker.node,
+                    x=marker.x,
+                    y=marker.y,
+                    layer=marker.layer,
+                    marker=marker.marker,
+                    edge_color=marker.edge_color,
+                    face_color=None,
+                    filled=marker.filled,
+                    face_color_mode=marker.face_color_mode,
+                    color_value=color_value,
+                    contribution_mV=marker.contribution_mV,
+                )
+            )
+    else:
+        aggressor_markers = []
+
+    zoom_bounds = _compute_victim_centered_zoom_bounds(
+        victim_x,
+        victim_y,
+        window_bounds,
+        [(marker.x, marker.y) for marker in aggressor_markers],
+    )
+
+    return VictimOverlayPlotData(
+        instance_name=instance_name,
+        victim_node=victim_node,
+        victim_layer=victim_layer,
+        victim_location=(victim_x, victim_y),
+        zoom_bounds=zoom_bounds,
+        victim_marker=OverlayMarkerMetadata(
+            node=victim_node,
+            x=victim_x,
+            y=victim_y,
+            layer=victim_layer,
+            marker='x',
+            edge_color='red',
+            face_color=None,
+            filled=False,
+        ),
+        aggressor_markers=aggressor_markers,
+        near_window_box=OverlayWindowMetadata(
+            x_min=window_bounds[0],
+            x_max=window_bounds[1],
+            y_min=window_bounds[2],
+            y_max=window_bounds[3],
+            layer=victim_layer,
+        ),
+    )
+
+
+def prepare_victim_aggressor_bar_plot_data(
+    instance: InstanceDecomposition | Mapping[str, Any],
+    max_aggressors: int = 10,
+) -> Optional[VictimAggressorBarPlotData]:
+    """Prepare aggressor contribution bar-chart inputs from live or saved data."""
+    victim_node = _get_instance_field(instance, 'node')
+    instance_name = _get_instance_field(instance, 'instance_name', victim_node)
+    aggressors = sorted(
+        _get_top_aggressors(instance),
+        key=lambda aggressor: abs(float(_get_aggressor_field(aggressor, 'contribution_mV', 0.0))),
+        reverse=True,
+    )[:max(0, max_aggressors)]
+    if not aggressors:
+        return None
+
+    strengths = [
+        abs(float(_get_aggressor_field(aggressor, 'contribution_mV', 0.0)))
+        for aggressor in aggressors
+    ]
+    color_values = _compute_relative_strength_values(strengths)
+    prepared_aggressors = [
+        AggressorBarMetadata(
+            node=str(_get_aggressor_field(aggressor, 'node', '')),
+            contribution_mV=float(_get_aggressor_field(aggressor, 'contribution_mV', 0.0)),
+            contribution_pct=float(_get_aggressor_field(aggressor, 'contribution_pct', 0.0)),
+            color_value=color_value,
+        )
+        for aggressor, color_value in zip(aggressors, color_values)
+    ]
+    return VictimAggressorBarPlotData(
+        instance_name=str(instance_name),
+        victim_node=str(victim_node),
+        peak_total_mV=_get_instance_peak_total_mV(instance),
+        self_contribution_mV=_get_instance_self_contribution_mV(instance),
+        aggressors=prepared_aggressors,
+    )
+
+
+def prepare_decomposition_aggressor_bar_plot_data(
+    result: DecompositionResult | Mapping[str, Any],
+    max_aggressors: int = 10,
+) -> List[VictimAggressorBarPlotData]:
+    """Prepare bar-chart inputs for each victim in a live or saved result."""
+    worst_instances = (
+        result.get('worst_instances', [])
+        if isinstance(result, Mapping)
+        else result.worst_instances
+    )
+    prepared: List[VictimAggressorBarPlotData] = []
+    for instance in worst_instances:
+        plot_data = prepare_victim_aggressor_bar_plot_data(
+            instance,
+            max_aggressors=max_aggressors,
+        )
+        if plot_data is not None:
+            prepared.append(plot_data)
+    return prepared
+
+
+def prepare_decomposition_overlay_plot_data(
+    result: DecompositionResult | Mapping[str, Any],
+    max_aggressors: int = 10,
+) -> List[VictimOverlayPlotData]:
+    """Prepare overlay inputs for each victim in a live or saved decomposition result."""
+    worst_instances = (
+        result.get('worst_instances', [])
+        if isinstance(result, Mapping)
+        else result.worst_instances
+    )
+    prepared: List[VictimOverlayPlotData] = []
+    for instance in worst_instances:
+        overlay_data = prepare_victim_overlay_plot_data(
+            instance,
+            max_aggressors=max_aggressors,
+        )
+        if overlay_data is not None:
+            prepared.append(overlay_data)
+    return prepared
+
+
+def _coerce_victim_overlay_plot_data(
+    overlay_data: VictimOverlayPlotData | InstanceDecomposition | Mapping[str, Any],
+    max_aggressors: int = 10,
+) -> VictimOverlayPlotData:
+    """Normalize live/saved victim input into prepared overlay metadata."""
+    if isinstance(overlay_data, VictimOverlayPlotData):
+        return overlay_data
+
+    prepared = prepare_victim_overlay_plot_data(
+        overlay_data,
+        max_aggressors=max_aggressors,
+    )
+    if prepared is None:
+        raise ValueError("Could not prepare overlay plot data for victim")
+    return prepared
+
+
+def _prepare_peak_ir_drop_overlay_data(
+    peak_ir_drop_per_node: Mapping[str, float],
+) -> _PreparedPeakIRDropOverlayData:
+    """Parse peak IR-drop mapping once for overlay plotting."""
+    _, xs, ys, layers, values = extract_node_data_vectorized(peak_ir_drop_per_node)
+    return _PreparedPeakIRDropOverlayData(
+        xs=xs,
+        ys=ys,
+        layers=layers,
+        values=values,
+    )
+
+
+def _extract_peak_ir_drop_overlay_region(
+    prepared_peak_ir_drop: _PreparedPeakIRDropOverlayData,
+    overlay_data: VictimOverlayPlotData,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Extract zoom-window peak IR-drop values on the victim layer."""
+    layer_mask = prepared_peak_ir_drop.layers == overlay_data.victim_layer
+    if not np.any(layer_mask):
+        raise ValueError(
+            f"No peak IR-drop data found on victim layer {overlay_data.victim_layer}"
+        )
+
+    xs = prepared_peak_ir_drop.xs[layer_mask]
+    ys = prepared_peak_ir_drop.ys[layer_mask]
+    values = prepared_peak_ir_drop.values[layer_mask]
+
+    x_min, x_max, y_min, y_max = overlay_data.zoom_bounds
+    zoom_mask = (
+        (xs >= x_min) & (xs <= x_max) &
+        (ys >= y_min) & (ys <= y_max)
+    )
+    if not np.any(zoom_mask):
+        raise ValueError(
+            "No peak IR-drop samples found inside zoom window "
+            f"for {overlay_data.instance_name} on layer {overlay_data.victim_layer}"
+        )
+
+    xs = xs[zoom_mask]
+    ys = ys[zoom_mask]
+    values = values[zoom_mask]
+
+    return xs, ys, values
+
+
+def _plot_victim_overlay_peak_ir_drop_heatmap_prepared(
+    prepared_peak_ir_drop: _PreparedPeakIRDropOverlayData,
+    prepared: VictimOverlayPlotData,
+    *,
+    ax: Optional['Axes'] = None,
+    heatmap_cmap: str = 'RdYlGn_r',
+    aggressor_cmap: str = 'plasma',
+    title: Optional[str] = None,
+    show: bool = False,
+    save_path: Optional[str] = None,
+    unit_scale: float = 1000.0,
+    unit_label: str = 'mV',
+    draw_aggressor_colorbar: bool = True,
+    **scatter_kwargs: Any,
+) -> Tuple['Figure', 'Axes']:
+    """Render a zoomed peak IR-drop heatmap from pre-parsed peak arrays."""
+    import matplotlib
+    if not show:
+        matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+    from matplotlib.patches import Rectangle
+
+    xs, ys, values = _extract_peak_ir_drop_overlay_region(
+        prepared_peak_ir_drop,
+        prepared,
+    )
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 6))
+    else:
+        fig = ax.figure
+
+    kwargs = {'s': 40, 'edgecolors': 'k', 'linewidths': 0.3}
+    kwargs.update(scatter_kwargs)
+
+    heatmap = ax.scatter(
+        xs,
+        ys,
+        c=values * unit_scale,
+        cmap=heatmap_cmap,
+        zorder=1,
+        **kwargs,
+    )
+    fig.colorbar(heatmap, ax=ax, label=f'Peak IR-Drop ({unit_label})')
+
+    window = prepared.near_window_box
+    ax.add_patch(
+        Rectangle(
+            (window.x_min, window.y_min),
+            window.x_max - window.x_min,
+            window.y_max - window.y_min,
+            edgecolor=window.edge_color,
+            facecolor='none',
+            linestyle='--',
+            linewidth=2.0,
+            zorder=3,
+        )
+    )
+
+    aggressor_markers = prepared.aggressor_markers
+    if aggressor_markers:
+        ax.scatter(
+            [marker.x for marker in aggressor_markers],
+            [marker.y for marker in aggressor_markers],
+            c=[
+                marker.color_value if marker.color_value is not None else 0.0
+                for marker in aggressor_markers
+            ],
+            cmap=aggressor_cmap,
+            vmin=0.0,
+            vmax=1.0,
+            s=110,
+            marker='o',
+            edgecolors='black',
+            linewidths=0.6,
+            zorder=4,
+        )
+        if draw_aggressor_colorbar:
+            fig.colorbar(
+                ScalarMappable(norm=Normalize(vmin=0.0, vmax=1.0), cmap=aggressor_cmap),
+                ax=ax,
+                label='Aggressor Strength (relative)',
+            )
+    ax.plot(
+        prepared.victim_marker.x,
+        prepared.victim_marker.y,
+        marker=prepared.victim_marker.marker,
+        color=prepared.victim_marker.edge_color,
+        markersize=12,
+        markeredgewidth=2.5,
+        linestyle='None',
+        zorder=5,
+    )
+
+    x_min, x_max, y_min, y_max = prepared.zoom_bounds
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect('equal', adjustable='box')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_title(
+        title or
+        f'Peak IR-Drop Overlay - {prepared.instance_name} (Layer {prepared.victim_layer})'
+    )
+
+    plt.tight_layout()
+
+    if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    if show:
+        plt.show()
+
+    return fig, ax
+
+
+def plot_victim_overlay_peak_ir_drop_heatmap(
+    peak_ir_drop_per_node: Mapping[str, float],
+    overlay_data: VictimOverlayPlotData | InstanceDecomposition | Mapping[str, Any],
+    *,
+    max_aggressors: int = 10,
+    ax: Optional['Axes'] = None,
+    heatmap_cmap: str = 'RdYlGn_r',
+    aggressor_cmap: str = 'plasma',
+    title: Optional[str] = None,
+    show: bool = False,
+    save_path: Optional[str] = None,
+    unit_scale: float = 1000.0,
+    unit_label: str = 'mV',
+    draw_aggressor_colorbar: bool = True,
+    **scatter_kwargs: Any,
+) -> Tuple['Figure', 'Axes']:
+    """Render a zoomed peak IR-drop heatmap with victim/aggressor overlays."""
+    prepared = _coerce_victim_overlay_plot_data(
+        overlay_data,
+        max_aggressors=max_aggressors,
+    )
+    prepared_peak_ir_drop = _prepare_peak_ir_drop_overlay_data(
+        peak_ir_drop_per_node,
+    )
+    return _plot_victim_overlay_peak_ir_drop_heatmap_prepared(
+        prepared_peak_ir_drop,
+        prepared,
+        ax=ax,
+        heatmap_cmap=heatmap_cmap,
+        aggressor_cmap=aggressor_cmap,
+        title=title,
+        show=show,
+        save_path=save_path,
+        unit_scale=unit_scale,
+        unit_label=unit_label,
+        draw_aggressor_colorbar=draw_aggressor_colorbar,
+        **scatter_kwargs,
+    )
+
+
+def _sanitize_overlay_filename_component(value: str) -> str:
+    """Return a filesystem-friendly filename component for overlay plot outputs."""
+    sanitized = re.sub(r'[^0-9A-Za-z._-]+', '_', value.strip())
+    sanitized = sanitized.strip('._')
+    return sanitized or 'victim'
+
+
+def _resolve_overlay_save_path(
+    base_save_path: str | Path,
+    overlay_data: VictimOverlayPlotData,
+    index: int,
+) -> str:
+    """Derive a unique per-victim save path for bulk overlay rendering."""
+    base_path = Path(base_save_path)
+    instance_slug = _sanitize_overlay_filename_component(overlay_data.instance_name)
+    layer_slug = _sanitize_overlay_filename_component(overlay_data.victim_layer)
+    victim_index = index + 1
+
+    if base_path.suffix:
+        save_path = base_path.with_name(
+            f"{base_path.stem}_{victim_index}_{instance_slug}_{layer_slug}"
+            f"{base_path.suffix}"
+        )
+    else:
+        save_path = base_path / (
+            f"peak_ir_drop_overlay_{victim_index}_{instance_slug}_{layer_slug}.png"
+        )
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    return str(save_path)
+
+
+def plot_victim_aggressor_bar_chart(
+    plot_data: VictimAggressorBarPlotData | InstanceDecomposition | Mapping[str, Any],
+    *,
+    max_aggressors: int = 10,
+    ax: Optional['Axes'] = None,
+    aggressor_cmap: str = 'plasma',
+    title: Optional[str] = None,
+    show: bool = False,
+    save_path: Optional[str | Path] = None,
+) -> Tuple['Figure', 'Axes']:
+    """Render a top-aggressor contribution bar chart for one victim."""
+    import matplotlib
+    if not show:
+        matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    prepared = (
+        plot_data
+        if isinstance(plot_data, VictimAggressorBarPlotData)
+        else prepare_victim_aggressor_bar_plot_data(
+            plot_data,
+            max_aggressors=max_aggressors,
+        )
+    )
+    if prepared is None:
+        raise ValueError("Could not prepare aggressor bar-plot data for victim")
+
+    if ax is None:
+        fig_height = max(4.5, 2.5 + 0.5 * max(1, len(prepared.aggressors)))
+        fig, ax = plt.subplots(figsize=(10, fig_height))
+    else:
+        fig = ax.figure
+
+    aggressors = prepared.aggressors
+    y_pos = np.arange(len(aggressors))
+    cmap = matplotlib.colormaps.get_cmap(aggressor_cmap)
+    bar_colors = cmap([aggressor.color_value for aggressor in aggressors])
+    contributions = [aggressor.contribution_mV for aggressor in aggressors]
+    labels = [aggressor.node for aggressor in aggressors]
+
+    bars = ax.barh(
+        y_pos,
+        contributions,
+        color=bar_colors,
+        edgecolor='black',
+        linewidth=0.5,
+    )
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlabel('Contribution (mV)')
+    ax.set_ylabel('Aggressor Node')
+    ax.grid(axis='x', alpha=0.3)
+
+    x_min = min([0.0, *contributions]) if contributions else 0.0
+    x_max = max([0.0, *contributions]) if contributions else 1.0
+    if x_min == x_max:
+        x_max = x_min + 1.0
+    x_span = x_max - x_min
+    label_offset = 0.02 * x_span if x_span > 0 else 0.05
+    ax.set_xlim(x_min - 0.05 * x_span, x_max + 0.20 * x_span + label_offset)
+
+    label_artists = []
+    for bar, aggressor in zip(bars, aggressors):
+        contribution = aggressor.contribution_mV
+        label_x = contribution + label_offset
+        label_artists.append(ax.text(
+            label_x,
+            bar.get_y() + bar.get_height() / 2.0,
+            f'{contribution:.2f} mV | {aggressor.contribution_pct:.1f}%',
+            va='center',
+            ha='left',
+            fontsize=8,
+        ))
+
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    axis_bbox = ax.get_window_extent(renderer=renderer)
+    if axis_bbox.width > 0:
+        data_per_pixel = (ax.get_xlim()[1] - ax.get_xlim()[0]) / axis_bbox.width
+        overflow_right = max(
+            (
+                max(0.0, text.get_window_extent(renderer=renderer).x1 - axis_bbox.x1)
+                for text in label_artists
+            ),
+            default=0.0,
+        )
+        if overflow_right > 0.0:
+            x0, x1 = ax.get_xlim()
+            ax.set_xlim(x0, x1 + overflow_right * data_per_pixel + 4.0 * data_per_pixel)
+
+    ax.set_title(
+        title or (
+            'Top Aggressor Contributions\n'
+            f'{truncate_name(prepared.instance_name)} ({prepared.victim_node}) | '
+            f'Peak: {prepared.peak_total_mV:.3f} mV | '
+            f'Self: {prepared.self_contribution_mV:.3f} mV'
+        )
+    )
+
+    plt.tight_layout()
+
+    if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    if show:
+        plt.show()
+
+    return fig, ax
+
+
+def generate_aggressor_contribution_plots(
+    result: DecompositionResult | Mapping[str, Any],
+    plot_dir: str | Path,
+    *,
+    show: bool = False,
+    max_aggressors: int = 10,
+    verbose: bool = False,
+) -> None:
+    """Generate per-victim top-aggressor contribution bar charts."""
+    import matplotlib.pyplot as plt
+
+    os.makedirs(plot_dir, exist_ok=True)
+    for old_file in glob.glob(os.path.join(str(plot_dir), 'aggressors_*.png')):
+        try:
+            os.remove(old_file)
+        except OSError:
+            pass
+
+    prepared_plots = prepare_decomposition_aggressor_bar_plot_data(
+        result,
+        max_aggressors=max_aggressors,
+    )
+    if verbose and prepared_plots:
+        print("Generating aggressor contribution plots...")
+
+    for idx, plot_data in enumerate(prepared_plots):
+        fig, _ = plot_victim_aggressor_bar_chart(
+            plot_data,
+            show=show,
+            save_path=Path(plot_dir) / f'aggressors_{idx + 1}.png',
+        )
+        plt.close(fig)
+
+
+def plot_decomposition_overlay_peak_ir_drop_heatmaps(
+    peak_ir_drop_per_node: Mapping[str, float],
+    result: DecompositionResult | Mapping[str, Any],
+    *,
+    max_aggressors: int = 10,
+    save_path: Optional[str | Path] = None,
+    on_error: Optional[Callable[[VictimOverlayPlotData, Exception], None]] = None,
+    **plot_kwargs: Any,
+) -> List[Tuple[VictimOverlayPlotData, 'Figure', 'Axes']]:
+    """Render per-victim overlay peak IR-drop heatmaps for a decomposition result."""
+    rendered: List[Tuple[VictimOverlayPlotData, 'Figure', 'Axes']] = []
+    plot_kwargs.pop('save_path', None)
+    prepared_overlays = prepare_decomposition_overlay_plot_data(
+        result,
+        max_aggressors=max_aggressors,
+    )
+    if not prepared_overlays:
+        return rendered
+
+    prepared_peak_ir_drop = _prepare_peak_ir_drop_overlay_data(peak_ir_drop_per_node)
+    for idx, overlay_data in enumerate(prepared_overlays):
+        overlay_save_path = (
+            _resolve_overlay_save_path(save_path, overlay_data, idx)
+            if save_path is not None else None
+        )
+        try:
+            fig, ax = _plot_victim_overlay_peak_ir_drop_heatmap_prepared(
+                prepared_peak_ir_drop,
+                overlay_data,
+                save_path=overlay_save_path,
+                **plot_kwargs,
+            )
+        except Exception as exc:
+            if on_error is not None:
+                on_error(overlay_data, exc)
+            else:
+                warnings.warn(
+                    "Skipping peak IR-drop overlay render for "
+                    f"{overlay_data.instance_name} ({overlay_data.victim_layer}): {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            continue
+        rendered.append((overlay_data, fig, ax))
+    return rendered
 
 
 # =============================================================================
@@ -818,6 +1838,86 @@ def truncate_name(name: str, max_len: int = 40) -> str:
         return name[:max_len - 3] + '...'
     return name
 
+
+def generate_peak_ir_drop_plots(
+    result: DecompositionResult | Mapping[str, Any],
+    peak_ir_drop_per_node: Mapping[str, float],
+    plot_dir: str,
+    *,
+    show: bool = False,
+    heatmap_layers: Optional[List[str]] = None,
+    max_stripes: int = 500,
+    verbose: bool = False,
+    graph: Optional[Any] = None,
+) -> None:
+    """Generate design-wide and per-victim peak IR-drop plots from live or saved data."""
+    if not peak_ir_drop_per_node:
+        return
+
+    from visualization.stripe_heatmap import plot_stripe_heatmap
+    import matplotlib.pyplot as plt
+
+    overlay_plot_dir = os.path.join(plot_dir, 'peak_ir_drop_overlays')
+    os.makedirs(plot_dir, exist_ok=True)
+    _remove_stale_peak_ir_drop_outputs(plot_dir)
+
+    overlay_data = prepare_decomposition_overlay_plot_data(result, max_aggressors=10)
+    markers = [
+        (overlay.victim_marker.x, overlay.victim_marker.y, overlay.victim_layer)
+        for overlay in overlay_data
+    ]
+    windows = [
+        (
+            overlay.near_window_box.x_min,
+            overlay.near_window_box.x_max,
+            overlay.near_window_box.y_min,
+            overlay.near_window_box.y_max,
+            overlay.near_window_box.layer,
+        )
+        for overlay in overlay_data
+    ]
+
+    if verbose:
+        print("Generating peak IR-drop heatmaps...")
+
+    plot_stripe_heatmap(
+        node_values=peak_ir_drop_per_node,
+        layers=heatmap_layers,
+        plot_dir=plot_dir,
+        max_stripes=max_stripes,
+        title_prefix='Peak IR-Drop',
+        value_label='Peak IR-Drop (mV)',
+        value_scale=1000.0,
+        markers=markers,
+        windows=windows,
+        show=show,
+        verbose=verbose,
+        graph=graph,
+    )
+
+    if verbose:
+        print("Generating per-victim peak IR-drop overlays...")
+
+    def _warn_overlay_failure(
+        overlay: VictimOverlayPlotData,
+        exc: Exception,
+    ) -> None:
+        print(
+            "Warning: failed to render peak IR-drop overlay for "
+            f"{overlay.instance_name} ({overlay.victim_layer}): {exc}"
+        )
+
+    rendered_overlays = plot_decomposition_overlay_peak_ir_drop_heatmaps(
+        peak_ir_drop_per_node,
+        result,
+        save_path=overlay_plot_dir,
+        show=show,
+        on_error=_warn_overlay_failure,
+    )
+    for _, fig, _ in rendered_overlays:
+        plt.close(fig)
+
+
 def generate_plots(
     result: DecompositionResult,
     plot_dir: str,
@@ -834,6 +1934,7 @@ def generate_plots(
     2. Waveform plots: Time-domain decomposition with total current for each worst instance
     3. Aggressor contribution bar plots (per victim)
     4. Peak IR-drop stripe heatmaps (if peak_ir_drop_per_node available)
+    5. Peak IR-drop overlay heatmaps (per victim, if peak_ir_drop_per_node available)
 
     Args:
         result: DecompositionResult with analysis data
@@ -855,8 +1956,8 @@ def generate_plots(
     os.makedirs(plot_dir, exist_ok=True)
 
     # Clean stale plots from previous runs so leftover files don't
-    # confuse users (e.g. old aggressors_*.png when adjoint is now disabled).
-    for pattern in ('waveform_*.png', 'aggressors_*.png'):
+    # confuse users.
+    for pattern in ('waveform_*.png',):
         for old_file in glob.glob(os.path.join(plot_dir, pattern)):
             try:
                 os.remove(old_file)
@@ -938,150 +2039,90 @@ def generate_plots(
             plt.show()
         plt.close()
 
-    # 3. Aggressor contribution bar plots (per victim, sorted by distance)
-    from matplotlib.colors import Normalize
-    from matplotlib.cm import ScalarMappable
+    # 3. Aggressor contribution bar plots (per victim)
+    generate_aggressor_contribution_plots(
+        result,
+        plot_dir,
+        show=show,
+        max_aggressors=10,
+        verbose=verbose,
+    )
 
-    # Adaptive thresholds for plot readability
-    LABEL_ALL_THRESHOLD = 20      # Show all labels if ≤ this many aggressors
-    TARGET_LABELS = 15            # Target number of x-axis labels when crowded
-    ANNOTATE_THRESHOLD = 20       # Annotate all bars if ≤ this many aggressors
-    TOP_N_ANNOTATE = 10           # Number of top contributors to annotate when crowded
-    EDGE_LINE_THRESHOLD = 50      # Remove bar edges if > this many aggressors
-
-    for i, inst in enumerate(result.worst_instances):
-        if not inst.top_aggressors:
-            continue
-
-        # Sort aggressors by distance
-        sorted_aggressors = sorted(inst.top_aggressors, key=lambda a: a.distance_um)
-        n_aggressors = len(sorted_aggressors)
-        distances = [agg.distance_um for agg in sorted_aggressors]
-        contributions = [agg.contribution_mV for agg in sorted_aggressors]
-
-        # Adaptive figure width based on number of aggressors
-        fig_width = max(12, min(24, 12 + (n_aggressors - 20) * 0.1))
-        fig, ax = plt.subplots(figsize=(fig_width, 6))
-
-        # Create bar positions and labels
-        x_pos = np.arange(n_aggressors)
-        cmap = matplotlib.colormaps.get_cmap('viridis')
-        bar_colors = cmap(np.linspace(0.2, 0.8, n_aggressors))
-
-        # Adaptive bar edge styling
-        edge_color = 'black' if n_aggressors <= EDGE_LINE_THRESHOLD else 'none'
-        edge_width = 0.5 if n_aggressors <= EDGE_LINE_THRESHOLD else 0
-
-        bars = ax.bar(x_pos, contributions, color=bar_colors,
-                      edgecolor=edge_color, linewidth=edge_width)
-
-        # Adaptive value annotations - only annotate top contributors when crowded
-        if n_aggressors <= ANNOTATE_THRESHOLD:
-            # Annotate all bars
-            for bar, contrib in zip(bars, contributions):
-                height = bar.get_height()
-                ax.annotate(f'{contrib:.2f}',
-                           xy=(bar.get_x() + bar.get_width() / 2, height),
-                           xytext=(0, 3),
-                           textcoords="offset points",
-                           ha='center', va='bottom', fontsize=8)
-        else:
-            # Only annotate top N contributors by magnitude
-            contrib_array = np.array(contributions)
-            top_indices = set(np.argsort(contrib_array)[-TOP_N_ANNOTATE:])
-            for idx, (bar, contrib) in enumerate(zip(bars, contributions)):
-                if idx in top_indices:
-                    height = bar.get_height()
-                    ax.annotate(f'{contrib:.2f}',
-                               xy=(bar.get_x() + bar.get_width() / 2, height),
-                               xytext=(0, 2),
-                               textcoords="offset points",
-                               ha='center', va='bottom', fontsize=7, rotation=45)
-
-        # Adaptive x-axis labels
-        if n_aggressors <= LABEL_ALL_THRESHOLD:
-            # Show all labels
-            x_labels = [f'{d:.0f}' for d in distances]
-            ax.set_xticks(x_pos)
-            ax.set_xticklabels(x_labels, fontsize=9)
-        else:
-            # Show subset of labels to avoid overlap
-            label_stride = max(1, n_aggressors // TARGET_LABELS)
-            visible_ticks = x_pos[::label_stride]
-            visible_labels = [f'{distances[j]:.0f}' for j in range(0, n_aggressors, label_stride)]
-            ax.set_xticks(visible_ticks)
-            ax.set_xticklabels(visible_labels, fontsize=8, rotation=45, ha='right')
-
-        ax.set_xlabel('Distance to Victim (um)')
-        ax.set_ylabel('Contribution (mV)')
-
-        # Enhanced title with more context
-        total_agg_contrib = sum(agg.contribution_mV for agg in inst.top_aggressors)
-        ax.set_title(f'Aggressor Contributions vs Distance\n'
-                     f'Victim #{i+1}: {truncate_name(inst.instance_name)} (Node: {inst.node})\n'
-                     f'Peak IR-drop: {inst.peak_total_mV:.3f} mV | '
-                     f'Self: {inst.self_contribution_mV:.3f} mV | '
-                     f'Aggressors: {total_agg_contrib:.3f} mV')
-        ax.grid(axis='y', alpha=0.3)
-
-        # Add a color bar legend for distance
-        sm = ScalarMappable(cmap='viridis',
-                            norm=Normalize(vmin=min(distances), vmax=max(distances)))
-        sm.set_array([])
-        cbar = plt.colorbar(sm, ax=ax, shrink=0.6)
-        cbar.set_label('Distance (um)')
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, f'aggressors_{i+1}.png'), dpi=150)
-        if show:
-            plt.show()
-        plt.close()
-
-    # 4. Peak IR-drop stripe heatmaps (if peak_ir_drop_per_node available)
-    if result.peak_ir_drop_per_node:
-        from visualization.stripe_heatmap import plot_stripe_heatmap
-
-        # Helper function to extract layer from node name
-        def extract_layer_from_node(node: str) -> Optional[str]:
-            parts = str(node).split('_')
-            if len(parts) >= 3:
-                return parts[2]
-            return None
-
-        # Build markers from worst instances
-        markers = []
-        for inst in result.worst_instances:
-            layer = extract_layer_from_node(inst.node)
-            if layer:
-                markers.append((inst.x, inst.y, layer))
-
-        # Build windows from worst instances
-        windows = []
-        for inst in result.worst_instances:
-            layer = extract_layer_from_node(inst.node)
-            if layer and inst.window_bounds:
-                x_min, x_max, y_min, y_max = inst.window_bounds
-                windows.append((x_min, x_max, y_min, y_max, layer))
-
-        if verbose:
-            print(f"Generating peak IR-drop heatmaps...")
-
-        plot_stripe_heatmap(
-            node_values=result.peak_ir_drop_per_node,
-            layers=heatmap_layers,
-            plot_dir=plot_dir,
-            max_stripes=max_stripes,
-            title_prefix='Peak IR-Drop',
-            value_label='Peak IR-Drop (mV)',
-            value_scale=1000.0,  # V to mV
-            markers=markers,
-            windows=windows,
-            show=show,
-            verbose=verbose,
-            graph=graph,
-        )
+    generate_peak_ir_drop_plots(
+        result,
+        result.peak_ir_drop_per_node,
+        plot_dir,
+        show=show,
+        heatmap_layers=heatmap_layers,
+        max_stripes=max_stripes,
+        verbose=verbose,
+        graph=graph,
+    )
 
     print(f"Plots saved to: {plot_dir}")
+
+
+def postprocess_saved_decomposition_outputs(
+    results_json_path: str | Path,
+    *,
+    peak_ir_drop_data_path: Optional[str | Path] = None,
+    plot_dir: Optional[str | Path] = None,
+    heatmap_layers: Optional[List[str]] = None,
+    max_stripes: int = 500,
+    show: bool = False,
+    verbose: bool = False,
+    graph: Optional[Any] = None,
+) -> str:
+    """Regenerate plots that can be derived from saved decomposition outputs."""
+    results_path = Path(results_json_path)
+    saved_result = load_saved_decomposition_result(results_path)
+    target_plot_dir = Path(plot_dir) if plot_dir is not None else results_path.parent / 'plots'
+    explicit_peak_ir_drop_data_path = peak_ir_drop_data_path is not None
+
+    generate_aggressor_contribution_plots(
+        saved_result,
+        target_plot_dir,
+        show=show,
+        max_aggressors=10,
+        verbose=verbose,
+    )
+
+    try:
+        peak_data_path = resolve_peak_ir_drop_data_path(
+            results_path,
+            saved_result,
+            peak_ir_drop_data_path=peak_ir_drop_data_path,
+        )
+    except FileNotFoundError:
+        if explicit_peak_ir_drop_data_path:
+            raise
+        recovered_plot_dir = recover_legacy_peak_ir_drop_plot_artifacts(
+            results_path,
+            plot_dir=plot_dir,
+            verbose=verbose,
+        )
+        if recovered_plot_dir is not None:
+            return recovered_plot_dir
+        raise
+
+    peak_ir_drop_per_node = load_peak_ir_drop_data(peak_data_path)
+
+    if verbose:
+        print(f"Post-processing saved decomposition output: {results_path}")
+        print(f"Loading persisted peak IR-drop data: {peak_data_path}")
+        print(f"Writing plots to: {target_plot_dir}")
+
+    generate_peak_ir_drop_plots(
+        saved_result,
+        peak_ir_drop_per_node,
+        str(target_plot_dir),
+        show=show,
+        heatmap_layers=heatmap_layers,
+        max_stripes=max_stripes,
+        verbose=verbose,
+        graph=graph,
+    )
+    return str(target_plot_dir)
 
 
 # =============================================================================
@@ -1660,6 +2701,9 @@ Examples:
 
   # Pre-defined instances
   python -m analysis.dynamic_irdrop_decomposition ./netlist/netlist_test --instances "inst1,inst2,inst3"
+
+  # Re-generate saved-result peak IR-drop plots only
+  python -m analysis.dynamic_irdrop_decomposition --saved-results ./results/ir_drop_decomp/results.json
         """
     )
 
@@ -1668,6 +2712,16 @@ Examples:
 
     # Config file
     parser.add_argument('--config', type=str, help='Path to YAML config file')
+    parser.add_argument(
+        '--saved-results',
+        type=str,
+        help='Path to saved results.json for post-processing peak IR-drop plots only',
+    )
+    parser.add_argument(
+        '--peak-ir-drop-data',
+        type=str,
+        help='Optional path to persisted peak IR-drop data sidecar for --saved-results',
+    )
 
     # Basic parameters
     parser.add_argument('--net', type=str, help='Power net name (default: VDD)')
@@ -1721,6 +2775,27 @@ Examples:
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
+
+    if args.saved_results:
+        if args.netlist_dir:
+            parser.error("netlist_dir cannot be used with --saved-results")
+        if args.config:
+            parser.error("--config is not supported with --saved-results; pass plotting flags directly")
+        if args.no_plot:
+            parser.error("--no-plot cannot be used with --saved-results")
+        heatmap_layers = (
+            [s.strip() for s in args.heatmap_layers.split(',')]
+            if args.heatmap_layers else None
+        )
+        return postprocess_saved_decomposition_outputs(
+            args.saved_results,
+            peak_ir_drop_data_path=args.peak_ir_drop_data,
+            plot_dir=args.output_dir,
+            heatmap_layers=heatmap_layers,
+            max_stripes=args.max_stripes,
+            show=False,
+            verbose=args.verbose,
+        )
 
     # Load config if provided
     config = {}

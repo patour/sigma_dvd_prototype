@@ -34,7 +34,7 @@ from __future__ import annotations
 import gc
 import os
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -67,14 +67,15 @@ def parse_node_info(node_name: str) -> Tuple[Optional[float], Optional[float], O
 
 
 def extract_node_data_vectorized(
-    node_values: Dict[str, float]
+    node_values: Mapping[Any, float]
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Extract arrays from node_values dict in single pass.
 
     Optimized for large node counts (10M+).
 
     Args:
-        node_values: Dict mapping node name to value
+        node_values: Mapping from node identifier to numeric value. Node
+            identifiers are normalized via ``str(node)`` during parsing.
 
     Returns:
         (nodes, xs, ys, layers, values) arrays for valid nodes only
@@ -88,13 +89,14 @@ def extract_node_data_vectorized(
     valid = np.zeros(n, dtype=bool)
 
     for i, (node, val) in enumerate(node_values.items()):
-        x, y, layer = parse_node_info(node)
+        node_name = str(node)
+        x, y, layer = parse_node_info(node_name)
         if x is not None:
-            nodes[i] = node
+            nodes[i] = node_name
             xs[i] = x
             ys[i] = y
             layers[i] = layer
-            values[i] = val
+            values[i] = float(val)
             valid[i] = True
 
     return nodes[valid], xs[valid], ys[valid], layers[valid], values[valid]
