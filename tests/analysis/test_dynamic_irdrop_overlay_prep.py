@@ -1,5 +1,6 @@
 import gzip
 import json
+import pickle
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -53,6 +54,27 @@ def _make_instance(top_aggressors):
         avg_far_fraction=40.0,
         top_aggressors=top_aggressors,
     )
+
+
+def test_compute_waveform_zoom_window_ns_focuses_on_peak_activity():
+    t_ns = np.array([
+        1.80, 1.90, 2.00, 2.10, 2.20, 2.24, 2.25, 2.26, 2.27, 2.28,
+        2.29, 2.30, 2.31, 2.32, 2.33, 2.34, 2.35, 2.40, 2.50, 2.60,
+    ])
+    waveform_mV = np.array([
+        1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.5, 6.0, 20.0, 88.0,
+        77.0, 25.0, 16.0, 10.0, 6.0, 4.0, 2.8, 1.8, 1.4, 1.3,
+    ])
+
+    t_min, t_max = dynamic_overlay_module._compute_waveform_zoom_window_ns(
+        t_ns,
+        waveform_mV,
+        peak_time_ns=2.28,
+    )
+
+    assert t_min <= 2.26
+    assert t_max >= 2.33
+    assert 0.15 <= (t_max - t_min) < 0.35
 
 
 def test_prepare_victim_overlay_plot_data_limits_top10_and_encodes_marker_semantics():
@@ -236,6 +258,7 @@ def test_plot_victim_overlay_peak_ir_drop_heatmap_renders_zoomed_overlay():
         peak_ir_drop_per_node,
         _make_instance(top_aggressors),
         show=False,
+        orientation_overrides={"M1": "H"},
     )
 
     try:
@@ -247,9 +270,12 @@ def test_plot_victim_overlay_peak_ir_drop_heatmap_renders_zoomed_overlay():
 
         assert len(ax.collections) == 2
         heatmap_collection, aggressor_collection = ax.collections
-        assert heatmap_collection.get_offsets().shape[0] == 5
+        assert heatmap_collection.__class__.__name__ == "PatchCollection"
+        assert heatmap_collection.get_array().size > 0
+        assert len(heatmap_collection.get_paths()) > 0
         assert aggressor_collection.get_offsets().shape[0] == 2
         assert aggressor_collection.get_array().tolist() == pytest.approx([1.0, 0.0])
+
 
         assert len(ax.lines) == 1
         victim_line = ax.lines[0]
@@ -269,9 +295,34 @@ def test_plot_victim_overlay_peak_ir_drop_heatmap_renders_zoomed_overlay():
             overlay.near_window_box.y_max - overlay.near_window_box.y_min
         )
 
-        assert len(fig.axes) == 3
+        assert len(fig.axes) == 2
     finally:
         plt.close(fig)
+
+
+def test_plot_victim_overlay_peak_ir_drop_heatmap_uses_orientation_override(monkeypatch):
+    peak_ir_drop_per_node = {
+        "80_180_M1": 0.001,
+        "90_190_M1": 0.004,
+        "100_200_M1": 0.006,
+        "110_210_M1": 0.003,
+        "120_220_M1": 0.002,
+    }
+
+    monkeypatch.setattr(
+        dynamic_overlay_module,
+        "detect_orientation_from_coords",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("auto-detection should not run")),
+    )
+
+    fig, _ax = plot_victim_overlay_peak_ir_drop_heatmap(
+        peak_ir_drop_per_node,
+        _make_instance([]),
+        show=False,
+        orientation_overrides={"M1": "H"},
+    )
+
+    plt.close(fig)
 
 
 def test_plot_victim_aggressor_bar_chart_uses_plasma_strength_colors_and_keeps_labels_in_bounds():
@@ -363,6 +414,7 @@ def test_plot_decomposition_overlay_peak_ir_drop_heatmaps_uses_prepared_overlays
         peak_ir_drop_per_node,
         result,
         show=False,
+        orientation_overrides={"24": "H"},
     )
 
     try:
@@ -744,6 +796,83 @@ def test_generate_peak_ir_drop_plots_cleans_stale_heatmaps_and_overlay_files(tmp
         / "peak_ir_drop_overlay_1_inst0_M1.png"
     ).is_file()
     assert not stale_overlay.exists()
+
+
+def test_generate_peak_ir_drop_plots_uses_distributed_tile_orientation_metadata(
+    monkeypatch,
+    tmp_path,
+):
+    from distributed.tile_parsing import TileData
+
+    pkl_dir = tmp_path / "distributed_pkl"
+    pkl_dir.mkdir()
+    with open(pkl_dir / "metadata.pkl", "wb") as f:
+        pickle.dump({"metadata": "unused", "boundary_nodes": set()}, f)
+
+    tile_data = TileData(
+        tile_id=(0, 0),
+        resistive_edges=[
+            ("0_0_24", "10_0_24", 1.0),
+            ("10_0_24", "20_0_24", 1.0),
+            ("20_0_24", "30_0_24", 1.0),
+        ],
+        all_nodes={"0_0_24", "10_0_24", "20_0_24", "30_0_24"},
+        boundary_nodes=set(),
+        current_injections={},
+    )
+    with open(pkl_dir / "tile_0_0.pkl", "wb") as f:
+        pickle.dump(tile_data, f)
+
+    result = DecompositionResult(
+        netlist_dir=str(pkl_dir),
+        net_name="VDD",
+        method="transient",
+        integration_method="trap",
+        t_start_ns=0.0,
+        t_end_ns=1.0,
+        dt_ns=1.0,
+        window_percent=10.0,
+        grid_bounds=(0.0, 100.0, 0.0, 100.0),
+        worst_instances=[],
+        peak_ir_drop_per_node={
+            "0_0_24": 0.001,
+            "10_0_24": 0.002,
+            "20_0_24": 0.003,
+            "30_0_24": 0.004,
+        },
+    )
+
+    stripe_calls = []
+    overlay_calls = []
+
+    def fake_plot_stripe_heatmap(**kwargs):
+        stripe_calls.append(kwargs)
+
+    def fake_plot_decomposition_overlay_peak_ir_drop_heatmaps(*args, **kwargs):
+        overlay_calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        "visualization.stripe_heatmap.plot_stripe_heatmap",
+        fake_plot_stripe_heatmap,
+    )
+    monkeypatch.setattr(
+        dynamic_overlay_module,
+        "plot_decomposition_overlay_peak_ir_drop_heatmaps",
+        fake_plot_decomposition_overlay_peak_ir_drop_heatmaps,
+    )
+
+    generate_peak_ir_drop_plots(
+        result,
+        result.peak_ir_drop_per_node,
+        str(tmp_path / "plots"),
+        show=False,
+    )
+
+    assert len(stripe_calls) == 1
+    assert stripe_calls[0]["orientation_overrides"] == {"24": "H"}
+    assert len(overlay_calls) == 1
+    assert overlay_calls[0]["orientation_overrides"] == {"24": "H"}
 
 
 def test_save_json_persists_peak_ir_drop_sidecar(tmp_path):

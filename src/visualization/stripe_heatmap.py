@@ -39,6 +39,9 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 import numpy as np
 
 
+StripeBinData = Tuple[float, float, np.ndarray, np.ndarray]
+
+
 # =============================================================================
 # Node Parsing Utilities
 # =============================================================================
@@ -601,6 +604,127 @@ def aggregate_fast_imshow(
     return x_edges, y_edges, grid.T
 
 
+def build_binned_stripe_data(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    values: np.ndarray,
+    orientation: str,
+    *,
+    max_stripes: int = 500,
+    stripe_bin_size: Optional[int] = None,
+    aggregation: str = 'max',
+    target_bins_per_stripe: int = 500,
+) -> Tuple[List[StripeBinData], Optional[float], Optional[float]]:
+    """Build consolidated, binned stripe data for reuse across renderers."""
+    stripes = group_nodes_into_stripes(xs, ys, values, orientation)
+    consolidated = consolidate_stripes(stripes, max_stripes)
+
+    all_bin_values: List[float] = []
+    stripe_data: List[StripeBinData] = []
+
+    for start_coord, end_coord, s_xs, s_ys, s_vals in consolidated:
+        if len(s_vals) == 0:
+            continue
+
+        bins, bin_values = aggregate_stripe_bins(
+            s_xs,
+            s_ys,
+            s_vals,
+            orientation,
+            stripe_bin_size,
+            aggregation,
+            target_bins=target_bins_per_stripe,
+        )
+
+        valid_vals = bin_values[~np.isnan(bin_values)]
+        if len(valid_vals) == 0:
+            continue
+
+        stripe_data.append((start_coord, end_coord, bins, bin_values))
+        all_bin_values.extend(valid_vals.tolist())
+
+    if not all_bin_values:
+        return [], None, None
+
+    return stripe_data, min(all_bin_values), max(all_bin_values)
+
+
+def render_binned_stripe_data_to_axes(
+    ax,
+    stripe_data: List[StripeBinData],
+    orientation: str,
+    *,
+    cmap: str = 'RdYlGn_r',
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+):
+    """Render pre-binned stripe rectangles onto an existing axes."""
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import PatchCollection
+    from matplotlib.patches import Rectangle
+
+    if not stripe_data:
+        return None
+
+    if vmin is None or vmax is None:
+        valid_arrays = [
+            bin_values[~np.isnan(bin_values)]
+            for _start_coord, _end_coord, _bins, bin_values in stripe_data
+            if np.any(~np.isnan(bin_values))
+        ]
+        if not valid_arrays:
+            return None
+        all_values = np.concatenate(valid_arrays)
+        if vmin is None:
+            vmin = float(np.min(all_values))
+        if vmax is None:
+            vmax = float(np.max(all_values))
+
+    if vmin == vmax:
+        vmax = vmin + 1.0
+
+    norm = plt.Normalize(vmin=vmin, vmax=vmax)
+    rects = []
+    colors = []
+
+    if orientation == 'H':
+        for start_coord, end_coord, bins, bin_values in stripe_data:
+            stripe_height = end_coord - start_coord
+            for i, (bin_start, bin_end) in enumerate(zip(bins[:-1], bins[1:])):
+                if np.isnan(bin_values[i]):
+                    continue
+                rects.append(
+                    Rectangle(
+                        (bin_start, start_coord),
+                        bin_end - bin_start,
+                        stripe_height,
+                    )
+                )
+                colors.append(bin_values[i])
+    else:
+        for start_coord, end_coord, bins, bin_values in stripe_data:
+            stripe_width = end_coord - start_coord
+            for i, (bin_start, bin_end) in enumerate(zip(bins[:-1], bins[1:])):
+                if np.isnan(bin_values[i]):
+                    continue
+                rects.append(
+                    Rectangle(
+                        (start_coord, bin_start),
+                        stripe_width,
+                        bin_end - bin_start,
+                    )
+                )
+                colors.append(bin_values[i])
+
+    if not rects:
+        return None
+
+    collection = PatchCollection(rects, cmap=cmap, norm=norm, edgecolors='none')
+    collection.set_array(np.array(colors))
+    ax.add_collection(collection)
+    return collection
+
+
 # =============================================================================
 # Main Plotting Function
 # =============================================================================
@@ -624,6 +748,7 @@ def plot_stripe_heatmap(
     orientation_threshold: float = 2.0,
     verbose: bool = False,
     graph: Optional[Any] = None,
+    orientation_overrides: Optional[Mapping[str, str]] = None,
 ) -> None:
     """Generate stripe-mode heatmaps with optional markers and windows.
 
@@ -657,8 +782,6 @@ def plot_stripe_heatmap(
             matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches_mod
-        from matplotlib.patches import Rectangle
-        from matplotlib.collections import PatchCollection
     except ImportError:
         print("Warning: matplotlib not available, skipping plots")
         return
@@ -714,19 +837,35 @@ def plot_stripe_heatmap(
         if n_nodes == 0:
             continue
 
-        # Detect orientation - prefer edge-based when graph is available
-        if graph is not None:
+        # Detect orientation - prefer explicit overrides, then edge-based,
+        # then coordinate heuristics.
+        orientation_override = None
+        if orientation_overrides is not None:
+            orientation_override = orientation_overrides.get(layer)
+            if orientation_override is None:
+                orientation_override = orientation_overrides.get(str(layer))
+
+        if orientation_override is not None:
+            if orientation_override not in {'H', 'V', 'MIXED'}:
+                raise ValueError(
+                    f"Invalid orientation override for layer {layer}: "
+                    f"{orientation_override!r}"
+                )
+            orientation = orientation_override
+            orientation_source = 'override'
+        elif graph is not None:
             layer_node_names = nodes[mask].tolist()
             orientation = detect_orientation_from_edges(
                 graph, layer_node_names, layer, max_edges=5000, threshold=0.70
             )
-            if verbose:
-                print(f"  Orientation: {orientation} (edge-based), Nodes: {n_nodes}")
+            orientation_source = 'edge-based'
         else:
             # Fallback to coordinate-based detection
             orientation = detect_orientation_from_coords(layer_xs, layer_ys, orientation_threshold)
-            if verbose:
-                print(f"  Orientation: {orientation} (coord-based), Nodes: {n_nodes}")
+            orientation_source = 'coord-based'
+
+        if verbose:
+            print(f"  Orientation: {orientation} ({orientation_source}), Nodes: {n_nodes}")
 
         # Create figure
         fig, ax = plt.subplots(figsize=(10, 8))
@@ -764,75 +903,38 @@ def plot_stripe_heatmap(
             if verbose:
                 print(f"  Using stripe mode")
 
-            # Group into stripes
             stripes = group_nodes_into_stripes(layer_xs, layer_ys, layer_vals, orientation)
             n_original_stripes = len(stripes)
-
-            # Consolidate if needed
-            consolidated = consolidate_stripes(stripes, max_stripes)
-            n_display_stripes = len(consolidated)
+            n_display_stripes = len(consolidate_stripes(stripes, max_stripes))
 
             if verbose:
                 print(f"  Stripes: {n_original_stripes} -> {n_display_stripes}")
 
-            # Build stripe data with bin aggregation
-            all_bin_values = []
-            stripe_data = []
+            stripe_data, vmin, vmax = build_binned_stripe_data(
+                layer_xs,
+                layer_ys,
+                layer_vals,
+                orientation,
+                max_stripes=max_stripes,
+                stripe_bin_size=stripe_bin_size,
+                aggregation=aggregation,
+                target_bins_per_stripe=target_bins_per_stripe,
+            )
 
-            for start_coord, end_coord, s_xs, s_ys, s_vals in consolidated:
-                if len(s_vals) == 0:
-                    continue
-
-                bins, bin_values = aggregate_stripe_bins(
-                    s_xs, s_ys, s_vals, orientation, stripe_bin_size, aggregation,
-                    target_bins=target_bins_per_stripe,
-                )
-
-                valid_vals = bin_values[~np.isnan(bin_values)]
-                if len(valid_vals) > 0:
-                    stripe_data.append((start_coord, end_coord, bins, bin_values))
-                    all_bin_values.extend(valid_vals.tolist())
-
-            if not all_bin_values:
+            if not stripe_data:
                 plt.close(fig)
                 continue
 
-            # Create visualization using PatchCollection
-            vmin = min(all_bin_values)
-            vmax = max(all_bin_values)
-            norm = plt.Normalize(vmin=vmin, vmax=vmax)
-
-            rects = []
-            colors = []
-
-            if orientation == 'H':
-                for start_coord, end_coord, bins, bin_values in stripe_data:
-                    stripe_height = end_coord - start_coord
-                    for i, (bin_start, bin_end) in enumerate(zip(bins[:-1], bins[1:])):
-                        if not np.isnan(bin_values[i]):
-                            bin_width = bin_end - bin_start
-                            rect = Rectangle((bin_start, start_coord), bin_width, stripe_height)
-                            rects.append(rect)
-                            colors.append(bin_values[i])
-            else:  # V orientation
-                for start_coord, end_coord, bins, bin_values in stripe_data:
-                    stripe_width = end_coord - start_coord
-                    for i, (bin_start, bin_end) in enumerate(zip(bins[:-1], bins[1:])):
-                        if not np.isnan(bin_values[i]):
-                            bin_height = bin_end - bin_start
-                            rect = Rectangle((start_coord, bin_start), stripe_width, bin_height)
-                            rects.append(rect)
-                            colors.append(bin_values[i])
-
-            if rects:
-                pc = PatchCollection(rects, cmap=cmap, norm=norm, edgecolors='none')
-                pc.set_array(np.array(colors))
-                ax.add_collection(pc)
-
-                # Create ScalarMappable for colorbar
-                sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-                sm.set_array([])
-                plt.colorbar(sm, ax=ax, label=value_label)
+            heatmap = render_binned_stripe_data_to_axes(
+                ax,
+                stripe_data,
+                orientation,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+            )
+            if heatmap is not None:
+                plt.colorbar(heatmap, ax=ax, label=value_label)
 
         # Set axis limits
         margin_x = (x_max - x_min) * 0.02

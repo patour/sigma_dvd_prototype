@@ -4,7 +4,9 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 from visualization.stripe_heatmap import (
@@ -15,7 +17,9 @@ from visualization.stripe_heatmap import (
     consolidate_stripes,
     aggregate_stripe_bins,
     aggregate_fast_imshow,
+    build_binned_stripe_data,
     plot_stripe_heatmap,
+    render_binned_stripe_data_to_axes,
     render_from_prebinned_stripe_data,
 )
 
@@ -340,6 +344,46 @@ class TestBinAggregation(unittest.TestCase):
         self.assertEqual(len(bins_100), len(bins_500))
 
 
+class TestSharedStripeRendering(unittest.TestCase):
+    """Tests for reusable stripe binning/rendering helpers."""
+
+    def test_build_and_render_binned_horizontal_stripes(self):
+        """Shared stripe helpers should render horizontal bins as wide rectangles."""
+        xs = np.array([0, 10, 20, 30, 0, 10, 20, 30], dtype=float)
+        ys = np.array([0, 0, 0, 0, 10, 10, 10, 10], dtype=float)
+        values = np.array([1, 2, 3, 4, 2, 3, 4, 5], dtype=float)
+
+        stripe_data, vmin, vmax = build_binned_stripe_data(
+            xs,
+            ys,
+            values,
+            'H',
+            max_stripes=10,
+            target_bins_per_stripe=4,
+        )
+
+        self.assertTrue(stripe_data)
+        self.assertEqual(vmin, 1.0)
+        self.assertEqual(vmax, 5.0)
+
+        fig, ax = plt.subplots()
+        try:
+            heatmap = render_binned_stripe_data_to_axes(
+                ax,
+                stripe_data,
+                'H',
+                vmin=vmin,
+                vmax=vmax,
+            )
+            self.assertIsNotNone(heatmap)
+            self.assertEqual(len(ax.collections), 1)
+            self.assertGreater(len(heatmap.get_paths()), 0)
+
+            self.assertEqual(len(heatmap.get_array()), len(heatmap.get_paths()))
+        finally:
+            plt.close(fig)
+
+
 class TestPlotting(unittest.TestCase):
     """Tests for heatmap plotting."""
 
@@ -457,6 +501,31 @@ class TestPlotting(unittest.TestCase):
                 layers=["M1"],
                 plot_dir=tmpdir,
                 orientation_threshold=2.0,
+                show=False,
+                verbose=False,
+            )
+
+            expected_file = os.path.join(tmpdir, "peak_ir-drop_heatmap_M1.png")
+            self.assertTrue(os.path.exists(expected_file))
+
+    def test_plot_with_orientation_override_skips_auto_detection(self):
+        """Explicit orientation overrides should bypass coordinate heuristics."""
+        node_values = {
+            "0_0_M1": 0.001,
+            "10_0_M1": 0.002,
+            "20_0_M1": 0.003,
+            "30_0_M1": 0.004,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch(
+            "visualization.stripe_heatmap.detect_orientation_from_coords",
+            side_effect=AssertionError("auto-detection should not run"),
+        ):
+            plot_stripe_heatmap(
+                node_values=node_values,
+                layers=["M1"],
+                plot_dir=tmpdir,
+                orientation_overrides={"M1": "H"},
                 show=False,
                 verbose=False,
             )

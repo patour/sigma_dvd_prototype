@@ -68,6 +68,7 @@ import gzip
 import json
 import math
 import os
+import pickle
 import re
 import shutil
 import sys
@@ -78,7 +79,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping, Optional, Set, Tuple
 
 import numpy as np
-from visualization.stripe_heatmap import extract_node_data_vectorized, parse_node_info
+from visualization.stripe_heatmap import (
+    aggregate_fast_imshow,
+    build_binned_stripe_data,
+    detect_orientation_from_coords,
+    detect_orientation_from_edges,
+    extract_node_data_vectorized,
+    parse_node_info,
+    render_binned_stripe_data_to_axes,
+)
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -348,6 +357,153 @@ def load_peak_ir_drop_data(path: str | Path) -> Dict[str, float]:
     return {str(node): float(value) for node, value in data.items()}
 
 
+def _resolve_distributed_pkl_dir(netlist_dir: str | Path | None) -> Optional[Path]:
+    """Return the distributed tile bundle path when one is available."""
+    if netlist_dir is None:
+        return None
+
+    base_path = Path(netlist_dir)
+    candidates = [base_path]
+    if base_path.name != 'distributed_pkl':
+        candidates.append(base_path / 'distributed_pkl')
+
+    for candidate in candidates:
+        if (candidate / 'metadata.pkl').is_file():
+            return candidate
+    return None
+
+
+def _infer_layer_orientation_overrides_from_distributed_pkl(
+    pkl_dir: str | Path,
+    *,
+    target_layers: Optional[Set[str]] = None,
+) -> Dict[str, str]:
+    """Infer layer routing orientation from distributed tile resistive edges."""
+    pkl_path = Path(pkl_dir)
+    tile_pkls = sorted(pkl_path.glob('tile_*_*.pkl'))
+    if not tile_pkls:
+        return {}
+
+    normalized_layers = None if target_layers is None else {str(layer) for layer in target_layers}
+    node_cache: Dict[str, Tuple[Optional[float], Optional[float], Optional[str]]] = {}
+    layer_edge_counts: Dict[str, List[int]] = {}
+
+    for tile_pkl in tile_pkls:
+        with open(tile_pkl, 'rb') as f:
+            tile_data = pickle.load(f)
+
+        resistive_edges = getattr(tile_data, 'resistive_edges', None)
+        if resistive_edges is None:
+            raise TypeError(
+                f"Distributed tile pickle is missing resistive edge data: {tile_pkl}"
+            )
+
+        for u, v, _conductance in resistive_edges:
+            u_info = node_cache.get(u)
+            if u_info is None:
+                u_info = parse_node_info(u)
+                node_cache[u] = u_info
+
+            v_info = node_cache.get(v)
+            if v_info is None:
+                v_info = parse_node_info(v)
+                node_cache[v] = v_info
+
+            ux, uy, u_layer = u_info
+            vx, vy, v_layer = v_info
+            if ux is None or vx is None or u_layer != v_layer:
+                continue
+
+            layer = str(u_layer)
+            if normalized_layers is not None and layer not in normalized_layers:
+                continue
+
+            dx = abs(vx - ux)
+            dy = abs(vy - uy)
+            if dx == 0 and dy == 0:
+                continue
+
+            counts = layer_edge_counts.setdefault(layer, [0, 0, 0])
+            if dy == 0:
+                counts[0] += 1
+            elif dx == 0:
+                counts[1] += 1
+            else:
+                counts[2] += 1
+
+    return {
+        layer: ('H' if h_count >= v_count else 'V')
+        for layer, (h_count, v_count, _d_count) in layer_edge_counts.items()
+    }
+
+
+def _infer_peak_plot_layers(
+    peak_ir_drop_per_node: Mapping[str, float],
+    *,
+    requested_layers: Optional[List[str]] = None,
+) -> Set[str]:
+    """Return layers that will be plotted for peak IR-drop heatmaps."""
+    if requested_layers is not None:
+        return {str(layer) for layer in requested_layers}
+
+    detected_layers: Set[str] = set()
+    for node in peak_ir_drop_per_node:
+        _x, _y, layer = parse_node_info(str(node))
+        if layer is not None:
+            detected_layers.add(str(layer))
+    return detected_layers
+
+
+def _load_peak_plot_orientation_overrides(
+    result: DecompositionResult | Mapping[str, Any],
+    peak_ir_drop_per_node: Mapping[str, float],
+    *,
+    heatmap_layers: Optional[List[str]] = None,
+    verbose: bool = False,
+) -> Optional[Dict[str, str]]:
+    """Load distributed layer-orientation metadata for decomposition heatmaps."""
+    if isinstance(result, DecompositionResult):
+        netlist_dir = result.netlist_dir
+    else:
+        netlist_dir = result.get('netlist_dir')
+
+    pkl_dir = _resolve_distributed_pkl_dir(netlist_dir)
+    if pkl_dir is None:
+        return None
+
+    target_layers = _infer_peak_plot_layers(
+        peak_ir_drop_per_node,
+        requested_layers=heatmap_layers,
+    )
+
+    try:
+        overrides = _infer_layer_orientation_overrides_from_distributed_pkl(
+            pkl_dir,
+            target_layers=target_layers,
+        )
+    except (
+        OSError,
+        EOFError,
+        ImportError,
+        AttributeError,
+        TypeError,
+        ValueError,
+        pickle.PickleError,
+    ) as exc:
+        warnings.warn(
+            "Failed to infer peak heatmap layer orientations from distributed "
+            f"tile data in {pkl_dir}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    if verbose and overrides:
+        print(f"Using distributed tile orientation metadata from: {pkl_dir}")
+
+    return overrides or None
+
+
 def load_saved_decomposition_result(path: str | Path) -> Dict[str, Any]:
     """Load a saved decomposition results.json file."""
     with open(path, 'r', encoding='utf-8') as f:
@@ -577,6 +733,7 @@ class VictimAggressorBarPlotData:
 class _PreparedPeakIRDropOverlayData:
     """Parsed peak IR-drop arrays reused across overlay renders."""
 
+    nodes: np.ndarray
     xs: np.ndarray
     ys: np.ndarray
     layers: np.ndarray
@@ -901,8 +1058,9 @@ def _prepare_peak_ir_drop_overlay_data(
     peak_ir_drop_per_node: Mapping[str, float],
 ) -> _PreparedPeakIRDropOverlayData:
     """Parse peak IR-drop mapping once for overlay plotting."""
-    _, xs, ys, layers, values = extract_node_data_vectorized(peak_ir_drop_per_node)
+    nodes, xs, ys, layers, values = extract_node_data_vectorized(peak_ir_drop_per_node)
     return _PreparedPeakIRDropOverlayData(
+        nodes=nodes,
         xs=xs,
         ys=ys,
         layers=layers,
@@ -943,6 +1101,52 @@ def _extract_peak_ir_drop_overlay_region(
     return xs, ys, values
 
 
+def _resolve_peak_ir_drop_overlay_orientation(
+    prepared_peak_ir_drop: _PreparedPeakIRDropOverlayData,
+    overlay_data: VictimOverlayPlotData,
+    *,
+    graph: Optional[Any] = None,
+    orientation_overrides: Optional[Mapping[str, str]] = None,
+    orientation_threshold: float = 2.0,
+) -> str:
+    """Resolve overlay layer orientation using the same precedence as peak heatmaps."""
+    layer = overlay_data.victim_layer
+
+    orientation_override = None
+    if orientation_overrides is not None:
+        orientation_override = orientation_overrides.get(layer)
+        if orientation_override is None:
+            orientation_override = orientation_overrides.get(str(layer))
+
+    if orientation_override is not None:
+        if orientation_override not in {'H', 'V', 'MIXED'}:
+            raise ValueError(
+                f"Invalid orientation override for layer {layer}: {orientation_override!r}"
+            )
+        return orientation_override
+
+    layer_mask = prepared_peak_ir_drop.layers == layer
+    if not np.any(layer_mask):
+        raise ValueError(f"No peak IR-drop data found on victim layer {layer}")
+
+    if graph is not None:
+        edge_orientation = detect_orientation_from_edges(
+            graph,
+            prepared_peak_ir_drop.nodes[layer_mask].tolist(),
+            layer,
+            max_edges=5000,
+            threshold=0.70,
+        )
+        if edge_orientation != 'MIXED':
+            return edge_orientation
+
+    return detect_orientation_from_coords(
+        prepared_peak_ir_drop.xs[layer_mask],
+        prepared_peak_ir_drop.ys[layer_mask],
+        orientation_threshold,
+    )
+
+
 def _plot_victim_overlay_peak_ir_drop_heatmap_prepared(
     prepared_peak_ir_drop: _PreparedPeakIRDropOverlayData,
     prepared: VictimOverlayPlotData,
@@ -955,7 +1159,14 @@ def _plot_victim_overlay_peak_ir_drop_heatmap_prepared(
     save_path: Optional[str] = None,
     unit_scale: float = 1000.0,
     unit_label: str = 'mV',
-    draw_aggressor_colorbar: bool = True,
+    draw_aggressor_colorbar: bool = False,
+    graph: Optional[Any] = None,
+    orientation_overrides: Optional[Mapping[str, str]] = None,
+    max_stripes: int = 500,
+    stripe_bin_size: Optional[int] = None,
+    target_bins_per_stripe: int = 500,
+    aggregation: str = 'max',
+    orientation_threshold: float = 2.0,
     **scatter_kwargs: Any,
 ) -> Tuple['Figure', 'Axes']:
     """Render a zoomed peak IR-drop heatmap from pre-parsed peak arrays."""
@@ -971,23 +1182,76 @@ def _plot_victim_overlay_peak_ir_drop_heatmap_prepared(
         prepared_peak_ir_drop,
         prepared,
     )
+    orientation = _resolve_peak_ir_drop_overlay_orientation(
+        prepared_peak_ir_drop,
+        prepared,
+        graph=graph,
+        orientation_overrides=orientation_overrides,
+        orientation_threshold=orientation_threshold,
+    )
 
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 6))
     else:
         fig = ax.figure
 
+    scaled_values = values * unit_scale
     kwargs = {'s': 40, 'edgecolors': 'k', 'linewidths': 0.3}
     kwargs.update(scatter_kwargs)
 
-    heatmap = ax.scatter(
-        xs,
-        ys,
-        c=values * unit_scale,
-        cmap=heatmap_cmap,
-        zorder=1,
-        **kwargs,
-    )
+    if orientation == 'MIXED':
+        try:
+            x_edges, y_edges, grid = aggregate_fast_imshow(
+                xs, ys, scaled_values, orientation, aggregation=aggregation
+            )
+            heatmap = ax.imshow(
+                grid,
+                extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                origin='lower',
+                aspect='auto',
+                cmap=heatmap_cmap,
+                interpolation='bilinear',
+                zorder=1,
+            )
+        except ImportError:
+            heatmap = ax.scatter(
+                xs,
+                ys,
+                c=scaled_values,
+                cmap=heatmap_cmap,
+                zorder=1,
+                **kwargs,
+            )
+    else:
+        stripe_data, vmin, vmax = build_binned_stripe_data(
+            xs,
+            ys,
+            scaled_values,
+            orientation,
+            max_stripes=max_stripes,
+            stripe_bin_size=stripe_bin_size,
+            aggregation=aggregation,
+            target_bins_per_stripe=target_bins_per_stripe,
+        )
+        if not stripe_data:
+            raise ValueError(
+                "No peak IR-drop samples remained after stripe binning for "
+                f"{prepared.instance_name} on layer {prepared.victim_layer}"
+            )
+        heatmap = render_binned_stripe_data_to_axes(
+            ax,
+            stripe_data,
+            orientation,
+            cmap=heatmap_cmap,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        if heatmap is None:
+            raise ValueError(
+                "Failed to render stripe-binned peak IR-drop overlay for "
+                f"{prepared.instance_name} on layer {prepared.victim_layer}"
+            )
+
     fig.colorbar(heatmap, ax=ax, label=f'Peak IR-Drop ({unit_label})')
 
     window = prepared.near_window_box
@@ -1075,7 +1339,14 @@ def plot_victim_overlay_peak_ir_drop_heatmap(
     save_path: Optional[str] = None,
     unit_scale: float = 1000.0,
     unit_label: str = 'mV',
-    draw_aggressor_colorbar: bool = True,
+    draw_aggressor_colorbar: bool = False,
+    graph: Optional[Any] = None,
+    orientation_overrides: Optional[Mapping[str, str]] = None,
+    max_stripes: int = 500,
+    stripe_bin_size: Optional[int] = None,
+    target_bins_per_stripe: int = 500,
+    aggregation: str = 'max',
+    orientation_threshold: float = 2.0,
     **scatter_kwargs: Any,
 ) -> Tuple['Figure', 'Axes']:
     """Render a zoomed peak IR-drop heatmap with victim/aggressor overlays."""
@@ -1098,6 +1369,13 @@ def plot_victim_overlay_peak_ir_drop_heatmap(
         unit_scale=unit_scale,
         unit_label=unit_label,
         draw_aggressor_colorbar=draw_aggressor_colorbar,
+        graph=graph,
+        orientation_overrides=orientation_overrides,
+        max_stripes=max_stripes,
+        stripe_bin_size=stripe_bin_size,
+        target_bins_per_stripe=target_bins_per_stripe,
+        aggregation=aggregation,
+        orientation_threshold=orientation_threshold,
         **scatter_kwargs,
     )
 
@@ -1287,6 +1565,7 @@ def plot_decomposition_overlay_peak_ir_drop_heatmaps(
     max_aggressors: int = 10,
     save_path: Optional[str | Path] = None,
     on_error: Optional[Callable[[VictimOverlayPlotData, Exception], None]] = None,
+    orientation_overrides: Optional[Mapping[str, str]] = None,
     **plot_kwargs: Any,
 ) -> List[Tuple[VictimOverlayPlotData, 'Figure', 'Axes']]:
     """Render per-victim overlay peak IR-drop heatmaps for a decomposition result."""
@@ -1310,6 +1589,7 @@ def plot_decomposition_overlay_peak_ir_drop_heatmaps(
                 prepared_peak_ir_drop,
                 overlay_data,
                 save_path=overlay_save_path,
+                orientation_overrides=orientation_overrides,
                 **plot_kwargs,
             )
         except Exception as exc:
@@ -1860,6 +2140,14 @@ def generate_peak_ir_drop_plots(
     overlay_plot_dir = os.path.join(plot_dir, 'peak_ir_drop_overlays')
     os.makedirs(plot_dir, exist_ok=True)
     _remove_stale_peak_ir_drop_outputs(plot_dir)
+    orientation_overrides = None
+    if graph is None:
+        orientation_overrides = _load_peak_plot_orientation_overrides(
+            result,
+            peak_ir_drop_per_node,
+            heatmap_layers=heatmap_layers,
+            verbose=verbose,
+        )
 
     overlay_data = prepare_decomposition_overlay_plot_data(result, max_aggressors=10)
     markers = [
@@ -1893,6 +2181,7 @@ def generate_peak_ir_drop_plots(
         show=show,
         verbose=verbose,
         graph=graph,
+        orientation_overrides=orientation_overrides,
     )
 
     if verbose:
@@ -1913,9 +2202,72 @@ def generate_peak_ir_drop_plots(
         save_path=overlay_plot_dir,
         show=show,
         on_error=_warn_overlay_failure,
+        graph=graph,
+        orientation_overrides=orientation_overrides,
     )
     for _, fig, _ in rendered_overlays:
         plt.close(fig)
+
+
+def _compute_waveform_zoom_window_ns(
+    t_ns: np.ndarray,
+    waveform_mV: np.ndarray,
+    peak_time_ns: float,
+) -> Tuple[float, float]:
+    """Return a tighter x-axis window around the local peak activity."""
+    t_arr = np.asarray(t_ns, dtype=float)
+    waveform_arr = np.asarray(waveform_mV, dtype=float)
+    default_half_window_ns = 0.075
+
+    if t_arr.size == 0 or waveform_arr.size == 0:
+        return -default_half_window_ns, default_half_window_ns
+    if t_arr.size == 1 or waveform_arr.size == 1:
+        t0 = float(t_arr[0])
+        return t0 - default_half_window_ns, t0 + default_half_window_ns
+
+    peak_idx = int(np.argmin(np.abs(t_arr - float(peak_time_ns))))
+    diffs = np.diff(t_arr)
+    positive_diffs = diffs[diffs > 0]
+    dt_ns = float(np.min(positive_diffs)) if positive_diffs.size else 0.0
+    min_window_ns = max(0.15, 6.0 * dt_ns)
+
+    baseline_mV = float(np.percentile(waveform_arr, 5))
+    peak_mV = float(waveform_arr[peak_idx])
+    excursion_mV = peak_mV - baseline_mV
+
+    if not np.isfinite(excursion_mV) or excursion_mV <= 0.0:
+        half_window = min_window_ns / 2.0
+        center = float(t_arr[peak_idx])
+        return (
+            max(float(t_arr[0]), center - half_window),
+            min(float(t_arr[-1]), center + half_window),
+        )
+
+    active_threshold_mV = baseline_mV + 0.05 * excursion_mV
+    active = waveform_arr >= active_threshold_mV
+    active[peak_idx] = True
+
+    left = peak_idx
+    while left > 0 and active[left - 1]:
+        left -= 1
+
+    right = peak_idx
+    while right < waveform_arr.size - 1 and active[right + 1]:
+        right += 1
+
+    active_span_ns = float(t_arr[right] - t_arr[left])
+    pad_ns = max(active_span_ns, 4.0 * dt_ns, min_window_ns / 4.0)
+
+    t_min = max(float(t_arr[0]), float(t_arr[left] - pad_ns))
+    t_max = min(float(t_arr[-1]), float(t_arr[right] + pad_ns))
+
+    if t_max - t_min < min_window_ns:
+        half_window = min_window_ns / 2.0
+        center = float(t_arr[peak_idx])
+        t_min = max(float(t_arr[0]), center - half_window)
+        t_max = min(float(t_arr[-1]), center + half_window)
+
+    return t_min, t_max
 
 
 def generate_plots(
@@ -1998,12 +2350,11 @@ def generate_plots(
         fig, ax = plt.subplots(figsize=(10, 5))
 
         t_ns = inst.t_array * 1e9
-
-        # Zoom window: 1ns centered on peak time
-        ZOOM_WINDOW_NS = 1.0
-        half_window = ZOOM_WINDOW_NS / 2
-        t_min = max(t_ns[0], inst.peak_time_ns - half_window)
-        t_max = min(t_ns[-1], inst.peak_time_ns + half_window)
+        t_min, t_max = _compute_waveform_zoom_window_ns(
+            t_ns,
+            inst.ir_drop_total * 1000,
+            inst.peak_time_ns,
+        )
 
         # Left y-axis: IR-drop waveforms
         ax.plot(t_ns, inst.ir_drop_total * 1000, 'k-', linewidth=1.2, label='Total IR-drop')
