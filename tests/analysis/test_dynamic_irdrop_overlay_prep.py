@@ -178,11 +178,15 @@ def test_prepare_victim_aggressor_bar_plot_data_limits_top10_and_includes_self_c
     ]
     instance = _make_instance(top_aggressors)
     instance.self_contribution_mV = 2.5
+    instance.self_contribution_pct = 25.0
 
     plot_data = prepare_victim_aggressor_bar_plot_data(instance)
 
     assert plot_data is not None
     assert plot_data.self_contribution_mV == pytest.approx(2.5)
+    assert plot_data.self_contribution_pct == pytest.approx(25.0)
+    assert plot_data.top_aggressor_total_mV == pytest.approx(75.0)
+    assert plot_data.top_aggressor_total_pct == pytest.approx(75.0)
     assert len(plot_data.aggressors) == 10
     assert [aggressor.contribution_mV for aggressor in plot_data.aggressors] == pytest.approx(
         [12.0, 11.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0]
@@ -200,9 +204,10 @@ def test_prepare_decomposition_aggressor_bar_plot_data_accepts_saved_result_mapp
                 "peak_ir_drop": {"total_mV": 10.0},
                 "aggressor_analysis": {
                     "self_contribution_mV": 1.5,
+                    "self_contribution_pct": 15.0,
                     "top_aggressors": [
-                        {"node": "490_600_24", "contribution_mV": 8.0},
-                        {"node": "520_610_24", "contribution_mV": 4.0},
+                        {"node": "490_600_24", "contribution_mV": 8.0, "contribution_pct": 80.0},
+                        {"node": "520_610_24", "contribution_mV": 4.0, "contribution_pct": 40.0},
                     ],
                 },
             }
@@ -214,6 +219,9 @@ def test_prepare_decomposition_aggressor_bar_plot_data_accepts_saved_result_mapp
     assert len(prepared) == 1
     assert prepared[0].peak_total_mV == pytest.approx(10.0)
     assert prepared[0].self_contribution_mV == pytest.approx(1.5)
+    assert prepared[0].self_contribution_pct == pytest.approx(15.0)
+    assert prepared[0].top_aggressor_total_mV == pytest.approx(12.0)
+    assert prepared[0].top_aggressor_total_pct == pytest.approx(120.0)
     assert [aggressor.node for aggressor in prepared[0].aggressors] == [
         "490_600_24",
         "520_610_24",
@@ -325,7 +333,7 @@ def test_plot_victim_overlay_peak_ir_drop_heatmap_uses_orientation_override(monk
     plt.close(fig)
 
 
-def test_plot_victim_aggressor_bar_chart_uses_plasma_strength_colors_and_keeps_labels_in_bounds():
+def test_plot_victim_aggressor_bar_chart_places_summary_bottom_right_at_title_size():
     top_aggressors = [
         AggressorResult(
             node="110_210_M1",
@@ -351,6 +359,7 @@ def test_plot_victim_aggressor_bar_chart_uses_plasma_strength_colors_and_keeps_l
     ]
     instance = _make_instance(top_aggressors)
     instance.self_contribution_mV = 2.1
+    instance.self_contribution_pct = 10.5
 
     fig, ax = plot_victim_aggressor_bar_chart(instance, show=False)
 
@@ -361,11 +370,21 @@ def test_plot_victim_aggressor_bar_chart_uses_plasma_strength_colors_and_keeps_l
         assert "Distance" not in ax.get_xlabel()
         assert "Distance" not in ax.get_ylabel()
         assert "Self: 2.100 mV" in ax.get_title()
-        assert [text.get_text() for text in ax.texts] == [
+        bar_label_texts = [text.get_text() for text in ax.texts if "\n" not in text.get_text()]
+        assert bar_label_texts == [
             "10.00 mV | 50.0%",
             "6.00 mV | 30.0%",
             "2.00 mV | 10.0%",
         ]
+        bar_label_artists = [text for text in ax.texts if "\n" not in text.get_text()]
+        assert all(text.get_fontsize() == pytest.approx(10.0) for text in bar_label_artists)
+        summary_texts = [text for text in ax.texts if "\n" in text.get_text()]
+        assert len(summary_texts) == 1
+        assert summary_texts[0].get_text() == (
+            "Top-3 aggressors: 18.00 mV | 90.0%\n"
+            "Self: 2.10 mV | 10.5%"
+        )
+        assert summary_texts[0].get_bbox_patch() is not None
 
         expected_colors = plt.get_cmap("plasma")([1.0, 0.5, 0.0])
         observed_colors = np.array([patch.get_facecolor() for patch in ax.patches])
@@ -375,10 +394,27 @@ def test_plot_victim_aggressor_bar_chart_uses_plasma_strength_colors_and_keeps_l
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
         axis_bbox = ax.get_window_extent(renderer=renderer)
+        summary_bbox = summary_texts[0].get_window_extent(renderer=renderer)
+        assert summary_texts[0].get_fontsize() == pytest.approx(ax.title.get_fontsize())
+        assert summary_bbox.x0 >= axis_bbox.x0 - 1.0
+        assert summary_bbox.x1 <= axis_bbox.x1 + 1.0
+        assert summary_bbox.y0 >= axis_bbox.y0 - 1.0
+        assert summary_bbox.y1 <= axis_bbox.y1 + 1.0
+        assert summary_bbox.x1 >= axis_bbox.x0 + 0.75 * axis_bbox.width
+        assert summary_bbox.y0 <= axis_bbox.y0 + 0.25 * axis_bbox.height
+        assert max(patch.get_width() for patch in ax.patches) / (ax.get_xlim()[1] - ax.get_xlim()[0]) > 0.5
+
         for text in ax.texts:
             text_bbox = text.get_window_extent(renderer=renderer)
             assert text_bbox.x0 >= axis_bbox.x0 - 1.0
             assert text_bbox.x1 <= axis_bbox.x1 + 1.0
+            if text is not summary_texts[0]:
+                assert (
+                    text_bbox.x1 <= summary_bbox.x0
+                    or text_bbox.x0 >= summary_bbox.x1
+                    or text_bbox.y1 <= summary_bbox.y0
+                    or text_bbox.y0 >= summary_bbox.y1
+                )
     finally:
         plt.close(fig)
 

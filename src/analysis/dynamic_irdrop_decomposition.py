@@ -726,6 +726,9 @@ class VictimAggressorBarPlotData:
     victim_node: str
     peak_total_mV: float
     self_contribution_mV: float
+    self_contribution_pct: float
+    top_aggressor_total_mV: float
+    top_aggressor_total_pct: float
     aggressors: List[AggressorBarMetadata]
 
 
@@ -836,6 +839,17 @@ def _get_instance_self_contribution_mV(
         if isinstance(aggressor_analysis, Mapping):
             return float(aggressor_analysis.get('self_contribution_mV', 0.0))
     return float(_get_instance_field(instance, 'self_contribution_mV', 0.0))
+
+
+def _get_instance_self_contribution_pct(
+    instance: InstanceDecomposition | Mapping[str, Any],
+) -> float:
+    """Return victim self-contribution in % from a live or saved instance."""
+    if isinstance(instance, Mapping):
+        aggressor_analysis = instance.get('aggressor_analysis') or {}
+        if isinstance(aggressor_analysis, Mapping):
+            return float(aggressor_analysis.get('self_contribution_pct', 0.0))
+    return float(_get_instance_field(instance, 'self_contribution_pct', 0.0))
 
 
 def prepare_victim_overlay_plot_data(
@@ -991,6 +1005,13 @@ def prepare_victim_aggressor_bar_plot_data(
         victim_node=str(victim_node),
         peak_total_mV=_get_instance_peak_total_mV(instance),
         self_contribution_mV=_get_instance_self_contribution_mV(instance),
+        self_contribution_pct=_get_instance_self_contribution_pct(instance),
+        top_aggressor_total_mV=sum(
+            aggressor.contribution_mV for aggressor in prepared_aggressors
+        ),
+        top_aggressor_total_pct=sum(
+            aggressor.contribution_pct for aggressor in prepared_aggressors
+        ),
         aggressors=prepared_aggressors,
     )
 
@@ -1441,11 +1462,13 @@ def plot_victim_aggressor_bar_chart(
 
     if ax is None:
         fig_height = max(4.5, 2.5 + 0.5 * max(1, len(prepared.aggressors)))
-        fig, ax = plt.subplots(figsize=(10, fig_height))
+        fig, ax = plt.subplots(figsize=(12.5, fig_height))
     else:
         fig = ax.figure
 
     aggressors = prepared.aggressors
+    bar_label_fontsize = 10
+    max_figure_width = 14.5
     y_pos = np.arange(len(aggressors))
     cmap = matplotlib.colormaps.get_cmap(aggressor_cmap)
     bar_colors = cmap([aggressor.color_value for aggressor in aggressors])
@@ -1472,7 +1495,7 @@ def plot_victim_aggressor_bar_chart(
         x_max = x_min + 1.0
     x_span = x_max - x_min
     label_offset = 0.02 * x_span if x_span > 0 else 0.05
-    ax.set_xlim(x_min - 0.05 * x_span, x_max + 0.20 * x_span + label_offset)
+    ax.set_xlim(x_min - 0.03 * x_span, x_max + 0.65 * x_span + label_offset)
 
     label_artists = []
     for bar, aggressor in zip(bars, aggressors):
@@ -1484,24 +1507,24 @@ def plot_victim_aggressor_bar_chart(
             f'{contribution:.2f} mV | {aggressor.contribution_pct:.1f}%',
             va='center',
             ha='left',
-            fontsize=8,
+            fontsize=bar_label_fontsize,
         ))
 
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-    axis_bbox = ax.get_window_extent(renderer=renderer)
-    if axis_bbox.width > 0:
-        data_per_pixel = (ax.get_xlim()[1] - ax.get_xlim()[0]) / axis_bbox.width
-        overflow_right = max(
-            (
-                max(0.0, text.get_window_extent(renderer=renderer).x1 - axis_bbox.x1)
-                for text in label_artists
-            ),
-            default=0.0,
+    summary_line_1 = (
+        f'Top-{len(prepared.aggressors)} aggressors: '
+        f'{prepared.top_aggressor_total_mV:.2f} mV | {prepared.top_aggressor_total_pct:.1f}%'
+    )
+    summary_line_2 = (
+        f'Self: {prepared.self_contribution_mV:.2f} mV | '
+        f'{prepared.self_contribution_pct:.1f}%'
+    )
+    def _bboxes_overlap(a: Any, b: Any, padding_px: float = 0.0) -> bool:
+        return not (
+            a.x1 <= b.x0 - padding_px
+            or a.x0 >= b.x1 + padding_px
+            or a.y1 <= b.y0 - padding_px
+            or a.y0 >= b.y1 + padding_px
         )
-        if overflow_right > 0.0:
-            x0, x1 = ax.get_xlim()
-            ax.set_xlim(x0, x1 + overflow_right * data_per_pixel + 4.0 * data_per_pixel)
 
     ax.set_title(
         title or (
@@ -1512,7 +1535,92 @@ def plot_victim_aggressor_bar_chart(
         )
     )
 
+    summary_artist = ax.text(
+        0.985,
+        0.035,
+        f'{summary_line_1}\n{summary_line_2}',
+        transform=ax.transAxes,
+        ha='right',
+        va='bottom',
+        fontsize=float(ax.title.get_fontsize()),
+        linespacing=1.30,
+        bbox={
+            'boxstyle': 'round,pad=0.40',
+            'facecolor': 'white',
+            'edgecolor': '0.35',
+            'alpha': 0.92,
+        },
+        zorder=6,
+    )
+
     plt.tight_layout()
+
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    axis_bbox = ax.get_window_extent(renderer=renderer)
+
+    for _ in range(4):
+        summary_bbox = summary_artist.get_window_extent(renderer=renderer)
+        fits_axis = (
+            summary_bbox.x0 >= axis_bbox.x0 + 1.0
+            and summary_bbox.x1 <= axis_bbox.x1 - 1.0
+            and summary_bbox.y0 >= axis_bbox.y0 + 1.0
+            and summary_bbox.y1 <= axis_bbox.y1 - 1.0
+        )
+        if fits_axis:
+            break
+        fig_width, fig_height = fig.get_size_inches()
+        if fig_width >= max_figure_width:
+            break
+        fig.set_size_inches(min(fig_width + 0.5, max_figure_width), fig_height, forward=True)
+        plt.tight_layout()
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        axis_bbox = ax.get_window_extent(renderer=renderer)
+
+    for _ in range(8):
+        summary_bbox = summary_artist.get_window_extent(renderer=renderer)
+        label_bboxes = [
+            text.get_window_extent(renderer=renderer)
+            for text in label_artists
+        ]
+        overflow_right = max(
+            (
+                max(0.0, text_bbox.x1 - axis_bbox.x1 + 4.0)
+                for text_bbox in label_bboxes
+            ),
+            default=0.0,
+        )
+        overlap_px = max(
+            (
+                max(0.0, text_bbox.x1 - summary_bbox.x0 + 8.0)
+                for text_bbox in label_bboxes
+                if _bboxes_overlap(text_bbox, summary_bbox, padding_px=4.0)
+            ),
+            default=0.0,
+        )
+        if overflow_right <= 0.0 and overlap_px <= 0.0:
+            break
+        fig_width, fig_height = fig.get_size_inches()
+        if fig_width < max_figure_width:
+            fig.set_size_inches(min(fig_width + 0.5, max_figure_width), fig_height, forward=True)
+            plt.tight_layout()
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            axis_bbox = ax.get_window_extent(renderer=renderer)
+            continue
+        if axis_bbox.width <= 0:
+            break
+        data_per_pixel = (ax.get_xlim()[1] - ax.get_xlim()[0]) / axis_bbox.width
+        x0, x1 = ax.get_xlim()
+        required_extra = max(
+            0.12 * (x1 - x0),
+            (overflow_right + overlap_px + 4.0) * data_per_pixel,
+        )
+        ax.set_xlim(x0, x1 + required_extra)
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        axis_bbox = ax.get_window_extent(renderer=renderer)
 
     if save_path:
         save_path = Path(save_path)
