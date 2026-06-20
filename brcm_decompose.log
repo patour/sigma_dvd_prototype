@@ -1,0 +1,1672 @@
+14:26:56 distributed.cli INFO: Logging to file: /wv/bwdev1/patrasej/dev/sigma_dvd/mpower_testcases/BRCM/analysis/ir_drop_decomp/decompose_20260510_142656.log
+14:26:56 distributed.decomposition INFO: Phase 0: Loading distributed partitions from netlist/netlist_brcm/distributed_pkl
+14:26:57 distributed.model INFO: Loaded metadata from netlist/netlist_brcm/distributed_pkl: 36 tiles, 137900 shared boundary nodes
+14:27:11 distributed.model INFO: Interface: 138209 nodes (137900 boundary + 309 die attachment)
+14:27:46 distributed.model INFO: Model created in 48.160s: 36 tiles, 30672873 interior nodes, 136909 boundary entries, 138209 interface nodes
+14:27:46 distributed.decomposition INFO: Model: 36 tiles (6x6), 138209 interface nodes, Vdd=0.760 V, net=VDD_VAR
+15:15:13 distributed.solver_td INFO: VCS init: 12393200 total sources across 36 tiles (36 from cache)
+15:15:13 distributed.solver_td INFO:   init_vcs: 5.3089s
+15:15:13 distributed.solver_td INFO:   smooth_sources: 2842.2751s
+15:15:13 distributed.decomposition INFO: Phase 1: Factoring DC and transient systems
+15:19:49 distributed.result_factorization DEBUG: Tile (0, 0) factor_and_compute_schur:
+  G_ii: 542,354 x 542,354, nnz=2,524,308 (density 0.00086%), 33.2 MB
+  G_pp: 2,604 x 2,604, nnz=3,450
+  G_pi: 2,604 x 542,354, nnz=5,720  |  G_ip: 542,354 x 2,604, nnz=5,720
+  Block system memory: 33.2 MB
+  factor_interior: 36.666s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 37.553s  |  Schur: 2,604 x 2,604 dense (51.7 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (0, 1) factor_and_compute_schur:
+  G_ii: 1,033,128 x 1,033,128, nnz=4,904,180 (density 0.00046%), 64.3 MB
+  G_pp: 3,891 x 3,891, nnz=4,743
+  G_pi: 3,891 x 1,033,128, nnz=8,693  |  G_ip: 1,033,128 x 3,891, nnz=8,693
+  Block system memory: 64.3 MB
+  factor_interior: 124.913s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 126.858s  |  Schur: 3,891 x 3,891 dense (115.5 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (0, 2) factor_and_compute_schur:
+  G_ii: 732,130 x 732,130, nnz=3,444,252 (density 0.00064%), 45.3 MB
+  G_pp: 3,796 x 3,796, nnz=5,476
+  G_pi: 3,796 x 732,130, nnz=7,796  |  G_ip: 732,130 x 3,796, nnz=7,796
+  Block system memory: 45.3 MB
+  factor_interior: 53.105s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 55.906s  |  Schur: 3,796 x 3,796 dense (109.9 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (0, 3) factor_and_compute_schur:
+  G_ii: 579,965 x 579,965, nnz=2,701,823 (density 0.00080%), 35.6 MB
+  G_pp: 3,353 x 3,353, nnz=4,211
+  G_pi: 3,353 x 579,965, nnz=6,354  |  G_ip: 579,965 x 3,353, nnz=6,354
+  Block system memory: 35.6 MB
+  factor_interior: 60.408s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 63.151s  |  Schur: 3,353 x 3,353 dense (85.8 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (0, 4) factor_and_compute_schur:
+  G_ii: 619,117 x 619,117, nnz=2,897,615 (density 0.00076%), 38.1 MB
+  G_pp: 3,112 x 3,112, nnz=4,634
+  G_pi: 3,112 x 619,117, nnz=5,669  |  G_ip: 619,117 x 3,112, nnz=5,669
+  Block system memory: 38.1 MB
+  factor_interior: 55.077s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 58.723s  |  Schur: 3,112 x 3,112 dense (73.9 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (0, 5) factor_and_compute_schur:
+  G_ii: 507,440 x 507,440, nnz=2,372,664 (density 0.00092%), 31.1 MB
+  G_pp: 1,110 x 1,110, nnz=1,798
+  G_pi: 1,110 x 507,440, nnz=2,438  |  G_ip: 507,440 x 1,110, nnz=2,438
+  Block system memory: 31.1 MB
+  factor_interior: 30.144s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 47.383s  |  Schur: 1,110 x 1,110 dense (9.4 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (1, 0) factor_and_compute_schur:
+  G_ii: 527,521 x 527,521, nnz=2,457,637 (density 0.00088%), 32.3 MB
+  G_pp: 2,781 x 2,781, nnz=3,613
+  G_pi: 2,781 x 527,521, nnz=3,565  |  G_ip: 527,521 x 2,781, nnz=3,565
+  Block system memory: 32.3 MB
+  factor_interior: 56.507s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 60.474s  |  Schur: 2,781 x 2,781 dense (59.0 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (1, 1) factor_and_compute_schur:
+  G_ii: 1,035,420 x 1,035,420, nnz=4,927,226 (density 0.00046%), 64.5 MB
+  G_pp: 4,189 x 4,189, nnz=5,033
+  G_pi: 4,189 x 1,035,420, nnz=6,822  |  G_ip: 1,035,420 x 4,189, nnz=6,822
+  Block system memory: 64.5 MB
+  factor_interior: 113.579s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 124.793s  |  Schur: 4,189 x 4,189 dense (133.9 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (1, 2) factor_and_compute_schur:
+  G_ii: 1,200,708 x 1,200,708, nnz=5,739,478 (density 0.00040%), 75.2 MB
+  G_pp: 5,276 x 5,276, nnz=6,954
+  G_pi: 5,276 x 1,200,708, nnz=8,324  |  G_ip: 1,200,708 x 5,276, nnz=8,324
+  Block system memory: 75.2 MB
+  factor_interior: 116.126s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 120.017s  |  Schur: 5,276 x 5,276 dense (212.4 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (1, 3) factor_and_compute_schur:
+  G_ii: 648,479 x 648,479, nnz=3,037,981 (density 0.00072%), 40.0 MB
+  G_pp: 4,269 x 4,269, nnz=5,117
+  G_pi: 4,269 x 648,479, nnz=6,663  |  G_ip: 648,479 x 4,269, nnz=6,663
+  Block system memory: 40.0 MB
+  factor_interior: 84.589s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 93.383s  |  Schur: 4,269 x 4,269 dense (139.0 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (1, 4) factor_and_compute_schur:
+  G_ii: 815,578 x 815,578, nnz=3,867,902 (density 0.00058%), 50.7 MB
+  G_pp: 3,307 x 3,307, nnz=4,227
+  G_pi: 3,307 x 815,578, nnz=5,173  |  G_ip: 815,578 x 3,307, nnz=5,173
+  Block system memory: 50.7 MB
+  factor_interior: 60.789s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 64.719s  |  Schur: 3,307 x 3,307 dense (83.4 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (1, 5) factor_and_compute_schur:
+  G_ii: 201,199 x 201,199, nnz=953,835 (density 0.00236%), 12.5 MB
+  G_pp: 1,330 x 1,330, nnz=1,410
+  G_pi: 1,330 x 201,199, nnz=2,284  |  G_ip: 201,199 x 1,330, nnz=2,284
+  Block system memory: 12.5 MB
+  factor_interior: 6.309s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 6.604s  |  Schur: 1,330 x 1,330 dense (13.5 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (2, 0) factor_and_compute_schur:
+  G_ii: 526,908 x 526,908, nnz=2,455,818 (density 0.00088%), 32.3 MB
+  G_pp: 2,778 x 2,778, nnz=3,610
+  G_pi: 2,778 x 526,908, nnz=3,307  |  G_ip: 526,908 x 2,778, nnz=3,307
+  Block system memory: 32.3 MB
+  factor_interior: 46.502s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 56.747s  |  Schur: 2,778 x 2,778 dense (58.9 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (2, 1) factor_and_compute_schur:
+  G_ii: 1,035,288 x 1,035,288, nnz=4,926,856 (density 0.00046%), 64.5 MB
+  G_pp: 4,183 x 4,183, nnz=5,021
+  G_pi: 4,183 x 1,035,288, nnz=6,561  |  G_ip: 1,035,288 x 4,183, nnz=6,561
+  Block system memory: 64.5 MB
+  factor_interior: 114.033s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 116.410s  |  Schur: 4,183 x 4,183 dense (133.5 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (2, 2) factor_and_compute_schur:
+  G_ii: 1,363,566 x 1,363,566, nnz=6,534,494 (density 0.00035%), 85.6 MB
+  G_pp: 6,252 x 6,252, nnz=7,930
+  G_pi: 6,252 x 1,363,566, nnz=10,914  |  G_ip: 1,363,566 x 6,252, nnz=10,914
+  Block system memory: 85.6 MB
+  factor_interior: 154.634s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 200.101s  |  Schur: 6,252 x 6,252 dense (298.2 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (2, 3) factor_and_compute_schur:
+  G_ii: 1,625,868 x 1,625,868, nnz=7,807,544 (density 0.00030%), 102.2 MB
+  G_pp: 6,707 x 6,707, nnz=7,583
+  G_pi: 6,707 x 1,625,868, nnz=13,435  |  G_ip: 1,625,868 x 6,707, nnz=13,435
+  Block system memory: 102.2 MB
+  factor_interior: 267.990s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 275.692s  |  Schur: 6,707 x 6,707 dense (343.2 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (2, 4) factor_and_compute_schur:
+  G_ii: 1,423,132 x 1,423,132, nnz=6,814,292 (density 0.00034%), 89.3 MB
+  G_pp: 6,168 x 6,168, nnz=7,876
+  G_pi: 6,168 x 1,423,132, nnz=12,707  |  G_ip: 1,423,132 x 6,168, nnz=12,707
+  Block system memory: 89.3 MB
+  factor_interior: 211.230s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 217.212s  |  Schur: 6,168 x 6,168 dense (290.3 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (2, 5) factor_and_compute_schur:
+  G_ii: 917,802 x 917,802, nnz=4,347,656 (density 0.00052%), 57.0 MB
+  G_pp: 3,888 x 3,888, nnz=4,754
+  G_pi: 3,888 x 917,802, nnz=7,860  |  G_ip: 917,802 x 3,888, nnz=7,860
+  Block system memory: 57.0 MB
+  factor_interior: 75.411s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 77.430s  |  Schur: 3,888 x 3,888 dense (115.3 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (3, 0) factor_and_compute_schur:
+  G_ii: 542,428 x 542,428, nnz=2,524,524 (density 0.00086%), 33.2 MB
+  G_pp: 2,789 x 2,789, nnz=3,635
+  G_pi: 2,789 x 542,428, nnz=6,164  |  G_ip: 542,428 x 2,789, nnz=6,164
+  Block system memory: 33.2 MB
+  factor_interior: 48.486s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 49.568s  |  Schur: 2,789 x 2,789 dense (59.3 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (3, 1) factor_and_compute_schur:
+  G_ii: 1,032,738 x 1,032,738, nnz=4,902,760 (density 0.00046%), 64.3 MB
+  G_pp: 4,081 x 4,081, nnz=4,939
+  G_pi: 4,081 x 1,032,738, nnz=9,142  |  G_ip: 1,032,738 x 4,081, nnz=9,142
+  Block system memory: 64.3 MB
+  factor_interior: 113.882s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 116.207s  |  Schur: 4,081 x 4,081 dense (127.1 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (3, 2) factor_and_compute_schur:
+  G_ii: 1,253,135 x 1,253,135, nnz=5,981,083 (density 0.00038%), 78.4 MB
+  G_pp: 5,122 x 5,122, nnz=6,814
+  G_pi: 5,122 x 1,253,135, nnz=10,015  |  G_ip: 1,253,135 x 5,122, nnz=10,015
+  Block system memory: 78.4 MB
+  factor_interior: 110.517s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 114.268s  |  Schur: 5,122 x 5,122 dense (200.2 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (3, 3) factor_and_compute_schur:
+  G_ii: 1,498,215 x 1,498,215, nnz=7,167,049 (density 0.00032%), 93.9 MB
+  G_pp: 5,985 x 5,985, nnz=6,849
+  G_pi: 5,985 x 1,498,215, nnz=12,453  |  G_ip: 1,498,215 x 5,985, nnz=12,453
+  Block system memory: 93.9 MB
+  factor_interior: 229.633s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 235.326s  |  Schur: 5,985 x 5,985 dense (273.3 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (3, 4) factor_and_compute_schur:
+  G_ii: 1,336,914 x 1,336,914, nnz=6,384,830 (density 0.00036%), 83.6 MB
+  G_pp: 5,189 x 5,189, nnz=6,881
+  G_pi: 5,189 x 1,336,914, nnz=11,172  |  G_ip: 1,336,914 x 5,189, nnz=11,172
+  Block system memory: 83.6 MB
+  factor_interior: 191.228s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 204.363s  |  Schur: 5,189 x 5,189 dense (205.4 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (3, 5) factor_and_compute_schur:
+  G_ii: 682,528 x 682,528, nnz=3,199,256 (density 0.00069%), 42.0 MB
+  G_pp: 2,878 x 2,878, nnz=3,736
+  G_pi: 2,878 x 682,528, nnz=5,726  |  G_ip: 682,528 x 2,878, nnz=5,726
+  Block system memory: 42.0 MB
+  factor_interior: 79.172s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 80.876s  |  Schur: 2,878 x 2,878 dense (63.2 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (4, 0) factor_and_compute_schur:
+  G_ii: 526,900 x 526,900, nnz=2,455,790 (density 0.00088%), 32.3 MB
+  G_pp: 2,774 x 2,774, nnz=3,602
+  G_pi: 2,774 x 526,900, nnz=3,303  |  G_ip: 526,900 x 2,774, nnz=3,303
+  Block system memory: 32.3 MB
+  factor_interior: 32.653s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 33.698s  |  Schur: 2,774 x 2,774 dense (58.7 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (4, 1) factor_and_compute_schur:
+  G_ii: 1,035,281 x 1,035,281, nnz=4,926,831 (density 0.00046%), 64.5 MB
+  G_pp: 4,179 x 4,179, nnz=5,013
+  G_pi: 4,179 x 1,035,281, nnz=6,557  |  G_ip: 1,035,281 x 4,179, nnz=6,557
+  Block system memory: 64.5 MB
+  factor_interior: 103.643s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 106.054s  |  Schur: 4,179 x 4,179 dense (133.2 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (4, 2) factor_and_compute_schur:
+  G_ii: 1,202,512 x 1,202,512, nnz=5,750,544 (density 0.00040%), 75.2 MB
+  G_pp: 4,547 x 4,547, nnz=6,213
+  G_pi: 4,547 x 1,202,512, nnz=6,901  |  G_ip: 1,202,512 x 4,547, nnz=6,901
+  Block system memory: 75.2 MB
+  factor_interior: 91.511s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 117.331s  |  Schur: 4,547 x 4,547 dense (157.7 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (4, 3) factor_and_compute_schur:
+  G_ii: 648,763 x 648,763, nnz=3,042,681 (density 0.00072%), 40.0 MB
+  G_pp: 4,141 x 4,141, nnz=4,987
+  G_pi: 4,141 x 648,763, nnz=6,443  |  G_ip: 648,763 x 4,141, nnz=6,443
+  Block system memory: 40.0 MB
+  factor_interior: 84.941s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 87.198s  |  Schur: 4,141 x 4,141 dense (130.8 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (4, 4) factor_and_compute_schur:
+  G_ii: 734,595 x 734,595, nnz=3,458,211 (density 0.00064%), 45.4 MB
+  G_pp: 4,191 x 4,191, nnz=5,865
+  G_pi: 4,191 x 734,595, nnz=6,426  |  G_ip: 734,595 x 4,191, nnz=6,426
+  Block system memory: 45.4 MB
+  factor_interior: 77.237s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 88.542s  |  Schur: 4,191 x 4,191 dense (134.0 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (4, 5) factor_and_compute_schur:
+  G_ii: 752,400 x 752,400, nnz=3,546,026 (density 0.00063%), 46.5 MB
+  G_pp: 2,924 x 2,924, nnz=3,770
+  G_pi: 2,924 x 752,400, nnz=4,563  |  G_ip: 752,400 x 2,924, nnz=4,563
+  Block system memory: 46.5 MB
+  factor_interior: 61.982s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 66.995s  |  Schur: 2,924 x 2,924 dense (65.2 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (5, 0) factor_and_compute_schur:
+  G_ii: 542,465 x 542,465, nnz=2,524,651 (density 0.00086%), 33.2 MB
+  G_pp: 2,601 x 2,601, nnz=3,443
+  G_pi: 2,601 x 542,465, nnz=5,974  |  G_ip: 542,465 x 2,601, nnz=5,974
+  Block system memory: 33.2 MB
+  factor_interior: 46.447s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 47.427s  |  Schur: 2,601 x 2,601 dense (51.6 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (5, 1) factor_and_compute_schur:
+  G_ii: 1,032,774 x 1,032,774, nnz=4,902,884 (density 0.00046%), 64.3 MB
+  G_pp: 3,891 x 3,891, nnz=4,745
+  G_pi: 3,891 x 1,032,774, nnz=8,950  |  G_ip: 1,032,774 x 3,891, nnz=8,950
+  Block system memory: 64.3 MB
+  factor_interior: 109.804s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 111.825s  |  Schur: 3,891 x 3,891 dense (115.5 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (5, 2) factor_and_compute_schur:
+  G_ii: 733,049 x 733,049, nnz=3,446,739 (density 0.00064%), 45.3 MB
+  G_pp: 3,792 x 3,792, nnz=5,472
+  G_pi: 3,792 x 733,049, nnz=7,142  |  G_ip: 733,049 x 3,792, nnz=7,142
+  Block system memory: 45.3 MB
+  factor_interior: 65.974s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 68.163s  |  Schur: 3,792 x 3,792 dense (109.7 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (5, 3) factor_and_compute_schur:
+  G_ii: 582,048 x 582,048, nnz=2,707,816 (density 0.00080%), 35.6 MB
+  G_pp: 3,345 x 3,345, nnz=4,187
+  G_pi: 3,345 x 582,048, nnz=5,576  |  G_ip: 582,048 x 3,345, nnz=5,576
+  Block system memory: 35.6 MB
+  factor_interior: 81.811s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 83.364s  |  Schur: 3,345 x 3,345 dense (85.4 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (5, 4) factor_and_compute_schur:
+  G_ii: 598,978 x 598,978, nnz=2,790,684 (density 0.00078%), 36.7 MB
+  G_pp: 3,378 x 3,378, nnz=5,044
+  G_pi: 3,378 x 598,978, nnz=5,200  |  G_ip: 598,978 x 3,378, nnz=5,200
+  Block system memory: 36.7 MB
+  factor_interior: 65.342s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 77.842s  |  Schur: 3,378 x 3,378 dense (87.1 MB)
+15:19:49 distributed.result_factorization DEBUG: Tile (5, 5) factor_and_compute_schur:
+  G_ii: 601,547 x 601,547, nnz=2,803,905 (density 0.00077%), 36.8 MB
+  G_pp: 2,108 x 2,108, nnz=2,950
+  G_pi: 2,108 x 601,547, nnz=3,801  |  G_ip: 601,547 x 2,108, nnz=3,801
+  Block system memory: 36.8 MB
+  factor_interior: 40.997s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 42.527s  |  Schur: 2,108 x 2,108 dense (33.9 MB)
+16:02:12 distributed.result_factorization INFO: === Distributed DDM Prepare Statistics ===
+16:02:12 distributed.result_factorization INFO: Tiles: 36
+16:02:12 distributed.result_factorization INFO:   Interior nodes:  201,199 / 852,024 / 1.6M  (min/mean/max)
+16:02:12 distributed.result_factorization INFO:   Port nodes:      1,110 / 3,803 / 6,707
+16:02:12 distributed.result_factorization INFO:   G_ii nnz:        953,835 / 4.0M / 7.8M
+16:02:12 distributed.result_factorization INFO:   G_ii memory:     12.5 MB / 52.9 MB / 102.2 MB  (total: 1.9 GB)
+16:02:12 distributed.result_factorization INFO:   Schur memory:    9.4 MB / 122.7 MB / 343.2 MB  (total: 4.3 GB)
+16:02:12 distributed.result_factorization INFO:   Factor time:     6.309s / 91.757s / 267.990s
+16:02:12 distributed.result_factorization INFO:   Factor backend:  cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+16:02:12 distributed.result_factorization INFO:   Factor + Schur wall time: 275.864s
+16:02:12 distributed.result_factorization INFO: Interface system: 70,734 unknowns, 479.4M nnz (density 9.581%), 5.4 GB
+16:02:12 distributed.result_factorization INFO:   Backend: cholmod(mode=simplicial, ordering=metis, idx=64-bit)
+16:02:12 distributed.result_factorization INFO:   Factor time: 1668.300s
+16:02:12 distributed.result_factorization INFO:   Islands penalized: 0
+16:02:12 distributed.result_factorization INFO:   Assemble time: 473.460s
+16:02:12 distributed.result_factorization INFO:   Detect islands time: 401.065s
+16:02:12 distributed.result_factorization INFO: === Total Prepare: 2818.689s ===
+16:06:54 distributed.result_factorization DEBUG: Tile (0, 0) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=3,450
+  C_ii cap nodes: 542344 / 542354  |  C_pp cap nodes: 2604 / 2604
+  Total tile cap: 250536.4 fF  |  C_coeff: 0.2000
+  factor_interior: 40.368s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 41.250s  |  Schur: 2,604 x 2,604 dense (51.7 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (0, 1) factor_transient_system:
+  A_ii: nnz=4.9M  |  A_pp: nnz=4,743
+  C_ii cap nodes: 1033025 / 1033128  |  C_pp cap nodes: 3891 / 3891
+  Total tile cap: 1423549.4 fF  |  C_coeff: 0.2000
+  factor_interior: 107.413s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 109.365s  |  Schur: 3,891 x 3,891 dense (115.5 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (0, 2) factor_transient_system:
+  A_ii: nnz=3.4M  |  A_pp: nnz=5,476
+  C_ii cap nodes: 732098 / 732130  |  C_pp cap nodes: 3796 / 3796
+  Total tile cap: 473073.2 fF  |  C_coeff: 0.2000
+  factor_interior: 45.760s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 48.375s  |  Schur: 3,796 x 3,796 dense (109.9 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (0, 3) factor_transient_system:
+  A_ii: nnz=2.7M  |  A_pp: nnz=4,211
+  C_ii cap nodes: 579958 / 579965  |  C_pp cap nodes: 3352 / 3353
+  Total tile cap: 171377.6 fF  |  C_coeff: 0.2000
+  factor_interior: 64.037s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 81.053s  |  Schur: 3,353 x 3,353 dense (85.8 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (0, 4) factor_transient_system:
+  A_ii: nnz=2.9M  |  A_pp: nnz=4,634
+  C_ii cap nodes: 619102 / 619117  |  C_pp cap nodes: 3107 / 3112
+  Total tile cap: 240167.3 fF  |  C_coeff: 0.2000
+  factor_interior: 57.560s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 59.230s  |  Schur: 3,112 x 3,112 dense (73.9 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (0, 5) factor_transient_system:
+  A_ii: nnz=2.4M  |  A_pp: nnz=1,798
+  C_ii cap nodes: 507440 / 507440  |  C_pp cap nodes: 1105 / 1110
+  Total tile cap: 168052.6 fF  |  C_coeff: 0.2000
+  factor_interior: 25.580s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 26.180s  |  Schur: 1,110 x 1,110 dense (9.4 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (1, 0) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=3,613
+  C_ii cap nodes: 527517 / 527521  |  C_pp cap nodes: 2781 / 2781
+  Total tile cap: 244513.2 fF  |  C_coeff: 0.2000
+  factor_interior: 47.281s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 48.379s  |  Schur: 2,781 x 2,781 dense (59.0 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (1, 1) factor_transient_system:
+  A_ii: nnz=4.9M  |  A_pp: nnz=5,033
+  C_ii cap nodes: 1035210 / 1035420  |  C_pp cap nodes: 4189 / 4189
+  Total tile cap: 1455171.0 fF  |  C_coeff: 0.2000
+  factor_interior: 104.188s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 107.552s  |  Schur: 4,189 x 4,189 dense (133.9 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (1, 2) factor_transient_system:
+  A_ii: nnz=5.7M  |  A_pp: nnz=6,954
+  C_ii cap nodes: 1200535 / 1200708  |  C_pp cap nodes: 5276 / 5276
+  Total tile cap: 1196292.6 fF  |  C_coeff: 0.2000
+  factor_interior: 107.073s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 111.275s  |  Schur: 5,276 x 5,276 dense (212.4 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (1, 3) factor_transient_system:
+  A_ii: nnz=3.0M  |  A_pp: nnz=5,117
+  C_ii cap nodes: 648467 / 648479  |  C_pp cap nodes: 4268 / 4269
+  Total tile cap: 288808.3 fF  |  C_coeff: 0.2000
+  factor_interior: 78.704s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 106.951s  |  Schur: 4,269 x 4,269 dense (139.0 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (1, 4) factor_transient_system:
+  A_ii: nnz=3.9M  |  A_pp: nnz=4,227
+  C_ii cap nodes: 815537 / 815578  |  C_pp cap nodes: 3307 / 3307
+  Total tile cap: 494876.3 fF  |  C_coeff: 0.2000
+  factor_interior: 58.842s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 60.825s  |  Schur: 3,307 x 3,307 dense (83.4 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (1, 5) factor_transient_system:
+  A_ii: nnz=953,835  |  A_pp: nnz=1,410
+  C_ii cap nodes: 201199 / 201199  |  C_pp cap nodes: 1330 / 1330
+  Total tile cap: 122196.1 fF  |  C_coeff: 0.2000
+  factor_interior: 53.972s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 63.588s  |  Schur: 1,330 x 1,330 dense (13.5 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (2, 0) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=3,610
+  C_ii cap nodes: 526904 / 526908  |  C_pp cap nodes: 2778 / 2778
+  Total tile cap: 242497.1 fF  |  C_coeff: 0.2000
+  factor_interior: 39.198s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 41.541s  |  Schur: 2,778 x 2,778 dense (58.9 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (2, 1) factor_transient_system:
+  A_ii: nnz=4.9M  |  A_pp: nnz=5,021
+  C_ii cap nodes: 1035078 / 1035288  |  C_pp cap nodes: 4183 / 4183
+  Total tile cap: 1452760.1 fF  |  C_coeff: 0.2000
+  factor_interior: 105.307s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 107.671s  |  Schur: 4,183 x 4,183 dense (133.5 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (2, 2) factor_transient_system:
+  A_ii: nnz=6.5M  |  A_pp: nnz=7,930
+  C_ii cap nodes: 1363340 / 1363566  |  C_pp cap nodes: 6252 / 6252
+  Total tile cap: 1327707.5 fF  |  C_coeff: 0.2000
+  factor_interior: 158.452s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 208.296s  |  Schur: 6,252 x 6,252 dense (298.2 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (2, 3) factor_transient_system:
+  A_ii: nnz=7.8M  |  A_pp: nnz=7,583
+  C_ii cap nodes: 1625703 / 1625868  |  C_pp cap nodes: 6707 / 6707
+  Total tile cap: 2426190.6 fF  |  C_coeff: 0.2000
+  factor_interior: 271.319s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 279.054s  |  Schur: 6,707 x 6,707 dense (343.2 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (2, 4) factor_transient_system:
+  A_ii: nnz=6.8M  |  A_pp: nnz=7,876
+  C_ii cap nodes: 1422981 / 1423132  |  C_pp cap nodes: 6168 / 6168
+  Total tile cap: 1558294.7 fF  |  C_coeff: 0.2000
+  factor_interior: 210.797s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 216.802s  |  Schur: 6,168 x 6,168 dense (290.3 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (2, 5) factor_transient_system:
+  A_ii: nnz=4.3M  |  A_pp: nnz=4,754
+  C_ii cap nodes: 917772 / 917802  |  C_pp cap nodes: 3888 / 3888
+  Total tile cap: 676425.7 fF  |  C_coeff: 0.2000
+  factor_interior: 102.074s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 104.267s  |  Schur: 3,888 x 3,888 dense (115.3 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (3, 0) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=3,635
+  C_ii cap nodes: 542418 / 542428  |  C_pp cap nodes: 2789 / 2789
+  Total tile cap: 253022.2 fF  |  C_coeff: 0.2000
+  factor_interior: 36.924s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 37.912s  |  Schur: 2,789 x 2,789 dense (59.3 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (3, 1) factor_transient_system:
+  A_ii: nnz=4.9M  |  A_pp: nnz=4,939
+  C_ii cap nodes: 1032634 / 1032738  |  C_pp cap nodes: 4081 / 4081
+  Total tile cap: 1426322.4 fF  |  C_coeff: 0.2000
+  factor_interior: 115.891s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 118.033s  |  Schur: 4,081 x 4,081 dense (127.1 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (3, 2) factor_transient_system:
+  A_ii: nnz=6.0M  |  A_pp: nnz=6,814
+  C_ii cap nodes: 1253034 / 1253135  |  C_pp cap nodes: 5122 / 5122
+  Total tile cap: 1000806.9 fF  |  C_coeff: 0.2000
+  factor_interior: 125.254s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 128.952s  |  Schur: 5,122 x 5,122 dense (200.2 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (3, 3) factor_transient_system:
+  A_ii: nnz=7.2M  |  A_pp: nnz=6,849
+  C_ii cap nodes: 1498001 / 1498215  |  C_pp cap nodes: 5984 / 5985
+  Total tile cap: 1606008.6 fF  |  C_coeff: 0.2000
+  factor_interior: 233.389s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 241.347s  |  Schur: 5,985 x 5,985 dense (273.3 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (3, 4) factor_transient_system:
+  A_ii: nnz=6.4M  |  A_pp: nnz=6,881
+  C_ii cap nodes: 1336764 / 1336914  |  C_pp cap nodes: 5184 / 5189
+  Total tile cap: 1097236.8 fF  |  C_coeff: 0.2000
+  factor_interior: 185.543s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 191.807s  |  Schur: 5,189 x 5,189 dense (205.4 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (3, 5) factor_transient_system:
+  A_ii: nnz=3.2M  |  A_pp: nnz=3,736
+  C_ii cap nodes: 682509 / 682528  |  C_pp cap nodes: 2873 / 2878
+  Total tile cap: 349165.6 fF  |  C_coeff: 0.2000
+  factor_interior: 65.373s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 66.951s  |  Schur: 2,878 x 2,878 dense (63.2 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (4, 0) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=3,602
+  C_ii cap nodes: 526896 / 526900  |  C_pp cap nodes: 2774 / 2774
+  Total tile cap: 242515.3 fF  |  C_coeff: 0.2000
+  factor_interior: 36.326s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 37.270s  |  Schur: 2,774 x 2,774 dense (58.7 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (4, 1) factor_transient_system:
+  A_ii: nnz=4.9M  |  A_pp: nnz=5,013
+  C_ii cap nodes: 1035071 / 1035281  |  C_pp cap nodes: 4179 / 4179
+  Total tile cap: 1452778.4 fF  |  C_coeff: 0.2000
+  factor_interior: 104.763s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 107.858s  |  Schur: 4,179 x 4,179 dense (133.2 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (4, 2) factor_transient_system:
+  A_ii: nnz=5.8M  |  A_pp: nnz=6,213
+  C_ii cap nodes: 1202396 / 1202512  |  C_pp cap nodes: 4547 / 4547
+  Total tile cap: 1181415.5 fF  |  C_coeff: 0.2000
+  factor_interior: 102.948s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 163.112s  |  Schur: 4,547 x 4,547 dense (157.7 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (4, 3) factor_transient_system:
+  A_ii: nnz=3.0M  |  A_pp: nnz=4,987
+  C_ii cap nodes: 648760 / 648763  |  C_pp cap nodes: 4141 / 4141
+  Total tile cap: 302117.3 fF  |  C_coeff: 0.2000
+  factor_interior: 76.274s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 78.618s  |  Schur: 4,141 x 4,141 dense (130.8 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (4, 4) factor_transient_system:
+  A_ii: nnz=3.5M  |  A_pp: nnz=5,865
+  C_ii cap nodes: 734595 / 734595  |  C_pp cap nodes: 4187 / 4191
+  Total tile cap: 390128.8 fF  |  C_coeff: 0.2000
+  factor_interior: 79.034s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 81.896s  |  Schur: 4,191 x 4,191 dense (134.0 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (4, 5) factor_transient_system:
+  A_ii: nnz=3.5M  |  A_pp: nnz=3,770
+  C_ii cap nodes: 752400 / 752400  |  C_pp cap nodes: 2921 / 2924
+  Total tile cap: 334552.0 fF  |  C_coeff: 0.2000
+  factor_interior: 59.798s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 62.031s  |  Schur: 2,924 x 2,924 dense (65.2 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (5, 0) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=3,443
+  C_ii cap nodes: 542455 / 542465  |  C_pp cap nodes: 2601 / 2601
+  Total tile cap: 252945.8 fF  |  C_coeff: 0.2000
+  factor_interior: 37.567s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 38.696s  |  Schur: 2,601 x 2,601 dense (51.6 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (5, 1) factor_transient_system:
+  A_ii: nnz=4.9M  |  A_pp: nnz=4,745
+  C_ii cap nodes: 1032670 / 1032774  |  C_pp cap nodes: 3891 / 3891
+  Total tile cap: 1426246.5 fF  |  C_coeff: 0.2000
+  factor_interior: 101.029s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 103.183s  |  Schur: 3,891 x 3,891 dense (115.5 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (5, 2) factor_transient_system:
+  A_ii: nnz=3.4M  |  A_pp: nnz=5,472
+  C_ii cap nodes: 733038 / 733049  |  C_pp cap nodes: 3792 / 3792
+  Total tile cap: 475165.1 fF  |  C_coeff: 0.2000
+  factor_interior: 55.950s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 57.942s  |  Schur: 3,792 x 3,792 dense (109.7 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (5, 3) factor_transient_system:
+  A_ii: nnz=2.7M  |  A_pp: nnz=4,187
+  C_ii cap nodes: 582045 / 582048  |  C_pp cap nodes: 3345 / 3345
+  Total tile cap: 175959.3 fF  |  C_coeff: 0.2000
+  factor_interior: 68.316s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 69.729s  |  Schur: 3,345 x 3,345 dense (85.4 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (5, 4) factor_transient_system:
+  A_ii: nnz=2.8M  |  A_pp: nnz=5,044
+  C_ii cap nodes: 598978 / 598978  |  C_pp cap nodes: 3374 / 3378
+  Total tile cap: 214515.0 fF  |  C_coeff: 0.2000
+  factor_interior: 67.753s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 70.386s  |  Schur: 3,378 x 3,378 dense (87.1 MB)
+16:06:54 distributed.result_factorization DEBUG: Tile (5, 5) factor_transient_system:
+  A_ii: nnz=2.8M  |  A_pp: nnz=2,950
+  C_ii cap nodes: 601547 / 601547  |  C_pp cap nodes: 2105 / 2108
+  Total tile cap: 193351.4 fF  |  C_coeff: 0.2000
+  factor_interior: 40.439s  |  backend: cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+  compute_schur: 41.622s  |  Schur: 2,108 x 2,108 dense (33.9 MB)
+16:55:08 distributed.result_factorization INFO: === Distributed DDM Prepare Transient Statistics ===
+16:55:08 distributed.result_factorization INFO: Method: be  |  dt: 5.0 ps  |  C_coeff: 0.2000
+16:55:08 distributed.result_factorization INFO: Tiles: 36
+16:55:08 distributed.result_factorization INFO:   A_ii nnz:         953,835 / 4.0M / 7.8M  (min/mean/max)
+16:55:08 distributed.result_factorization INFO:   A_pp nnz:         1,410 / 4,877 / 7,930
+16:55:08 distributed.result_factorization INFO:   Total cap:        122196 fF / 738521 fF / 2426191 fF  (total: 26586743 fF)
+16:55:08 distributed.result_factorization INFO:   Schur memory:     9.4 MB / 122.7 MB / 343.2 MB  (total: 4.3 GB)
+16:55:08 distributed.result_factorization INFO:   Factor time:      25.580s / 90.847s / 271.319s
+16:55:08 distributed.result_factorization INFO:   Factor backend:   cholmod(partial, mode=simplicial, ordering=default, natural, idx=64-bit)
+16:55:08 distributed.result_factorization INFO:   Factor + Schur wall time: 281.627s
+16:55:08 distributed.result_factorization INFO: Transient interface: 70,734 unknowns, 479.4M nnz (density 9.581%), 5.4 GB
+16:55:08 distributed.result_factorization INFO:   Backend: cholmod(mode=simplicial, ordering=metis, idx=64-bit)
+16:55:08 distributed.result_factorization INFO:   Factor time: 1760.507s
+16:55:08 distributed.result_factorization INFO:   Has capacitance: True
+16:55:08 distributed.result_factorization INFO:   Package C_uu nnz: 0  |  Package G_uu nnz: 3090
+16:55:08 distributed.result_factorization INFO:   Assemble time: 1134.009s
+16:55:08 distributed.result_factorization INFO: === Total Prepare: 3176.143s ===
+16:55:08 distributed.decomposition INFO: Phase 2a: DC solve for shared initial condition
+16:55:10 distributed.solver DEBUG: Tile (0, 0) get_reduced_rhs:
+  time: 0.311s  |  n_currents: 22983  |  rhs_norm: 8.8813
+16:55:10 distributed.solver DEBUG: Tile (0, 1) get_reduced_rhs:
+  time: 0.816s  |  n_currents: 75313  |  rhs_norm: 47.7653
+16:55:10 distributed.solver DEBUG: Tile (0, 2) get_reduced_rhs:
+  time: 0.755s  |  n_currents: 30727  |  rhs_norm: 9.8884
+16:55:10 distributed.solver DEBUG: Tile (0, 3) get_reduced_rhs:
+  time: 0.605s  |  n_currents: 10208  |  rhs_norm: 11.1999
+16:55:10 distributed.solver DEBUG: Tile (0, 4) get_reduced_rhs:
+  time: 0.490s  |  n_currents: 16737  |  rhs_norm: 10.8400
+16:55:10 distributed.solver DEBUG: Tile (0, 5) get_reduced_rhs:
+  time: 0.290s  |  n_currents: 11491  |  rhs_norm: 14.9533
+16:55:10 distributed.solver DEBUG: Tile (1, 0) get_reduced_rhs:
+  time: 0.777s  |  n_currents: 24088  |  rhs_norm: 7.6936
+16:55:10 distributed.solver DEBUG: Tile (1, 1) get_reduced_rhs:
+  time: 0.991s  |  n_currents: 78868  |  rhs_norm: 48.3708
+16:55:10 distributed.solver DEBUG: Tile (1, 2) get_reduced_rhs:
+  time: 0.798s  |  n_currents: 85981  |  rhs_norm: 6.3563
+16:55:10 distributed.solver DEBUG: Tile (1, 3) get_reduced_rhs:
+  time: 0.854s  |  n_currents: 20678  |  rhs_norm: 10.3243
+16:55:10 distributed.solver DEBUG: Tile (1, 4) get_reduced_rhs:
+  time: 0.634s  |  n_currents: 40627  |  rhs_norm: 10.8163
+16:55:10 distributed.solver DEBUG: Tile (1, 5) get_reduced_rhs:
+  time: 0.144s  |  n_currents: 8369  |  rhs_norm: 0.0114
+16:55:10 distributed.solver DEBUG: Tile (2, 0) get_reduced_rhs:
+  time: 0.532s  |  n_currents: 24231  |  rhs_norm: 7.7790
+16:55:10 distributed.solver DEBUG: Tile (2, 1) get_reduced_rhs:
+  time: 0.786s  |  n_currents: 78988  |  rhs_norm: 48.2124
+16:55:10 distributed.solver DEBUG: Tile (2, 2) get_reduced_rhs:
+  time: 1.386s  |  n_currents: 87249  |  rhs_norm: 5.8501
+16:55:10 distributed.solver DEBUG: Tile (2, 3) get_reduced_rhs:
+  time: 0.918s  |  n_currents: 120617  |  rhs_norm: 24.9521
+16:55:10 distributed.solver DEBUG: Tile (2, 4) get_reduced_rhs:
+  time: 0.977s  |  n_currents: 98533  |  rhs_norm: 10.6797
+16:55:10 distributed.solver DEBUG: Tile (2, 5) get_reduced_rhs:
+  time: 0.580s  |  n_currents: 45894  |  rhs_norm: 10.6051
+16:55:10 distributed.solver DEBUG: Tile (3, 0) get_reduced_rhs:
+  time: 0.317s  |  n_currents: 22979  |  rhs_norm: 7.8585
+16:55:10 distributed.solver DEBUG: Tile (3, 1) get_reduced_rhs:
+  time: 0.759s  |  n_currents: 75317  |  rhs_norm: 45.2407
+16:55:10 distributed.solver DEBUG: Tile (3, 2) get_reduced_rhs:
+  time: 0.709s  |  n_currents: 74253  |  rhs_norm: 4.3358
+16:55:10 distributed.solver DEBUG: Tile (3, 3) get_reduced_rhs:
+  time: 0.937s  |  n_currents: 102391  |  rhs_norm: 11.9145
+16:55:10 distributed.solver DEBUG: Tile (3, 4) get_reduced_rhs:
+  time: 1.453s  |  n_currents: 82157  |  rhs_norm: 2.7871
+16:55:10 distributed.solver DEBUG: Tile (3, 5) get_reduced_rhs:
+  time: 0.773s  |  n_currents: 17891  |  rhs_norm: 8.2196
+16:55:10 distributed.solver DEBUG: Tile (4, 0) get_reduced_rhs:
+  time: 0.514s  |  n_currents: 24231  |  rhs_norm: 8.0037
+16:55:10 distributed.solver DEBUG: Tile (4, 1) get_reduced_rhs:
+  time: 0.844s  |  n_currents: 78988  |  rhs_norm: 50.1206
+16:55:10 distributed.solver DEBUG: Tile (4, 2) get_reduced_rhs:
+  time: 1.087s  |  n_currents: 84957  |  rhs_norm: 6.2929
+16:55:10 distributed.solver DEBUG: Tile (4, 3) get_reduced_rhs:
+  time: 0.523s  |  n_currents: 20708  |  rhs_norm: 11.4602
+16:55:10 distributed.solver DEBUG: Tile (4, 4) get_reduced_rhs:
+  time: 0.641s  |  n_currents: 29260  |  rhs_norm: 10.3087
+16:55:10 distributed.solver DEBUG: Tile (4, 5) get_reduced_rhs:
+  time: 0.667s  |  n_currents: 21697  |  rhs_norm: 10.6500
+16:55:10 distributed.solver DEBUG: Tile (5, 0) get_reduced_rhs:
+  time: 0.505s  |  n_currents: 22979  |  rhs_norm: 9.6936
+16:55:10 distributed.solver DEBUG: Tile (5, 1) get_reduced_rhs:
+  time: 0.584s  |  n_currents: 75317  |  rhs_norm: 50.2194
+16:55:10 distributed.solver DEBUG: Tile (5, 2) get_reduced_rhs:
+  time: 0.447s  |  n_currents: 30999  |  rhs_norm: 11.0557
+16:55:10 distributed.solver DEBUG: Tile (5, 3) get_reduced_rhs:
+  time: 0.207s  |  n_currents: 10793  |  rhs_norm: 12.1125
+16:55:10 distributed.solver DEBUG: Tile (5, 4) get_reduced_rhs:
+  time: 0.674s  |  n_currents: 13853  |  rhs_norm: 11.7163
+16:55:10 distributed.solver DEBUG: Tile (5, 5) get_reduced_rhs:
+  time: 0.530s  |  n_currents: 10978  |  rhs_norm: 16.1818
+16:55:23 distributed.solver DEBUG: Tile (0, 0) get_interior_voltages:
+  time: 0.667s  |  n_nodes: 544958  |  v_range: [0.756, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (0, 1) get_interior_voltages:
+  time: 1.058s  |  n_nodes: 1037019  |  v_range: [0.752, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (0, 2) get_interior_voltages:
+  time: 0.862s  |  n_nodes: 735926  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (0, 3) get_interior_voltages:
+  time: 0.615s  |  n_nodes: 583318  |  v_range: [0.756, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (0, 4) get_interior_voltages:
+  time: 0.590s  |  n_nodes: 622229  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (0, 5) get_interior_voltages:
+  time: 0.639s  |  n_nodes: 508550  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (1, 0) get_interior_voltages:
+  time: 0.616s  |  n_nodes: 530302  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (1, 1) get_interior_voltages:
+  time: 1.139s  |  n_nodes: 1039609  |  v_range: [0.753, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (1, 2) get_interior_voltages:
+  time: 1.308s  |  n_nodes: 1205984  |  v_range: [0.754, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (1, 3) get_interior_voltages:
+  time: 1.107s  |  n_nodes: 652748  |  v_range: [0.754, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (1, 4) get_interior_voltages:
+  time: 1.100s  |  n_nodes: 818885  |  v_range: [0.753, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (1, 5) get_interior_voltages:
+  time: 0.195s  |  n_nodes: 202529  |  v_range: [0.759, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (2, 0) get_interior_voltages:
+  time: 0.644s  |  n_nodes: 529686  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (2, 1) get_interior_voltages:
+  time: 1.172s  |  n_nodes: 1039471  |  v_range: [0.753, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (2, 2) get_interior_voltages:
+  time: 1.572s  |  n_nodes: 1369818  |  v_range: [0.751, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (2, 3) get_interior_voltages:
+  time: 1.786s  |  n_nodes: 1632575  |  v_range: [0.749, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (2, 4) get_interior_voltages:
+  time: 1.523s  |  n_nodes: 1429300  |  v_range: [0.754, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (2, 5) get_interior_voltages:
+  time: 1.256s  |  n_nodes: 921690  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (3, 0) get_interior_voltages:
+  time: 0.579s  |  n_nodes: 545217  |  v_range: [0.756, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (3, 1) get_interior_voltages:
+  time: 1.297s  |  n_nodes: 1036819  |  v_range: [0.752, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (3, 2) get_interior_voltages:
+  time: 1.064s  |  n_nodes: 1258257  |  v_range: [0.751, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (3, 3) get_interior_voltages:
+  time: 1.686s  |  n_nodes: 1504200  |  v_range: [0.751, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (3, 4) get_interior_voltages:
+  time: 1.465s  |  n_nodes: 1342103  |  v_range: [0.756, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (3, 5) get_interior_voltages:
+  time: 0.928s  |  n_nodes: 685406  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (4, 0) get_interior_voltages:
+  time: 0.644s  |  n_nodes: 529674  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (4, 1) get_interior_voltages:
+  time: 1.130s  |  n_nodes: 1039460  |  v_range: [0.753, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (4, 2) get_interior_voltages:
+  time: 1.236s  |  n_nodes: 1207059  |  v_range: [0.754, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (4, 3) get_interior_voltages:
+  time: 0.746s  |  n_nodes: 652904  |  v_range: [0.754, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (4, 4) get_interior_voltages:
+  time: 0.834s  |  n_nodes: 738786  |  v_range: [0.754, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (4, 5) get_interior_voltages:
+  time: 0.817s  |  n_nodes: 755324  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (5, 0) get_interior_voltages:
+  time: 0.621s  |  n_nodes: 545066  |  v_range: [0.756, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (5, 1) get_interior_voltages:
+  time: 1.167s  |  n_nodes: 1036665  |  v_range: [0.752, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (5, 2) get_interior_voltages:
+  time: 1.023s  |  n_nodes: 736841  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (5, 3) get_interior_voltages:
+  time: 0.595s  |  n_nodes: 585393  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (5, 4) get_interior_voltages:
+  time: 0.711s  |  n_nodes: 602356  |  v_range: [0.757, 0.760]
+16:55:23 distributed.solver DEBUG: Tile (5, 5) get_interior_voltages:
+  time: 0.631s  |  n_nodes: 603655  |  v_range: [0.757, 0.760]
+16:55:23 distributed.decomposition INFO: Phase 2b: Running initial transient (0.00 ns to 50.00 ns, dt=0.005 ns)
+16:57:09 distributed.solver_td INFO: Step 1/10000 (t=5.000e-12 s): max_drop=0.0193 V, total_I=820.11 mA
+16:58:16 distributed.solver_td INFO: Step 11/10000 (t=5.500e-11 s): max_drop=0.0183 V, total_I=877.48 mA
+16:59:04 distributed.solver_td INFO: Step 21/10000 (t=1.050e-10 s): max_drop=0.0941 V, total_I=887.48 mA
+16:59:56 distributed.solver_td INFO: Step 31/10000 (t=1.550e-10 s): max_drop=0.0222 V, total_I=1389.95 mA
+17:00:42 distributed.solver_td INFO: Step 41/10000 (t=2.050e-10 s): max_drop=0.0353 V, total_I=2503.73 mA
+17:01:33 distributed.solver_td INFO: Step 51/10000 (t=2.550e-10 s): max_drop=0.0337 V, total_I=1856.83 mA
+17:02:24 distributed.solver_td INFO: Step 61/10000 (t=3.050e-10 s): max_drop=0.0285 V, total_I=1666.17 mA
+17:03:23 distributed.solver_td INFO: Step 71/10000 (t=3.550e-10 s): max_drop=0.0492 V, total_I=1166.31 mA
+17:04:05 distributed.solver_td INFO: Step 81/10000 (t=4.050e-10 s): max_drop=0.0461 V, total_I=873.63 mA
+17:04:54 distributed.solver_td INFO: Step 91/10000 (t=4.550e-10 s): max_drop=0.0172 V, total_I=1797.92 mA
+17:05:35 distributed.solver_td INFO: Step 101/10000 (t=5.050e-10 s): max_drop=0.0356 V, total_I=1122.80 mA
+17:06:30 distributed.solver_td INFO: Step 111/10000 (t=5.550e-10 s): max_drop=0.0202 V, total_I=871.36 mA
+17:07:16 distributed.solver_td INFO: Step 121/10000 (t=6.050e-10 s): max_drop=0.0941 V, total_I=872.08 mA
+17:08:02 distributed.solver_td INFO: Step 131/10000 (t=6.550e-10 s): max_drop=0.0222 V, total_I=1333.13 mA
+17:08:44 distributed.solver_td INFO: Step 141/10000 (t=7.050e-10 s): max_drop=0.0382 V, total_I=2445.34 mA
+17:09:26 distributed.solver_td INFO: Step 151/10000 (t=7.550e-10 s): max_drop=0.0331 V, total_I=2307.60 mA
+17:10:10 distributed.solver_td INFO: Step 161/10000 (t=8.050e-10 s): max_drop=0.0253 V, total_I=1752.14 mA
+17:10:54 distributed.solver_td INFO: Step 171/10000 (t=8.550e-10 s): max_drop=0.0863 V, total_I=1152.60 mA
+17:11:37 distributed.solver_td INFO: Step 181/10000 (t=9.050e-10 s): max_drop=0.0379 V, total_I=915.90 mA
+17:12:23 distributed.solver_td INFO: Step 191/10000 (t=9.550e-10 s): max_drop=0.0248 V, total_I=1752.43 mA
+17:13:11 distributed.solver_td INFO: Step 201/10000 (t=1.005e-09 s): max_drop=0.0356 V, total_I=1128.38 mA
+17:13:56 distributed.solver_td INFO: Step 211/10000 (t=1.055e-09 s): max_drop=0.0183 V, total_I=873.79 mA
+17:14:41 distributed.solver_td INFO: Step 221/10000 (t=1.105e-09 s): max_drop=0.0941 V, total_I=879.57 mA
+17:15:24 distributed.solver_td INFO: Step 231/10000 (t=1.155e-09 s): max_drop=0.0222 V, total_I=1382.07 mA
+17:16:08 distributed.solver_td INFO: Step 241/10000 (t=1.205e-09 s): max_drop=0.0382 V, total_I=2500.50 mA
+17:16:49 distributed.solver_td INFO: Step 251/10000 (t=1.255e-09 s): max_drop=0.0342 V, total_I=2381.96 mA
+17:17:44 distributed.solver_td INFO: Step 261/10000 (t=1.305e-09 s): max_drop=0.0288 V, total_I=1905.24 mA
+17:18:23 distributed.solver_td INFO: Step 271/10000 (t=1.355e-09 s): max_drop=0.0521 V, total_I=1250.49 mA
+17:19:18 distributed.solver_td INFO: Step 281/10000 (t=1.405e-09 s): max_drop=0.0503 V, total_I=897.26 mA
+17:20:01 distributed.solver_td INFO: Step 291/10000 (t=1.455e-09 s): max_drop=0.0172 V, total_I=1780.15 mA
+17:20:41 distributed.solver_td INFO: Step 301/10000 (t=1.505e-09 s): max_drop=0.0356 V, total_I=1121.13 mA
+17:21:22 distributed.solver_td INFO: Step 311/10000 (t=1.555e-09 s): max_drop=0.0183 V, total_I=870.07 mA
+17:22:02 distributed.solver_td INFO: Step 321/10000 (t=1.605e-09 s): max_drop=0.0941 V, total_I=868.11 mA
+17:22:42 distributed.solver_td INFO: Step 331/10000 (t=1.655e-09 s): max_drop=0.0222 V, total_I=1361.66 mA
+17:23:29 distributed.solver_td INFO: Step 341/10000 (t=1.705e-09 s): max_drop=0.0383 V, total_I=2546.83 mA
+17:24:28 distributed.solver_td INFO: Step 351/10000 (t=1.755e-09 s): max_drop=0.0282 V, total_I=2504.85 mA
+17:25:09 distributed.solver_td INFO: Step 361/10000 (t=1.805e-09 s): max_drop=0.0373 V, total_I=1955.65 mA
+17:25:54 distributed.solver_td INFO: Step 371/10000 (t=1.855e-09 s): max_drop=0.0867 V, total_I=1279.76 mA
+17:26:36 distributed.solver_td INFO: Step 381/10000 (t=1.905e-09 s): max_drop=0.0380 V, total_I=898.84 mA
+17:27:23 distributed.solver_td INFO: Step 391/10000 (t=1.955e-09 s): max_drop=0.0299 V, total_I=1804.57 mA
+17:28:13 distributed.solver_td INFO: Step 401/10000 (t=2.005e-09 s): max_drop=0.0356 V, total_I=1140.99 mA
+17:28:56 distributed.solver_td INFO: Step 411/10000 (t=2.055e-09 s): max_drop=0.0183 V, total_I=878.55 mA
+17:29:38 distributed.solver_td INFO: Step 421/10000 (t=2.105e-09 s): max_drop=0.0941 V, total_I=888.19 mA
+17:30:18 distributed.solver_td INFO: Step 431/10000 (t=2.155e-09 s): max_drop=0.0222 V, total_I=1387.03 mA
+17:30:59 distributed.solver_td INFO: Step 441/10000 (t=2.205e-09 s): max_drop=0.0383 V, total_I=2592.93 mA
+17:31:41 distributed.solver_td INFO: Step 451/10000 (t=2.255e-09 s): max_drop=0.0342 V, total_I=2452.66 mA
+17:32:22 distributed.solver_td INFO: Step 461/10000 (t=2.305e-09 s): max_drop=0.0290 V, total_I=1947.10 mA
+17:33:02 distributed.solver_td INFO: Step 471/10000 (t=2.355e-09 s): max_drop=0.0518 V, total_I=1258.25 mA
+17:33:47 distributed.solver_td INFO: Step 481/10000 (t=2.405e-09 s): max_drop=0.0462 V, total_I=884.24 mA
+17:34:32 distributed.solver_td INFO: Step 491/10000 (t=2.455e-09 s): max_drop=0.0185 V, total_I=1818.31 mA
+17:35:14 distributed.solver_td INFO: Step 501/10000 (t=2.505e-09 s): max_drop=0.0356 V, total_I=1143.43 mA
+17:35:54 distributed.solver_td INFO: Step 511/10000 (t=2.555e-09 s): max_drop=0.0183 V, total_I=867.17 mA
+17:36:34 distributed.solver_td INFO: Step 521/10000 (t=2.605e-09 s): max_drop=0.0941 V, total_I=867.88 mA
+17:37:18 distributed.solver_td INFO: Step 531/10000 (t=2.655e-09 s): max_drop=0.0222 V, total_I=1334.90 mA
+17:38:04 distributed.solver_td INFO: Step 541/10000 (t=2.705e-09 s): max_drop=0.0383 V, total_I=2494.55 mA
+17:38:48 distributed.solver_td INFO: Step 551/10000 (t=2.755e-09 s): max_drop=0.0282 V, total_I=2432.15 mA
+17:39:34 distributed.solver_td INFO: Step 561/10000 (t=2.805e-09 s): max_drop=0.0263 V, total_I=1921.24 mA
+17:40:48 distributed.solver_td INFO: Step 571/10000 (t=2.855e-09 s): max_drop=0.0864 V, total_I=1269.13 mA
+17:41:53 distributed.solver_td INFO: Step 581/10000 (t=2.905e-09 s): max_drop=0.0586 V, total_I=963.92 mA
+17:42:43 distributed.solver_td INFO: Step 591/10000 (t=2.955e-09 s): max_drop=0.0248 V, total_I=1808.09 mA
+17:43:38 distributed.solver_td INFO: Step 601/10000 (t=3.005e-09 s): max_drop=0.0356 V, total_I=1128.06 mA
+17:45:06 distributed.solver_td INFO: Step 611/10000 (t=3.055e-09 s): max_drop=0.0183 V, total_I=881.20 mA
+17:45:50 distributed.solver_td INFO: Step 621/10000 (t=3.105e-09 s): max_drop=0.0941 V, total_I=893.83 mA
+17:46:35 distributed.solver_td INFO: Step 631/10000 (t=3.155e-09 s): max_drop=0.0222 V, total_I=1378.92 mA
+17:47:18 distributed.solver_td INFO: Step 641/10000 (t=3.205e-09 s): max_drop=0.0383 V, total_I=2621.18 mA
+17:48:03 distributed.solver_td INFO: Step 651/10000 (t=3.255e-09 s): max_drop=0.0343 V, total_I=2497.76 mA
+17:48:46 distributed.solver_td INFO: Step 661/10000 (t=3.305e-09 s): max_drop=0.0292 V, total_I=1964.01 mA
+17:49:42 distributed.solver_td INFO: Step 671/10000 (t=3.355e-09 s): max_drop=0.0519 V, total_I=1284.47 mA
+17:50:24 distributed.solver_td INFO: Step 681/10000 (t=3.405e-09 s): max_drop=0.0462 V, total_I=925.67 mA
+17:51:06 distributed.solver_td INFO: Step 691/10000 (t=3.455e-09 s): max_drop=0.0176 V, total_I=1827.72 mA
+17:51:47 distributed.solver_td INFO: Step 701/10000 (t=3.505e-09 s): max_drop=0.0356 V, total_I=1128.62 mA
+17:52:32 distributed.solver_td INFO: Step 711/10000 (t=3.555e-09 s): max_drop=0.0183 V, total_I=869.63 mA
+17:53:13 distributed.solver_td INFO: Step 721/10000 (t=3.605e-09 s): max_drop=0.0941 V, total_I=867.44 mA
+17:53:54 distributed.solver_td INFO: Step 731/10000 (t=3.655e-09 s): max_drop=0.0222 V, total_I=1333.63 mA
+17:54:33 distributed.solver_td INFO: Step 741/10000 (t=3.705e-09 s): max_drop=0.0383 V, total_I=2517.58 mA
+17:55:18 distributed.solver_td INFO: Step 751/10000 (t=3.755e-09 s): max_drop=0.0282 V, total_I=2454.56 mA
+17:56:00 distributed.solver_td INFO: Step 761/10000 (t=3.805e-09 s): max_drop=0.0380 V, total_I=1921.37 mA
+17:56:59 distributed.solver_td INFO: Step 771/10000 (t=3.855e-09 s): max_drop=0.0863 V, total_I=1239.12 mA
+17:58:00 distributed.solver_td INFO: Step 781/10000 (t=3.905e-09 s): max_drop=0.0379 V, total_I=898.37 mA
+17:58:49 distributed.solver_td INFO: Step 791/10000 (t=3.955e-09 s): max_drop=0.0248 V, total_I=1815.46 mA
+17:59:44 distributed.solver_td INFO: Step 801/10000 (t=4.005e-09 s): max_drop=0.0356 V, total_I=1149.47 mA
+18:00:27 distributed.solver_td INFO: Step 811/10000 (t=4.055e-09 s): max_drop=0.0183 V, total_I=884.56 mA
+18:01:26 distributed.solver_td INFO: Step 821/10000 (t=4.105e-09 s): max_drop=0.0941 V, total_I=890.34 mA
+18:02:09 distributed.solver_td INFO: Step 831/10000 (t=4.155e-09 s): max_drop=0.0222 V, total_I=1409.65 mA
+18:02:56 distributed.solver_td INFO: Step 841/10000 (t=4.205e-09 s): max_drop=0.0383 V, total_I=2653.23 mA
+18:03:46 distributed.solver_td INFO: Step 851/10000 (t=4.255e-09 s): max_drop=0.0347 V, total_I=2557.32 mA
+18:04:37 distributed.solver_td INFO: Step 861/10000 (t=4.305e-09 s): max_drop=0.0291 V, total_I=2020.89 mA
+18:05:17 distributed.solver_td INFO: Step 871/10000 (t=4.355e-09 s): max_drop=0.0519 V, total_I=1320.57 mA
+18:06:29 distributed.solver_td INFO: Step 881/10000 (t=4.405e-09 s): max_drop=0.0462 V, total_I=909.73 mA
+18:07:11 distributed.solver_td INFO: Step 891/10000 (t=4.455e-09 s): max_drop=0.0172 V, total_I=1820.67 mA
+18:07:51 distributed.solver_td INFO: Step 901/10000 (t=4.505e-09 s): max_drop=0.0356 V, total_I=1136.00 mA
+18:08:33 distributed.solver_td INFO: Step 911/10000 (t=4.555e-09 s): max_drop=0.0183 V, total_I=867.79 mA
+18:09:15 distributed.solver_td INFO: Step 921/10000 (t=4.605e-09 s): max_drop=0.0941 V, total_I=867.45 mA
+18:09:59 distributed.solver_td INFO: Step 931/10000 (t=4.655e-09 s): max_drop=0.0222 V, total_I=1337.57 mA
+18:10:47 distributed.solver_td INFO: Step 941/10000 (t=4.705e-09 s): max_drop=0.0383 V, total_I=2554.28 mA
+18:11:29 distributed.solver_td INFO: Step 951/10000 (t=4.755e-09 s): max_drop=0.0282 V, total_I=2505.54 mA
+18:12:25 distributed.solver_td INFO: Step 961/10000 (t=4.805e-09 s): max_drop=0.0266 V, total_I=2010.05 mA
+18:13:17 distributed.solver_td INFO: Step 971/10000 (t=4.855e-09 s): max_drop=0.0865 V, total_I=1319.39 mA
+18:14:01 distributed.solver_td INFO: Step 981/10000 (t=4.905e-09 s): max_drop=0.0587 V, total_I=975.61 mA
+18:14:47 distributed.solver_td INFO: Step 991/10000 (t=4.955e-09 s): max_drop=0.0248 V, total_I=1851.07 mA
+18:15:37 distributed.solver_td INFO: Step 1001/10000 (t=5.005e-09 s): max_drop=0.0356 V, total_I=1142.43 mA
+18:16:25 distributed.solver_td INFO: Step 1011/10000 (t=5.055e-09 s): max_drop=0.0183 V, total_I=873.66 mA
+18:17:07 distributed.solver_td INFO: Step 1021/10000 (t=5.105e-09 s): max_drop=0.0941 V, total_I=876.88 mA
+18:17:50 distributed.solver_td INFO: Step 1031/10000 (t=5.155e-09 s): max_drop=0.0222 V, total_I=1375.43 mA
+18:18:33 distributed.solver_td INFO: Step 1041/10000 (t=5.205e-09 s): max_drop=0.0383 V, total_I=2653.87 mA
+18:19:26 distributed.solver_td INFO: Step 1051/10000 (t=5.255e-09 s): max_drop=0.0347 V, total_I=2531.57 mA
+18:20:12 distributed.solver_td INFO: Step 1061/10000 (t=5.305e-09 s): max_drop=0.0293 V, total_I=1988.54 mA
+18:20:54 distributed.solver_td INFO: Step 1071/10000 (t=5.355e-09 s): max_drop=0.0519 V, total_I=1250.44 mA
+18:21:37 distributed.solver_td INFO: Step 1081/10000 (t=5.405e-09 s): max_drop=0.0462 V, total_I=903.46 mA
+18:22:23 distributed.solver_td INFO: Step 1091/10000 (t=5.455e-09 s): max_drop=0.0172 V, total_I=1812.61 mA
+18:23:03 distributed.solver_td INFO: Step 1101/10000 (t=5.505e-09 s): max_drop=0.0356 V, total_I=1148.39 mA
+18:23:51 distributed.solver_td INFO: Step 1111/10000 (t=5.555e-09 s): max_drop=0.0183 V, total_I=871.88 mA
+18:24:45 distributed.solver_td INFO: Step 1121/10000 (t=5.605e-09 s): max_drop=0.0941 V, total_I=870.85 mA
+18:25:29 distributed.solver_td INFO: Step 1131/10000 (t=5.655e-09 s): max_drop=0.0222 V, total_I=1353.66 mA
+18:26:11 distributed.solver_td INFO: Step 1141/10000 (t=5.705e-09 s): max_drop=0.0383 V, total_I=2559.14 mA
+18:26:51 distributed.solver_td INFO: Step 1151/10000 (t=5.755e-09 s): max_drop=0.0282 V, total_I=2479.84 mA
+18:27:36 distributed.solver_td INFO: Step 1161/10000 (t=5.805e-09 s): max_drop=0.0263 V, total_I=1918.83 mA
+18:28:18 distributed.solver_td INFO: Step 1171/10000 (t=5.855e-09 s): max_drop=0.0844 V, total_I=1265.01 mA
+18:28:58 distributed.solver_td INFO: Step 1181/10000 (t=5.905e-09 s): max_drop=0.0379 V, total_I=925.35 mA
+18:29:53 distributed.solver_td INFO: Step 1191/10000 (t=5.955e-09 s): max_drop=0.0248 V, total_I=1817.74 mA
+18:30:36 distributed.solver_td INFO: Step 1201/10000 (t=6.005e-09 s): max_drop=0.0356 V, total_I=1136.26 mA
+18:31:23 distributed.solver_td INFO: Step 1211/10000 (t=6.055e-09 s): max_drop=0.0203 V, total_I=880.65 mA
+18:32:10 distributed.solver_td INFO: Step 1221/10000 (t=6.105e-09 s): max_drop=0.0941 V, total_I=886.74 mA
+18:32:51 distributed.solver_td INFO: Step 1231/10000 (t=6.155e-09 s): max_drop=0.0222 V, total_I=1362.21 mA
+18:33:33 distributed.solver_td INFO: Step 1241/10000 (t=6.205e-09 s): max_drop=0.0383 V, total_I=2619.32 mA
+18:34:18 distributed.solver_td INFO: Step 1251/10000 (t=6.255e-09 s): max_drop=0.0341 V, total_I=2430.00 mA
+18:35:08 distributed.solver_td INFO: Step 1261/10000 (t=6.305e-09 s): max_drop=0.0372 V, total_I=1898.67 mA
+18:36:03 distributed.solver_td INFO: Step 1271/10000 (t=6.355e-09 s): max_drop=0.0509 V, total_I=1220.52 mA
+18:36:46 distributed.solver_td INFO: Step 1281/10000 (t=6.405e-09 s): max_drop=0.0336 V, total_I=875.46 mA
+18:37:31 distributed.solver_td INFO: Step 1291/10000 (t=6.455e-09 s): max_drop=0.0267 V, total_I=1819.55 mA
+18:38:12 distributed.solver_td INFO: Step 1301/10000 (t=6.505e-09 s): max_drop=0.0186 V, total_I=1135.99 mA
+18:39:06 distributed.solver_td INFO: Step 1311/10000 (t=6.555e-09 s): max_drop=0.0712 V, total_I=884.55 mA
+18:39:47 distributed.solver_td INFO: Step 1321/10000 (t=6.605e-09 s): max_drop=0.0912 V, total_I=870.03 mA
+18:40:27 distributed.solver_td INFO: Step 1331/10000 (t=6.655e-09 s): max_drop=0.0343 V, total_I=1737.62 mA
+18:41:16 distributed.solver_td INFO: Step 1341/10000 (t=6.705e-09 s): max_drop=0.0342 V, total_I=2189.00 mA
+18:42:13 distributed.solver_td INFO: Step 1351/10000 (t=6.755e-09 s): max_drop=0.0335 V, total_I=2254.32 mA
+18:43:02 distributed.solver_td INFO: Step 1361/10000 (t=6.805e-09 s): max_drop=0.0310 V, total_I=1728.30 mA
+18:43:54 distributed.solver_td INFO: Step 1371/10000 (t=6.855e-09 s): max_drop=0.0610 V, total_I=1218.57 mA
+18:44:37 distributed.solver_td INFO: Step 1381/10000 (t=6.905e-09 s): max_drop=0.0384 V, total_I=991.33 mA
+18:45:22 distributed.solver_td INFO: Step 1391/10000 (t=6.955e-09 s): max_drop=0.0828 V, total_I=1817.23 mA
+18:46:01 distributed.solver_td INFO: Step 1401/10000 (t=7.005e-09 s): max_drop=0.0191 V, total_I=1145.94 mA
+18:46:46 distributed.solver_td INFO: Step 1411/10000 (t=7.055e-09 s): max_drop=0.0711 V, total_I=798.14 mA
+18:47:30 distributed.solver_td INFO: Step 1421/10000 (t=7.105e-09 s): max_drop=0.0912 V, total_I=882.50 mA
+18:48:14 distributed.solver_td INFO: Step 1431/10000 (t=7.155e-09 s): max_drop=0.0343 V, total_I=1823.31 mA
+18:48:54 distributed.solver_td INFO: Step 1441/10000 (t=7.205e-09 s): max_drop=0.0297 V, total_I=2276.80 mA
+18:49:35 distributed.solver_td INFO: Step 1451/10000 (t=7.255e-09 s): max_drop=0.0305 V, total_I=2265.12 mA
+18:50:16 distributed.solver_td INFO: Step 1461/10000 (t=7.305e-09 s): max_drop=0.0322 V, total_I=1588.07 mA
+18:51:06 distributed.solver_td INFO: Step 1471/10000 (t=7.355e-09 s): max_drop=0.0415 V, total_I=1058.15 mA
+18:51:46 distributed.solver_td INFO: Step 1481/10000 (t=7.405e-09 s): max_drop=0.0336 V, total_I=922.22 mA
+18:52:31 distributed.solver_td INFO: Step 1491/10000 (t=7.455e-09 s): max_drop=0.0267 V, total_I=1826.91 mA
+18:53:16 distributed.solver_td INFO: Step 1501/10000 (t=7.505e-09 s): max_drop=0.0186 V, total_I=1142.56 mA
+18:54:00 distributed.solver_td INFO: Step 1511/10000 (t=7.555e-09 s): max_drop=0.0711 V, total_I=791.97 mA
+18:54:50 distributed.solver_td INFO: Step 1521/10000 (t=7.605e-09 s): max_drop=0.0912 V, total_I=869.23 mA
+18:55:40 distributed.solver_td INFO: Step 1531/10000 (t=7.655e-09 s): max_drop=0.0343 V, total_I=1734.58 mA
+18:56:21 distributed.solver_td INFO: Step 1541/10000 (t=7.705e-09 s): max_drop=0.0456 V, total_I=2266.26 mA
+18:57:11 distributed.solver_td INFO: Step 1551/10000 (t=7.755e-09 s): max_drop=0.0333 V, total_I=2285.16 mA
+18:58:30 distributed.solver_td INFO: Step 1561/10000 (t=7.805e-09 s): max_drop=0.0250 V, total_I=1627.79 mA
+18:59:51 distributed.solver_td INFO: Step 1571/10000 (t=7.855e-09 s): max_drop=0.0520 V, total_I=1086.93 mA
+19:01:22 distributed.solver_td INFO: Step 1581/10000 (t=7.905e-09 s): max_drop=0.0586 V, total_I=928.77 mA
+19:02:45 distributed.solver_td INFO: Step 1591/10000 (t=7.955e-09 s): max_drop=0.0829 V, total_I=1789.23 mA
+19:04:15 distributed.solver_td INFO: Step 1601/10000 (t=8.005e-09 s): max_drop=0.0939 V, total_I=1143.50 mA
+19:05:28 distributed.solver_td INFO: Step 1611/10000 (t=8.055e-09 s): max_drop=0.0711 V, total_I=801.70 mA
+19:06:38 distributed.solver_td INFO: Step 1621/10000 (t=8.105e-09 s): max_drop=0.0912 V, total_I=889.01 mA
+19:07:44 distributed.solver_td INFO: Step 1631/10000 (t=8.155e-09 s): max_drop=0.0343 V, total_I=1844.36 mA
+19:08:50 distributed.solver_td INFO: Step 1641/10000 (t=8.205e-09 s): max_drop=0.0344 V, total_I=2412.41 mA
+19:10:13 distributed.solver_td INFO: Step 1651/10000 (t=8.255e-09 s): max_drop=0.0305 V, total_I=2470.10 mA
+19:11:28 distributed.solver_td INFO: Step 1661/10000 (t=8.305e-09 s): max_drop=0.0308 V, total_I=1771.55 mA
+19:12:58 distributed.solver_td INFO: Step 1671/10000 (t=8.355e-09 s): max_drop=0.0400 V, total_I=1159.63 mA
+19:14:18 distributed.solver_td INFO: Step 1681/10000 (t=8.405e-09 s): max_drop=0.0302 V, total_I=923.32 mA
+19:15:26 distributed.solver_td INFO: Step 1691/10000 (t=8.455e-09 s): max_drop=0.0267 V, total_I=1858.56 mA
+19:16:40 distributed.solver_td INFO: Step 1701/10000 (t=8.505e-09 s): max_drop=0.0187 V, total_I=1156.18 mA
+19:17:45 distributed.solver_td INFO: Step 1711/10000 (t=8.555e-09 s): max_drop=0.0711 V, total_I=810.81 mA
+19:18:47 distributed.solver_td INFO: Step 1721/10000 (t=8.605e-09 s): max_drop=0.0912 V, total_I=869.53 mA
+19:19:56 distributed.solver_td INFO: Step 1731/10000 (t=8.655e-09 s): max_drop=0.0343 V, total_I=1755.36 mA
+19:21:14 distributed.solver_td INFO: Step 1741/10000 (t=8.705e-09 s): max_drop=0.0457 V, total_I=2355.87 mA
+19:22:41 distributed.solver_td INFO: Step 1751/10000 (t=8.755e-09 s): max_drop=0.0339 V, total_I=2499.30 mA
+19:24:01 distributed.solver_td INFO: Step 1761/10000 (t=8.805e-09 s): max_drop=0.0358 V, total_I=1841.51 mA
+19:25:20 distributed.solver_td INFO: Step 1771/10000 (t=8.855e-09 s): max_drop=0.0524 V, total_I=1217.93 mA
+19:26:57 distributed.solver_td INFO: Step 1781/10000 (t=8.905e-09 s): max_drop=0.0337 V, total_I=978.45 mA
+19:28:32 distributed.solver_td INFO: Step 1791/10000 (t=8.955e-09 s): max_drop=0.0828 V, total_I=1874.03 mA
+19:30:02 distributed.solver_td INFO: Step 1801/10000 (t=9.005e-09 s): max_drop=0.0191 V, total_I=1138.38 mA
+19:31:33 distributed.solver_td INFO: Step 1811/10000 (t=9.055e-09 s): max_drop=0.0711 V, total_I=800.45 mA
+19:33:10 distributed.solver_td INFO: Step 1821/10000 (t=9.105e-09 s): max_drop=0.0912 V, total_I=888.43 mA
+19:34:41 distributed.solver_td INFO: Step 1831/10000 (t=9.155e-09 s): max_drop=0.0343 V, total_I=1835.78 mA
+19:36:09 distributed.solver_td INFO: Step 1841/10000 (t=9.205e-09 s): max_drop=0.0344 V, total_I=2434.03 mA
+19:37:47 distributed.solver_td INFO: Step 1851/10000 (t=9.255e-09 s): max_drop=0.0306 V, total_I=2490.84 mA
+19:39:42 distributed.solver_td INFO: Step 1861/10000 (t=9.305e-09 s): max_drop=0.0315 V, total_I=1752.30 mA
+19:40:54 distributed.solver_td INFO: Step 1871/10000 (t=9.355e-09 s): max_drop=0.0400 V, total_I=1148.16 mA
+19:42:25 distributed.solver_td INFO: Step 1881/10000 (t=9.405e-09 s): max_drop=0.0303 V, total_I=949.75 mA
+19:43:52 distributed.solver_td INFO: Step 1891/10000 (t=9.455e-09 s): max_drop=0.0267 V, total_I=1868.49 mA
+19:45:27 distributed.solver_td INFO: Step 1901/10000 (t=9.505e-09 s): max_drop=0.0186 V, total_I=1140.64 mA
+19:46:51 distributed.solver_td INFO: Step 1911/10000 (t=9.555e-09 s): max_drop=0.0711 V, total_I=791.26 mA
+19:48:00 distributed.solver_td INFO: Step 1921/10000 (t=9.605e-09 s): max_drop=0.0912 V, total_I=866.22 mA
+19:49:19 distributed.solver_td INFO: Step 1931/10000 (t=9.655e-09 s): max_drop=0.0343 V, total_I=1755.89 mA
+19:50:50 distributed.solver_td INFO: Step 1941/10000 (t=9.705e-09 s): max_drop=0.0457 V, total_I=2320.19 mA
+19:52:05 distributed.solver_td INFO: Step 1951/10000 (t=9.755e-09 s): max_drop=0.0337 V, total_I=2369.95 mA
+19:53:28 distributed.solver_td INFO: Step 1961/10000 (t=9.805e-09 s): max_drop=0.0334 V, total_I=1804.44 mA
+19:54:55 distributed.solver_td INFO: Step 1971/10000 (t=9.855e-09 s): max_drop=0.0522 V, total_I=1195.64 mA
+19:56:16 distributed.solver_td INFO: Step 1981/10000 (t=9.905e-09 s): max_drop=0.0297 V, total_I=952.86 mA
+19:57:31 distributed.solver_td INFO: Step 1991/10000 (t=9.955e-09 s): max_drop=0.0829 V, total_I=1899.09 mA
+19:58:47 distributed.solver_td INFO: Step 2001/10000 (t=1.001e-08 s): max_drop=0.0940 V, total_I=1137.33 mA
+19:59:29 distributed.solver_td INFO: Step 2011/10000 (t=1.005e-08 s): max_drop=0.0713 V, total_I=801.77 mA
+20:00:27 distributed.solver_td INFO: Step 2021/10000 (t=1.011e-08 s): max_drop=0.0911 V, total_I=889.43 mA
+20:01:11 distributed.solver_td INFO: Step 2031/10000 (t=1.016e-08 s): max_drop=0.0343 V, total_I=1840.49 mA
+20:01:55 distributed.solver_td INFO: Step 2041/10000 (t=1.020e-08 s): max_drop=0.0344 V, total_I=2428.64 mA
+20:02:37 distributed.solver_td INFO: Step 2051/10000 (t=1.025e-08 s): max_drop=0.0305 V, total_I=2506.27 mA
+20:03:27 distributed.solver_td INFO: Step 2061/10000 (t=1.031e-08 s): max_drop=0.0312 V, total_I=1781.74 mA
+20:04:27 distributed.solver_td INFO: Step 2071/10000 (t=1.036e-08 s): max_drop=0.0427 V, total_I=1167.78 mA
+20:05:28 distributed.solver_td INFO: Step 2081/10000 (t=1.040e-08 s): max_drop=0.0302 V, total_I=924.57 mA
+20:06:27 distributed.solver_td INFO: Step 2091/10000 (t=1.045e-08 s): max_drop=0.0269 V, total_I=1851.60 mA
+20:07:35 distributed.solver_td INFO: Step 2101/10000 (t=1.051e-08 s): max_drop=0.0186 V, total_I=1136.96 mA
+20:08:20 distributed.solver_td INFO: Step 2111/10000 (t=1.056e-08 s): max_drop=0.0713 V, total_I=794.51 mA
+20:09:06 distributed.solver_td INFO: Step 2121/10000 (t=1.060e-08 s): max_drop=0.0911 V, total_I=871.02 mA
+20:09:51 distributed.solver_td INFO: Step 2131/10000 (t=1.066e-08 s): max_drop=0.0343 V, total_I=1761.78 mA
+20:10:34 distributed.solver_td INFO: Step 2141/10000 (t=1.071e-08 s): max_drop=0.0456 V, total_I=2300.98 mA
+20:11:18 distributed.solver_td INFO: Step 2151/10000 (t=1.075e-08 s): max_drop=0.0337 V, total_I=2449.25 mA
+20:12:02 distributed.solver_td INFO: Step 2161/10000 (t=1.080e-08 s): max_drop=0.0354 V, total_I=1826.85 mA
+20:12:48 distributed.solver_td INFO: Step 2171/10000 (t=1.086e-08 s): max_drop=0.0521 V, total_I=1175.21 mA
+20:13:32 distributed.solver_td INFO: Step 2181/10000 (t=1.091e-08 s): max_drop=0.0325 V, total_I=922.26 mA
+20:14:15 distributed.solver_td INFO: Step 2191/10000 (t=1.095e-08 s): max_drop=0.0828 V, total_I=1826.35 mA
+20:14:59 distributed.solver_td INFO: Step 2201/10000 (t=1.100e-08 s): max_drop=0.0235 V, total_I=1138.29 mA
+20:15:43 distributed.solver_td INFO: Step 2211/10000 (t=1.106e-08 s): max_drop=0.0713 V, total_I=798.76 mA
+20:16:26 distributed.solver_td INFO: Step 2221/10000 (t=1.111e-08 s): max_drop=0.0911 V, total_I=883.53 mA
+20:17:09 distributed.solver_td INFO: Step 2231/10000 (t=1.115e-08 s): max_drop=0.0343 V, total_I=1824.38 mA
+20:17:54 distributed.solver_td INFO: Step 2241/10000 (t=1.121e-08 s): max_drop=0.0344 V, total_I=2412.30 mA
+20:18:38 distributed.solver_td INFO: Step 2251/10000 (t=1.126e-08 s): max_drop=0.0305 V, total_I=2469.29 mA
+20:19:25 distributed.solver_td INFO: Step 2261/10000 (t=1.130e-08 s): max_drop=0.0310 V, total_I=1809.64 mA
+20:20:08 distributed.solver_td INFO: Step 2271/10000 (t=1.135e-08 s): max_drop=0.0487 V, total_I=1176.20 mA
+20:20:56 distributed.solver_td INFO: Step 2281/10000 (t=1.141e-08 s): max_drop=0.0303 V, total_I=951.10 mA
+20:21:39 distributed.solver_td INFO: Step 2291/10000 (t=1.146e-08 s): max_drop=0.0269 V, total_I=1836.33 mA
+20:22:24 distributed.solver_td INFO: Step 2301/10000 (t=1.150e-08 s): max_drop=0.0186 V, total_I=1144.59 mA
+20:23:11 distributed.solver_td INFO: Step 2311/10000 (t=1.155e-08 s): max_drop=0.0713 V, total_I=793.58 mA
+20:23:58 distributed.solver_td INFO: Step 2321/10000 (t=1.161e-08 s): max_drop=0.0911 V, total_I=886.83 mA
+20:25:02 distributed.solver_td INFO: Step 2331/10000 (t=1.166e-08 s): max_drop=0.0343 V, total_I=1751.90 mA
+20:26:39 distributed.solver_td INFO: Step 2341/10000 (t=1.170e-08 s): max_drop=0.0457 V, total_I=2292.81 mA
+20:27:46 distributed.solver_td INFO: Step 2351/10000 (t=1.176e-08 s): max_drop=0.0336 V, total_I=2424.04 mA
+20:29:07 distributed.solver_td INFO: Step 2361/10000 (t=1.181e-08 s): max_drop=0.0329 V, total_I=1819.55 mA
+20:30:50 distributed.solver_td INFO: Step 2371/10000 (t=1.185e-08 s): max_drop=0.0523 V, total_I=1224.70 mA
+20:32:17 distributed.solver_td INFO: Step 2381/10000 (t=1.190e-08 s): max_drop=0.0508 V, total_I=975.49 mA
+20:33:39 distributed.solver_td INFO: Step 2391/10000 (t=1.196e-08 s): max_drop=0.0829 V, total_I=1858.31 mA
+20:34:23 distributed.solver_td INFO: Step 2401/10000 (t=1.201e-08 s): max_drop=0.0940 V, total_I=1144.14 mA
+20:35:04 distributed.solver_td INFO: Step 2411/10000 (t=1.205e-08 s): max_drop=0.0713 V, total_I=803.23 mA
+20:35:46 distributed.solver_td INFO: Step 2421/10000 (t=1.210e-08 s): max_drop=0.0911 V, total_I=893.89 mA
+20:36:28 distributed.solver_td INFO: Step 2431/10000 (t=1.216e-08 s): max_drop=0.0343 V, total_I=1827.14 mA
+20:37:10 distributed.solver_td INFO: Step 2441/10000 (t=1.221e-08 s): max_drop=0.0344 V, total_I=2423.83 mA
+20:37:51 distributed.solver_td INFO: Step 2451/10000 (t=1.225e-08 s): max_drop=0.0305 V, total_I=2451.14 mA
+20:38:33 distributed.solver_td INFO: Step 2461/10000 (t=1.231e-08 s): max_drop=0.0309 V, total_I=1740.37 mA
+20:39:14 distributed.solver_td INFO: Step 2471/10000 (t=1.236e-08 s): max_drop=0.0388 V, total_I=1111.44 mA
+20:39:56 distributed.solver_td INFO: Step 2481/10000 (t=1.240e-08 s): max_drop=0.0239 V, total_I=917.82 mA
+20:40:37 distributed.solver_td INFO: Step 2491/10000 (t=1.245e-08 s): max_drop=0.0269 V, total_I=1854.48 mA
+20:41:18 distributed.solver_td INFO: Step 2501/10000 (t=1.251e-08 s): max_drop=0.0186 V, total_I=1130.77 mA
+20:42:01 distributed.solver_td INFO: Step 2511/10000 (t=1.256e-08 s): max_drop=0.0713 V, total_I=791.64 mA
+20:42:44 distributed.solver_td INFO: Step 2521/10000 (t=1.260e-08 s): max_drop=0.0911 V, total_I=864.55 mA
+20:43:26 distributed.solver_td INFO: Step 2531/10000 (t=1.265e-08 s): max_drop=0.0343 V, total_I=1742.96 mA
+20:44:10 distributed.solver_td INFO: Step 2541/10000 (t=1.271e-08 s): max_drop=0.0452 V, total_I=2309.96 mA
+20:44:53 distributed.solver_td INFO: Step 2551/10000 (t=1.276e-08 s): max_drop=0.0670 V, total_I=2403.37 mA
+20:45:35 distributed.solver_td INFO: Step 2561/10000 (t=1.280e-08 s): max_drop=0.0307 V, total_I=1757.56 mA
+20:46:16 distributed.solver_td INFO: Step 2571/10000 (t=1.285e-08 s): max_drop=0.0516 V, total_I=1136.43 mA
+20:46:57 distributed.solver_td INFO: Step 2581/10000 (t=1.291e-08 s): max_drop=0.0322 V, total_I=972.85 mA
+20:47:38 distributed.solver_td INFO: Step 2591/10000 (t=1.295e-08 s): max_drop=0.0828 V, total_I=1841.36 mA
+20:48:19 distributed.solver_td INFO: Step 2601/10000 (t=1.300e-08 s): max_drop=0.0192 V, total_I=1152.45 mA
+20:49:00 distributed.solver_td INFO: Step 2611/10000 (t=1.306e-08 s): max_drop=0.0713 V, total_I=799.12 mA
+20:49:40 distributed.solver_td INFO: Step 2621/10000 (t=1.311e-08 s): max_drop=0.0911 V, total_I=888.51 mA
+20:50:21 distributed.solver_td INFO: Step 2631/10000 (t=1.315e-08 s): max_drop=0.0343 V, total_I=1791.10 mA
+20:51:04 distributed.solver_td INFO: Step 2641/10000 (t=1.320e-08 s): max_drop=0.0297 V, total_I=2314.80 mA
+20:51:46 distributed.solver_td INFO: Step 2651/10000 (t=1.326e-08 s): max_drop=0.0329 V, total_I=2336.31 mA
+20:52:27 distributed.solver_td INFO: Step 2661/10000 (t=1.331e-08 s): max_drop=0.0310 V, total_I=1709.98 mA
+20:53:08 distributed.solver_td INFO: Step 2671/10000 (t=1.335e-08 s): max_drop=0.0497 V, total_I=1162.31 mA
+20:53:51 distributed.solver_td INFO: Step 2681/10000 (t=1.340e-08 s): max_drop=0.0498 V, total_I=911.63 mA
+20:54:31 distributed.solver_td INFO: Step 2691/10000 (t=1.346e-08 s): max_drop=0.0269 V, total_I=1818.06 mA
+20:55:12 distributed.solver_td INFO: Step 2701/10000 (t=1.350e-08 s): max_drop=0.0186 V, total_I=1132.52 mA
+20:55:55 distributed.solver_td INFO: Step 2711/10000 (t=1.355e-08 s): max_drop=0.0713 V, total_I=792.26 mA
+20:56:36 distributed.solver_td INFO: Step 2721/10000 (t=1.361e-08 s): max_drop=0.0911 V, total_I=869.58 mA
+20:57:16 distributed.solver_td INFO: Step 2731/10000 (t=1.366e-08 s): max_drop=0.0343 V, total_I=1741.36 mA
+20:57:56 distributed.solver_td INFO: Step 2741/10000 (t=1.370e-08 s): max_drop=0.0343 V, total_I=2202.04 mA
+20:58:36 distributed.solver_td INFO: Step 2751/10000 (t=1.375e-08 s): max_drop=0.0333 V, total_I=2229.72 mA
+20:59:18 distributed.solver_td INFO: Step 2761/10000 (t=1.381e-08 s): max_drop=0.0289 V, total_I=1610.97 mA
+20:59:59 distributed.solver_td INFO: Step 2771/10000 (t=1.386e-08 s): max_drop=0.0717 V, total_I=1138.32 mA
+21:00:40 distributed.solver_td INFO: Step 2781/10000 (t=1.390e-08 s): max_drop=0.0383 V, total_I=975.48 mA
+21:01:21 distributed.solver_td INFO: Step 2791/10000 (t=1.395e-08 s): max_drop=0.0829 V, total_I=1834.97 mA
+21:02:01 distributed.solver_td INFO: Step 2801/10000 (t=1.401e-08 s): max_drop=0.0940 V, total_I=1169.12 mA
+21:02:43 distributed.solver_td INFO: Step 2811/10000 (t=1.405e-08 s): max_drop=0.0713 V, total_I=809.16 mA
+21:03:27 distributed.solver_td INFO: Step 2821/10000 (t=1.410e-08 s): max_drop=0.0911 V, total_I=908.83 mA
+21:04:07 distributed.solver_td INFO: Step 2831/10000 (t=1.416e-08 s): max_drop=0.0343 V, total_I=1832.59 mA
+21:04:48 distributed.solver_td INFO: Step 2841/10000 (t=1.421e-08 s): max_drop=0.0456 V, total_I=2234.77 mA
+21:05:29 distributed.solver_td INFO: Step 2851/10000 (t=1.425e-08 s): max_drop=0.0332 V, total_I=2221.29 mA
+21:06:10 distributed.solver_td INFO: Step 2861/10000 (t=1.430e-08 s): max_drop=0.0318 V, total_I=1619.60 mA
+21:06:51 distributed.solver_td INFO: Step 2871/10000 (t=1.436e-08 s): max_drop=0.0497 V, total_I=1080.96 mA
+21:07:32 distributed.solver_td INFO: Step 2881/10000 (t=1.441e-08 s): max_drop=0.0337 V, total_I=920.43 mA
+21:08:12 distributed.solver_td INFO: Step 2891/10000 (t=1.445e-08 s): max_drop=0.0269 V, total_I=1784.17 mA
+21:08:53 distributed.solver_td INFO: Step 2901/10000 (t=1.450e-08 s): max_drop=0.0186 V, total_I=1135.95 mA
+21:09:33 distributed.solver_td INFO: Step 2911/10000 (t=1.456e-08 s): max_drop=0.0713 V, total_I=792.01 mA
+21:10:13 distributed.solver_td INFO: Step 2921/10000 (t=1.460e-08 s): max_drop=0.0911 V, total_I=867.67 mA
+21:10:53 distributed.solver_td INFO: Step 2931/10000 (t=1.465e-08 s): max_drop=0.0343 V, total_I=1724.79 mA
+21:11:35 distributed.solver_td INFO: Step 2941/10000 (t=1.470e-08 s): max_drop=0.0344 V, total_I=2274.89 mA
+21:12:16 distributed.solver_td INFO: Step 2951/10000 (t=1.476e-08 s): max_drop=0.0285 V, total_I=2380.80 mA
+21:12:57 distributed.solver_td INFO: Step 2961/10000 (t=1.480e-08 s): max_drop=0.0306 V, total_I=1682.17 mA
+21:13:38 distributed.solver_td INFO: Step 2971/10000 (t=1.485e-08 s): max_drop=0.0521 V, total_I=1093.67 mA
+21:14:19 distributed.solver_td INFO: Step 2981/10000 (t=1.491e-08 s): max_drop=0.0302 V, total_I=937.34 mA
+21:14:59 distributed.solver_td INFO: Step 2991/10000 (t=1.495e-08 s): max_drop=0.0828 V, total_I=1759.35 mA
+21:15:41 distributed.solver_td INFO: Step 3001/10000 (t=1.500e-08 s): max_drop=0.0192 V, total_I=1142.15 mA
+21:16:21 distributed.solver_td INFO: Step 3011/10000 (t=1.505e-08 s): max_drop=0.0713 V, total_I=797.23 mA
+21:17:02 distributed.solver_td INFO: Step 3021/10000 (t=1.510e-08 s): max_drop=0.0911 V, total_I=880.18 mA
+21:17:43 distributed.solver_td INFO: Step 3031/10000 (t=1.515e-08 s): max_drop=0.0343 V, total_I=1834.28 mA
+21:18:25 distributed.solver_td INFO: Step 3041/10000 (t=1.520e-08 s): max_drop=0.0457 V, total_I=2367.49 mA
+21:19:07 distributed.solver_td INFO: Step 3051/10000 (t=1.525e-08 s): max_drop=0.0334 V, total_I=2439.70 mA
+21:19:48 distributed.solver_td INFO: Step 3061/10000 (t=1.530e-08 s): max_drop=0.0336 V, total_I=1816.77 mA
+21:20:28 distributed.solver_td INFO: Step 3071/10000 (t=1.535e-08 s): max_drop=0.0499 V, total_I=1164.43 mA
+21:21:09 distributed.solver_td INFO: Step 3081/10000 (t=1.540e-08 s): max_drop=0.0325 V, total_I=922.97 mA
+21:21:50 distributed.solver_td INFO: Step 3091/10000 (t=1.545e-08 s): max_drop=0.0269 V, total_I=1847.06 mA
+21:22:33 distributed.solver_td INFO: Step 3101/10000 (t=1.550e-08 s): max_drop=0.0186 V, total_I=1138.70 mA
+21:23:14 distributed.solver_td INFO: Step 3111/10000 (t=1.555e-08 s): max_drop=0.0713 V, total_I=794.10 mA
+21:23:55 distributed.solver_td INFO: Step 3121/10000 (t=1.560e-08 s): max_drop=0.0911 V, total_I=874.05 mA
+21:24:37 distributed.solver_td INFO: Step 3131/10000 (t=1.565e-08 s): max_drop=0.0343 V, total_I=1754.88 mA
+21:25:18 distributed.solver_td INFO: Step 3141/10000 (t=1.570e-08 s): max_drop=0.0344 V, total_I=2361.40 mA
+21:25:58 distributed.solver_td INFO: Step 3151/10000 (t=1.575e-08 s): max_drop=0.0340 V, total_I=2510.16 mA
+21:26:40 distributed.solver_td INFO: Step 3161/10000 (t=1.580e-08 s): max_drop=0.0322 V, total_I=1793.65 mA
+21:27:20 distributed.solver_td INFO: Step 3171/10000 (t=1.585e-08 s): max_drop=0.0523 V, total_I=1178.24 mA
+21:28:02 distributed.solver_td INFO: Step 3181/10000 (t=1.590e-08 s): max_drop=0.0311 V, total_I=963.05 mA
+21:28:43 distributed.solver_td INFO: Step 3191/10000 (t=1.595e-08 s): max_drop=0.0829 V, total_I=1845.01 mA
+21:29:24 distributed.solver_td INFO: Step 3201/10000 (t=1.600e-08 s): max_drop=0.0940 V, total_I=1144.20 mA
+21:30:05 distributed.solver_td INFO: Step 3211/10000 (t=1.605e-08 s): max_drop=0.0713 V, total_I=801.97 mA
+21:30:45 distributed.solver_td INFO: Step 3221/10000 (t=1.610e-08 s): max_drop=0.0911 V, total_I=890.34 mA
+21:31:27 distributed.solver_td INFO: Step 3231/10000 (t=1.615e-08 s): max_drop=0.0343 V, total_I=1835.74 mA
+21:32:09 distributed.solver_td INFO: Step 3241/10000 (t=1.620e-08 s): max_drop=0.0457 V, total_I=2400.98 mA
+21:32:51 distributed.solver_td INFO: Step 3251/10000 (t=1.625e-08 s): max_drop=0.0335 V, total_I=2478.93 mA
+21:33:32 distributed.solver_td INFO: Step 3261/10000 (t=1.630e-08 s): max_drop=0.0343 V, total_I=1781.90 mA
+21:34:13 distributed.solver_td INFO: Step 3271/10000 (t=1.635e-08 s): max_drop=0.0499 V, total_I=1170.68 mA
+21:34:55 distributed.solver_td INFO: Step 3281/10000 (t=1.640e-08 s): max_drop=0.0297 V, total_I=947.91 mA
+21:35:36 distributed.solver_td INFO: Step 3291/10000 (t=1.645e-08 s): max_drop=0.0269 V, total_I=1865.37 mA
+21:36:17 distributed.solver_td INFO: Step 3301/10000 (t=1.650e-08 s): max_drop=0.0186 V, total_I=1135.47 mA
+21:36:59 distributed.solver_td INFO: Step 3311/10000 (t=1.655e-08 s): max_drop=0.0713 V, total_I=794.21 mA
+21:37:39 distributed.solver_td INFO: Step 3321/10000 (t=1.660e-08 s): max_drop=0.0911 V, total_I=884.89 mA
+21:38:20 distributed.solver_td INFO: Step 3331/10000 (t=1.665e-08 s): max_drop=0.0343 V, total_I=1746.97 mA
+21:39:01 distributed.solver_td INFO: Step 3341/10000 (t=1.670e-08 s): max_drop=0.0344 V, total_I=2282.71 mA
+21:39:43 distributed.solver_td INFO: Step 3351/10000 (t=1.675e-08 s): max_drop=0.0335 V, total_I=2367.90 mA
+21:40:23 distributed.solver_td INFO: Step 3361/10000 (t=1.680e-08 s): max_drop=0.0311 V, total_I=1723.25 mA
+21:41:04 distributed.solver_td INFO: Step 3371/10000 (t=1.685e-08 s): max_drop=0.0521 V, total_I=1149.54 mA
+21:41:45 distributed.solver_td INFO: Step 3381/10000 (t=1.690e-08 s): max_drop=0.0303 V, total_I=948.99 mA
+21:42:27 distributed.solver_td INFO: Step 3391/10000 (t=1.695e-08 s): max_drop=0.0828 V, total_I=1842.19 mA
+21:43:08 distributed.solver_td INFO: Step 3401/10000 (t=1.700e-08 s): max_drop=0.0195 V, total_I=1139.33 mA
+21:43:48 distributed.solver_td INFO: Step 3411/10000 (t=1.705e-08 s): max_drop=0.0713 V, total_I=798.43 mA
+21:44:29 distributed.solver_td INFO: Step 3421/10000 (t=1.710e-08 s): max_drop=0.0911 V, total_I=880.31 mA
+21:45:11 distributed.solver_td INFO: Step 3431/10000 (t=1.715e-08 s): max_drop=0.0343 V, total_I=1831.26 mA
+21:45:51 distributed.solver_td INFO: Step 3441/10000 (t=1.720e-08 s): max_drop=0.0457 V, total_I=2420.23 mA
+21:46:31 distributed.solver_td INFO: Step 3451/10000 (t=1.725e-08 s): max_drop=0.0342 V, total_I=2520.59 mA
+21:47:11 distributed.solver_td INFO: Step 3461/10000 (t=1.730e-08 s): max_drop=0.0311 V, total_I=1836.59 mA
+21:47:52 distributed.solver_td INFO: Step 3471/10000 (t=1.735e-08 s): max_drop=0.0498 V, total_I=1174.85 mA
+21:48:32 distributed.solver_td INFO: Step 3481/10000 (t=1.740e-08 s): max_drop=0.0297 V, total_I=937.15 mA
+21:49:14 distributed.solver_td INFO: Step 3491/10000 (t=1.745e-08 s): max_drop=0.0269 V, total_I=1859.75 mA
+21:49:55 distributed.solver_td INFO: Step 3501/10000 (t=1.750e-08 s): max_drop=0.0186 V, total_I=1121.73 mA
+21:50:37 distributed.solver_td INFO: Step 3511/10000 (t=1.755e-08 s): max_drop=0.0713 V, total_I=794.03 mA
+21:51:17 distributed.solver_td INFO: Step 3521/10000 (t=1.760e-08 s): max_drop=0.0911 V, total_I=872.46 mA
+21:51:59 distributed.solver_td INFO: Step 3531/10000 (t=1.765e-08 s): max_drop=0.0343 V, total_I=1773.52 mA
+21:52:38 distributed.solver_td INFO: Step 3541/10000 (t=1.770e-08 s): max_drop=0.0344 V, total_I=2365.21 mA
+21:53:19 distributed.solver_td INFO: Step 3551/10000 (t=1.775e-08 s): max_drop=0.0338 V, total_I=2529.78 mA
+21:54:01 distributed.solver_td INFO: Step 3561/10000 (t=1.780e-08 s): max_drop=0.0323 V, total_I=1833.10 mA
+21:54:42 distributed.solver_td INFO: Step 3571/10000 (t=1.785e-08 s): max_drop=0.0523 V, total_I=1197.42 mA
+21:55:22 distributed.solver_td INFO: Step 3581/10000 (t=1.790e-08 s): max_drop=0.0508 V, total_I=959.07 mA
+21:56:03 distributed.solver_td INFO: Step 3591/10000 (t=1.795e-08 s): max_drop=0.0829 V, total_I=1882.76 mA
+21:56:43 distributed.solver_td INFO: Step 3601/10000 (t=1.800e-08 s): max_drop=0.0940 V, total_I=1151.90 mA
+21:57:26 distributed.solver_td INFO: Step 3611/10000 (t=1.805e-08 s): max_drop=0.0713 V, total_I=801.99 mA
+21:58:06 distributed.solver_td INFO: Step 3621/10000 (t=1.810e-08 s): max_drop=0.0911 V, total_I=891.15 mA
+21:58:47 distributed.solver_td INFO: Step 3631/10000 (t=1.815e-08 s): max_drop=0.0343 V, total_I=1844.93 mA
+21:59:28 distributed.solver_td INFO: Step 3641/10000 (t=1.820e-08 s): max_drop=0.0457 V, total_I=2474.45 mA
+22:00:09 distributed.solver_td INFO: Step 3651/10000 (t=1.825e-08 s): max_drop=0.0344 V, total_I=2585.16 mA
+22:00:50 distributed.solver_td INFO: Step 3661/10000 (t=1.830e-08 s): max_drop=0.0318 V, total_I=1892.81 mA
+22:01:31 distributed.solver_td INFO: Step 3671/10000 (t=1.835e-08 s): max_drop=0.0499 V, total_I=1231.85 mA
+22:02:12 distributed.solver_td INFO: Step 3681/10000 (t=1.840e-08 s): max_drop=0.0298 V, total_I=953.68 mA
+22:02:53 distributed.solver_td INFO: Step 3691/10000 (t=1.845e-08 s): max_drop=0.0269 V, total_I=1882.05 mA
+22:03:34 distributed.solver_td INFO: Step 3701/10000 (t=1.850e-08 s): max_drop=0.0186 V, total_I=1134.28 mA
+22:04:16 distributed.solver_td INFO: Step 3711/10000 (t=1.855e-08 s): max_drop=0.0713 V, total_I=799.46 mA
+22:04:57 distributed.solver_td INFO: Step 3721/10000 (t=1.860e-08 s): max_drop=0.0911 V, total_I=870.28 mA
+22:05:38 distributed.solver_td INFO: Step 3731/10000 (t=1.865e-08 s): max_drop=0.0343 V, total_I=1767.02 mA
+22:06:18 distributed.solver_td INFO: Step 3741/10000 (t=1.870e-08 s): max_drop=0.0344 V, total_I=2380.91 mA
+22:06:59 distributed.solver_td INFO: Step 3751/10000 (t=1.875e-08 s): max_drop=0.0336 V, total_I=2434.56 mA
+22:07:41 distributed.solver_td INFO: Step 3761/10000 (t=1.880e-08 s): max_drop=0.0317 V, total_I=1802.38 mA
+22:08:22 distributed.solver_td INFO: Step 3771/10000 (t=1.885e-08 s): max_drop=0.0521 V, total_I=1183.81 mA
+22:09:03 distributed.solver_td INFO: Step 3781/10000 (t=1.890e-08 s): max_drop=0.0333 V, total_I=935.99 mA
+22:09:45 distributed.solver_td INFO: Step 3791/10000 (t=1.895e-08 s): max_drop=0.0828 V, total_I=1893.03 mA
+22:10:27 distributed.solver_td INFO: Step 3801/10000 (t=1.900e-08 s): max_drop=0.0192 V, total_I=1151.26 mA
+22:11:09 distributed.solver_td INFO: Step 3811/10000 (t=1.905e-08 s): max_drop=0.0713 V, total_I=803.42 mA
+22:11:50 distributed.solver_td INFO: Step 3821/10000 (t=1.910e-08 s): max_drop=0.0911 V, total_I=900.86 mA
+22:12:32 distributed.solver_td INFO: Step 3831/10000 (t=1.915e-08 s): max_drop=0.0343 V, total_I=1815.57 mA
+22:13:14 distributed.solver_td INFO: Step 3841/10000 (t=1.920e-08 s): max_drop=0.0457 V, total_I=2424.28 mA
+22:13:55 distributed.solver_td INFO: Step 3851/10000 (t=1.925e-08 s): max_drop=0.0335 V, total_I=2495.29 mA
+22:14:36 distributed.solver_td INFO: Step 3861/10000 (t=1.930e-08 s): max_drop=0.0307 V, total_I=1772.86 mA
+22:15:18 distributed.solver_td INFO: Step 3871/10000 (t=1.935e-08 s): max_drop=0.0389 V, total_I=1092.38 mA
+22:15:59 distributed.solver_td INFO: Step 3881/10000 (t=1.940e-08 s): max_drop=0.0234 V, total_I=917.85 mA
+22:16:40 distributed.solver_td INFO: Step 3891/10000 (t=1.945e-08 s): max_drop=0.0898 V, total_I=1863.68 mA
+22:17:21 distributed.solver_td INFO: Step 3901/10000 (t=1.950e-08 s): max_drop=0.0200 V, total_I=1144.74 mA
+22:18:02 distributed.solver_td INFO: Step 3911/10000 (t=1.955e-08 s): max_drop=0.0928 V, total_I=801.04 mA
+22:18:43 distributed.solver_td INFO: Step 3921/10000 (t=1.960e-08 s): max_drop=0.0731 V, total_I=817.27 mA
+22:19:26 distributed.solver_td INFO: Step 3931/10000 (t=1.965e-08 s): max_drop=0.0275 V, total_I=2188.68 mA
+22:20:11 distributed.solver_td INFO: Step 3941/10000 (t=1.970e-08 s): max_drop=0.0293 V, total_I=2161.77 mA
+22:20:53 distributed.solver_td INFO: Step 3951/10000 (t=1.975e-08 s): max_drop=0.0455 V, total_I=2273.27 mA
+22:21:37 distributed.solver_td INFO: Step 3961/10000 (t=1.980e-08 s): max_drop=0.0292 V, total_I=1685.66 mA
+22:22:19 distributed.solver_td INFO: Step 3971/10000 (t=1.985e-08 s): max_drop=0.0604 V, total_I=1131.81 mA
+22:23:01 distributed.solver_td INFO: Step 3981/10000 (t=1.990e-08 s): max_drop=0.0260 V, total_I=1141.74 mA
+22:23:44 distributed.solver_td INFO: Step 3991/10000 (t=1.995e-08 s): max_drop=0.0931 V, total_I=1648.25 mA
+22:24:26 distributed.solver_td INFO: Step 4001/10000 (t=2.000e-08 s): max_drop=0.0867 V, total_I=1175.40 mA
+22:25:08 distributed.solver_td INFO: Step 4011/10000 (t=2.005e-08 s): max_drop=0.0927 V, total_I=758.25 mA
+22:25:50 distributed.solver_td INFO: Step 4021/10000 (t=2.010e-08 s): max_drop=0.0731 V, total_I=843.65 mA
+22:26:34 distributed.solver_td INFO: Step 4031/10000 (t=2.015e-08 s): max_drop=0.0275 V, total_I=2267.02 mA
+22:27:18 distributed.solver_td INFO: Step 4041/10000 (t=2.020e-08 s): max_drop=0.0289 V, total_I=2215.06 mA
+22:28:01 distributed.solver_td INFO: Step 4051/10000 (t=2.025e-08 s): max_drop=0.0377 V, total_I=2317.17 mA
+22:28:45 distributed.solver_td INFO: Step 4061/10000 (t=2.030e-08 s): max_drop=0.0325 V, total_I=1586.52 mA
+22:29:29 distributed.solver_td INFO: Step 4071/10000 (t=2.035e-08 s): max_drop=0.0514 V, total_I=1047.38 mA
+22:30:13 distributed.solver_td INFO: Step 4081/10000 (t=2.040e-08 s): max_drop=0.0206 V, total_I=1059.34 mA
+22:30:56 distributed.solver_td INFO: Step 4091/10000 (t=2.045e-08 s): max_drop=0.0897 V, total_I=1592.80 mA
+22:31:39 distributed.solver_td INFO: Step 4101/10000 (t=2.050e-08 s): max_drop=0.0189 V, total_I=1163.45 mA
+22:32:21 distributed.solver_td INFO: Step 4111/10000 (t=2.055e-08 s): max_drop=0.0927 V, total_I=751.18 mA
+22:33:03 distributed.solver_td INFO: Step 4121/10000 (t=2.060e-08 s): max_drop=0.0731 V, total_I=823.92 mA
+22:33:47 distributed.solver_td INFO: Step 4131/10000 (t=2.065e-08 s): max_drop=0.0274 V, total_I=2232.83 mA
+22:34:29 distributed.solver_td INFO: Step 4141/10000 (t=2.070e-08 s): max_drop=0.0423 V, total_I=2084.01 mA
+22:35:13 distributed.solver_td INFO: Step 4151/10000 (t=2.075e-08 s): max_drop=0.0375 V, total_I=2231.84 mA
+22:35:56 distributed.solver_td INFO: Step 4161/10000 (t=2.080e-08 s): max_drop=0.0286 V, total_I=1552.31 mA
+22:36:37 distributed.solver_td INFO: Step 4171/10000 (t=2.085e-08 s): max_drop=0.0419 V, total_I=1068.83 mA
+22:37:20 distributed.solver_td INFO: Step 4181/10000 (t=2.090e-08 s): max_drop=0.0345 V, total_I=1049.17 mA
+22:38:03 distributed.solver_td INFO: Step 4191/10000 (t=2.095e-08 s): max_drop=0.0931 V, total_I=1618.49 mA
+22:38:46 distributed.solver_td INFO: Step 4201/10000 (t=2.100e-08 s): max_drop=0.0223 V, total_I=1164.12 mA
+22:39:29 distributed.solver_td INFO: Step 4211/10000 (t=2.105e-08 s): max_drop=0.0927 V, total_I=754.37 mA
+22:40:13 distributed.solver_td INFO: Step 4221/10000 (t=2.110e-08 s): max_drop=0.0731 V, total_I=844.75 mA
+22:40:56 distributed.solver_td INFO: Step 4231/10000 (t=2.115e-08 s): max_drop=0.0275 V, total_I=2332.86 mA
+22:41:38 distributed.solver_td INFO: Step 4241/10000 (t=2.120e-08 s): max_drop=0.0294 V, total_I=2180.36 mA
+22:42:20 distributed.solver_td INFO: Step 4251/10000 (t=2.125e-08 s): max_drop=0.0365 V, total_I=2266.75 mA
+22:43:02 distributed.solver_td INFO: Step 4261/10000 (t=2.130e-08 s): max_drop=0.0284 V, total_I=1537.86 mA
+22:43:45 distributed.solver_td INFO: Step 4271/10000 (t=2.135e-08 s): max_drop=0.0515 V, total_I=1001.40 mA
+22:44:27 distributed.solver_td INFO: Step 4281/10000 (t=2.140e-08 s): max_drop=0.0337 V, total_I=1051.78 mA
+22:45:11 distributed.solver_td INFO: Step 4291/10000 (t=2.145e-08 s): max_drop=0.0897 V, total_I=1646.77 mA
+22:45:55 distributed.solver_td INFO: Step 4301/10000 (t=2.150e-08 s): max_drop=0.0175 V, total_I=1158.13 mA
+22:46:37 distributed.solver_td INFO: Step 4311/10000 (t=2.155e-08 s): max_drop=0.0927 V, total_I=758.08 mA
+22:47:20 distributed.solver_td INFO: Step 4321/10000 (t=2.160e-08 s): max_drop=0.0731 V, total_I=824.28 mA
+22:48:05 distributed.solver_td INFO: Step 4331/10000 (t=2.165e-08 s): max_drop=0.0275 V, total_I=2174.71 mA
+22:48:47 distributed.solver_td INFO: Step 4341/10000 (t=2.170e-08 s): max_drop=0.0423 V, total_I=2138.52 mA
+22:49:29 distributed.solver_td INFO: Step 4351/10000 (t=2.175e-08 s): max_drop=0.0365 V, total_I=2326.36 mA
+22:50:13 distributed.solver_td INFO: Step 4361/10000 (t=2.180e-08 s): max_drop=0.0402 V, total_I=1608.85 mA
+22:50:55 distributed.solver_td INFO: Step 4371/10000 (t=2.185e-08 s): max_drop=0.0421 V, total_I=1086.97 mA
+22:51:38 distributed.solver_td INFO: Step 4381/10000 (t=2.190e-08 s): max_drop=0.0179 V, total_I=1073.34 mA
+22:52:22 distributed.solver_td INFO: Step 4391/10000 (t=2.195e-08 s): max_drop=0.0931 V, total_I=1599.67 mA
+22:53:05 distributed.solver_td INFO: Step 4401/10000 (t=2.200e-08 s): max_drop=0.0867 V, total_I=1181.41 mA
+22:53:47 distributed.solver_td INFO: Step 4411/10000 (t=2.205e-08 s): max_drop=0.0927 V, total_I=760.16 mA
+22:54:30 distributed.solver_td INFO: Step 4421/10000 (t=2.210e-08 s): max_drop=0.0731 V, total_I=848.63 mA
+22:55:14 distributed.solver_td INFO: Step 4431/10000 (t=2.215e-08 s): max_drop=0.0275 V, total_I=2347.58 mA
+22:55:56 distributed.solver_td INFO: Step 4441/10000 (t=2.220e-08 s): max_drop=0.0294 V, total_I=2321.19 mA
+22:56:41 distributed.solver_td INFO: Step 4451/10000 (t=2.225e-08 s): max_drop=0.0365 V, total_I=2423.48 mA
+22:57:24 distributed.solver_td INFO: Step 4461/10000 (t=2.230e-08 s): max_drop=0.0296 V, total_I=1656.06 mA
+22:58:07 distributed.solver_td INFO: Step 4471/10000 (t=2.235e-08 s): max_drop=0.0516 V, total_I=1073.33 mA
+22:58:51 distributed.solver_td INFO: Step 4481/10000 (t=2.240e-08 s): max_drop=0.0207 V, total_I=1089.43 mA
+22:59:35 distributed.solver_td INFO: Step 4491/10000 (t=2.245e-08 s): max_drop=0.0897 V, total_I=1659.15 mA
+23:00:18 distributed.solver_td INFO: Step 4501/10000 (t=2.250e-08 s): max_drop=0.0175 V, total_I=1157.72 mA
+23:01:00 distributed.solver_td INFO: Step 4511/10000 (t=2.255e-08 s): max_drop=0.0927 V, total_I=747.68 mA
+23:01:43 distributed.solver_td INFO: Step 4521/10000 (t=2.260e-08 s): max_drop=0.0731 V, total_I=819.85 mA
+23:02:25 distributed.solver_td INFO: Step 4531/10000 (t=2.265e-08 s): max_drop=0.0275 V, total_I=2253.07 mA
+23:03:09 distributed.solver_td INFO: Step 4541/10000 (t=2.270e-08 s): max_drop=0.0424 V, total_I=2249.50 mA
+23:03:53 distributed.solver_td INFO: Step 4551/10000 (t=2.275e-08 s): max_drop=0.0378 V, total_I=2387.76 mA
+23:04:35 distributed.solver_td INFO: Step 4561/10000 (t=2.280e-08 s): max_drop=0.0295 V, total_I=1707.86 mA
+23:05:18 distributed.solver_td INFO: Step 4571/10000 (t=2.285e-08 s): max_drop=0.0442 V, total_I=1086.84 mA
+23:06:03 distributed.solver_td INFO: Step 4581/10000 (t=2.290e-08 s): max_drop=0.0445 V, total_I=1052.07 mA
+23:06:46 distributed.solver_td INFO: Step 4591/10000 (t=2.295e-08 s): max_drop=0.0931 V, total_I=1677.48 mA
+23:07:28 distributed.solver_td INFO: Step 4601/10000 (t=2.300e-08 s): max_drop=0.0223 V, total_I=1162.43 mA
+23:08:10 distributed.solver_td INFO: Step 4611/10000 (t=2.305e-08 s): max_drop=0.0927 V, total_I=759.28 mA
+23:08:55 distributed.solver_td INFO: Step 4621/10000 (t=2.310e-08 s): max_drop=0.0731 V, total_I=855.66 mA
+23:09:40 distributed.solver_td INFO: Step 4631/10000 (t=2.315e-08 s): max_drop=0.0275 V, total_I=2355.77 mA
+23:10:22 distributed.solver_td INFO: Step 4641/10000 (t=2.320e-08 s): max_drop=0.0294 V, total_I=2314.11 mA
+23:11:04 distributed.solver_td INFO: Step 4651/10000 (t=2.325e-08 s): max_drop=0.0374 V, total_I=2439.05 mA
+23:11:47 distributed.solver_td INFO: Step 4661/10000 (t=2.330e-08 s): max_drop=0.0291 V, total_I=1651.33 mA
+23:12:31 distributed.solver_td INFO: Step 4671/10000 (t=2.335e-08 s): max_drop=0.0516 V, total_I=1054.30 mA
+23:13:13 distributed.solver_td INFO: Step 4681/10000 (t=2.340e-08 s): max_drop=0.0206 V, total_I=1037.43 mA
+23:13:56 distributed.solver_td INFO: Step 4691/10000 (t=2.345e-08 s): max_drop=0.0898 V, total_I=1662.37 mA
+23:14:38 distributed.solver_td INFO: Step 4701/10000 (t=2.350e-08 s): max_drop=0.0175 V, total_I=1159.10 mA
+23:15:20 distributed.solver_td INFO: Step 4711/10000 (t=2.355e-08 s): max_drop=0.0927 V, total_I=747.51 mA
+23:16:05 distributed.solver_td INFO: Step 4721/10000 (t=2.360e-08 s): max_drop=0.0731 V, total_I=820.94 mA
+23:16:48 distributed.solver_td INFO: Step 4731/10000 (t=2.365e-08 s): max_drop=0.0275 V, total_I=2192.20 mA
+23:17:31 distributed.solver_td INFO: Step 4741/10000 (t=2.370e-08 s): max_drop=0.0423 V, total_I=2162.86 mA
+23:18:15 distributed.solver_td INFO: Step 4751/10000 (t=2.375e-08 s): max_drop=0.0372 V, total_I=2302.43 mA
+23:18:59 distributed.solver_td INFO: Step 4761/10000 (t=2.380e-08 s): max_drop=0.0320 V, total_I=1663.44 mA
+23:19:42 distributed.solver_td INFO: Step 4771/10000 (t=2.385e-08 s): max_drop=0.0421 V, total_I=1141.25 mA
+23:20:26 distributed.solver_td INFO: Step 4781/10000 (t=2.390e-08 s): max_drop=0.0188 V, total_I=1063.77 mA
+23:21:08 distributed.solver_td INFO: Step 4791/10000 (t=2.395e-08 s): max_drop=0.0931 V, total_I=1624.01 mA
+23:21:50 distributed.solver_td INFO: Step 4801/10000 (t=2.400e-08 s): max_drop=0.0867 V, total_I=1185.06 mA
+23:22:33 distributed.solver_td INFO: Step 4811/10000 (t=2.405e-08 s): max_drop=0.0927 V, total_I=776.83 mA
+23:23:15 distributed.solver_td INFO: Step 4821/10000 (t=2.410e-08 s): max_drop=0.0731 V, total_I=853.66 mA
+23:23:58 distributed.solver_td INFO: Step 4831/10000 (t=2.415e-08 s): max_drop=0.0275 V, total_I=2319.17 mA
+23:24:41 distributed.solver_td INFO: Step 4841/10000 (t=2.420e-08 s): max_drop=0.0294 V, total_I=2278.55 mA
+23:25:24 distributed.solver_td INFO: Step 4851/10000 (t=2.425e-08 s): max_drop=0.0373 V, total_I=2374.11 mA
+23:26:07 distributed.solver_td INFO: Step 4861/10000 (t=2.430e-08 s): max_drop=0.0290 V, total_I=1624.30 mA
+23:26:49 distributed.solver_td INFO: Step 4871/10000 (t=2.435e-08 s): max_drop=0.0515 V, total_I=1054.47 mA
+23:27:33 distributed.solver_td INFO: Step 4881/10000 (t=2.440e-08 s): max_drop=0.0266 V, total_I=1046.00 mA
+23:28:16 distributed.solver_td INFO: Step 4891/10000 (t=2.445e-08 s): max_drop=0.0897 V, total_I=1613.49 mA
+23:28:57 distributed.solver_td INFO: Step 4901/10000 (t=2.450e-08 s): max_drop=0.0175 V, total_I=1152.22 mA
+23:29:40 distributed.solver_td INFO: Step 4911/10000 (t=2.455e-08 s): max_drop=0.0927 V, total_I=749.82 mA
+23:30:22 distributed.solver_td INFO: Step 4921/10000 (t=2.460e-08 s): max_drop=0.0731 V, total_I=819.71 mA
+23:31:04 distributed.solver_td INFO: Step 4931/10000 (t=2.465e-08 s): max_drop=0.0275 V, total_I=2227.36 mA
+23:31:48 distributed.solver_td INFO: Step 4941/10000 (t=2.470e-08 s): max_drop=0.0423 V, total_I=2162.47 mA
+23:32:33 distributed.solver_td INFO: Step 4951/10000 (t=2.475e-08 s): max_drop=0.0375 V, total_I=2377.31 mA
+23:33:16 distributed.solver_td INFO: Step 4961/10000 (t=2.480e-08 s): max_drop=0.0298 V, total_I=1672.74 mA
+23:33:58 distributed.solver_td INFO: Step 4971/10000 (t=2.485e-08 s): max_drop=0.0421 V, total_I=1101.43 mA
+23:34:40 distributed.solver_td INFO: Step 4981/10000 (t=2.490e-08 s): max_drop=0.0297 V, total_I=942.60 mA
+23:35:24 distributed.solver_td INFO: Step 4991/10000 (t=2.495e-08 s): max_drop=0.0828 V, total_I=1861.14 mA
+23:36:05 distributed.solver_td INFO: Step 5001/10000 (t=2.500e-08 s): max_drop=0.0192 V, total_I=1139.55 mA
+23:36:49 distributed.solver_td INFO: Step 5011/10000 (t=2.505e-08 s): max_drop=0.0713 V, total_I=797.26 mA
+23:37:34 distributed.solver_td INFO: Step 5021/10000 (t=2.510e-08 s): max_drop=0.0911 V, total_I=879.16 mA
+23:38:16 distributed.solver_td INFO: Step 5031/10000 (t=2.515e-08 s): max_drop=0.0343 V, total_I=1824.38 mA
+23:38:59 distributed.solver_td INFO: Step 5041/10000 (t=2.520e-08 s): max_drop=0.0344 V, total_I=2421.09 mA
+23:39:41 distributed.solver_td INFO: Step 5051/10000 (t=2.525e-08 s): max_drop=0.0408 V, total_I=2474.82 mA
+23:40:25 distributed.solver_td INFO: Step 5061/10000 (t=2.530e-08 s): max_drop=0.0308 V, total_I=1813.07 mA
+23:41:07 distributed.solver_td INFO: Step 5071/10000 (t=2.535e-08 s): max_drop=0.0390 V, total_I=1178.84 mA
+23:41:50 distributed.solver_td INFO: Step 5081/10000 (t=2.540e-08 s): max_drop=0.0237 V, total_I=1081.00 mA
+23:42:32 distributed.solver_td INFO: Step 5091/10000 (t=2.545e-08 s): max_drop=0.0897 V, total_I=1660.80 mA
+23:43:15 distributed.solver_td INFO: Step 5101/10000 (t=2.550e-08 s): max_drop=0.0175 V, total_I=1163.36 mA
+23:43:58 distributed.solver_td INFO: Step 5111/10000 (t=2.555e-08 s): max_drop=0.0927 V, total_I=753.61 mA
+23:44:42 distributed.solver_td INFO: Step 5121/10000 (t=2.560e-08 s): max_drop=0.0731 V, total_I=822.46 mA
+23:45:27 distributed.solver_td INFO: Step 5131/10000 (t=2.565e-08 s): max_drop=0.0274 V, total_I=2212.12 mA
+23:46:09 distributed.solver_td INFO: Step 5141/10000 (t=2.570e-08 s): max_drop=0.0419 V, total_I=2207.04 mA
+23:46:51 distributed.solver_td INFO: Step 5151/10000 (t=2.575e-08 s): max_drop=0.0844 V, total_I=2346.45 mA
+23:47:32 distributed.solver_td INFO: Step 5161/10000 (t=2.580e-08 s): max_drop=0.0283 V, total_I=1666.88 mA
+23:48:17 distributed.solver_td INFO: Step 5171/10000 (t=2.585e-08 s): max_drop=0.0530 V, total_I=1116.55 mA
+23:49:01 distributed.solver_td INFO: Step 5181/10000 (t=2.590e-08 s): max_drop=0.0285 V, total_I=1065.33 mA
+23:49:44 distributed.solver_td INFO: Step 5191/10000 (t=2.595e-08 s): max_drop=0.0931 V, total_I=1658.96 mA
+23:50:27 distributed.solver_td INFO: Step 5201/10000 (t=2.600e-08 s): max_drop=0.0867 V, total_I=1178.00 mA
+23:51:11 distributed.solver_td INFO: Step 5211/10000 (t=2.605e-08 s): max_drop=0.0927 V, total_I=758.15 mA
+23:51:54 distributed.solver_td INFO: Step 5221/10000 (t=2.610e-08 s): max_drop=0.0731 V, total_I=847.87 mA
+23:52:35 distributed.solver_td INFO: Step 5231/10000 (t=2.615e-08 s): max_drop=0.0275 V, total_I=2304.01 mA
+23:53:18 distributed.solver_td INFO: Step 5241/10000 (t=2.620e-08 s): max_drop=0.0289 V, total_I=2216.69 mA
+23:54:00 distributed.solver_td INFO: Step 5251/10000 (t=2.625e-08 s): max_drop=0.0375 V, total_I=2327.57 mA
+23:54:42 distributed.solver_td INFO: Step 5261/10000 (t=2.630e-08 s): max_drop=0.0292 V, total_I=1594.58 mA
+23:55:25 distributed.solver_td INFO: Step 5271/10000 (t=2.635e-08 s): max_drop=0.0420 V, total_I=1056.87 mA
+23:56:07 distributed.solver_td INFO: Step 5281/10000 (t=2.640e-08 s): max_drop=0.0507 V, total_I=1051.01 mA
+23:56:51 distributed.solver_td INFO: Step 5291/10000 (t=2.645e-08 s): max_drop=0.0897 V, total_I=1610.71 mA
+23:57:34 distributed.solver_td INFO: Step 5301/10000 (t=2.650e-08 s): max_drop=0.0175 V, total_I=1160.07 mA
+23:58:16 distributed.solver_td INFO: Step 5311/10000 (t=2.655e-08 s): max_drop=0.0927 V, total_I=776.98 mA
+23:58:57 distributed.solver_td INFO: Step 5321/10000 (t=2.660e-08 s): max_drop=0.0731 V, total_I=823.33 mA
+23:59:40 distributed.solver_td INFO: Step 5331/10000 (t=2.665e-08 s): max_drop=0.0274 V, total_I=2223.51 mA
+00:00:23 distributed.solver_td INFO: Step 5341/10000 (t=2.670e-08 s): max_drop=0.0294 V, total_I=2178.22 mA
+00:01:06 distributed.solver_td INFO: Step 5351/10000 (t=2.675e-08 s): max_drop=0.0376 V, total_I=2279.04 mA
+00:01:48 distributed.solver_td INFO: Step 5361/10000 (t=2.680e-08 s): max_drop=0.0260 V, total_I=1522.60 mA
+00:02:29 distributed.solver_td INFO: Step 5371/10000 (t=2.685e-08 s): max_drop=0.0514 V, total_I=1032.84 mA
+00:03:11 distributed.solver_td INFO: Step 5381/10000 (t=2.690e-08 s): max_drop=0.0260 V, total_I=1097.56 mA
+00:03:55 distributed.solver_td INFO: Step 5391/10000 (t=2.695e-08 s): max_drop=0.0931 V, total_I=1678.72 mA
+00:04:37 distributed.solver_td INFO: Step 5401/10000 (t=2.700e-08 s): max_drop=0.0223 V, total_I=1161.93 mA
+00:05:18 distributed.solver_td INFO: Step 5411/10000 (t=2.705e-08 s): max_drop=0.0927 V, total_I=757.33 mA
+00:06:00 distributed.solver_td INFO: Step 5421/10000 (t=2.710e-08 s): max_drop=0.0732 V, total_I=839.50 mA
+00:06:43 distributed.solver_td INFO: Step 5431/10000 (t=2.715e-08 s): max_drop=0.0275 V, total_I=2246.66 mA
+00:07:26 distributed.solver_td INFO: Step 5441/10000 (t=2.720e-08 s): max_drop=0.0423 V, total_I=2217.41 mA
+00:08:09 distributed.solver_td INFO: Step 5451/10000 (t=2.725e-08 s): max_drop=0.0376 V, total_I=2304.67 mA
+00:08:51 distributed.solver_td INFO: Step 5461/10000 (t=2.730e-08 s): max_drop=0.0324 V, total_I=1645.44 mA
+00:09:34 distributed.solver_td INFO: Step 5471/10000 (t=2.735e-08 s): max_drop=0.0447 V, total_I=1048.77 mA
+00:10:18 distributed.solver_td INFO: Step 5481/10000 (t=2.740e-08 s): max_drop=0.0176 V, total_I=1062.88 mA
+00:11:01 distributed.solver_td INFO: Step 5491/10000 (t=2.745e-08 s): max_drop=0.0898 V, total_I=1584.43 mA
+00:11:45 distributed.solver_td INFO: Step 5501/10000 (t=2.750e-08 s): max_drop=0.0175 V, total_I=1156.29 mA
+00:12:27 distributed.solver_td INFO: Step 5511/10000 (t=2.755e-08 s): max_drop=0.0927 V, total_I=748.53 mA
+00:13:10 distributed.solver_td INFO: Step 5521/10000 (t=2.760e-08 s): max_drop=0.0731 V, total_I=819.20 mA
+00:13:54 distributed.solver_td INFO: Step 5531/10000 (t=2.765e-08 s): max_drop=0.0275 V, total_I=2202.65 mA
+00:14:36 distributed.solver_td INFO: Step 5541/10000 (t=2.770e-08 s): max_drop=0.0294 V, total_I=2085.48 mA
+00:15:18 distributed.solver_td INFO: Step 5551/10000 (t=2.775e-08 s): max_drop=0.0373 V, total_I=2271.68 mA
+00:16:00 distributed.solver_td INFO: Step 5561/10000 (t=2.780e-08 s): max_drop=0.0287 V, total_I=1627.71 mA
+00:16:43 distributed.solver_td INFO: Step 5571/10000 (t=2.785e-08 s): max_drop=0.0515 V, total_I=1106.52 mA
+00:17:25 distributed.solver_td INFO: Step 5581/10000 (t=2.790e-08 s): max_drop=0.0345 V, total_I=1050.17 mA
+00:18:09 distributed.solver_td INFO: Step 5591/10000 (t=2.795e-08 s): max_drop=0.0931 V, total_I=1588.52 mA
+00:18:50 distributed.solver_td INFO: Step 5601/10000 (t=2.800e-08 s): max_drop=0.0867 V, total_I=1179.14 mA
+00:19:33 distributed.solver_td INFO: Step 5611/10000 (t=2.805e-08 s): max_drop=0.0927 V, total_I=760.68 mA
+00:20:15 distributed.solver_td INFO: Step 5621/10000 (t=2.810e-08 s): max_drop=0.0731 V, total_I=851.17 mA
+00:20:58 distributed.solver_td INFO: Step 5631/10000 (t=2.815e-08 s): max_drop=0.0275 V, total_I=2327.81 mA
+00:21:42 distributed.solver_td INFO: Step 5641/10000 (t=2.820e-08 s): max_drop=0.0423 V, total_I=2153.65 mA
+00:22:24 distributed.solver_td INFO: Step 5651/10000 (t=2.825e-08 s): max_drop=0.0365 V, total_I=2234.33 mA
+00:23:06 distributed.solver_td INFO: Step 5661/10000 (t=2.830e-08 s): max_drop=0.0486 V, total_I=1574.56 mA
+00:23:48 distributed.solver_td INFO: Step 5671/10000 (t=2.835e-08 s): max_drop=0.0442 V, total_I=1027.73 mA
+00:24:31 distributed.solver_td INFO: Step 5681/10000 (t=2.840e-08 s): max_drop=0.0338 V, total_I=1043.28 mA
+00:25:14 distributed.solver_td INFO: Step 5691/10000 (t=2.845e-08 s): max_drop=0.0897 V, total_I=1606.15 mA
+00:25:59 distributed.solver_td INFO: Step 5701/10000 (t=2.850e-08 s): max_drop=0.0176 V, total_I=1161.27 mA
+00:26:41 distributed.solver_td INFO: Step 5711/10000 (t=2.855e-08 s): max_drop=0.0927 V, total_I=758.39 mA
+00:27:25 distributed.solver_td INFO: Step 5721/10000 (t=2.860e-08 s): max_drop=0.0731 V, total_I=828.65 mA
+00:28:07 distributed.solver_td INFO: Step 5731/10000 (t=2.865e-08 s): max_drop=0.0275 V, total_I=2163.74 mA
+00:28:50 distributed.solver_td INFO: Step 5741/10000 (t=2.870e-08 s): max_drop=0.0294 V, total_I=2157.48 mA
+00:29:32 distributed.solver_td INFO: Step 5751/10000 (t=2.875e-08 s): max_drop=0.0365 V, total_I=2319.31 mA
+00:30:17 distributed.solver_td INFO: Step 5761/10000 (t=2.880e-08 s): max_drop=0.0297 V, total_I=1546.07 mA
+00:31:01 distributed.solver_td INFO: Step 5771/10000 (t=2.885e-08 s): max_drop=0.0515 V, total_I=1040.82 mA
+00:31:44 distributed.solver_td INFO: Step 5781/10000 (t=2.890e-08 s): max_drop=0.0207 V, total_I=1068.09 mA
+00:32:26 distributed.solver_td INFO: Step 5791/10000 (t=2.895e-08 s): max_drop=0.0931 V, total_I=1582.70 mA
+00:33:11 distributed.solver_td INFO: Step 5801/10000 (t=2.900e-08 s): max_drop=0.0223 V, total_I=1167.15 mA
+00:33:55 distributed.solver_td INFO: Step 5811/10000 (t=2.905e-08 s): max_drop=0.0927 V, total_I=777.02 mA
+00:34:36 distributed.solver_td INFO: Step 5821/10000 (t=2.910e-08 s): max_drop=0.0731 V, total_I=837.03 mA
+00:35:20 distributed.solver_td INFO: Step 5831/10000 (t=2.915e-08 s): max_drop=0.0275 V, total_I=2352.72 mA
+00:36:05 distributed.solver_td INFO: Step 5841/10000 (t=2.920e-08 s): max_drop=0.0424 V, total_I=2276.39 mA
+00:36:49 distributed.solver_td INFO: Step 5851/10000 (t=2.925e-08 s): max_drop=0.0365 V, total_I=2418.98 mA
+00:37:32 distributed.solver_td INFO: Step 5861/10000 (t=2.930e-08 s): max_drop=0.0298 V, total_I=1668.30 mA
+00:38:16 distributed.solver_td INFO: Step 5871/10000 (t=2.935e-08 s): max_drop=0.0421 V, total_I=1107.09 mA
+00:38:59 distributed.solver_td INFO: Step 5881/10000 (t=2.940e-08 s): max_drop=0.0196 V, total_I=1073.81 mA
+00:39:42 distributed.solver_td INFO: Step 5891/10000 (t=2.945e-08 s): max_drop=0.0897 V, total_I=1672.60 mA
+00:40:26 distributed.solver_td INFO: Step 5901/10000 (t=2.950e-08 s): max_drop=0.0175 V, total_I=1167.11 mA
+00:41:10 distributed.solver_td INFO: Step 5911/10000 (t=2.955e-08 s): max_drop=0.0927 V, total_I=750.23 mA
+00:41:55 distributed.solver_td INFO: Step 5921/10000 (t=2.960e-08 s): max_drop=0.0731 V, total_I=821.57 mA
+00:42:38 distributed.solver_td INFO: Step 5931/10000 (t=2.965e-08 s): max_drop=0.0275 V, total_I=2221.85 mA
+00:43:20 distributed.solver_td INFO: Step 5941/10000 (t=2.970e-08 s): max_drop=0.0294 V, total_I=2221.90 mA
+00:44:04 distributed.solver_td INFO: Step 5951/10000 (t=2.975e-08 s): max_drop=0.0379 V, total_I=2367.31 mA
+00:44:46 distributed.solver_td INFO: Step 5961/10000 (t=2.981e-08 s): max_drop=0.0291 V, total_I=1637.97 mA
+00:45:31 distributed.solver_td INFO: Step 5971/10000 (t=2.985e-08 s): max_drop=0.0515 V, total_I=1066.91 mA
+00:46:14 distributed.solver_td INFO: Step 5981/10000 (t=2.990e-08 s): max_drop=0.0445 V, total_I=1044.44 mA
+00:46:58 distributed.solver_td INFO: Step 5991/10000 (t=2.995e-08 s): max_drop=0.0931 V, total_I=1652.97 mA
+00:47:38 distributed.solver_td INFO: Step 6001/10000 (t=3.000e-08 s): max_drop=0.0867 V, total_I=1170.91 mA
+00:48:21 distributed.solver_td INFO: Step 6011/10000 (t=3.006e-08 s): max_drop=0.0927 V, total_I=758.15 mA
+00:49:06 distributed.solver_td INFO: Step 6021/10000 (t=3.010e-08 s): max_drop=0.0731 V, total_I=846.33 mA
+00:49:49 distributed.solver_td INFO: Step 6031/10000 (t=3.015e-08 s): max_drop=0.0275 V, total_I=2346.38 mA
+00:50:31 distributed.solver_td INFO: Step 6041/10000 (t=3.020e-08 s): max_drop=0.0424 V, total_I=2314.92 mA
+00:51:13 distributed.solver_td INFO: Step 6051/10000 (t=3.025e-08 s): max_drop=0.0374 V, total_I=2467.24 mA
+00:51:56 distributed.solver_td INFO: Step 6061/10000 (t=3.030e-08 s): max_drop=0.0286 V, total_I=1680.60 mA
+00:52:37 distributed.solver_td INFO: Step 6071/10000 (t=3.035e-08 s): max_drop=0.0421 V, total_I=1062.40 mA
+00:53:21 distributed.solver_td INFO: Step 6081/10000 (t=3.040e-08 s): max_drop=0.0239 V, total_I=1068.13 mA
+00:54:04 distributed.solver_td INFO: Step 6091/10000 (t=3.045e-08 s): max_drop=0.0897 V, total_I=1667.59 mA
+00:54:47 distributed.solver_td INFO: Step 6101/10000 (t=3.050e-08 s): max_drop=0.0175 V, total_I=1160.78 mA
+00:55:29 distributed.solver_td INFO: Step 6111/10000 (t=3.055e-08 s): max_drop=0.0927 V, total_I=755.37 mA
+00:56:13 distributed.solver_td INFO: Step 6121/10000 (t=3.060e-08 s): max_drop=0.0731 V, total_I=826.64 mA
+00:56:57 distributed.solver_td INFO: Step 6131/10000 (t=3.065e-08 s): max_drop=0.0275 V, total_I=2238.03 mA
+00:57:39 distributed.solver_td INFO: Step 6141/10000 (t=3.070e-08 s): max_drop=0.0294 V, total_I=2236.74 mA
+00:58:22 distributed.solver_td INFO: Step 6151/10000 (t=3.075e-08 s): max_drop=0.0375 V, total_I=2413.28 mA
+00:59:04 distributed.solver_td INFO: Step 6161/10000 (t=3.080e-08 s): max_drop=0.0300 V, total_I=1690.97 mA
+00:59:46 distributed.solver_td INFO: Step 6171/10000 (t=3.085e-08 s): max_drop=0.0516 V, total_I=1153.01 mA
+01:00:30 distributed.solver_td INFO: Step 6181/10000 (t=3.090e-08 s): max_drop=0.0297 V, total_I=1080.38 mA
+01:01:12 distributed.solver_td INFO: Step 6191/10000 (t=3.095e-08 s): max_drop=0.0931 V, total_I=1668.29 mA
+01:01:54 distributed.solver_td INFO: Step 6201/10000 (t=3.100e-08 s): max_drop=0.0223 V, total_I=1165.71 mA
+01:02:35 distributed.solver_td INFO: Step 6211/10000 (t=3.105e-08 s): max_drop=0.0927 V, total_I=753.80 mA
+01:03:17 distributed.solver_td INFO: Step 6221/10000 (t=3.110e-08 s): max_drop=0.0731 V, total_I=843.36 mA
+01:03:59 distributed.solver_td INFO: Step 6231/10000 (t=3.115e-08 s): max_drop=0.0275 V, total_I=2348.60 mA
+01:04:41 distributed.solver_td INFO: Step 6241/10000 (t=3.120e-08 s): max_drop=0.0424 V, total_I=2329.71 mA
+01:05:27 distributed.solver_td INFO: Step 6251/10000 (t=3.125e-08 s): max_drop=0.0373 V, total_I=2456.04 mA
+01:06:13 distributed.solver_td INFO: Step 6261/10000 (t=3.130e-08 s): max_drop=0.0288 V, total_I=1706.71 mA
+01:06:55 distributed.solver_td INFO: Step 6271/10000 (t=3.135e-08 s): max_drop=0.0496 V, total_I=1116.75 mA
+01:07:38 distributed.solver_td INFO: Step 6281/10000 (t=3.140e-08 s): max_drop=0.0219 V, total_I=1074.13 mA
+01:08:21 distributed.solver_td INFO: Step 6291/10000 (t=3.145e-08 s): max_drop=0.0898 V, total_I=1668.58 mA
+01:09:05 distributed.solver_td INFO: Step 6301/10000 (t=3.150e-08 s): max_drop=0.0175 V, total_I=1156.86 mA
+01:09:48 distributed.solver_td INFO: Step 6311/10000 (t=3.156e-08 s): max_drop=0.0927 V, total_I=752.46 mA
+01:10:30 distributed.solver_td INFO: Step 6321/10000 (t=3.160e-08 s): max_drop=0.0731 V, total_I=820.11 mA
+01:11:12 distributed.solver_td INFO: Step 6331/10000 (t=3.165e-08 s): max_drop=0.0275 V, total_I=2250.29 mA
+01:11:56 distributed.solver_td INFO: Step 6341/10000 (t=3.170e-08 s): max_drop=0.0294 V, total_I=2272.17 mA
+01:12:40 distributed.solver_td INFO: Step 6351/10000 (t=3.175e-08 s): max_drop=0.0376 V, total_I=2392.86 mA
+01:13:22 distributed.solver_td INFO: Step 6361/10000 (t=3.180e-08 s): max_drop=0.0297 V, total_I=1675.20 mA
+01:14:04 distributed.solver_td INFO: Step 6371/10000 (t=3.185e-08 s): max_drop=0.0516 V, total_I=1064.87 mA
+01:14:46 distributed.solver_td INFO: Step 6381/10000 (t=3.191e-08 s): max_drop=0.0206 V, total_I=1030.12 mA
+01:15:29 distributed.solver_td INFO: Step 6391/10000 (t=3.195e-08 s): max_drop=0.0931 V, total_I=1696.65 mA
+01:16:13 distributed.solver_td INFO: Step 6401/10000 (t=3.200e-08 s): max_drop=0.0867 V, total_I=1176.43 mA
+01:16:55 distributed.solver_td INFO: Step 6411/10000 (t=3.205e-08 s): max_drop=0.0927 V, total_I=762.36 mA
+01:17:36 distributed.solver_td INFO: Step 6421/10000 (t=3.210e-08 s): max_drop=0.0731 V, total_I=854.09 mA
+01:18:17 distributed.solver_td INFO: Step 6431/10000 (t=3.215e-08 s): max_drop=0.0275 V, total_I=2362.89 mA
+01:19:00 distributed.solver_td INFO: Step 6441/10000 (t=3.220e-08 s): max_drop=0.0423 V, total_I=2345.72 mA
+01:19:44 distributed.solver_td INFO: Step 6451/10000 (t=3.225e-08 s): max_drop=0.0378 V, total_I=2476.03 mA
+01:20:29 distributed.solver_td INFO: Step 6461/10000 (t=3.230e-08 s): max_drop=0.0285 V, total_I=1701.19 mA
+01:21:11 distributed.solver_td INFO: Step 6471/10000 (t=3.235e-08 s): max_drop=0.0486 V, total_I=1103.46 mA
+01:21:53 distributed.solver_td INFO: Step 6481/10000 (t=3.240e-08 s): max_drop=0.0266 V, total_I=1052.16 mA
+01:22:34 distributed.solver_td INFO: Step 6491/10000 (t=3.245e-08 s): max_drop=0.0897 V, total_I=1673.51 mA
+01:23:15 distributed.solver_td INFO: Step 6501/10000 (t=3.250e-08 s): max_drop=0.0175 V, total_I=1162.94 mA
+01:23:56 distributed.solver_td INFO: Step 6511/10000 (t=3.255e-08 s): max_drop=0.0927 V, total_I=748.18 mA
+01:24:38 distributed.solver_td INFO: Step 6521/10000 (t=3.260e-08 s): max_drop=0.0731 V, total_I=814.74 mA
+01:25:21 distributed.solver_td INFO: Step 6531/10000 (t=3.265e-08 s): max_drop=0.0275 V, total_I=2202.48 mA
+01:26:02 distributed.solver_td INFO: Step 6541/10000 (t=3.270e-08 s): max_drop=0.0293 V, total_I=2175.49 mA
+01:26:44 distributed.solver_td INFO: Step 6551/10000 (t=3.275e-08 s): max_drop=0.0455 V, total_I=2298.01 mA
+01:27:28 distributed.solver_td INFO: Step 6561/10000 (t=3.280e-08 s): max_drop=0.0292 V, total_I=1695.89 mA
+01:28:11 distributed.solver_td INFO: Step 6571/10000 (t=3.285e-08 s): max_drop=0.0604 V, total_I=1179.06 mA
+01:28:54 distributed.solver_td INFO: Step 6581/10000 (t=3.290e-08 s): max_drop=0.0285 V, total_I=1098.03 mA
+01:29:37 distributed.solver_td INFO: Step 6591/10000 (t=3.295e-08 s): max_drop=0.0828 V, total_I=1647.73 mA
+01:30:19 distributed.solver_td INFO: Step 6601/10000 (t=3.300e-08 s): max_drop=0.0192 V, total_I=1160.30 mA
+01:31:02 distributed.solver_td INFO: Step 6611/10000 (t=3.305e-08 s): max_drop=0.0713 V, total_I=747.42 mA
+01:31:45 distributed.solver_td INFO: Step 6621/10000 (t=3.310e-08 s): max_drop=0.0911 V, total_I=885.84 mA
+01:32:31 distributed.solver_td INFO: Step 6631/10000 (t=3.315e-08 s): max_drop=0.0343 V, total_I=1812.49 mA
+01:33:15 distributed.solver_td INFO: Step 6641/10000 (t=3.320e-08 s): max_drop=0.0297 V, total_I=2392.31 mA
+01:33:58 distributed.solver_td INFO: Step 6651/10000 (t=3.325e-08 s): max_drop=0.0305 V, total_I=2438.38 mA
+01:34:41 distributed.solver_td INFO: Step 6661/10000 (t=3.330e-08 s): max_drop=0.0314 V, total_I=1700.46 mA
+01:35:24 distributed.solver_td INFO: Step 6671/10000 (t=3.335e-08 s): max_drop=0.0398 V, total_I=1078.50 mA
+01:36:05 distributed.solver_td INFO: Step 6681/10000 (t=3.340e-08 s): max_drop=0.0302 V, total_I=918.28 mA
+01:36:48 distributed.solver_td INFO: Step 6691/10000 (t=3.345e-08 s): max_drop=0.0269 V, total_I=1807.81 mA
+01:37:32 distributed.solver_td INFO: Step 6701/10000 (t=3.350e-08 s): max_drop=0.0186 V, total_I=1135.80 mA
+01:38:15 distributed.solver_td INFO: Step 6711/10000 (t=3.355e-08 s): max_drop=0.0713 V, total_I=792.33 mA
+01:38:59 distributed.solver_td INFO: Step 6721/10000 (t=3.360e-08 s): max_drop=0.0911 V, total_I=867.94 mA
+01:39:44 distributed.solver_td INFO: Step 6731/10000 (t=3.365e-08 s): max_drop=0.0343 V, total_I=1751.80 mA
+01:40:26 distributed.solver_td INFO: Step 6741/10000 (t=3.370e-08 s): max_drop=0.0457 V, total_I=2325.82 mA
+01:41:09 distributed.solver_td INFO: Step 6751/10000 (t=3.376e-08 s): max_drop=0.0335 V, total_I=2348.33 mA
+01:41:52 distributed.solver_td INFO: Step 6761/10000 (t=3.380e-08 s): max_drop=0.0250 V, total_I=1710.43 mA
+01:42:34 distributed.solver_td INFO: Step 6771/10000 (t=3.385e-08 s): max_drop=0.0516 V, total_I=1127.18 mA
+01:43:16 distributed.solver_td INFO: Step 6781/10000 (t=3.390e-08 s): max_drop=0.0587 V, total_I=980.89 mA
+01:43:58 distributed.solver_td INFO: Step 6791/10000 (t=3.395e-08 s): max_drop=0.0829 V, total_I=1865.73 mA
+01:44:40 distributed.solver_td INFO: Step 6801/10000 (t=3.400e-08 s): max_drop=0.0940 V, total_I=1166.85 mA
+01:45:22 distributed.solver_td INFO: Step 6811/10000 (t=3.405e-08 s): max_drop=0.0713 V, total_I=817.02 mA
+01:46:05 distributed.solver_td INFO: Step 6821/10000 (t=3.410e-08 s): max_drop=0.0911 V, total_I=887.77 mA
+01:46:51 distributed.solver_td INFO: Step 6831/10000 (t=3.415e-08 s): max_drop=0.0343 V, total_I=1805.22 mA
+01:47:34 distributed.solver_td INFO: Step 6841/10000 (t=3.420e-08 s): max_drop=0.0344 V, total_I=2404.57 mA
+01:48:17 distributed.solver_td INFO: Step 6851/10000 (t=3.425e-08 s): max_drop=0.0305 V, total_I=2413.46 mA
+01:48:58 distributed.solver_td INFO: Step 6861/10000 (t=3.430e-08 s): max_drop=0.0306 V, total_I=1762.41 mA
+01:49:40 distributed.solver_td INFO: Step 6871/10000 (t=3.435e-08 s): max_drop=0.0400 V, total_I=1155.11 mA
+01:50:24 distributed.solver_td INFO: Step 6881/10000 (t=3.440e-08 s): max_drop=0.0302 V, total_I=916.59 mA
+01:51:07 distributed.solver_td INFO: Step 6891/10000 (t=3.445e-08 s): max_drop=0.0269 V, total_I=1854.32 mA
+01:51:50 distributed.solver_td INFO: Step 6901/10000 (t=3.450e-08 s): max_drop=0.0186 V, total_I=1141.21 mA
+01:52:33 distributed.solver_td INFO: Step 6911/10000 (t=3.455e-08 s): max_drop=0.0713 V, total_I=792.51 mA
+01:53:16 distributed.solver_td INFO: Step 6921/10000 (t=3.460e-08 s): max_drop=0.0911 V, total_I=870.18 mA
+01:53:58 distributed.solver_td INFO: Step 6931/10000 (t=3.465e-08 s): max_drop=0.0343 V, total_I=1750.23 mA
+01:54:41 distributed.solver_td INFO: Step 6941/10000 (t=3.470e-08 s): max_drop=0.0457 V, total_I=2233.06 mA
+01:55:24 distributed.solver_td INFO: Step 6951/10000 (t=3.475e-08 s): max_drop=0.0336 V, total_I=2357.87 mA
+01:56:07 distributed.solver_td INFO: Step 6961/10000 (t=3.480e-08 s): max_drop=0.0355 V, total_I=1773.96 mA
+01:56:53 distributed.solver_td INFO: Step 6971/10000 (t=3.485e-08 s): max_drop=0.0499 V, total_I=1230.26 mA
+01:57:35 distributed.solver_td INFO: Step 6981/10000 (t=3.490e-08 s): max_drop=0.0384 V, total_I=983.72 mA
+01:58:18 distributed.solver_td INFO: Step 6991/10000 (t=3.495e-08 s): max_drop=0.0828 V, total_I=1844.65 mA
+01:59:02 distributed.solver_td INFO: Step 7001/10000 (t=3.500e-08 s): max_drop=0.0192 V, total_I=1139.01 mA
+01:59:44 distributed.solver_td INFO: Step 7011/10000 (t=3.505e-08 s): max_drop=0.0713 V, total_I=798.66 mA
+02:00:29 distributed.solver_td INFO: Step 7021/10000 (t=3.510e-08 s): max_drop=0.0911 V, total_I=881.22 mA
+02:01:14 distributed.solver_td INFO: Step 7031/10000 (t=3.515e-08 s): max_drop=0.0343 V, total_I=1828.09 mA
+02:01:57 distributed.solver_td INFO: Step 7041/10000 (t=3.520e-08 s): max_drop=0.0344 V, total_I=2344.71 mA
+02:02:39 distributed.solver_td INFO: Step 7051/10000 (t=3.525e-08 s): max_drop=0.0305 V, total_I=2317.53 mA
+02:03:21 distributed.solver_td INFO: Step 7061/10000 (t=3.530e-08 s): max_drop=0.0312 V, total_I=1626.44 mA
+02:04:04 distributed.solver_td INFO: Step 7071/10000 (t=3.535e-08 s): max_drop=0.0399 V, total_I=1099.57 mA
+02:04:50 distributed.solver_td INFO: Step 7081/10000 (t=3.540e-08 s): max_drop=0.0303 V, total_I=947.31 mA
+02:05:31 distributed.solver_td INFO: Step 7091/10000 (t=3.545e-08 s): max_drop=0.0898 V, total_I=1856.97 mA
+02:06:14 distributed.solver_td INFO: Step 7101/10000 (t=3.550e-08 s): max_drop=0.0175 V, total_I=1153.50 mA
+02:06:58 distributed.solver_td INFO: Step 7111/10000 (t=3.555e-08 s): max_drop=0.0928 V, total_I=807.81 mA
+02:07:41 distributed.solver_td INFO: Step 7121/10000 (t=3.561e-08 s): max_drop=0.0731 V, total_I=824.99 mA
+02:08:24 distributed.solver_td INFO: Step 7131/10000 (t=3.565e-08 s): max_drop=0.0275 V, total_I=2195.18 mA
+02:09:07 distributed.solver_td INFO: Step 7141/10000 (t=3.570e-08 s): max_drop=0.0423 V, total_I=2170.64 mA
+02:09:52 distributed.solver_td INFO: Step 7151/10000 (t=3.575e-08 s): max_drop=0.0365 V, total_I=2276.76 mA
+02:10:35 distributed.solver_td INFO: Step 7161/10000 (t=3.580e-08 s): max_drop=0.0485 V, total_I=1611.52 mA
+02:11:17 distributed.solver_td INFO: Step 7171/10000 (t=3.585e-08 s): max_drop=0.0442 V, total_I=1067.61 mA
+02:11:59 distributed.solver_td INFO: Step 7181/10000 (t=3.590e-08 s): max_drop=0.0178 V, total_I=1038.97 mA
+02:12:41 distributed.solver_td INFO: Step 7191/10000 (t=3.596e-08 s): max_drop=0.0931 V, total_I=1607.98 mA
+02:13:24 distributed.solver_td INFO: Step 7201/10000 (t=3.600e-08 s): max_drop=0.0867 V, total_I=1174.53 mA
+02:14:07 distributed.solver_td INFO: Step 7211/10000 (t=3.605e-08 s): max_drop=0.0927 V, total_I=758.43 mA
+02:14:51 distributed.solver_td INFO: Step 7221/10000 (t=3.610e-08 s): max_drop=0.0731 V, total_I=845.31 mA
+02:15:32 distributed.solver_td INFO: Step 7231/10000 (t=3.615e-08 s): max_drop=0.0275 V, total_I=2352.09 mA
+02:16:16 distributed.solver_td INFO: Step 7241/10000 (t=3.620e-08 s): max_drop=0.0294 V, total_I=2309.05 mA
+02:16:59 distributed.solver_td INFO: Step 7251/10000 (t=3.625e-08 s): max_drop=0.0365 V, total_I=2429.61 mA
+02:17:42 distributed.solver_td INFO: Step 7261/10000 (t=3.630e-08 s): max_drop=0.0288 V, total_I=1661.45 mA
+02:18:24 distributed.solver_td INFO: Step 7271/10000 (t=3.635e-08 s): max_drop=0.0516 V, total_I=1066.25 mA
+02:19:09 distributed.solver_td INFO: Step 7281/10000 (t=3.640e-08 s): max_drop=0.0206 V, total_I=1046.13 mA
+02:19:52 distributed.solver_td INFO: Step 7291/10000 (t=3.645e-08 s): max_drop=0.0897 V, total_I=1663.30 mA
+02:20:34 distributed.solver_td INFO: Step 7301/10000 (t=3.650e-08 s): max_drop=0.0175 V, total_I=1177.50 mA
+02:21:18 distributed.solver_td INFO: Step 7311/10000 (t=3.655e-08 s): max_drop=0.0927 V, total_I=747.55 mA
+02:22:03 distributed.solver_td INFO: Step 7321/10000 (t=3.660e-08 s): max_drop=0.0731 V, total_I=821.11 mA
+02:22:45 distributed.solver_td INFO: Step 7331/10000 (t=3.665e-08 s): max_drop=0.0275 V, total_I=2205.49 mA
+02:23:29 distributed.solver_td INFO: Step 7341/10000 (t=3.670e-08 s): max_drop=0.0423 V, total_I=2195.38 mA
+02:24:12 distributed.solver_td INFO: Step 7351/10000 (t=3.675e-08 s): max_drop=0.0377 V, total_I=2387.25 mA
+02:24:53 distributed.solver_td INFO: Step 7361/10000 (t=3.680e-08 s): max_drop=0.0323 V, total_I=1681.85 mA
+02:25:35 distributed.solver_td INFO: Step 7371/10000 (t=3.685e-08 s): max_drop=0.0421 V, total_I=1098.01 mA
+02:26:16 distributed.solver_td INFO: Step 7381/10000 (t=3.690e-08 s): max_drop=0.0446 V, total_I=1048.97 mA
+02:27:01 distributed.solver_td INFO: Step 7391/10000 (t=3.695e-08 s): max_drop=0.0931 V, total_I=1622.01 mA
+02:27:44 distributed.solver_td INFO: Step 7401/10000 (t=3.700e-08 s): max_drop=0.0223 V, total_I=1163.76 mA
+02:28:27 distributed.solver_td INFO: Step 7411/10000 (t=3.705e-08 s): max_drop=0.0927 V, total_I=756.11 mA
+02:29:12 distributed.solver_td INFO: Step 7421/10000 (t=3.710e-08 s): max_drop=0.0731 V, total_I=845.33 mA
+02:29:54 distributed.solver_td INFO: Step 7431/10000 (t=3.715e-08 s): max_drop=0.0275 V, total_I=2323.38 mA
+02:30:38 distributed.solver_td INFO: Step 7441/10000 (t=3.720e-08 s): max_drop=0.0294 V, total_I=2278.41 mA
+02:31:22 distributed.solver_td INFO: Step 7451/10000 (t=3.725e-08 s): max_drop=0.0374 V, total_I=2386.70 mA
+02:32:04 distributed.solver_td INFO: Step 7461/10000 (t=3.730e-08 s): max_drop=0.0289 V, total_I=1627.20 mA
+02:32:47 distributed.solver_td INFO: Step 7471/10000 (t=3.735e-08 s): max_drop=0.0515 V, total_I=1071.76 mA
+02:33:29 distributed.solver_td INFO: Step 7481/10000 (t=3.740e-08 s): max_drop=0.0207 V, total_I=1043.72 mA
+02:34:15 distributed.solver_td INFO: Step 7491/10000 (t=3.745e-08 s): max_drop=0.0897 V, total_I=1611.43 mA
+02:34:57 distributed.solver_td INFO: Step 7501/10000 (t=3.750e-08 s): max_drop=0.0175 V, total_I=1161.10 mA
+02:35:39 distributed.solver_td INFO: Step 7511/10000 (t=3.755e-08 s): max_drop=0.0927 V, total_I=749.61 mA
+02:36:20 distributed.solver_td INFO: Step 7521/10000 (t=3.760e-08 s): max_drop=0.0731 V, total_I=822.84 mA
+02:37:04 distributed.solver_td INFO: Step 7531/10000 (t=3.765e-08 s): max_drop=0.0275 V, total_I=2229.01 mA
+02:37:47 distributed.solver_td INFO: Step 7541/10000 (t=3.770e-08 s): max_drop=0.0423 V, total_I=2154.12 mA
+02:38:31 distributed.solver_td INFO: Step 7551/10000 (t=3.775e-08 s): max_drop=0.0373 V, total_I=2324.84 mA
+02:39:16 distributed.solver_td INFO: Step 7561/10000 (t=3.781e-08 s): max_drop=0.0297 V, total_I=1663.37 mA
+02:40:02 distributed.solver_td INFO: Step 7571/10000 (t=3.785e-08 s): max_drop=0.0421 V, total_I=1122.18 mA
+02:40:46 distributed.solver_td INFO: Step 7581/10000 (t=3.790e-08 s): max_drop=0.0297 V, total_I=1086.71 mA
+02:41:30 distributed.solver_td INFO: Step 7591/10000 (t=3.795e-08 s): max_drop=0.0931 V, total_I=1643.21 mA
+02:42:14 distributed.solver_td INFO: Step 7601/10000 (t=3.800e-08 s): max_drop=0.0867 V, total_I=1178.74 mA
+02:42:58 distributed.solver_td INFO: Step 7611/10000 (t=3.805e-08 s): max_drop=0.0927 V, total_I=760.29 mA
+02:43:40 distributed.solver_td INFO: Step 7621/10000 (t=3.810e-08 s): max_drop=0.0731 V, total_I=849.28 mA
+02:44:25 distributed.solver_td INFO: Step 7631/10000 (t=3.815e-08 s): max_drop=0.0275 V, total_I=2345.67 mA
+02:45:07 distributed.solver_td INFO: Step 7641/10000 (t=3.820e-08 s): max_drop=0.0294 V, total_I=2278.92 mA
+02:45:49 distributed.solver_td INFO: Step 7651/10000 (t=3.825e-08 s): max_drop=0.0372 V, total_I=2373.79 mA
+02:46:32 distributed.solver_td INFO: Step 7661/10000 (t=3.830e-08 s): max_drop=0.0291 V, total_I=1633.81 mA
+02:47:16 distributed.solver_td INFO: Step 7671/10000 (t=3.835e-08 s): max_drop=0.0426 V, total_I=1067.52 mA
+02:47:57 distributed.solver_td INFO: Step 7681/10000 (t=3.840e-08 s): max_drop=0.0188 V, total_I=1034.68 mA
+02:48:39 distributed.solver_td INFO: Step 7691/10000 (t=3.845e-08 s): max_drop=0.0897 V, total_I=1641.09 mA
+02:49:21 distributed.solver_td INFO: Step 7701/10000 (t=3.850e-08 s): max_drop=0.0175 V, total_I=1150.99 mA
+02:50:03 distributed.solver_td INFO: Step 7711/10000 (t=3.855e-08 s): max_drop=0.0927 V, total_I=751.61 mA
+02:50:46 distributed.solver_td INFO: Step 7721/10000 (t=3.860e-08 s): max_drop=0.0731 V, total_I=824.78 mA
+02:51:30 distributed.solver_td INFO: Step 7731/10000 (t=3.865e-08 s): max_drop=0.0275 V, total_I=2210.03 mA
+02:52:13 distributed.solver_td INFO: Step 7741/10000 (t=3.870e-08 s): max_drop=0.0419 V, total_I=2204.88 mA
+02:52:56 distributed.solver_td INFO: Step 7751/10000 (t=3.875e-08 s): max_drop=0.0844 V, total_I=2372.54 mA
+02:53:39 distributed.solver_td INFO: Step 7761/10000 (t=3.880e-08 s): max_drop=0.0285 V, total_I=1665.82 mA
+02:54:22 distributed.solver_td INFO: Step 7771/10000 (t=3.885e-08 s): max_drop=0.0530 V, total_I=1075.53 mA
+02:55:05 distributed.solver_td INFO: Step 7781/10000 (t=3.890e-08 s): max_drop=0.0213 V, total_I=1065.44 mA
+02:55:48 distributed.solver_td INFO: Step 7791/10000 (t=3.895e-08 s): max_drop=0.0931 V, total_I=1660.37 mA
+02:56:33 distributed.solver_td INFO: Step 7801/10000 (t=3.900e-08 s): max_drop=0.0223 V, total_I=1188.39 mA
+02:57:15 distributed.solver_td INFO: Step 7811/10000 (t=3.905e-08 s): max_drop=0.0927 V, total_I=755.02 mA
+02:58:01 distributed.solver_td INFO: Step 7821/10000 (t=3.910e-08 s): max_drop=0.0731 V, total_I=840.12 mA
+02:58:44 distributed.solver_td INFO: Step 7831/10000 (t=3.915e-08 s): max_drop=0.0275 V, total_I=2324.07 mA
+02:59:27 distributed.solver_td INFO: Step 7841/10000 (t=3.920e-08 s): max_drop=0.0290 V, total_I=2249.71 mA
+03:00:09 distributed.solver_td INFO: Step 7851/10000 (t=3.925e-08 s): max_drop=0.0377 V, total_I=2357.51 mA
+03:00:51 distributed.solver_td INFO: Step 7861/10000 (t=3.930e-08 s): max_drop=0.0294 V, total_I=1660.52 mA
+03:01:35 distributed.solver_td INFO: Step 7871/10000 (t=3.935e-08 s): max_drop=0.0420 V, total_I=1091.46 mA
+03:02:18 distributed.solver_td INFO: Step 7881/10000 (t=3.940e-08 s): max_drop=0.0219 V, total_I=1051.35 mA
+03:03:01 distributed.solver_td INFO: Step 7891/10000 (t=3.945e-08 s): max_drop=0.0269 V, total_I=1625.21 mA
+03:03:45 distributed.solver_td INFO: Step 7901/10000 (t=3.950e-08 s): max_drop=0.0244 V, total_I=1165.27 mA
+03:04:29 distributed.solver_td INFO: Step 7911/10000 (t=3.955e-08 s): max_drop=0.0712 V, total_I=740.79 mA
+03:05:13 distributed.solver_td INFO: Step 7921/10000 (t=3.960e-08 s): max_drop=0.0911 V, total_I=867.55 mA
+03:05:57 distributed.solver_td INFO: Step 7931/10000 (t=3.965e-08 s): max_drop=0.0343 V, total_I=1754.14 mA
+03:06:39 distributed.solver_td INFO: Step 7941/10000 (t=3.970e-08 s): max_drop=0.0344 V, total_I=2318.55 mA
+03:07:21 distributed.solver_td INFO: Step 7951/10000 (t=3.975e-08 s): max_drop=0.0336 V, total_I=2348.15 mA
+03:08:05 distributed.solver_td INFO: Step 7961/10000 (t=3.980e-08 s): max_drop=0.0252 V, total_I=1688.26 mA
+03:08:49 distributed.solver_td INFO: Step 7971/10000 (t=3.985e-08 s): max_drop=0.0521 V, total_I=1174.11 mA
+03:09:31 distributed.solver_td INFO: Step 7981/10000 (t=3.990e-08 s): max_drop=0.0302 V, total_I=966.44 mA
+03:10:12 distributed.solver_td INFO: Step 7991/10000 (t=3.995e-08 s): max_drop=0.0829 V, total_I=1861.13 mA
+03:10:57 distributed.solver_td INFO: Step 8001/10000 (t=4.000e-08 s): max_drop=0.0940 V, total_I=1151.26 mA
+03:11:41 distributed.solver_td INFO: Step 8011/10000 (t=4.005e-08 s): max_drop=0.0713 V, total_I=801.71 mA
+03:12:23 distributed.solver_td INFO: Step 8021/10000 (t=4.010e-08 s): max_drop=0.0911 V, total_I=889.91 mA
+03:13:04 distributed.solver_td INFO: Step 8031/10000 (t=4.015e-08 s): max_drop=0.0343 V, total_I=1816.38 mA
+03:13:46 distributed.solver_td INFO: Step 8041/10000 (t=4.020e-08 s): max_drop=0.0456 V, total_I=2334.88 mA
+03:14:28 distributed.solver_td INFO: Step 8051/10000 (t=4.025e-08 s): max_drop=0.0334 V, total_I=2403.64 mA
+03:15:10 distributed.solver_td INFO: Step 8061/10000 (t=4.030e-08 s): max_drop=0.0321 V, total_I=1740.15 mA
+03:15:51 distributed.solver_td INFO: Step 8071/10000 (t=4.035e-08 s): max_drop=0.0498 V, total_I=1115.35 mA
+03:16:33 distributed.solver_td INFO: Step 8081/10000 (t=4.040e-08 s): max_drop=0.0503 V, total_I=938.04 mA
+03:17:15 distributed.solver_td INFO: Step 8091/10000 (t=4.045e-08 s): max_drop=0.0269 V, total_I=1784.42 mA
+03:17:58 distributed.solver_td INFO: Step 8101/10000 (t=4.050e-08 s): max_drop=0.0199 V, total_I=1138.92 mA
+03:18:43 distributed.solver_td INFO: Step 8111/10000 (t=4.055e-08 s): max_drop=0.0713 V, total_I=799.38 mA
+03:19:26 distributed.solver_td INFO: Step 8121/10000 (t=4.060e-08 s): max_drop=0.0911 V, total_I=869.96 mA
+03:20:08 distributed.solver_td INFO: Step 8131/10000 (t=4.065e-08 s): max_drop=0.0343 V, total_I=1765.98 mA
+03:20:50 distributed.solver_td INFO: Step 8141/10000 (t=4.070e-08 s): max_drop=0.0344 V, total_I=2327.78 mA
+03:21:34 distributed.solver_td INFO: Step 8151/10000 (t=4.075e-08 s): max_drop=0.0336 V, total_I=2430.32 mA
+03:22:16 distributed.solver_td INFO: Step 8161/10000 (t=4.080e-08 s): max_drop=0.0307 V, total_I=1754.47 mA
+03:23:00 distributed.solver_td INFO: Step 8171/10000 (t=4.085e-08 s): max_drop=0.0516 V, total_I=1120.62 mA
+03:23:44 distributed.solver_td INFO: Step 8181/10000 (t=4.090e-08 s): max_drop=0.0322 V, total_I=972.70 mA
+03:24:30 distributed.solver_td INFO: Step 8191/10000 (t=4.095e-08 s): max_drop=0.0828 V, total_I=1826.15 mA
+03:25:13 distributed.solver_td INFO: Step 8201/10000 (t=4.100e-08 s): max_drop=0.0192 V, total_I=1142.36 mA
+03:25:54 distributed.solver_td INFO: Step 8211/10000 (t=4.105e-08 s): max_drop=0.0713 V, total_I=797.41 mA
+03:26:36 distributed.solver_td INFO: Step 8221/10000 (t=4.110e-08 s): max_drop=0.0911 V, total_I=880.48 mA
+03:27:20 distributed.solver_td INFO: Step 8231/10000 (t=4.115e-08 s): max_drop=0.0343 V, total_I=1798.75 mA
+03:28:03 distributed.solver_td INFO: Step 8241/10000 (t=4.120e-08 s): max_drop=0.0457 V, total_I=2352.22 mA
+03:28:46 distributed.solver_td INFO: Step 8251/10000 (t=4.125e-08 s): max_drop=0.0333 V, total_I=2403.83 mA
+03:29:28 distributed.solver_td INFO: Step 8261/10000 (t=4.130e-08 s): max_drop=0.0337 V, total_I=1817.99 mA
+03:30:10 distributed.solver_td INFO: Step 8271/10000 (t=4.135e-08 s): max_drop=0.0498 V, total_I=1176.87 mA
+03:30:57 distributed.solver_td INFO: Step 8281/10000 (t=4.140e-08 s): max_drop=0.0297 V, total_I=927.44 mA
+03:31:40 distributed.solver_td INFO: Step 8291/10000 (t=4.145e-08 s): max_drop=0.0269 V, total_I=1846.82 mA
+03:32:23 distributed.solver_td INFO: Step 8301/10000 (t=4.150e-08 s): max_drop=0.0186 V, total_I=1160.15 mA
+03:33:06 distributed.solver_td INFO: Step 8311/10000 (t=4.155e-08 s): max_drop=0.0713 V, total_I=791.99 mA
+03:33:48 distributed.solver_td INFO: Step 8321/10000 (t=4.160e-08 s): max_drop=0.0911 V, total_I=866.71 mA
+03:34:34 distributed.solver_td INFO: Step 8331/10000 (t=4.165e-08 s): max_drop=0.0343 V, total_I=1739.59 mA
+03:35:16 distributed.solver_td INFO: Step 8341/10000 (t=4.170e-08 s): max_drop=0.0343 V, total_I=2223.76 mA
+03:35:58 distributed.solver_td INFO: Step 8351/10000 (t=4.175e-08 s): max_drop=0.0333 V, total_I=2335.68 mA
+03:36:40 distributed.solver_td INFO: Step 8361/10000 (t=4.180e-08 s): max_drop=0.0322 V, total_I=1704.80 mA
+03:37:23 distributed.solver_td INFO: Step 8371/10000 (t=4.185e-08 s): max_drop=0.0723 V, total_I=1171.19 mA
+03:38:07 distributed.solver_td INFO: Step 8381/10000 (t=4.190e-08 s): max_drop=0.0383 V, total_I=974.96 mA
+03:38:50 distributed.solver_td INFO: Step 8391/10000 (t=4.195e-08 s): max_drop=0.0829 V, total_I=1819.63 mA
+03:39:36 distributed.solver_td INFO: Step 8401/10000 (t=4.200e-08 s): max_drop=0.0940 V, total_I=1153.14 mA
+03:40:19 distributed.solver_td INFO: Step 8411/10000 (t=4.205e-08 s): max_drop=0.0713 V, total_I=806.28 mA
+03:41:01 distributed.solver_td INFO: Step 8421/10000 (t=4.210e-08 s): max_drop=0.0911 V, total_I=892.89 mA
+03:41:42 distributed.solver_td INFO: Step 8431/10000 (t=4.215e-08 s): max_drop=0.0343 V, total_I=1843.59 mA
+03:42:24 distributed.solver_td INFO: Step 8441/10000 (t=4.220e-08 s): max_drop=0.0457 V, total_I=2335.18 mA
+03:43:06 distributed.solver_td INFO: Step 8451/10000 (t=4.225e-08 s): max_drop=0.0334 V, total_I=2309.28 mA
+03:43:47 distributed.solver_td INFO: Step 8461/10000 (t=4.230e-08 s): max_drop=0.0342 V, total_I=1674.95 mA
+03:44:28 distributed.solver_td INFO: Step 8471/10000 (t=4.235e-08 s): max_drop=0.0498 V, total_I=1128.48 mA
+03:45:10 distributed.solver_td INFO: Step 8481/10000 (t=4.240e-08 s): max_drop=0.0334 V, total_I=946.14 mA
+03:45:50 distributed.solver_td INFO: Step 8491/10000 (t=4.245e-08 s): max_drop=0.0269 V, total_I=1854.43 mA
+03:46:31 distributed.solver_td INFO: Step 8501/10000 (t=4.250e-08 s): max_drop=0.0186 V, total_I=1128.42 mA
+03:47:12 distributed.solver_td INFO: Step 8511/10000 (t=4.255e-08 s): max_drop=0.0713 V, total_I=792.13 mA
+03:47:54 distributed.solver_td INFO: Step 8521/10000 (t=4.260e-08 s): max_drop=0.0911 V, total_I=869.13 mA
+03:48:35 distributed.solver_td INFO: Step 8531/10000 (t=4.265e-08 s): max_drop=0.0343 V, total_I=1717.11 mA
+03:49:16 distributed.solver_td INFO: Step 8541/10000 (t=4.270e-08 s): max_drop=0.0344 V, total_I=2241.23 mA
+03:49:58 distributed.solver_td INFO: Step 8551/10000 (t=4.275e-08 s): max_drop=0.0285 V, total_I=2333.74 mA
+03:50:40 distributed.solver_td INFO: Step 8561/10000 (t=4.280e-08 s): max_drop=0.0309 V, total_I=1650.00 mA
+03:51:20 distributed.solver_td INFO: Step 8571/10000 (t=4.285e-08 s): max_drop=0.0520 V, total_I=1079.74 mA
+03:52:02 distributed.solver_td INFO: Step 8581/10000 (t=4.290e-08 s): max_drop=0.0302 V, total_I=923.82 mA
+03:52:43 distributed.solver_td INFO: Step 8591/10000 (t=4.295e-08 s): max_drop=0.0828 V, total_I=1764.64 mA
+03:53:24 distributed.solver_td INFO: Step 8601/10000 (t=4.300e-08 s): max_drop=0.0192 V, total_I=1151.93 mA
+03:54:05 distributed.solver_td INFO: Step 8611/10000 (t=4.305e-08 s): max_drop=0.0713 V, total_I=804.62 mA
+03:54:46 distributed.solver_td INFO: Step 8621/10000 (t=4.310e-08 s): max_drop=0.0911 V, total_I=889.18 mA
+03:55:29 distributed.solver_td INFO: Step 8631/10000 (t=4.315e-08 s): max_drop=0.0343 V, total_I=1870.37 mA
+03:56:10 distributed.solver_td INFO: Step 8641/10000 (t=4.320e-08 s): max_drop=0.0457 V, total_I=2406.84 mA
+03:57:24 distributed.solver_td INFO: Step 8651/10000 (t=4.325e-08 s): max_drop=0.0342 V, total_I=2506.18 mA
+03:58:06 distributed.solver_td INFO: Step 8661/10000 (t=4.330e-08 s): max_drop=0.0310 V, total_I=1832.46 mA
+03:58:48 distributed.solver_td INFO: Step 8671/10000 (t=4.335e-08 s): max_drop=0.0498 V, total_I=1176.48 mA
+03:59:31 distributed.solver_td INFO: Step 8681/10000 (t=4.340e-08 s): max_drop=0.0297 V, total_I=932.82 mA
+04:00:11 distributed.solver_td INFO: Step 8691/10000 (t=4.345e-08 s): max_drop=0.0269 V, total_I=1857.56 mA
+04:00:53 distributed.solver_td INFO: Step 8701/10000 (t=4.350e-08 s): max_drop=0.0186 V, total_I=1136.20 mA
+04:01:33 distributed.solver_td INFO: Step 8711/10000 (t=4.355e-08 s): max_drop=0.0713 V, total_I=792.78 mA
+04:02:14 distributed.solver_td INFO: Step 8721/10000 (t=4.360e-08 s): max_drop=0.0911 V, total_I=868.16 mA
+04:02:56 distributed.solver_td INFO: Step 8731/10000 (t=4.365e-08 s): max_drop=0.0343 V, total_I=1751.39 mA
+04:03:38 distributed.solver_td INFO: Step 8741/10000 (t=4.370e-08 s): max_drop=0.0344 V, total_I=2381.11 mA
+04:04:19 distributed.solver_td INFO: Step 8751/10000 (t=4.375e-08 s): max_drop=0.0341 V, total_I=2541.82 mA
+04:05:10 distributed.solver_td INFO: Step 8761/10000 (t=4.380e-08 s): max_drop=0.0323 V, total_I=1854.52 mA
+04:05:54 distributed.solver_td INFO: Step 8771/10000 (t=4.385e-08 s): max_drop=0.0524 V, total_I=1220.70 mA
+04:06:39 distributed.solver_td INFO: Step 8781/10000 (t=4.390e-08 s): max_drop=0.0303 V, total_I=963.19 mA
+04:07:21 distributed.solver_td INFO: Step 8791/10000 (t=4.395e-08 s): max_drop=0.0829 V, total_I=1876.71 mA
+04:08:03 distributed.solver_td INFO: Step 8801/10000 (t=4.400e-08 s): max_drop=0.0940 V, total_I=1162.21 mA
+04:08:46 distributed.solver_td INFO: Step 8811/10000 (t=4.405e-08 s): max_drop=0.0713 V, total_I=812.14 mA
+04:09:28 distributed.solver_td INFO: Step 8821/10000 (t=4.410e-08 s): max_drop=0.0911 V, total_I=889.29 mA
+04:10:12 distributed.solver_td INFO: Step 8831/10000 (t=4.415e-08 s): max_drop=0.0343 V, total_I=1836.11 mA
+04:10:55 distributed.solver_td INFO: Step 8841/10000 (t=4.420e-08 s): max_drop=0.0457 V, total_I=2432.89 mA
+04:11:45 distributed.solver_td INFO: Step 8851/10000 (t=4.425e-08 s): max_drop=0.0344 V, total_I=2523.67 mA
+04:12:36 distributed.solver_td INFO: Step 8861/10000 (t=4.430e-08 s): max_drop=0.0315 V, total_I=1827.49 mA
+04:13:23 distributed.solver_td INFO: Step 8871/10000 (t=4.435e-08 s): max_drop=0.0499 V, total_I=1192.93 mA
+04:14:05 distributed.solver_td INFO: Step 8881/10000 (t=4.440e-08 s): max_drop=0.0297 V, total_I=943.64 mA
+04:14:48 distributed.solver_td INFO: Step 8891/10000 (t=4.445e-08 s): max_drop=0.0269 V, total_I=1866.00 mA
+04:15:31 distributed.solver_td INFO: Step 8901/10000 (t=4.450e-08 s): max_drop=0.0186 V, total_I=1136.02 mA
+04:16:11 distributed.solver_td INFO: Step 8911/10000 (t=4.455e-08 s): max_drop=0.0713 V, total_I=791.69 mA
+04:16:55 distributed.solver_td INFO: Step 8921/10000 (t=4.460e-08 s): max_drop=0.0911 V, total_I=867.52 mA
+04:17:39 distributed.solver_td INFO: Step 8931/10000 (t=4.465e-08 s): max_drop=0.0343 V, total_I=1763.81 mA
+04:18:22 distributed.solver_td INFO: Step 8941/10000 (t=4.470e-08 s): max_drop=0.0344 V, total_I=2351.80 mA
+04:19:07 distributed.solver_td INFO: Step 8951/10000 (t=4.475e-08 s): max_drop=0.0335 V, total_I=2404.48 mA
+04:19:50 distributed.solver_td INFO: Step 8961/10000 (t=4.480e-08 s): max_drop=0.0319 V, total_I=1785.03 mA
+04:20:34 distributed.solver_td INFO: Step 8971/10000 (t=4.485e-08 s): max_drop=0.0521 V, total_I=1180.24 mA
+04:21:18 distributed.solver_td INFO: Step 8981/10000 (t=4.490e-08 s): max_drop=0.0303 V, total_I=937.24 mA
+04:22:01 distributed.solver_td INFO: Step 8991/10000 (t=4.495e-08 s): max_drop=0.0828 V, total_I=1888.46 mA
+04:22:43 distributed.solver_td INFO: Step 9001/10000 (t=4.500e-08 s): max_drop=0.0192 V, total_I=1144.82 mA
+04:23:25 distributed.solver_td INFO: Step 9011/10000 (t=4.505e-08 s): max_drop=0.0713 V, total_I=797.75 mA
+04:24:09 distributed.solver_td INFO: Step 9021/10000 (t=4.510e-08 s): max_drop=0.0911 V, total_I=880.15 mA
+04:24:53 distributed.solver_td INFO: Step 9031/10000 (t=4.515e-08 s): max_drop=0.0343 V, total_I=1826.98 mA
+04:25:37 distributed.solver_td INFO: Step 9041/10000 (t=4.520e-08 s): max_drop=0.0457 V, total_I=2419.00 mA
+04:27:09 distributed.solver_td INFO: Step 9051/10000 (t=4.525e-08 s): max_drop=0.0335 V, total_I=2483.41 mA
+04:27:53 distributed.solver_td INFO: Step 9061/10000 (t=4.530e-08 s): max_drop=0.0306 V, total_I=1775.65 mA
+04:28:42 distributed.solver_td INFO: Step 9071/10000 (t=4.535e-08 s): max_drop=0.0484 V, total_I=1129.41 mA
+04:29:25 distributed.solver_td INFO: Step 9081/10000 (t=4.540e-08 s): max_drop=0.0265 V, total_I=922.46 mA
+04:30:11 distributed.solver_td INFO: Step 9091/10000 (t=4.545e-08 s): max_drop=0.0269 V, total_I=1865.73 mA
+04:30:55 distributed.solver_td INFO: Step 9101/10000 (t=4.550e-08 s): max_drop=0.0186 V, total_I=1128.66 mA
+04:31:37 distributed.solver_td INFO: Step 9111/10000 (t=4.555e-08 s): max_drop=0.0713 V, total_I=798.38 mA
+04:32:18 distributed.solver_td INFO: Step 9121/10000 (t=4.560e-08 s): max_drop=0.0911 V, total_I=867.87 mA
+04:33:00 distributed.solver_td INFO: Step 9131/10000 (t=4.565e-08 s): max_drop=0.0343 V, total_I=1763.97 mA
+04:33:44 distributed.solver_td INFO: Step 9141/10000 (t=4.570e-08 s): max_drop=0.0343 V, total_I=2292.05 mA
+04:34:28 distributed.solver_td INFO: Step 9151/10000 (t=4.575e-08 s): max_drop=0.0337 V, total_I=2384.17 mA
+04:35:14 distributed.solver_td INFO: Step 9161/10000 (t=4.580e-08 s): max_drop=0.0313 V, total_I=1801.83 mA
+04:35:55 distributed.solver_td INFO: Step 9171/10000 (t=4.585e-08 s): max_drop=0.0610 V, total_I=1227.93 mA
+04:36:37 distributed.solver_td INFO: Step 9181/10000 (t=4.590e-08 s): max_drop=0.0326 V, total_I=983.14 mA
+04:37:19 distributed.solver_td INFO: Step 9191/10000 (t=4.595e-08 s): max_drop=0.0829 V, total_I=1858.38 mA
+04:38:01 distributed.solver_td INFO: Step 9201/10000 (t=4.600e-08 s): max_drop=0.0940 V, total_I=1141.36 mA
+04:38:45 distributed.solver_td INFO: Step 9211/10000 (t=4.605e-08 s): max_drop=0.0713 V, total_I=801.33 mA
+04:39:28 distributed.solver_td INFO: Step 9221/10000 (t=4.610e-08 s): max_drop=0.0911 V, total_I=889.20 mA
+04:40:09 distributed.solver_td INFO: Step 9231/10000 (t=4.615e-08 s): max_drop=0.0343 V, total_I=1831.15 mA
+04:40:51 distributed.solver_td INFO: Step 9241/10000 (t=4.620e-08 s): max_drop=0.0297 V, total_I=2394.31 mA
+04:41:33 distributed.solver_td INFO: Step 9251/10000 (t=4.625e-08 s): max_drop=0.0305 V, total_I=2471.68 mA
+04:42:17 distributed.solver_td INFO: Step 9261/10000 (t=4.630e-08 s): max_drop=0.0315 V, total_I=1769.84 mA
+04:43:00 distributed.solver_td INFO: Step 9271/10000 (t=4.635e-08 s): max_drop=0.0400 V, total_I=1168.03 mA
+04:43:42 distributed.solver_td INFO: Step 9281/10000 (t=4.640e-08 s): max_drop=0.0302 V, total_I=933.42 mA
+04:44:23 distributed.solver_td INFO: Step 9291/10000 (t=4.645e-08 s): max_drop=0.0269 V, total_I=1839.51 mA
+04:45:07 distributed.solver_td INFO: Step 9301/10000 (t=4.650e-08 s): max_drop=0.0186 V, total_I=1144.10 mA
+04:45:49 distributed.solver_td INFO: Step 9311/10000 (t=4.655e-08 s): max_drop=0.0713 V, total_I=791.43 mA
+04:46:30 distributed.solver_td INFO: Step 9321/10000 (t=4.660e-08 s): max_drop=0.0911 V, total_I=867.93 mA
+04:47:13 distributed.solver_td INFO: Step 9331/10000 (t=4.665e-08 s): max_drop=0.0343 V, total_I=1756.76 mA
+04:47:55 distributed.solver_td INFO: Step 9341/10000 (t=4.670e-08 s): max_drop=0.0457 V, total_I=2342.07 mA
+04:48:39 distributed.solver_td INFO: Step 9351/10000 (t=4.675e-08 s): max_drop=0.0336 V, total_I=2362.17 mA
+04:49:22 distributed.solver_td INFO: Step 9361/10000 (t=4.680e-08 s): max_drop=0.0253 V, total_I=1735.85 mA
+04:50:05 distributed.solver_td INFO: Step 9371/10000 (t=4.685e-08 s): max_drop=0.0521 V, total_I=1157.28 mA
+04:50:49 distributed.solver_td INFO: Step 9381/10000 (t=4.690e-08 s): max_drop=0.0507 V, total_I=950.28 mA
+04:51:34 distributed.solver_td INFO: Step 9391/10000 (t=4.695e-08 s): max_drop=0.0828 V, total_I=1885.09 mA
+04:52:21 distributed.solver_td INFO: Step 9401/10000 (t=4.700e-08 s): max_drop=0.0192 V, total_I=1137.80 mA
+04:53:04 distributed.solver_td INFO: Step 9411/10000 (t=4.705e-08 s): max_drop=0.0713 V, total_I=801.76 mA
+04:53:47 distributed.solver_td INFO: Step 9421/10000 (t=4.710e-08 s): max_drop=0.0911 V, total_I=885.07 mA
+04:54:30 distributed.solver_td INFO: Step 9431/10000 (t=4.715e-08 s): max_drop=0.0343 V, total_I=1827.59 mA
+04:55:12 distributed.solver_td INFO: Step 9441/10000 (t=4.720e-08 s): max_drop=0.0344 V, total_I=2447.36 mA
+04:55:54 distributed.solver_td INFO: Step 9451/10000 (t=4.725e-08 s): max_drop=0.0305 V, total_I=2487.71 mA
+04:56:38 distributed.solver_td INFO: Step 9461/10000 (t=4.730e-08 s): max_drop=0.0308 V, total_I=1767.16 mA
+04:57:22 distributed.solver_td INFO: Step 9471/10000 (t=4.735e-08 s): max_drop=0.0400 V, total_I=1105.82 mA
+04:58:05 distributed.solver_td INFO: Step 9481/10000 (t=4.740e-08 s): max_drop=0.0302 V, total_I=914.79 mA
+04:58:47 distributed.solver_td INFO: Step 9491/10000 (t=4.745e-08 s): max_drop=0.0269 V, total_I=1844.50 mA
+04:59:29 distributed.solver_td INFO: Step 9501/10000 (t=4.750e-08 s): max_drop=0.0186 V, total_I=1144.08 mA
+05:00:12 distributed.solver_td INFO: Step 9511/10000 (t=4.755e-08 s): max_drop=0.0713 V, total_I=791.83 mA
+05:00:53 distributed.solver_td INFO: Step 9521/10000 (t=4.760e-08 s): max_drop=0.0911 V, total_I=868.23 mA
+05:01:33 distributed.solver_td INFO: Step 9531/10000 (t=4.765e-08 s): max_drop=0.0343 V, total_I=1762.25 mA
+05:02:14 distributed.solver_td INFO: Step 9541/10000 (t=4.770e-08 s): max_drop=0.0457 V, total_I=2329.42 mA
+05:02:58 distributed.solver_td INFO: Step 9551/10000 (t=4.775e-08 s): max_drop=0.0336 V, total_I=2447.45 mA
+05:03:38 distributed.solver_td INFO: Step 9561/10000 (t=4.780e-08 s): max_drop=0.0358 V, total_I=1817.73 mA
+05:04:20 distributed.solver_td INFO: Step 9571/10000 (t=4.785e-08 s): max_drop=0.0517 V, total_I=1190.36 mA
+05:05:03 distributed.solver_td INFO: Step 9581/10000 (t=4.790e-08 s): max_drop=0.0503 V, total_I=1023.43 mA
+05:05:46 distributed.solver_td INFO: Step 9591/10000 (t=4.795e-08 s): max_drop=0.0829 V, total_I=1858.65 mA
+05:06:28 distributed.solver_td INFO: Step 9601/10000 (t=4.800e-08 s): max_drop=0.0940 V, total_I=1148.77 mA
+05:07:09 distributed.solver_td INFO: Step 9611/10000 (t=4.805e-08 s): max_drop=0.0713 V, total_I=805.72 mA
+05:07:52 distributed.solver_td INFO: Step 9621/10000 (t=4.810e-08 s): max_drop=0.0911 V, total_I=891.59 mA
+05:08:36 distributed.solver_td INFO: Step 9631/10000 (t=4.815e-08 s): max_drop=0.0343 V, total_I=1805.33 mA
+05:09:19 distributed.solver_td INFO: Step 9641/10000 (t=4.820e-08 s): max_drop=0.0344 V, total_I=2410.23 mA
+05:10:02 distributed.solver_td INFO: Step 9651/10000 (t=4.825e-08 s): max_drop=0.0305 V, total_I=2427.28 mA
+05:10:44 distributed.solver_td INFO: Step 9661/10000 (t=4.830e-08 s): max_drop=0.0314 V, total_I=1762.08 mA
+05:11:29 distributed.solver_td INFO: Step 9671/10000 (t=4.835e-08 s): max_drop=0.0400 V, total_I=1169.31 mA
+05:12:13 distributed.solver_td INFO: Step 9681/10000 (t=4.840e-08 s): max_drop=0.0303 V, total_I=949.33 mA
+05:13:18 distributed.solver_td INFO: Step 9691/10000 (t=4.845e-08 s): max_drop=0.0269 V, total_I=1860.50 mA
+05:14:34 distributed.solver_td INFO: Step 9701/10000 (t=4.850e-08 s): max_drop=0.0187 V, total_I=1144.52 mA
+05:16:00 distributed.solver_td INFO: Step 9711/10000 (t=4.855e-08 s): max_drop=0.0713 V, total_I=799.21 mA
+05:16:41 distributed.solver_td INFO: Step 9721/10000 (t=4.860e-08 s): max_drop=0.0911 V, total_I=882.89 mA
+05:17:35 distributed.solver_td INFO: Step 9731/10000 (t=4.865e-08 s): max_drop=0.0343 V, total_I=1747.10 mA
+05:18:17 distributed.solver_td INFO: Step 9741/10000 (t=4.870e-08 s): max_drop=0.0457 V, total_I=2236.77 mA
+05:19:00 distributed.solver_td INFO: Step 9751/10000 (t=4.875e-08 s): max_drop=0.0334 V, total_I=2302.62 mA
+05:20:32 distributed.solver_td INFO: Step 9761/10000 (t=4.880e-08 s): max_drop=0.0334 V, total_I=1739.95 mA
+05:21:21 distributed.solver_td INFO: Step 9771/10000 (t=4.885e-08 s): max_drop=0.0719 V, total_I=1167.09 mA
+05:22:12 distributed.solver_td INFO: Step 9781/10000 (t=4.890e-08 s): max_drop=0.0383 V, total_I=942.37 mA
+05:23:18 distributed.solver_td INFO: Step 9791/10000 (t=4.895e-08 s): max_drop=0.0828 V, total_I=1866.05 mA
+05:23:59 distributed.solver_td INFO: Step 9801/10000 (t=4.900e-08 s): max_drop=0.0192 V, total_I=1146.73 mA
+05:24:41 distributed.solver_td INFO: Step 9811/10000 (t=4.905e-08 s): max_drop=0.0713 V, total_I=797.80 mA
+05:25:22 distributed.solver_td INFO: Step 9821/10000 (t=4.910e-08 s): max_drop=0.0911 V, total_I=879.43 mA
+05:26:03 distributed.solver_td INFO: Step 9831/10000 (t=4.915e-08 s): max_drop=0.0343 V, total_I=1835.12 mA
+05:26:45 distributed.solver_td INFO: Step 9841/10000 (t=4.920e-08 s): max_drop=0.0344 V, total_I=2336.85 mA
+05:27:30 distributed.solver_td INFO: Step 9851/10000 (t=4.925e-08 s): max_drop=0.0305 V, total_I=2336.81 mA
+05:28:12 distributed.solver_td INFO: Step 9861/10000 (t=4.930e-08 s): max_drop=0.0309 V, total_I=1647.91 mA
+05:28:54 distributed.solver_td INFO: Step 9871/10000 (t=4.935e-08 s): max_drop=0.0415 V, total_I=1080.34 mA
+05:29:36 distributed.solver_td INFO: Step 9881/10000 (t=4.940e-08 s): max_drop=0.0334 V, total_I=916.46 mA
+05:30:17 distributed.solver_td INFO: Step 9891/10000 (t=4.945e-08 s): max_drop=0.0269 V, total_I=1853.92 mA
+05:31:00 distributed.solver_td INFO: Step 9901/10000 (t=4.950e-08 s): max_drop=0.0186 V, total_I=1155.41 mA
+05:31:45 distributed.solver_td INFO: Step 9911/10000 (t=4.955e-08 s): max_drop=0.0713 V, total_I=793.77 mA
+05:32:28 distributed.solver_td INFO: Step 9921/10000 (t=4.960e-08 s): max_drop=0.0911 V, total_I=868.34 mA
+05:33:13 distributed.solver_td INFO: Step 9931/10000 (t=4.965e-08 s): max_drop=0.0343 V, total_I=1724.81 mA
+05:33:56 distributed.solver_td INFO: Step 9941/10000 (t=4.970e-08 s): max_drop=0.0342 V, total_I=2237.28 mA
+05:34:39 distributed.solver_td INFO: Step 9951/10000 (t=4.975e-08 s): max_drop=0.0336 V, total_I=2342.14 mA
+05:35:20 distributed.solver_td INFO: Step 9961/10000 (t=4.980e-08 s): max_drop=0.0347 V, total_I=1707.71 mA
+05:36:03 distributed.solver_td INFO: Step 9971/10000 (t=4.985e-08 s): max_drop=0.0519 V, total_I=1106.53 mA
+05:36:45 distributed.solver_td INFO: Step 9981/10000 (t=4.990e-08 s): max_drop=0.0297 V, total_I=907.72 mA
+05:37:27 distributed.solver_td INFO: Step 9991/10000 (t=4.995e-08 s): max_drop=0.0829 V, total_I=1747.62 mA
+05:38:04 distributed.solver_td INFO: Step 10000/10000 (t=5.000e-08 s): max_drop=0.0143 V, total_I=864.66 mA
+05:38:04 distributed.solver_td INFO: === Distributed DDM Transient Solve Statistics ===
+05:38:04 distributed.solver_td INFO: Time steps: 10000  |  t: [5ps, 50ns]  |  dt: 5ps  |  method: be
+05:38:04 distributed.solver_td INFO: DC initial condition: 5.458s
+05:38:04 distributed.solver_td INFO: Time loop: 45755.26s (10000 steps, avg 4.576s/step)
+05:38:04 distributed.solver_td INFO:   Transient RHS:     3.194s/step (per-tile: 0.025 / 0.710 / 98.123)
+05:38:04 distributed.solver_td INFO:   Assemble + solve:  0.673s/step
+05:38:04 distributed.solver_td INFO:   Interior recovery:  0.620s/step
+05:38:04 distributed.solver_td INFO: Peak IR-drop: 0.1049 V at t=35.575ns
+05:38:04 distributed.decomposition INFO:   Peak IR-drop: 104.945 mV at t=35.575 ns
+05:40:24 distributed.decomposition INFO:   Found 10 spatially-separated worst nodes (grid: X=[0, 19152000], Y=[10600, 16628040])
+05:40:36 distributed.decomposition INFO: Phase 3: Waveform decomposition for 10 victims
+05:40:36 distributed.decomposition INFO:   Running all-sources transient (tracking 10 victims)
+17:07:35 distributed.decomposition INFO:   Victim 1/10: 7919600_7736295_43
