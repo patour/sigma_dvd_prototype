@@ -4,261 +4,172 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Static and dynamic IR-drop analysis prototype for multi-layer power grids. Supports both synthetic grids and real PDN netlists. Includes quasi-static (batch DC) and transient RC analysis.
+Static and dynamic IR-drop analysis prototype for multi-layer power grids. Supports synthetic grids and real PDN netlists; quasi-static (batch DC) and transient RC analysis; flat, hierarchical, coupled, tiled, and distributed (DDM) solvers.
 
-**Source Layout (`src/` packages, installed via `pip install -e .`):**
-1. **`src/graph/`** - Rustworkx graph wrappers and conversion utilities
-2. **`src/model/`** - `UnifiedPowerGridModel`, adapters, factory functions
-3. **`src/solver/`** - Flat, hierarchical, coupled, and tiled solvers
-4. **`src/analysis/`** - Dynamic, transient, adjoint analysis; PWL smoothing
-5. **`src/parser/`** - SPICE-like netlist parsing (`NetlistParser`)
-6. **`src/distributed/`** - Distributed DDM solver (tile-based domain decomposition), includes `heatmap.py` for tile-parallel pre-binned stripe heatmaps
-7. **`src/visualization/`** - Plotters (`UnifiedPlotter`, `DynamicPlotter`, `PDNPlotter`)
-8. **`src/legacy/`** - Original synthetic grid modules (originally `irdrop/`)
-9. **`src/reports/`** - Shared report generators (floating nodes, top-K IR-drop)
+`src/` is installed editable (`pip install -e .`) with `pythonpath = ["src"]` set in `pyproject.toml`, so imports are `from solver.unified_solver import ...`, not `from src.solver...`.
 
 ## Commands
 
 ```bash
-# Install (editable)
+# Install (editable, with test deps)
 uv pip install -e ".[test]"
 
-# Run unit tests (fast, <160s)
+# Unit tests (fast, <160s) — preferred during iteration
 pytest -m unit
 
-# Run a specific integration test file
-pytest tests/distributed/test_distributed_integration.py -v
-
-# Run ALL integration tests (~6 min, slow — only when needed)
-pytest -m integration
-
-# Run everything (~10 min, slow — only as a final check)
-pytest
-
-# Run specific test module
+# Specific module
 pytest tests/solver/test_hierarchical_solver.py
-pytest tests/parser/test_pdn_parser.py
 pytest tests/distributed/test_distributed_solver.py
 
-# Run single test
+# Single test
 pytest tests/legacy/test_irdrop.py::TestIRDrop::test_no_load_currents_all_pad_voltage -v
 
-# Run CLI tools
+# Integration tests (~6 min) — only when relevant area changed
+pytest -m integration
+
+# Everything (~10 min) — final validation only
+pytest
+
+# CLIs
 python -m parser.pdn_parser ./netlist/netlist_test --net VDD
 python -m solver.pdn_solver --input graph.pkl --net VDD --output ./results
 python -m analysis.dynamic_irdrop_decomposition ./netlist/netlist_test --net VDD --end-time 100ns --dt 100ps
-
-# Run distributed solver with heatmaps
 python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --backend ray --plot --verbose
-
-# Run distributed quasi-static analysis
-python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --mode quasi-static --t-end 100ns --n-points 11 --verbose
-
-# Run distributed transient analysis
-python -m distributed solve ./netlist/netlist_sampled/distributed_pkl --mode transient --t-end 10ns --dt 100ps --verbose
+python -m distributed solve ./pkl_dir --mode quasi-static --t-end 100ns --n-points 11 --verbose
+python -m distributed solve ./pkl_dir --mode transient --t-end 10ns --dt 100ps --verbose
 ```
 
-> **Test priority:** First run individual unit test files related to the affected
-> area, then `pytest -m unit` for full unit coverage. Run individual integration
-> test files only when changes affect that area. Run bare `pytest` only as a
-> final validation step, not during intermediate steps.
+**Test priority:** run individual unit test files for the affected area first, then `pytest -m unit`. Integration files only when changes touch that area. Bare `pytest` is a final check, not an iteration step.
 
 ## Architecture
 
 ### Data Flow
-- **Synthetic**: `generate_power_grid()` -> `create_model_from_synthetic(G, pads, vdd)` -> `UnifiedIRDropSolver`
-- **PDN**: `NetlistParser.parse()` -> `create_model_from_pdn(graph, net_name)` -> `UnifiedIRDropSolver`
-- **Multi-Net**: `NetlistParser.parse()` -> `create_multi_net_models(graph)` -> iterate models
-- **Distributed**: `DistributedNetlistParser.parse_and_dump()` -> `ParsedTileBundle` -> `create_distributed_model(bundle)` -> `DistributedDDMSolver`
-- **Distributed QS**: `ctx = prepare()` -> `preprocess_sources()` -> `solve_quasi_static(ctx, t_array)` -> `DistributedQuasiStaticResult` (peaks lazy on workers)
-- **Distributed Transient**: `dc_ctx = prepare()` -> `trans_ctx = prepare_transient(dt, method)` -> `preprocess_sources()` -> `solve_transient(trans_ctx, dc_context=dc_ctx)` -> `DistributedTransientResult`
-- **Distributed Transient (ic_voltages)**: `trans_ctx = prepare_transient(dt, method)` -> `solve_transient(trans_ctx, ic_voltages=dc_result.voltages)` -> `DistributedTransientResult`
-- **Distributed Adjoint**: `dc_ctx = prepare()` -> `solver.analyze_adjoint_static(victim, T, dc_ctx)` or `solver.analyze_adjoint(victim, T, trans_ctx, trans_result)` -> `AdjointAttribution`
 
-**Key Constraint:** Pads (voltage sources) are Dirichlet BCs at Vdd, eliminated via Schur complement. LU factorization cached for batch solves.
+- **Synthetic**: `generate_power_grid()` → `create_model_from_synthetic(G, pads, vdd)` → `UnifiedIRDropSolver`
+- **PDN**: `NetlistParser.parse()` → `create_model_from_pdn(graph, net_name)` → `UnifiedIRDropSolver`
+- **Multi-net PDN**: `create_multi_net_models(graph)` → iterate
+- **Distributed (DDM)**: `DistributedNetlistParser.parse_and_dump()` → `ParsedTileBundle` → `create_distributed_model(bundle)` → `DistributedDDMSolver`
 
-### Module Structure
+**Key constraint:** pads (voltage sources) are Dirichlet BCs at Vdd, eliminated via Schur complement. LU factorization is cached for batch solves.
 
-```
-src/
-├── graph/
-│   ├── rx_graph.py             # RustworkxMultiDiGraphWrapper
-│   ├── rx_algorithms.py        # Graph algorithms (dijkstra, components, etc.)
-│   └── converter.py            # NetworkX <-> Rustworkx conversion
-├── model/
-│   ├── unified_model.py        # UnifiedPowerGridModel, grid decomposition
-│   ├── factory.py              # create_model_from_* functions
-│   ├── node_adapter.py         # NodeInfoExtractor
-│   ├── edge_adapter.py         # EdgeInfoExtractor, ElementType
-│   └── solver_results.py       # Result/context data classes
-├── solver/
-│   ├── unified_solver.py       # UnifiedIRDropSolver (orchestration)
-│   ├── coupled_system.py       # BlockMatrixSystem, Schur math, grounded cap diags, re-exports
-│   ├── coupled_operators.py    # SchurComplementOperator, CoupledSystemOperator, preconditioners
-│   ├── interface_assembly.py   # Distributed interface assembly, island detection, package matrices
-│   ├── current_aggregation.py  # CurrentAggregator
-│   ├── tiling.py               # TileManager for parallel tiling
-│   ├── unified_partitioner.py  # Layer/spatial partitioning
-│   ├── effective_resistance.py # Pairwise effective resistance
-│   ├── statistics.py           # Netlist statistics
-│   └── pdn_solver.py           # Standalone PDN DC solver CLI
-├── analysis/
-│   ├── dynamic_solver.py       # DynamicIRDropSolver (batch DC)
-│   ├── transient_solver.py     # TransientIRDropSolver (RC)
-│   ├── adjoint_sensitivity.py  # IR-drop attribution
-│   ├── farfield_analysis.py    # Far-field to local boundary coupling analysis
-│   ├── pwl_smoothing.py        # PWLSmoother
-│   ├── vectorized_sources.py   # VectorizedCurrentSources
-│   └── dynamic_irdrop_decomposition.py  # CLI for dynamic IR-drop decomposition
-├── parser/
-│   ├── netlist.py              # NetlistParser (main entry point)
-│   ├── pdn_parser.py           # CLI entry point for PDN parsing
-│   ├── sampled_netlist.py      # Sampled multi-tile netlist generator
-│   ├── spice_lexer.py          # SPICE element line tokenizer
-│   ├── current_sources.py      # CurrentSource, Pulse, PWL
-│   ├── graph_builder.py        # Builds rustworkx graph from tokens
-│   ├── metadata.py             # Net voltage, vsrc metadata
-│   ├── parallel.py             # Parallel tile parsing
-│   └── edge_attrs.py           # Memory-optimized edge attributes
-├── distributed/
-│   ├── model.py                # DistributedPowerGridModel, ParsedTileBundle
-│   ├── solver.py               # DistributedDDMSolver (DC + time-domain mixin)
-│   ├── solver_td.py            # Time-domain mixin: preprocess_sources, solve_quasi_static, solve_transient
-│   ├── parser.py               # DistributedNetlistParser
-│   ├── tile_worker.py          # Per-tile BlockMatrixSystem actor (+ time-domain mixin)
-│   ├── tile_worker_td.py       # Time-domain mixin: VCS, transient factor/RHS, peak tracking
-│   ├── tile_parsing.py         # TileData, stateless parsing functions (_parse_tile_ckt, etc.)
-│   ├── backend.py              # Local/Ray compute backends
-│   ├── heatmap.py              # Distributed stripe heatmap pipeline (prebin/merge/render)
-│   ├── cli.py                  # CLI: python -m distributed {solve,run,parse} with --mode dc/quasi-static/transient
-│   ├── result.py               # Result/context classes (DC, quasi-static, transient) + dataclasses
-│   └── result_factorization.py # Factorization, save/load/refactor logic for context classes
-├── reports/
-│   ├── floating_nodes.py          # Floating nodes detection and reporting
-│   └── topk_irdrop.py             # Top-K worst IR-drop report (shared by flat and distributed)
-├── visualization/
-│   ├── unified_plotter.py      # UnifiedPlotter (voltage/IR-drop heatmaps)
-│   ├── dynamic_plotter.py      # DynamicPlotter (time-domain results)
-│   ├── pdn_plotter.py          # PDNPlotter (layer-wise heatmaps)
-│   └── stripe_heatmap.py       # Stripe-based heatmap visualization
-└── legacy/
-    ├── generate_power_grid.py  # Synthetic K-layer grid generator
-    ├── power_grid_model.py     # Original PowerGridModel
-    ├── solver.py               # IRDropSolver
-    ├── stimulus.py             # StimulusGenerator
-    ├── grid_partitioner.py     # GridPartitioner
-    ├── effective_resistance.py # EffectiveResistanceCalculator
-    ├── regional_voltage_solver.py # Regional IR-drop via effective resistance
-    └── plot.py                 # plot_voltage_map, plot_ir_drop_map
-```
+### Module Tree (high-level)
 
-### Key Classes (one-line summaries)
+- `src/graph/` — rustworkx wrappers, networkx↔rustworkx conversion (`ensure_rustworkx_graph`)
+- `src/model/` — `UnifiedPowerGridModel`, factories (`create_model_from_pdn/synthetic/multi_net`), result/context dataclasses
+- `src/solver/` — `UnifiedIRDropSolver` (`solve`, `solve_hierarchical`, `solve_hierarchical_coupled`, `solve_hierarchical_tiled`); `BlockMatrixSystem`, `SchurComplementOperator`, `CoupledSystemOperator`, `CurrentAggregator`, `TileManager`, `pdn_solver` CLI
+- `src/analysis/` — `DynamicIRDropSolver` (quasi-static), `TransientIRDropSolver` (BE/TR), `AdjointSensitivitySolver`, `PWLSmoother`, `VectorizedCurrentSources`, `farfield_analysis`
+- `src/parser/` — `NetlistParser` (gzip, parallel, net-filter), `sampled_netlist`, `parallel`, `edge_attrs` (memory-optimized slotted edges), `current_sources` (`Pulse`, `PWL`, `CurrentSource`)
+- `src/distributed/` — DDM solver, see *Distributed solver* below
+- `src/reports/` — shared report writers: `floating_nodes`, `topk_irdrop`
+- `src/visualization/` — `UnifiedPlotter`, `DynamicPlotter`, `PDNPlotter`, `stripe_heatmap` (`parse_node_info`, `render_from_prebinned_stripe_data`)
+- `src/legacy/` — original synthetic-grid path: `generate_power_grid`, `PowerGridModel`, `IRDropSolver`, `StimulusGenerator`, `GridPartitioner`
 
-- **UnifiedPowerGridModel**: Handles both NodeID and string nodes; auto-detects floating islands
-- **UnifiedIRDropSolver**: Flat, hierarchical, coupled, and tiled solves with batch support
-- **BlockMatrixSystem / SchurComplementOperator / CoupledSystemOperator**: Coupled solver internals
-- **CurrentAggregator**: Distributes load currents to ports (shortest-path or effective resistance)
-- **TileManager**: Tile generation, connectivity validation, and result merging
-- **DynamicIRDropSolver**: Quasi-static analysis via batch DC solves at discrete time points
-- **TransientIRDropSolver**: Transient RC analysis (Backward Euler or Trapezoidal)
-- **AdjointSensitivitySolver**: IR-drop attribution to aggressor current sources
-- **PWLSmoother**: Analytical triangular low-pass filter for waveform preprocessing
-- **NetlistParser**: SPICE-like tile-based netlist parsing with parallel support
-- **ParsedTileBundle**: Lightweight coordinator-side metadata for distributed model creation (no tile data)
-- **DistributedTopologyContext**: Immutable topology shared by DC and transient contexts
-- **DistributedSolverContext**: Active DC context with `factor()` / `release()` / `save()` / `load()` / `refactor()`
-- **DistributedTransientContext**: Active transient context with same lifecycle methods
-- **DistributedSmoothedSources**: Coordinator-side handle for preprocessed VCS (data lives on workers)
-- **DistributedQuasiStaticResult**: Lazy peak collection from workers; `as_flat()` / `as_per_tile()` / `dump()`
-- **DistributedTransientResult**: Extends quasi-static result with RC transient metadata
-- **generate_topk_report**: Shared top-K IR-drop report writer (used by both PDNSolver and DistributedDDMSolver)
+### Distributed solver (`src/distributed/`)
 
-### Legacy Module (src/legacy/)
-- `generate_power_grid()`: Creates K-layer resistor mesh with `NodeID` keys
-- `PowerGridModel`, `IRDropSolver`: Original classes (prefer unified versions in `src/solver/`)
-- `GridPartitioner`: Structured slab partitioning along via rows/columns
+DDM is structurally exact — matches the flat solver to floating-point precision (0 µV diff on validation). Files use a mixin pattern to keep each under ~800 lines:
 
-## Critical Conventions
+| File | Role |
+|------|------|
+| `solver.py` | `DistributedDDMSolver` — DC orchestration (`prepare`, `solve_dc`) |
+| `solver_td.py` | Time-domain mixin: `preprocess_sources`, `solve_quasi_static`, `prepare_transient`, `solve_transient` |
+| `solver_adjoint.py` | `analyze_adjoint_static`, `analyze_adjoint` |
+| `tile_worker.py` / `tile_worker_td.py` / `tile_worker_peak.py` / `tile_worker_adjoint.py` | Per-tile actor wrapping `BlockMatrixSystem` (mixins for transient, peak tracking, adjoint) |
+| `tile_parsing.py` | Stateless parsing: `TileData`, `_parse_tile_ckt`, `_iter_instance_sources`, `_parse_node_xy` |
+| `model.py` | `DistributedPowerGridModel`, `ParsedTileBundle`, `create_distributed_model` |
+| `parser.py` | `DistributedNetlistParser` |
+| `result.py` / `result_factorization.py` | Context/result dataclasses; `factor`/`release`/`save`/`load`/`refactor` |
+| `backend.py` | `LocalBackend`, `RayBackend` |
+| `heatmap.py` | Tile-parallel pre-binned stripe heatmap pipeline |
+| `cli.py` | `python -m distributed {parse,solve,run}` |
 
-### Node Types
-- **Synthetic**: `NodeID(layer, idx)` frozen dataclass keys the graph
-- **PDN**: String node names like `'1000_2000_M1'`, `'VDD_vsrc'`, `'0'` (ground)
-
-### Unit System (PDN)
-- Resistance: kOhm, Capacitance: fF, Inductance: nH, Current: mA
-- Conductance matrix in mS (milli-Siemens) for self-consistent G*V = I
-
-### Current Sign Convention (CRITICAL)
-- **Input**: Positive current = sink drawing from grid (`currents[node] = +1.0 mA`)
-- **Internal**: Solver negates for nodal equation
-- **IR-drop**: Always `Vdd - V_node` (positive = voltage dropped below Vdd)
-
-### Common Pitfalls
-- **Plotting**: `plot_ir_drop_map(G, voltages, vdd=1.0, ...)` requires scalar `vdd`, NOT pad list
-- **Stimulus area**: `StimulusGenerator(graph=G, ...)` must pass graph if using `area` parameter
-- **R_eff queries**: Pad nodes rejected in pairwise calculations (raises `ValueError`)
-- **PDN current extraction**: Use `model.extract_current_sources()` to get load currents from I-type edges
-- **Headless plotting**: Use `show=False` for batch/headless runs. Matplotlib backend is set to `Agg` in test runners.
-- **Legacy pickle files**: Old `pdn_graph.pkl` files contain NetworkX graphs. Use `ensure_rustworkx_graph()` to convert before creating models.
-- **Edge elem_name access**: With optimized edges (default), `elem_name` is None for most resistors. Use `data.get('elem_name', '')` not `data['elem_name']`.
-- **Instance model iteration**: Use `_iter_instance_sources()` from `distributed/tile_worker.py` to iterate filtered instanceModels entries — don't duplicate the gzip/net-filter logic.
-- **np.digitize binning**: Use `valid_mask` filter for out-of-range indices, NOT `np.clip`. Clamping corrupts edge bin values.
-- **Current heatmaps**: Only plot layers that have current sources (check for non-zero bins). Upper metal layers typically have none.
-- **Distributed circular imports**: `distributed/parser.py` cannot import from `distributed/model.py` at module level (model.py already imports from parser.py). Use lazy imports inside functions.
-- **Transient Dirichlet RHS**: In the distributed transient time loop, use `rhs_dirichlet_G` (G-only), NOT `rhs_dirichlet_interface` (A-based, includes cap terms). BE: `+rhs_d_G`, TR: `+2*rhs_d_G`. Pad capacitance history cancels because pads hold constant voltage.
-- **Island detection with caps**: Capacitive edges do NOT contribute to connectivity for island detection. A node connected to pads only via caps is floating. But DO filter cap edges when removing island nodes.
-- **Context lifecycle**: `solve_dc(ctx)`, `solve_quasi_static(ctx)`, `solve_transient(trans_ctx, dc_context=dc_ctx)` — context is REQUIRED (first positional). Caller creates via `prepare()` / `prepare_transient()` and must `release()` when done.
-- **Transient IC paths**: `solve_transient` takes `dc_context` OR `ic_voltages` (mutually exclusive). `dc_context` does a DC solve for IC; `ic_voltages` skips DC entirely.
-- **prepare_transient() is independent**: Does NOT internally call `prepare()`. Caller manages DC and transient contexts separately.
-- **solve_transient does NOT release dc_context**: Caller owns the lifecycle of both contexts.
-- **Context save/load**: `save()` must be called BEFORE `release()` (release clears S_global). After `load()`, call `refactor()` to rebuild coordinator LU from saved S_global. Workers need separate `factor()`.
-- **Ray worker globals**: Module-level globals (CHOLMOD settings, regularization) do NOT propagate to Ray workers (separate Python processes). Use `TileWorker.configure(settings)` called once during `create_distributed_model` to push settings to workers. CHOLMOD backend settings (`use_cholmod`, `cholmod_mode`, `cholmod_ordering`, `cholmod_use_long`) are now propagated automatically.
-- **Tile matrix SPD**: Per-tile full matrix `[[G_ii, G_ip], [G_pi, G_pp]]` may be PSD (not SPD) for tiles without ground connections. `_compute_schur_partial()` adds 1e-5 mS regularization to port diagonals and subtracts it from S after extraction. `G_ii` alone is always SPD (diagonal includes connections to ports).
-- **Partial Cholesky Schur path**: `compute_explicit_schur(block_system)` automatically uses partial Cholesky when CHOLMOD backend is active; falls back to chunked multi-RHS when splu is used. Factors full `[interior, ports]` matrix and extracts `S = L22 @ L22.T`. Sets `lu_ii` via solve_L/Lt truncation trick. CHOLMOD-only.
-- **`build_block_system_from_edges` vs `extract_block_matrices`**: The tile worker uses `build_block_system_from_edges` (no `exclude_port_to_port` param — includes all edges). The flat coupled solver uses `extract_block_matrices` (has `exclude_port_to_port` flag). Don't confuse them.
-- **`solve_quasi_static` default smoothing**: Calling without `smoothed_sources` triggers `preprocess_sources(smooth=True)`, silently overwriting `_active_sources` on workers. Always pass a `smoothed_sources` handle if VCS is already initialized.
-- **Notebook cwd for Ray**: Ray workers inherit the driver's cwd. Notebooks must `os.chdir` to the project root before creating the model so tile metadata relative paths resolve. Pattern: `os.chdir(Path(__file__).parent.parent if '__file__' in dir() else Path('..'))`
-- **`_parse_node_xy` shared utility**: Use `from distributed.tile_parsing import _parse_node_xy` for PDN coordinate parsing (`'1000_2000_M1'` → `(1000.0, 2000.0)`). Do not duplicate this function.
-
-## Typical Workflow Patterns
-
-### PDN Netlist Analysis (Recommended)
+**Context lifecycle (DC + transient are independent):**
 ```python
-from parser.netlist import NetlistParser
-from model.factory import create_model_from_pdn
-from solver.unified_solver import UnifiedIRDropSolver
-
-parser = NetlistParser('./netlist/netlist_test', validate=True)
-graph = parser.parse()
-model = create_model_from_pdn(graph, 'VDD')  # vdd auto-extracted
-load_currents = model.extract_current_sources()
-
-solver = UnifiedIRDropSolver(model)
-result = solver.solve(load_currents)
-print(f"Max IR-drop: {max(result.ir_drop.values()):.4f} V")
+dc_ctx = solver.prepare()                                  # builds + factors
+result = solver.solve_dc(dc_ctx)
+trans_ctx = solver.prepare_transient(dt=100e-12, method='BE')
+sources = solver.preprocess_sources(time_step=100e-12, t_end=10e-9)
+trans_result = solver.solve_transient(trans_ctx, dc_context=dc_ctx)  # OR ic_voltages=...
+trans_ctx.release(); dc_ctx.release()                      # caller owns both
 ```
 
-### Synthetic Grid Analysis
-```python
-from legacy.generate_power_grid import generate_power_grid
-from model.factory import create_model_from_synthetic
-from solver.unified_solver import UnifiedIRDropSolver
-from legacy import StimulusGenerator
+Heatmap pipeline: `get_layer_metadata()` → `build_global_bin_spec()` → `prebin_tile()` (per tile, picklable, `map_func`-able) → `merge_tile_prebins()` → `render_from_prebinned_stripe_data()`.
 
-G, loads, pads = generate_power_grid(K=3, N0=12, I_N=150, N_vsrc=4, seed=42)
-model = create_model_from_synthetic(G, pads, vdd=1.0)
+## Critical conventions
 
-stim_gen = StimulusGenerator(load_nodes=list(loads.keys()), vdd=1.0, seed=10, graph=G)
-meta = stim_gen.generate(total_power=1.5, percent=0.3, distribution="gaussian")
+### Node types
+- **Synthetic**: `NodeID(layer, idx)` frozen dataclass
+- **PDN**: strings like `'1000_2000_M1'`, `'VDD_vsrc'`, `'0'` (ground)
 
-solver = UnifiedIRDropSolver(model)
-result = solver.solve(meta.currents)
+### Unit system (PDN)
+- Resistance kΩ, capacitance fF, inductance nH, current mA
+- Conductance matrix in mS so `G·V = I` is self-consistent
+
+### Current sign convention
+- Input: positive = sink drawing from grid (`currents[node] = +1.0` mA)
+- Solver internally negates for the nodal equation
+- IR-drop is always reported as `Vdd − V_node` (positive = drop below Vdd)
+
+## Pitfalls (project-specific, not generic)
+
+### General
+- **Plotting**: `plot_ir_drop_map(G, voltages, vdd=1.0, ...)` takes a scalar `vdd`, not the pad list.
+- **Stimulus area**: `StimulusGenerator(graph=G, ...)` must receive `graph` if you use the `area` parameter.
+- **R_eff queries**: pad nodes are rejected in pairwise calculations (raises `ValueError`).
+- **PDN current extraction**: use `model.extract_current_sources()` to get load currents from I-type edges.
+- **Headless plotting**: `show=False` for batch; `tests/conftest.py` sets matplotlib `Agg` backend.
+- **Legacy pickles**: old `pdn_graph.pkl` files contain NetworkX graphs — call `ensure_rustworkx_graph(graph)` first.
+- **Optimized edge attrs (default)**: `elem_name` is *not* stored on most resistors. Use `data.get('elem_name', '')`, never `data['elem_name']`. Computed properties (`.tile_id`, `.net_type`) unpack on the fly and are 4–5× slower than dict access — cache in hot loops.
+- **Lazy factorization (default)**: `create_model_from_pdn(..., lazy_factor=True)` defers LU until first flat solve. Pass `lazy_factor=False` only if you need eager factorization (backward compat / flat-only).
+
+### Distributed solver
+- **Island detection**: must exclude ground node `'0'` from BFS (ground edges are diagonal-only). Capacitive edges do **not** contribute to connectivity for island detection — but DO filter cap edges when removing island nodes.
+- **Boundary current partitioning**: external current injection on boundary nodes must go to exactly one tile to avoid double-counting.
+- **Transient Dirichlet RHS in time loop**: use `rhs_dirichlet_G` (G-only), NOT `rhs_dirichlet_interface` (A-based, includes cap terms). BE: `+rhs_d_G`. TR: `+2*rhs_d_G`. Pad-cap history cancels because pads hold constant voltage.
+- **Tile matrix SPD**: per-tile `[[G_ii, G_ip], [G_pi, G_pp]]` may be PSD (not SPD) for tiles with no ground connection. `_compute_schur_partial()` adds 1e-5 mS port-diagonal regularization and subtracts it from S after extraction. `G_ii` alone is always SPD.
+- **Partial Cholesky Schur**: `compute_explicit_schur(block_system)` uses partial Cholesky when CHOLMOD is active; falls back to chunked multi-RHS with splu. CHOLMOD-only path sets `lu_ii` via the solve_L/Lt truncation trick.
+- **`build_block_system_from_edges` vs `extract_block_matrices`**: tile worker uses the former (no `exclude_port_to_port` param, includes all edges). Flat coupled solver uses the latter. Don't confuse.
+- **`solve_quasi_static` default smoothing**: calling without `smoothed_sources` triggers `preprocess_sources(smooth=True)` and silently overwrites `_active_sources` on workers. Always pass an explicit handle if VCS is already initialized.
+- **Context save/load**: `save()` must run **before** `release()` (release clears `S_global`). After `load()`, call `refactor()` to rebuild the coordinator LU; workers need a separate `factor()`.
+- **Ray worker globals**: module-level globals do **not** propagate to Ray workers (separate processes). Use `TileWorker.configure(settings)` during `create_distributed_model`. CHOLMOD settings (`use_cholmod`, `cholmod_mode`, `cholmod_ordering`, `cholmod_use_long`) are propagated automatically via the settings dict.
+- **Notebook cwd for Ray**: workers inherit the driver's cwd. Notebooks must `os.chdir` to the project root before creating the model so tile metadata relative paths resolve.
+- **Circular imports inside `distributed/`**: `parser.py` cannot import `model.py` at module level (model.py imports from parser.py). Use lazy imports. `result_factorization.py` uses `TYPE_CHECKING` for `result.py`/`model.py`.
+- **`_parse_current_source_line`** (in `parser/current_sources.py`) returns Amperes; conversion to mA happens post-parse in `_prepare_instance_source` (`current_sources.py`, also `parallel.py`). Multiply by `I_TO_MA` if you call it directly.
+- **`_parse_node_xy`**: shared utility in `distributed/tile_parsing.py` for `'1000_2000_M1'` → `(1000.0, 2000.0)`. Don't reimplement.
+
+### Visualization / heatmaps
+- **Current heatmaps**: only render layers that actually have current sources (all-zero check). Upper metals typically have none.
+- **`np.digitize` binning**: filter out-of-range with `valid_mask`, NOT `np.clip` — clamping corrupts edge bin values.
+
+## PDN netlist format
+
+```
+netlist_dir/
+  ckt.sp                  # Top-level includes
+  tile_X_Y.ckt            # R/C/L/I/V elements
+  tile_X_Y.nd             # Node coords: x y layer node_name
+  package.ckt             # Package-level connections
+  instanceModels_X_Y.sp   # Instance current source models
+  pg_net_voltage          # Power-net voltages, e.g. "VDD 1.0"
+  additional_vsrcs        # Extra vsrc definitions
+  decap_cell_list         # Decap cell instance names
+  switch_cell_list        # Power-switch cell names
 ```
 
-## File Landmarks
+**Element syntax** (units are kΩ / fF / nH / mA / V):
+```
+R_name n1 n2 <kOhm>
+C_name n1 n2 <fF>
+L_name n1 n2 <nH>
+I_name n1 n2 <mA>          # current source (load)
+V_name n+ n- <V>           # voltage source (pad)
+X_inst subckt n1 n2 ...    # subcircuit instance
+```
+
+**Node naming:** `<x>_<y>_<layer>` (e.g. `1000_2000_M1`).
+
+## File landmarks
 
 - **Notebooks**: `notebooks/irdrop_decomposition_pdn.ipynb`, `notebooks/irdrop_decomposition.ipynb`, `notebooks/irdrop_decomposition_unified_model.ipynb`
-- **Tests**: `tests/{graph,model,solver,analysis,parser,distributed,visualization,legacy}/test_*.py`
-- **API exports**: `src/*/__init__.py` (package-level public APIs)
-- **Scripts**: `scripts/analysis/`, `scripts/solver/`, `scripts/parser/`
-- **Reference**: `DEPRECATION.md` (historical old->new import mappings)
+- **Test netlists**: `netlist/netlist_test/` (small PDN, integration), `netlist/netlist_small/` (minimal unit fixtures), `netlist/netlist_sampled/` (distributed benchmark)
+- **API exports**: each `src/<pkg>/__init__.py`
+- **Copilot equivalent**: `.github/copilot-instructions.md` (overlapping content; this file is authoritative for Claude)

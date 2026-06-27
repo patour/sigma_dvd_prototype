@@ -1,134 +1,134 @@
-# Solver Package
+# `src/solver/` — flat / hierarchical / coupled / tiled solvers
 
-Flat, hierarchical, coupled, and tiled IR-drop solvers. Entry point: `UnifiedIRDropSolver` in `unified_solver.py`.
+> Root `CLAUDE.md` covers conventions, units, and lists distributed pitfalls. This file is the API reference for the in-process solver hierarchy.
 
-## Key Classes
+## Mode comparison
 
-- **UnifiedIRDropSolver**: Orchestrates all solve modes — `solve()` (flat), `solve_hierarchical()`, `solve_hierarchical_coupled()`, `solve_hierarchical_tiled()`
-- **BlockMatrixSystem** (`coupled_system.py`): Block-partitioned conductance matrix (port/interior splits)
-- **SchurComplementOperator** (`coupled_operators.py`, re-exported from `coupled_system.py`): Matrix-free Schur complement for coupled solver
-- **CoupledSystemOperator** (`coupled_operators.py`, re-exported from `coupled_system.py`): Full coupled top-grid + Schur complement operator
-- **CurrentAggregator** (`current_aggregation.py`): Distributes load currents to ports using shortest-path or effective resistance weighting
-- **TileManager** (`tiling.py`): Tile generation, connectivity validation, and result merging
-- **UnifiedPartitioner** (`unified_partitioner.py`): Layer-based and spatial grid partitioning
-- **UnifiedEffectiveResistanceCalculator** (`effective_resistance.py`): Pairwise and single-node effective resistance
-- **UnifiedStatistics** (`statistics.py`): Netlist statistics (node/edge counts, R/C/L/I totals)
-- **PDNSolver** (`pdn_solver.py`): Standalone DC solver CLI
+| Mode | Method | When | Accuracy |
+|---|---|---|---|
+| `solve()` | direct LU on reduced system | small/medium grids, baseline | exact |
+| `solve_hierarchical()` | layer-partitioned, weighted port currents | fast bottom-grid solves; tolerable approximation | ~0.5 mV error |
+| `solve_hierarchical_coupled()` | matrix-free Schur complement, iterative | exact + still benefits from layer partitioning | exact to tol (~0.02 µV) |
+| `solve_hierarchical_tiled()` | spatial tiling of bottom grid, parallel | PDN graphs only (string nodes); spatial locality | matches flat within validation_stats |
+| `prepare_distributed()` / `solve_distributed_prepared()` | hands off to DDM | many tiles, multi-process | exact (DDM is structurally exact) |
 
-## Hierarchical Solve (Layer Decomposition)
+All of these accept an optional `context=` to reuse cached precomputation. See *Batch solving* below.
+
+## Hierarchical (uncoupled, approximate)
 
 ```python
-# Partition at layer boundary for faster bottom-grid solves
-hier_result = solver.solve_hierarchical(
+hier = solver.solve_hierarchical(
     load_currents,
-    partition_layer='M2',      # or integer layer index
-    top_k=5,                   # ports per load for current aggregation
-    weighting="shortest_path", # "shortest_path" or "effective"
-    verbose=True,              # print timing breakdown
+    partition_layer='M2',         # str layer name or int index
+    top_k=5,                      # nearest ports per load
+    weighting='shortest_path',    # or 'effective' (more accurate, slower)
+    rmax=None,                    # cutoff for shortest-path weighting
+    use_fast_builder=True,        # vectorized subgrid builder (~10x)
+    verbose=False,
 )
-print(f"Ports: {len(hier_result.port_nodes)}")
 ```
 
-**Parameters:**
-- `partition_layer`: Layer name (string like `'M2'`) or integer index
-- `top_k`: Number of nearest ports per load for current aggregation (default 5)
-- `weighting`: `"shortest_path"` (default) or `"effective"` (more accurate but slower)
-- `rmax`: Maximum resistance distance for shortest_path weighting
-- `use_fast_builder`: If True (default), use vectorized subgrid builder (~10x speedup)
+Approximates port currents by distributing each load over `top_k` ports, then solves top and bottom grids independently. Fast; ~0.5 mV error vs flat.
 
-## Coupled Hierarchical Solve (Exact)
-
-Solves full coupled system iteratively using matrix-free Schur complement. Exact up to solver tolerance (~0.02 uV error).
+## Hierarchical coupled (exact, iterative)
 
 ```python
-coupled_result = solver.solve_hierarchical_coupled(
+res = solver.solve_hierarchical_coupled(
     load_currents,
     partition_layer='M2',
-    solver='gmres',            # 'gmres' or 'bicgstab'
-    tol=1e-8,                  # Iterative solver tolerance
-    maxiter=500,               # Max iterations
-    preconditioner='block_diagonal',  # 'none', 'block_diagonal', or 'ilu'
-    verbose=True,
+    solver='gmres',                  # 'cg', 'gmres', 'bicgstab'
+    tol=1e-8, maxiter=500,
+    preconditioner='block_diagonal', # 'none', 'block_diagonal', 'ilu', 'amg'
 )
-print(f"Converged in {coupled_result.iterations} iterations")
-print(f"Final residual: {coupled_result.final_residual:.2e}")
 ```
 
-**Coupled vs Uncoupled:**
-- **Uncoupled (`solve_hierarchical`)**: Approximates port currents via weighted distribution, then solves top/bottom grids independently. Fast but ~0.5 mV error.
-- **Coupled (`solve_hierarchical_coupled`)**: Iterative Schur complement. Exact up to tolerance. Slower but accurate.
+Recipes:
 
-**Solver Parameters:**
-- `solver`: `'cg'` (SPD, best for large), `'gmres'` (default, robust), `'bicgstab'` (often faster)
-- `tol`: Residual tolerance (default 1e-8)
-- `maxiter`: Max iterations (default 500)
-- `preconditioner`: `'block_diagonal'` (default), `'ilu'`, `'amg'` (requires pyamg), `'none'`
-
-**Recommended configurations:**
 - Small (<100K nodes): `solver='bicgstab', preconditioner='ilu'`
-- Large (>1M nodes): `solver='cg', preconditioner='amg'` (O(1) iterations)
+- Large (>1M nodes): `solver='cg', preconditioner='amg'` (O(1) iterations; needs `pyamg`)
+- **CG needs an SPD preconditioner** — use `amg` or `block_diagonal`, never `ilu`.
 
-**Note:** CG requires SPD preconditioner. Use `'amg'` or `'block_diagonal'` with CG, not `'ilu'`.
+Returns `UnifiedCoupledHierarchicalResult` with `iterations`, `final_residual`, `converged`, `timings`.
 
-**UnifiedCoupledHierarchicalResult Fields:**
-- All fields from `UnifiedHierarchicalResult` plus:
-- `iterations`, `final_residual`, `converged`, `preconditioner_type`
-- `timings`: Dict with 'factor_bottom', 'build_rhs', 'iterative_solve', 'recover_bottom'
-
-## Tiled Hierarchical Solve (PDN only)
-
-Exploits spatial locality by tiling the bottom-grid. **Only for PDN graphs** (string node names).
+## Tiled (PDN-only, spatially partitioned)
 
 ```python
-tiled_result = solver.solve_hierarchical_tiled(
+res = solver.solve_hierarchical_tiled(
     current_injections=load_currents,
     partition_layer='M2',
-    N_x=2, N_y=2,              # Tile grid dimensions
-    halo_percent=0.2,          # Halo size as fraction of tile
+    N_x=2, N_y=2,                # tile grid
+    halo_percent=0.2,            # halo as fraction of tile
     top_k=5,
-    n_workers=4,               # Parallel workers (default: CPU count)
-    parallel_backend='thread', # 'thread' or 'process'
+    n_workers=None,              # default = CPU count
+    parallel_backend='thread',   # or 'process'
     validate_against_flat=True,
 )
-print(f"Max diff vs flat: {tiled_result.validation_stats['max_diff']*1000:.3f} mV")
 ```
 
-## Batch Solving (Multiple Current Scenarios)
+Only works with PDN string nodes. `validation_stats['max_diff']` reports peak deviation vs flat in volts.
 
-Use prepare/solve_prepared to cache expensive precomputation (LU factorization, block matrices, operators):
+## Batch solving (`prepare_*` / `solve_*_prepared`)
+
+Build the expensive bits once, solve many scenarios cheap:
+
+| Mode | Prepare | Solve |
+|---|---|---|
+| flat | `prepare_flat()` → `FlatSolverContext` | `solve_prepared(ctx, currents)` |
+| hierarchical | `prepare_hierarchical(...)` → `HierarchicalSolverContext` | `solve_hierarchical_prepared(ctx, currents)` |
+| coupled | `prepare_hierarchical_coupled(...)` → `CoupledHierarchicalSolverContext` | `solve_hierarchical_coupled_prepared(ctx, currents)` |
+| tiled | `prepare_hierarchical_tiled(...)` → `TiledHierarchicalSolverContext` | `solve_hierarchical_tiled_prepared(ctx, currents)` |
+| distributed | `prepare_distributed(metadata=…)` | `solve_distributed_prepared(ctx, currents)` |
+
+The non-`_prepared` `solve*()` methods also accept `context=`; they build a temporary one if not given.
+
+## Coupled-system internals
+
+`coupled_system.py` and `coupled_operators.py` together implement the matrix-free Schur path.
+
+- `BlockMatrixSystem` — block-partitioned conductance matrix `[[G_ii, G_ip], [G_pi, G_pp]]`.
+- `extract_block_matrices(...)` — builder used by the flat coupled solver. Has `exclude_port_to_port` flag.
+- `build_block_system_from_edges(...)` — builder used by **distributed** tile workers; no `exclude_port_to_port` flag, includes all edges. Don't confuse the two.
+- `build_grounded_capacitance_diags(...)` — diagonal C contribution for transient.
+- `compute_explicit_schur(block_system)` — uses partial Cholesky when CHOLMOD is active, falls back to chunked multi-RHS with splu otherwise. CHOLMOD-only path sets `lu_ii` via the solve_L/Lt truncation trick.
+- `compute_reduced_rhs(...)` — port-only RHS, shape `(n_ports,)`, not full system.
+- `recover_bottom_voltages(...)` — interior recovery from port voltages.
+- `SchurComplementOperator`, `CoupledSystemOperator` — `LinearOperator`s used by iterative solvers; preconditioners (`block_diagonal`, `ilu`, `amg`) wrap them.
+
+## CHOLMOD backend (module-level)
 
 ```python
-solver = UnifiedIRDropSolver(model)
-
-# Prepare once (expensive)
-ctx = solver.prepare_flat()
-
-# Solve multiple scenarios (cheap: reuses cached factorization)
-for scenario in current_scenarios:
-    result = solver.solve_prepared(ctx, scenario)
+from solver.coupled_system import (
+    set_use_cholmod, set_cholmod_mode,
+    set_cholmod_ordering, set_cholmod_use_long,
+    get_active_backend,
+)
 ```
 
-**Available methods:**
+| Setting | Effect |
+|---|---|
+| `use_cholmod=True/False/None` | force on/off; None = auto |
+| `cholmod_mode='auto'/'simplicial'/'supernodal'` | factorization strategy |
+| `cholmod_ordering='amd'/'metis'/...` | fill-reducing ordering |
+| `cholmod_use_long=True/False` | 64-bit indices (large problems) |
 
-| Method | Context Class | Use Case |
-|--------|---------------|----------|
-| `prepare_flat()` | `FlatSolverContext` | Multiple flat solves |
-| `prepare_hierarchical()` | `HierarchicalSolverContext` | Multiple hierarchical solves |
-| `prepare_hierarchical_coupled()` | `CoupledHierarchicalSolverContext` | Multiple coupled solves |
-| `prepare_hierarchical_tiled()` | `TiledHierarchicalSolverContext` | Multiple tiled solves |
+These are **module globals** — they do not cross process boundaries automatically. For Ray distributed workers, use `TileWorker.configure(...)` (handled by `create_distributed_model`).
 
-**Hierarchical batch example:**
-```python
-ctx = solver.prepare_hierarchical(partition_layer='M2', top_k=5)
-for scenario in current_scenarios:
-    result = solver.solve_hierarchical_prepared(ctx, scenario)
-```
+## Other utilities
 
-**Coupled batch example:**
-```python
-ctx = solver.prepare_hierarchical_coupled(partition_layer='M2', preconditioner='block_diagonal')
-for scenario in current_scenarios:
-    result = solver.solve_hierarchical_coupled_prepared(ctx, scenario)
-```
+- `current_aggregation.CurrentAggregator` — distributes load currents to ports (shortest-path or effective-resistance weighting). Pad nodes are rejected.
+- `tiling.TileManager` — tile generation, halo expansion, connectivity validation, result merge.
+- `unified_partitioner.UnifiedPartitioner` — layer-based and spatial partitioning. Pads excluded; balance ratio enforced ≤ 3.5.
+- `effective_resistance.UnifiedEffectiveResistanceCalculator` — pairwise + single-node R_eff; raises `ValueError` on pad nodes.
+- `interface_assembly.py` — distributed interface assembly: `assemble_schur_complement_system`, `build_interface_package_matrices`, `find_interface_islands`, `apply_island_penalty`, `detect_interface_islands`. Uses `np.repeat`/`np.tile` for vectorized COO scatter-add (don't drop into Python loops here).
+- `statistics.UnifiedStatistics` — node/edge counts, R/C/L/I totals.
+- `pdn_solver.py` (`pdn-solve` CLI) — standalone DC solver if you don't want the unified interface.
 
-**NOTE:** All standard `solve*()` methods also accept an optional `context` parameter. If not provided, they create a temporary context internally.
+## Schur regularization
+
+`_compute_schur_partial(...)` adds a 1e-5 mS port-diagonal regularization for tiles whose full per-tile matrix is PSD-but-not-SPD (no ground connection). It's subtracted back from S after extraction. `G_ii` alone is always SPD, so interior solves don't need this. The default value is exposed via `set_partial_factor_reg_resistance` / `get_partial_factor_reg_resistance`.
+
+## Floating islands & ground
+
+- Ground node `'0'` is excluded from the conductance matrix but I-type edges to it are preserved (used during current extraction).
+- Capacitive edges do NOT contribute to connectivity for island detection; a node connected to pads only via caps is floating.
+- DC island detection penalty (`apply_island_penalty`) keeps the largest connected component plus components with ≥5 interface nodes (`MIN_INTERFACE_NODES_KEEP`).

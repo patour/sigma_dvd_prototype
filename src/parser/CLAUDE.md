@@ -1,144 +1,123 @@
-# Parser Package
+# `src/parser/` — SPICE-like PDN netlist parser
 
-SPICE-like tile-based netlist parsing. Entry point: `NetlistParser` in `netlist.py`.
+> Root `CLAUDE.md` covers the PDN directory layout, element syntax, and node naming. This file is the API and internals reference for the parser.
 
-## Key Classes
+## Entry points
 
-- **NetlistParser** (`netlist.py`): Main parser — gzip support, parallel parsing, net filtering
-- **pdn_parser.py**: CLI entry point for PDN netlist parsing
-- **sampled_netlist.py**: Sampled multi-tile netlist generator from netlist_minion
-- **parallel.py**: Worker functions and data classes for parallel tile parsing
-- **edge_attrs.py**: Memory-optimized edge attribute classes (ResistorEdge, CapacitorEdge, etc.)
-- **spice_lexer.py**: SPICE element line tokenizer
-- **graph_builder.py**: Builds rustworkx graph from tokens
-- **metadata.py**: Net voltage, vsrc metadata extraction
-- **current_sources.py**: CurrentSource, Pulse, PWL data structures
+- `parser.netlist.NetlistParser` — programmatic
+- `parser.pdn_parser` — CLI (`python -m parser.pdn_parser …` / `pdn-parse` console script)
 
-## Current Source Data Structures (from instanceModels*.sp)
-
-- `InstanceInfo`: Parsed instance name with net/pin/tile location info
-- `Pulse`: Pulse waveform with `evaluate(time)` and `get_dc()` methods
-- `PWL`: Piece-wise linear waveform with `evaluate(time)` and `get_dc()` methods
-- `CurrentSource`: Full current source with DC value, static_value, pulses, PWLs
-
-**Accessing Current Source Data:**
 ```python
-# By default, parser stores raw CurrentSource objects (memory efficient)
-graph = parser.parse()
-raw_sources = graph.graph.get('_instance_sources_objects', {})
+from parser.netlist import NetlistParser
 
-# Access CurrentSource objects directly
-for name, src in raw_sources.items():
-    static_ma = src.get_static_current()      # DC analysis
-    current_at_t = src.get_current_at_time(1e-9)  # Transient at 1ns
-
-# For portable pickle files, use store_instance_sources=True (serializes to dicts)
-parser = NetlistParser('./netlist_dir', store_instance_sources=True)
+parser = NetlistParser(
+    netlist_dir,
+    validate=False,                  # full structural validation pass (slow)
+    strict=False,                    # raise on parse warnings
+    parallel=False, n_workers=None,  # multiprocessing for tiles
+    chunk_size=None,                 # chunk size inside large tiles
+    net_filter=None,                 # 'VDD' or ['VDD','VSS'] — drops other nets
+    store_instance_sources=False,    # serialize CurrentSource → dict (see below)
+)
 graph = parser.parse()
-instance_sources = graph.graph.get('instance_sources', {})  # Serialized dicts
 ```
 
-**Memory Optimization for Large Netlists:**
-The default `store_instance_sources=False` avoids serializing CurrentSource objects to dicts, saving ~60% parse-time memory for large netlists (1.7GB -> 1.1GB for 1M sources). The dynamic/transient solvers automatically handle both formats.
+Returns a `RustworkxMultiDiGraphWrapper` whose `.graph` (top-level) carries metadata: `net_connectivity`, `vsrc_nodes`, `instance_node_map`, `pg_net_voltage`, `_instance_sources_objects` (or serialized `instance_sources`), and the `PowerGridMetaData` used by the distributed parser.
 
-## Edge Attribute Memory Optimization
+## Memory-optimized edge attributes (`edge_attrs.py`)
 
-By default, edge attributes use specialized slotted dataclasses (`edge_attrs.py`) instead of dicts, reducing memory by ~95% per edge. Critical for 100M+ edge netlists (~65 GB -> ~4 GB).
+Default ON. Specialized slotted dataclasses replace dicts (~95% per-edge memory cut, critical for 100M+ edge netlists ≈ 65 GB → ≈ 4 GB).
 
 ```python
 from parser.graph_builder import get_use_optimized_edges, set_use_optimized_edges
 
-# Check current mode (default: True)
-print(get_use_optimized_edges())  # True
-
-# Disable for backward compatibility or small netlists
-set_use_optimized_edges(False)
+set_use_optimized_edges(False)   # disable for tiny netlists or backward compat
 ```
 
-**Edge Classes:**
-- `ResistorEdge`: Die resistors (no elem_name stored) — 99.9% of resistors
-- `ResistorEdgeWithName`: Package resistors matching `vsrc_resistor_pattern` (e.g., 'rs')
-- `CapacitorEdge`, `InductorEdge`, `CurrentSourceEdge`, `VoltageSourceEdge`
+**Edge classes:**
 
-**Important:** With optimized edges, `elem_name` is only stored for:
-- Voltage sources (always)
-- Resistors matching `vsrc_resistor_pattern` (default 'rs') for vsrc node identification
+| Class | When used | Stores `elem_name`? |
+|---|---|---|
+| `ResistorEdge` | die resistors (~99.9% of resistors) | no |
+| `ResistorEdgeWithName` | resistors matching `vsrc_resistor_pattern` (default `'rs'`) | yes |
+| `CapacitorEdge`, `InductorEdge`, `CurrentSourceEdge` | passives & I-edges | no |
+| `VoltageSourceEdge` | vsrc edges | yes (always) |
 
-Use `.get('elem_name', '')` instead of `['elem_name']` for safe access:
+**Always access via `.get`:**
+
 ```python
-for u, v, data in graph.edges(data=True):
-    elem_name = data.get('elem_name', '')  # Safe: returns '' if not stored
-    # NOT: data['elem_name']  # May raise KeyError for die resistors
+elem_name = data.get('elem_name', '')   # safe: '' for die resistors
+# data['elem_name']                     # KeyError on die resistors
 ```
 
-**Runtime Trade-off:** Computed properties (`.tile_id`, `.net_type`) are ~4-5x slower than dict access due to on-the-fly unpacking. For hot loops, cache values locally or use `set_use_optimized_edges(False)`.
+Computed properties (`.tile_id`, `.net_type`) unpack on the fly and are 4–5× slower than dict access — cache values locally inside hot loops.
 
-**Pickle Compatibility:**
-- `store_instance_sources=False` (default): Pickle works but requires `parser` module when loading
-- `store_instance_sources=True`: Portable pickle (no module dependency), better for long-term storage
+## Pickle compatibility
 
-## Parallel Parsing (for large netlists with many tiles)
+| Mode | Pickle behavior | When to use |
+|------|-----------------|-------------|
+| `store_instance_sources=False` (default) | Stores raw `CurrentSource` objects in `graph.graph['_instance_sources_objects']`. Pickle works but loader must import `parser`. | In-process / same-version use; saves ~60% parse-time RAM on 1M-source netlists (1.7 GB → 1.1 GB). |
+| `store_instance_sources=True` | Serializes to plain dicts in `graph.graph['instance_sources']`. | Long-term archival, sharing pickles across environments. |
+
+Both dynamic and transient solvers handle both formats transparently.
+
+## Current-source data structures (`current_sources.py`)
+
+Parsed from `instanceModels_*.sp`. Returned by `_parse_current_source_line` and held on `CurrentSource`:
+
+- `Pulse(...)` — pulse waveform; `evaluate(time)`, `get_dc()`
+- `PWL(...)` — piecewise-linear; `evaluate(time)`, `get_dc()`
+- `CurrentSource` — full source with `dc_value`, `static_value`, `pulses`, `pwls`, plus `get_static_current()` and `get_current_at_time(t)`
+- `_DCOnlyCurrentSource` — internal lightweight variant when `optimize_dc_only=True`
+- `InstanceInfo` — parsed instance name (net, pin, tile location)
 
 ```python
-# Enable parallel parsing for ~6-8x speedup on 100+ tiles
-parser = NetlistParser('./netlist_dir', parallel=True, n_workers=8)
-graph = parser.parse()
+sources = graph.graph.get('_instance_sources_objects', {})
+for name, src in sources.items():
+    static_ma = src.get_static_current()
+    i_t = src.get_current_at_time(1e-9)
+```
 
-# With net filter and custom chunk size
-parser = NetlistParser('./netlist_dir', parallel=True, n_workers=4,
+`_parse_current_source_line` returns **Amperes**; conversion to mA happens post-parse in `_prepare_instance_source` (`current_sources.py`, mirrored in `parallel.py`). If you call it directly, multiply by `I_TO_MA` yourself.
+
+## Parallel parsing (`parallel.py`, `_parse_*_worker`)
+
+For large netlists with many tiles:
+
+```python
+parser = NetlistParser(netlist_dir, parallel=True, n_workers=8,
                        net_filter='VDD', chunk_size=10000)
 ```
 
-Parallel parsing uses `multiprocessing.Pool` with:
-- Memory-mapped file access for plain text files (gzip fallback for compressed)
-- Chunk-based processing within large tiles
-- Bulk graph operations for efficient merge phase
-- Full equivalence with sequential parsing (same graph output)
+Mechanics:
 
-## PDN Netlist Format
+- Memory-mapped file access for plain text (gzip falls back to streaming)
+- Chunk-based processing inside large tiles
+- Bulk graph operations during merge
+- Output is bit-equivalent to sequential parsing
 
-Directory structure:
-```
-netlist_dir/
-  ckt.sp              # Top-level circuit includes
-  tile_0_0.ckt        # Tile subcircuit with R/C/L/I/V elements
-  tile_0_0.nd         # Node coordinate mapping (x y layer node_name)
-  package.ckt         # Package-level connections
-  instanceModels_0_0.sp  # Instance current source models
-  pg_net_voltage      # Power net voltage specs (VDD 1.0, VSS 0.0)
-  additional_vsrcs    # Extra voltage source definitions
-  decap_cell_list     # Decap cell instance names
-  switch_cell_list    # Power switch cell names
-```
+Roughly 6–8× speedup on 100+ tile netlists.
 
-**Element syntax in `.ckt` files:**
-```spice
-R_name node1 node2 <resistance_kOhm>
-C_name node1 node2 <capacitance_fF>
-L_name node1 node2 <inductance_nH>
-I_name node1 node2 <current_mA>
-V_name node+ node- <voltage_V>
-X_inst subckt node1 node2 ...
-```
+## Tunables (module-level globals)
 
-**Current source syntax in `instanceModels*.sp` (enhanced):**
-```spice
-I_name node+ node- <dc_mA> [static_value=<mA>] [pulse(v1,v2,delay,rt,ft,width,period)] [pwl(t1 v1 t2 v2 ...)]
-```
-- `static_value=`: Additional static current component
-- `pulse(...)`: Periodic pulse waveform (values in Amperes)
-- `pwl(...)`: Piece-wise linear waveform with optional `pwl_period=` and `pwl_delay=`
+| Function | Effect |
+|---|---|
+| `set_use_optimized_edges(bool)` | Slotted edge classes vs dicts |
+| `set_apply_wscale(bool)` | Apply per-edge `wscale` weighting on resistors |
+| `set_optimize_dc_only(bool)` | Use `_DCOnlyCurrentSource` (drops Pulse/PWL waveform data) — large memory win for static-only flows |
 
-**Node naming convention:** `<x>_<y>_<layer>` (e.g., `1000_2000_M1`)
+Module-level globals do **not** propagate to spawned multiprocessing workers automatically; the parser passes them through worker args explicitly. They also do not propagate to Ray workers — see `src/distributed/CLAUDE.md`.
 
-**Boundary nodes (multi-tile stitching):**
-Nodes shared across tile boundaries are marked with `*` prefix in `.ckt` files:
-```spice
-R_bnd_M1 *900_2000_M1 *1000_2000_M1 8    # Cross-tile resistor (both nodes starred)
-r 800_2000_M1 *900_2000_M1 8              # Internal-to-boundary resistor (one starred)
-```
+## Sub-files at a glance
 
-The `*` prefix signals the parser to track these nodes for tile stitching:
-- Parser strips the `*` prefix when creating graph nodes
-- Tracks `boundary_node1`/`boundary_node2` flags in edge attributes
-- Merges matching boundary nodes across tiles during graph construction
+| File | Role |
+|---|---|
+| `netlist.py` | `NetlistParser`, the orchestrator |
+| `pdn_parser.py` | CLI + helpers (also where mA conversion lives) |
+| `graph_builder.py` | builds the rustworkx graph from token streams |
+| `spice_lexer.py` | element-line tokenizer |
+| `parallel.py` | worker functions + `TileParseResult` / `InstanceParseResult` |
+| `edge_attrs.py` | slotted edge classes |
+| `metadata.py` | `pg_net_voltage`, `additional_vsrcs`, vsrc node detection |
+| `current_sources.py` | `Pulse`, `PWL`, `CurrentSource`, `InstanceInfo` |
+| `sampled_netlist.py` | sampled multi-tile netlist generator |

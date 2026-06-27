@@ -1,77 +1,87 @@
-# Tests
+# `tests/`
 
-Test layout mirrors `src/`:
+> Root `CLAUDE.md` lists the `pytest` invocations and the test-priority rule (unit first, integration only for affected area, bare `pytest` as final check). This file documents the layout, fixtures, and conventions.
+
+## Layout
+
+Mirrors `src/`. ~984 tests total.
 
 ```
 tests/
-├── conftest.py     # Sets matplotlib Agg backend for headless testing
-├── fixtures.py     # Factory functions for edge case testing
-├── graph/          # test_rx_graph, test_rx_algorithms
-├── model/          # test_unified_core
-├── solver/         # test_hierarchical_solver, test_coupled_hierarchical_solver,
-│                   # test_batch_solving, test_regional_solver, test_pdn_solver,
-│                   # test_interface_islands, test_tiled_accuracy,
-│                   # test_hierarchical_integration (integration)
-├── analysis/       # test_dynamic_solver, test_transient_solver, test_transient_multi_rhs,
-│                   # test_adjoint_sensitivity, test_pwl_smoothing, test_vectorized_sources,
-│                   # test_smoothing_source_idx, test_dynamic_integration (integration)
-├── parser/         # test_pdn_parser, test_parallel_parser, test_edge_attrs,
-│                   # test_parser_regression, test_pdn_integration (integration)
-├── distributed/    # test_distributed_solver, test_distributed_heatmap,
-│                   # test_distributed_cli, test_time_domain,
-│                   # test_distributed_integration, test_time_domain_integration,
-│                   # test_adjoint_integration (integration)
-├── reports/        # test_floating_nodes, test_topk_irdrop,
-│                   # test_floating_nodes_consistency (integration)
-├── visualization/  # test_pdn_plotter, test_stripe_heatmap
-└── legacy/         # test_irdrop, test_partitioner
+├── conftest.py     # forces matplotlib 'Agg' backend
+├── fixtures.py     # canonical netlist paths + small-graph factories
+├── graph/          # rustworkx wrappers, NX↔RX conversion
+├── model/          # UnifiedPowerGridModel + factories
+├── solver/         # flat / hierarchical / coupled / tiled / batch / regional / interface_islands
+├── analysis/       # dynamic / transient / adjoint / PWL smoothing / vectorized sources
+├── parser/         # PDN parser, parallel parser, edge attrs, regression
+├── distributed/    # DDM solver, heatmap, time domain, adjoint, CLI
+├── reports/        # floating nodes, top-K IR-drop
+├── visualization/  # PDN plotter, stripe heatmap
+└── legacy/         # original synthetic IR-drop, partitioner
 ```
 
-## Test Netlists
+## Markers
 
-- `netlist/netlist_test/` — Small PDN for integration tests
-- `netlist/netlist_small/` — Minimal unit test fixtures
+| Marker | Meaning | Fixtures |
+|---|---|---|
+| `@pytest.mark.unit` | fast, isolated; no external netlist needed | minimal in-memory graphs from `fixtures.py` |
+| `@pytest.mark.integration` | slow; needs real netlist data; one of the `_integration.py` files | uses `NETLIST_TEST` / `NETLIST_SMALL` / `NETLIST_MULTI_TILE` / `NETLIST_SAMPLED` |
 
-## Key Invariants Tested
+Both markers are registered in `pyproject.toml`. Files named `test_<topic>_integration.py` are integration; everything else is unit.
 
-- Zero load -> all nodes at pad voltage
-- R_eff symmetry: `R(u,v) == R(v,u)` and triangle inequality
-- Partition balance ratio <= 3.5; pads excluded from partitions
-- Floating island detection removes disconnected components
+## Test netlists
 
-## Test Helper
+`fixtures.py` defines canonical paths — **always import these instead of hardcoding `pdn/...` paths**:
 
-`build_small()` in `fixtures.py` creates standard test grid (K=3, N0=8, I_N=80).
-`_build_two_tile_distributed_model()` in `distributed/test_time_domain.py` creates a minimal 2-tile distributed model with optional cap edges for unit tests.
+```python
+from fixtures import (
+    NETLIST_TEST,          # netlist/netlist_test/    — small PDN, integration
+    NETLIST_SMALL,         # netlist/netlist_small/   — minimal unit fixtures
+    NETLIST_MULTI_TILE,    # netlist/netlist_multi_tile/
+    NETLIST_SAMPLED,       # netlist/netlist_sampled/ — distributed benchmark
+)
+```
 
-## Running Tests
+## Helper factories
+
+`fixtures.create_minimal_pdn_graph(scenario)` builds tiny PDN graphs for edge cases that aren't reachable through `netlist_small`:
+
+| Scenario | Triggers |
+|---|---|
+| `'tile_merging'` | Phase-3 merge: 4×4 M1 + 2×2 M2 with loads clustered in one corner; 2×2 tiling produces 0-load tiles |
+| `'path_expansion'` | Sparse vias → locally disconnected core nodes → halo path expansion |
+| `'severe_halo_clip'` | 6×6 grid with 3×3 tiling clipping halos >70% |
+
+`tests/distributed/test_time_domain.py::_build_two_tile_distributed_model(...)` is the standard fixture for minimal 2-tile distributed models with optional cap edges. Reuse it; don't roll your own.
+
+## Invariants the suite guards
+
+These are the load-bearing checks — break one and you almost certainly broke physics:
+
+- Zero load → all nodes at pad voltage
+- `R_eff(u, v) == R_eff(v, u)` and triangle inequality (within tolerance)
+- Partition balance ratio ≤ 3.5; pads excluded from partitions
+- Floating-island detection removes disconnected components
+- DDM exactness: distributed solver matches flat to floating-point precision (0 µV diff) on validation graphs
+- PWL smoothing equivalence: `TestSparseVsDenseEquivalence`, `TestSparseSmoothingFunctions` in `tests/analysis/test_pwl_smoothing.py`
+
+## Naming
+
+- `test_<topic>.py` — unit
+- `test_<topic>_integration.py` — integration
+
+Within a file, classes group related scenarios (`TestHierarchicalCoupledExactness`, `TestTransientStability`, etc.). Keep that pattern when adding new tests.
+
+## Running a single case
 
 ```bash
-# Run unit tests (fast, <160s)
-pytest -m unit
-
-# Run a specific integration test file
-pytest tests/distributed/test_distributed_integration.py -v
-
-# Run ALL integration tests (~6 min, slow — only when needed)
-pytest -m integration
-
-# Run everything (~10 min, slow — only as a final check)
-pytest
-
-# Specific module
-pytest tests/solver/test_hierarchical_solver.py
-
-# Single test
 pytest tests/legacy/test_irdrop.py::TestIRDrop::test_no_load_currents_all_pad_voltage -v
+pytest tests/distributed/test_distributed_solver.py -k "schur and not benchmark" -v
 ```
 
-## Naming Conventions
+`-m "unit and not integration"` is implicit when you pass `-m unit` (integration tests aren't picked up unless explicitly requested), but `-k` is the easiest way to slice by name within a marker.
 
-- **Unit tests**: `test_<topic>.py` — fast tests marked `@pytest.mark.unit`
-- **Integration tests**: `test_<topic>_integration.py` — slow tests marked `@pytest.mark.integration`, require real netlist data
+## Known flakey tests
 
-> **Test priority:** First run individual unit test files related to the affected
-> area, then `pytest -m unit` for full unit coverage. Run individual integration
-> test files only when changes affect that area. Run bare `pytest` only as a
-> final validation step, not during intermediate steps.
+- `tests/analysis/test_pwl_smoothing.py::TestSmoothedEvaluationPerformance::test_smoothed_evaluate_at_time_within_2x_original` — measures `evaluate_at_time` speed (not smoothing); marginally fails the ~2.0× threshold on slow runners.

@@ -1,88 +1,150 @@
-# Distributed Package
+# `src/distributed/` — distributed DDM solver
 
-Tile-based domain decomposition solver for multi-tile PDN netlists. Decomposes into per-tile subproblems coupled through a Schur complement interface system.
+> Root `CLAUDE.md` already covers the file map, the context-lifecycle skeleton, and the long list of distributed pitfalls (Dirichlet RHS in transient, partial Cholesky, Ray globals, save-before-release, island detection with caps, etc.). This file is the deeper internals reference: numerics, near/far decomposition, heatmap pipeline, CLI surface.
 
-## File Organization
+## Numerics & matrix structure
 
-Mixin pattern keeps files under ~800 lines:
+- Per-tile full matrix is `[[G_ii, G_ip], [G_pi, G_pp]]`. `G_ii` is always SPD; the full matrix may be PSD-only (no ground), so `_compute_schur_partial` adds a 1e-5 mS port-diagonal regularization and subtracts it back from S after extraction.
+- Tile capacitors are grounded — diagonal C, with `C_ip = C_pi = 0`. Package caps can couple (general sparse).
+- Transient time loop scaling: `dt_scaled = dt_seconds * 1e12` (ps). `C_coeff = 1/dt_scaled` (BE) or `2/dt_scaled` (TR).
+- `BlockMatrixSystem.lu_ii` is the factored interior-solve callable; supports batch multi-RHS (matrix input).
+- `build_block_system_from_edges` returns `rhs_dirichlet` of shape `(n_ports + n_interior,)`, not `(n_ports,)`.
+- `compute_explicit_schur` requires `factor_interior()` first; uses batch solve, not column-by-column.
 
-| File | Role |
-|------|------|
-| `solver.py` | `DistributedDDMSolver` — DC orchestration (`prepare`, `solve_dc`) |
-| `solver_td.py` | Time-domain mixin: `preprocess_sources`, `solve_quasi_static`, `prepare_transient`, `solve_transient` |
-| `solver_adjoint.py` | Adjoint mixin: `analyze_adjoint_static`, `analyze_adjoint` (backward sweep) |
-| `tile_worker.py` | `TileWorker` — per-tile actor wrapping `BlockMatrixSystem` |
-| `tile_worker_td.py` | Time-domain mixin: VCS init, transient factor/RHS/recovery, current node masking |
-| `tile_worker_peak.py` | Peak tracking mixin: init, dict/array update, accessors, combined recover+peak |
-| `tile_worker_adjoint.py` | Adjoint worker mixin: terminal/step RHS, lambda recovery, contribution accumulation |
-| `tile_parsing.py` | Stateless parsing: `TileData`, `_parse_tile_ckt`, `_iter_instance_sources`, `_parse_node_xy` |
-| `model.py` | `DistributedPowerGridModel`, `ParsedTileBundle`, `create_distributed_model` |
-| `parser.py` | `DistributedNetlistParser` — parse + dump tiles to pkl |
-| `result.py` | Context/result dataclasses (`DistributedSolverContext`, `DistributedTransientContext`, etc.) |
-| `result_factorization.py` | `factor()`, `release()`, `save()`, `load()`, `refactor()` implementations |
-| `backend.py` | `LocalBackend`, `RayBackend` — compute abstraction |
-| `heatmap.py` | Tile-parallel pre-binned stripe heatmap pipeline |
-| `cli.py` | CLI: `python -m distributed {parse,solve,run}` with `--mode dc/quasi-static/transient` |
+## Topology context
 
-**Re-exports**: `tile_worker.py` re-exports all symbols from `tile_parsing.py` for backward compat. `__init__.py` re-exports the full public API.
-
-## Context Lifecycle
+`DistributedTopologyContext` is immutable, computed once on first `prepare()` / `prepare_transient()`, cached on `solver._topology`. Both DC and transient contexts share it.
 
 ```
-prepare()  -->  DistributedSolverContext   (DC)
-                  .factor() / .release() / .save() / .load() / .refactor()
-
-prepare_transient()  -->  DistributedTransientContext   (transient)
-                           .factor() / .release() / .save() / .load() / .refactor()
+solver.prepare()  ─┐
+                   ├─→  DistributedTopologyContext  (interface graph, islands, ownership)
+solver.prepare_transient(dt, method)  ─┘
 ```
 
-- `prepare()` and `prepare_transient()` are **independent** — caller manages both
-- `solve_transient(trans_ctx, dc_context=dc_ctx)` does NOT release `dc_context`
-- Two IC paths: `dc_context` (solve DC for IC) or `ic_voltages` (skip DC) — mutually exclusive
-- `save()` must be called BEFORE `release()` (release clears `S_global`)
-- After `load()`, call `refactor()` to rebuild coordinator LU; workers need separate `factor()`
-- Topology (`DistributedTopologyContext`) is cached on `solver._topology` — computed once, reused
+DC and transient contexts are otherwise **independent** lifecycles — caller manages both. `solve_transient(trans_ctx, dc_context=dc_ctx)` does NOT release `dc_ctx`. Two IC paths are mutually exclusive: `dc_context=` (DC solve for IC) vs `ic_voltages=` (skip DC).
 
-## Circular Import Rules
+## Save / load / refactor
 
-- `parser.py` cannot import from `model.py` at module level (model.py imports from parser.py). Use lazy imports inside functions.
-- `result_factorization.py` uses `TYPE_CHECKING` guard for imports from `result.py` and `model.py`.
-
-## Ray Worker Gotchas
-
-- Module-level globals (CHOLMOD settings, regularization) do NOT propagate to Ray workers (separate processes). Use `TileWorker.configure(settings)` during `create_distributed_model`. CHOLMOD backend settings (`use_cholmod`, `cholmod_mode`, `cholmod_ordering`, `cholmod_use_long`) are now propagated automatically via the settings dict.
-- `tile_parsing.py` duplicates unit constants (`R_TO_KOHM`, `C_TO_FF`, `I_TO_MA`) from `parser.py` to avoid circular imports.
-
-## Transient Numerics
-
-- Tile caps are grounded (diagonal C). `C_ip = C_pi = 0`. Package caps can couple (general sparse).
-- Dirichlet RHS in time loop: use `rhs_dirichlet_G` (G-only), NOT `rhs_dirichlet_interface` (A-based, includes cap terms). BE: `+rhs_d_G`, TR: `+2*rhs_d_G`.
-- Unit scaling: `dt_scaled = dt_seconds * 1e12` (ps). `C_coeff = 1/dt_scaled` (BE) or `2/dt_scaled` (TR).
-- Tile matrix may be PSD (not SPD) without ground connections. `_compute_schur_partial()` adds 1e-5 mS regularization.
-
-## Current Node Masking (Near/Far Decomposition)
-
-`TileWorker.set_current_node_mask(mask)` / `build_node_mask_for_window(x0, x1, y0, y1, inside=True)` enable spatially-filtered transient solves. The mask is applied in both `evaluate_and_get_reduced_rhs` (QS) and `get_transient_reduced_rhs` (transient) after `evaluate_at_time(t)`. The transient factorization (A = G + C*C) is independent of currents and can be reused across masked solves.
-
-## Key Entry Points
-
-```python
-from distributed import create_distributed_model, load_distributed_partitions, DistributedDDMSolver
-
-# From pre-parsed pkl
-model = load_distributed_partitions('./pkl_dir', backend='local')
-solver = DistributedDDMSolver(model)
-
-# DC
-ctx = solver.prepare()
-result = solver.solve_dc(ctx)
-ctx.release()
-
-# Transient
-dc_ctx = solver.prepare()
-trans_ctx = solver.prepare_transient(dt=100e-12, method='BE')
-sources = solver.preprocess_sources(time_step=100e-12, t_end=10e-9)
-result = solver.solve_transient(trans_ctx, dc_context=dc_ctx)
-trans_ctx.release()
-dc_ctx.release()
 ```
+ctx.factor()      # builds + factors (coordinator LU + worker tile factors)
+ctx.save(path)    # serializes assembled S_global + per-worker state
+ctx.release()     # frees factorizations and clears S_global
+ctx.load(path)    # restores S_global + worker state
+ctx.refactor()    # rebuilds coordinator LU from saved S_global
+                  # (workers still need a separate factor() afterwards)
+```
+
+`save()` must run **before** `release()` because release clears `S_global`. After `load()`, both `refactor()` (coordinator) and `factor()` (workers) are required before the next solve.
+
+## Near/far decomposition (`decomposition.py`)
+
+Spatially partitions the solve so far-field current sources are folded into a static contribution and only near-field sources are stepped.
+
+- `decompose_near_far(...)` — top-level pipeline
+- `find_worst_nodes_separated(...)` — pick spatially-separated victim candidates (10% min separation)
+- `extract_instance_locations_from_peaks(...)` — bridge from quasi-static peaks to instance coords
+- `analyze_distributed_decomposition(...)` — diagnostic / validation helper
+
+Tile-side: `TileWorker.set_current_node_mask(mask)` + `build_node_mask_for_window(x0, x1, y0, y1, inside=True)` enable spatially-filtered transient solves. Mask is applied in both `evaluate_and_get_reduced_rhs` (QS) and `get_transient_reduced_rhs` (transient) **after** `evaluate_at_time(t)`. The transient factorization (`A = G + α·C`) is current-independent and reused across masked solves.
+
+## Heatmap pipeline (`heatmap.py`)
+
+Root mentions the high-level pipeline; here are the building blocks:
+
+| Step | Function | Where it runs |
+|---|---|---|
+| Per-layer metadata (bbox, stripe coords, edge orientation) | `TileWorker.get_layer_metadata()` | one round-trip per worker |
+| Global bin spec (resolves stripe boundaries across tiles) | `build_global_bin_spec(...)` → `GlobalBinSpec` (collection of `LayerBinSpec`) | coordinator |
+| Per-tile pre-binning | `prebin_tile(...)` | stateless + picklable, runs as Ray `map_func` |
+| Boundary ownership (avoid double-counting) | `compute_boundary_ownership(...)` | coordinator |
+| Merge & render | `merge_tile_prebins(...)`, `_render_merged_heatmaps(...)`, `render_from_prebinned_stripe_data(...)` (in `visualization/stripe_heatmap.py`) | coordinator |
+| Top-level entry points | `plot_distributed_heatmaps(...)`, `plot_distributed_td_heatmaps(...)` | coordinator |
+
+`prebin_tile` is intentionally stateless and uses lazy imports so it pickles cleanly to Ray workers. Current heatmaps skip layers with no current sources (all-zero bin check) — upper metals typically have none. For binning, filter out-of-range with `valid_mask`, never `np.clip` (clamping corrupts edge bin values).
+
+## CLI (`python -m distributed`, `cli.py`)
+
+Subcommands: `parse`, `solve`, `run`, `decompose`. Important flags:
+
+```bash
+python -m distributed solve <pkl_dir> \
+    --backend {local,ray} \
+    --mode {dc,quasi-static,transient} \
+    --t-end 10ns --dt 100ps --n-points 11 \
+    --plot [--plot-layers M0,M1] [--max-stripes 2000] \
+    --config solver.yaml \
+    --verbose
+```
+
+YAML config supports per-role solver settings (coordinator vs tile workers) — see `_apply_yaml_role_configs`. CLI also supports file logging (`_setup_logging`, `_add_file_logging`) and writes a top-K worst IR-drop report via the shared `reports.topk_irdrop.generate_topk_report`.
+
+## Backends (`backend.py`)
+
+Both implement the `ComputeBackend` ABC:
+
+- `LocalBackend` — in-process; useful for tests and small models
+- `RayBackend` — multi-process via Ray; workers are `TileWorker` actors
+
+Backend is selected by `create_distributed_model(metadata, backend='local'|'ray')` or by `load_distributed_partitions(path, backend=...)`. Module-level globals (CHOLMOD settings, regularization) do NOT propagate to Ray workers — `TileWorker.configure(settings)` is called once during `create_distributed_model` to push them through. CHOLMOD knobs (`use_cholmod`, `cholmod_mode`, `cholmod_ordering`, `cholmod_use_long`) are propagated automatically via the settings dict.
+
+## Tile parsing (`tile_parsing.py`)
+
+Stateless, picklable functions used by both the parser and Ray workers:
+
+- `TileData` — parsed tile container
+- `_parse_tile_ckt(...)` — element parser
+- `_iter_instance_sources(...)` — iterates filtered `instanceModels` entries (handles gzip + net filter). **Always reuse this**, don't reimplement gzip/filter logic.
+- `_parse_node_xy('1000_2000_M1') -> (1000.0, 2000.0)` — shared coordinate parser. Don't duplicate.
+- `_parse_instance_models`, `_iter_instance_capacitors`, `_parse_instance_capacitors`, `parse_tile_with_instances`, `parse_and_dump_tile`
+
+Unit constants (`R_TO_KOHM`, `C_TO_FF`, `I_TO_MA`) are duplicated here from `parser.py` to avoid the circular import (`pdn_parser` → `core` → `core.distributed`).
+
+## Tile worker mixins
+
+`TileWorker` is composed via mixins to keep each file under ~800 lines:
+
+- `_TimeDomainMixin` (`tile_worker_td.py`) — VCS init, transient factor/RHS/recovery, current-node masking
+- `_PeakTrackingMixin` (`tile_worker_peak.py`) — peak init, dict/array update, accessors, fused recover+peak
+- `_AdjointWorkerMixin` (`tile_worker_adjoint.py`) — terminal/step RHS, lambda recovery, contribution accumulation
+
+`tile_worker.py` re-exports all `tile_parsing.py` symbols for backward compat.
+
+## Solver mixins
+
+`DistributedDDMSolver(_AdjointMixin, _SolverTimeDomainMixin)`:
+
+- `_SolverTimeDomainMixin` (`solver_td.py`) — `preprocess_sources`, `solve_quasi_static`, `prepare_transient`, `solve_transient`
+- `_AdjointMixin` (`solver_adjoint.py`) — `analyze_adjoint_static`, `analyze_adjoint`
+
+## Result types (`result.py`)
+
+- `DistributedTopologyContext` — immutable shared topology (see above)
+- `DistributedSolverContext` — DC; `factor`/`release`/`save`/`load`/`refactor`
+- `DistributedTransientContext` — transient; same lifecycle methods
+- `DistributedSmoothedSources` — coordinator-side handle to preprocessed VCS (data lives on workers)
+- `DistributedSolveResult` — flat DC result
+- `DistributedQuasiStaticResult` — lazy peak collection from workers; `as_flat()` / `as_per_tile()` / `dump()`
+- `DistributedTransientResult` — extends QS result with RC transient metadata
+- `TileSolveResult` — per-tile slice of a solve result
+
+`result_factorization.py` holds the `factor`/`release`/`save`/`load`/`refactor` implementations split out from the dataclasses to keep `result.py` minimal. Uses `TYPE_CHECKING` guards to import `result.py` and `model.py` types.
+
+## Net filter & metadata
+
+Net filtering happens at parse time (`PowerGridMetaData` set by the distributed parser's `net_filter`). `create_distributed_model(metadata, backend='local')` reads net info from there, not from graph attributes. `solver.prepare_distributed(metadata=…)` (on the *unified* solver) is the corresponding entry point.
+
+## Tests
+
+- `tests/distributed/test_distributed_solver.py` — 41 tests (38 unit/validation + 3 benchmark)
+- `tests/distributed/test_distributed_heatmap.py` — 39 tests
+- `tests/distributed/test_distributed_td_heatmap.py` — time-domain heatmap pipeline
+- `tests/distributed/test_time_domain*.py` — quasi-static + transient validation
+- `tests/distributed/test_adjoint_integration.py` — adjoint sensitivity validation
+- `tests/distributed/test_distributed_cli.py` — CLI surface
+- Integration: `*_integration.py` files (mark `@pytest.mark.integration`)
+
+`tests/distributed/test_time_domain.py::_build_two_tile_distributed_model` is the standard fixture for minimal 2-tile models with optional cap edges.
+
+## Benchmark snapshot
+
+`netlist_sampled` benchmark: Ray with 9 workers ≈ 2.7× total speedup; `factor_tiles` dominates the prepare phase.
