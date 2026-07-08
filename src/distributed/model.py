@@ -227,6 +227,8 @@ def create_distributed_model(
     coordinator_solver_config: Optional[SolverBackendConfig] = None,
     worker_solver_config: Optional[SolverBackendConfig] = None,
     threads_per_worker: Any = None,
+    use_step_columns: bool = True,
+    max_table_mb: float = 512.0,
     # Legacy kwargs (deprecated -- use ParsedTileBundle instead)
     use_pkl: bool = False,
     pkl_dir: Optional[str] = None,
@@ -259,6 +261,14 @@ def create_distributed_model(
             int: explicit count.  'auto': ``max(1, cpus // n_workers)``.
             ``None`` (default): no env override, system defaults apply.
             No effect on LocalBackend (workers are in-process).
+        use_step_columns: Enable A2 phase-folded step-column table on all
+            workers (default True).  Propagated via ``TileWorker.configure``
+            so Ray workers receive the setting even though module globals don't
+            propagate.  Can be overridden per-solve via the ``use_step_columns``
+            kwarg on ``solve_transient``/``solve_quasi_static``.
+        max_table_mb: Per-worker memory budget for the phase-table (MB,
+            default 512).  Tables estimated to exceed this fall back to the
+            chunked-window tier.  Propagated via ``TileWorker.configure``.
         use_pkl: (Deprecated) If True, use pre-parsed TileData.
         pkl_dir: (Deprecated) Directory containing tile_X_Y.pkl files.
         boundary_nodes: (Deprecated) Pre-collected boundary nodes.
@@ -299,6 +309,8 @@ def create_distributed_model(
         coordinator_solver_config=coordinator_solver_config,
         worker_solver_config=worker_solver_config,
         threads_per_worker=threads_per_worker,
+        use_step_columns=use_step_columns,
+        max_table_mb=max_table_mb,
         **backend_kwargs,
     )
     if _legacy_temp_dir:
@@ -402,6 +414,8 @@ def _create_distributed_model_from_bundle(
     coordinator_solver_config: Optional[SolverBackendConfig] = None,
     worker_solver_config: Optional[SolverBackendConfig] = None,
     threads_per_worker: Any = None,
+    use_step_columns: bool = True,
+    max_table_mb: float = 512.0,
     **backend_kwargs,
 ) -> DistributedPowerGridModel:
     """Core factory: create model from a ParsedTileBundle.
@@ -437,10 +451,15 @@ def _create_distributed_model_from_bundle(
     # Build worker settings dict: use explicit config or snapshot globals.
     # partial_factor_reg_ohms is a separate concern (block_system.py),
     # not included in SolverBackendConfig; always inherited from globals.
+    # A2 step-column settings (use_step_columns, max_table_mb) must be
+    # propagated here so Ray workers receive them — module-level globals
+    # do NOT propagate to Ray worker processes.
     from pgmath.factor import SolverBackendConfig as _SBC
     solver_settings = {
         **(worker_solver_config or _SBC.from_globals()).to_dict(),
         'partial_factor_reg_ohms': get_partial_factor_reg_resistance(),
+        'use_step_columns': use_step_columns,
+        'max_table_mb': max_table_mb,
     }
     be.call_all(workers, 'configure', [(solver_settings,)] * len(workers))
 
