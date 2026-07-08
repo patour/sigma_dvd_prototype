@@ -112,6 +112,15 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         # Allocated lazily on first use.
         self._current_buf: Optional[np.ndarray] = None
 
+        # --- A4: Symbolic-reuse cache for factor_and_compute_schur ----------
+        # Holds {'P_ii', 'factor', 'ref_indptr', 'ref_indices'} from the
+        # most recent _compute_schur_partial call.  Passed to subsequent
+        # calls (DC→transient or transient→DC) so the CHOLMOD AMD analysis
+        # is skipped and only numeric values are updated.
+        # None = not yet initialised; enabled by default when CHOLMOD active.
+        self._symbolic_ii: Optional[Dict] = None
+        self._use_symbolic_reuse: bool = True
+
         # --- Adjoint sensitivity state ---
         self._init_adjoint_state()
 
@@ -143,6 +152,9 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
             self._use_step_columns = bool(settings['use_step_columns'])
         if 'max_table_mb' in settings:
             self._max_table_mb = float(settings['max_table_mb'])
+        # A4 symbolic-reuse setting
+        if 'use_symbolic_reuse' in settings:
+            self._use_symbolic_reuse = bool(settings['use_symbolic_reuse'])
 
     def setup(
         self,
@@ -329,6 +341,11 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         solver backend (CHOLMOD vs splu).  Both paths set ``lu_ii`` as a
         side-effect, so downstream RHS/recovery calls work transparently.
 
+        A4: When ``_use_symbolic_reuse`` is True and CHOLMOD is active, the
+        cached symbolic analysis from a prior DC or transient factorization is
+        passed to ``compute_explicit_schur`` so the AMD analysis is skipped
+        and only numeric values are updated.
+
         Returns:
             Tuple of (S_i as numpy array, boundary_node_list, stats dict)
         """
@@ -338,9 +355,18 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         bs = self._block_system
         t_total_start = time.perf_counter()
 
+        # A4: Pass the worker's symbolic cache (may be None on first call).
+        sym_cache = self._symbolic_ii if self._use_symbolic_reuse else None
+
         t0 = time.perf_counter()
-        S, schur_stats = compute_explicit_schur(bs)
+        S, schur_stats = compute_explicit_schur(bs, symbolic_cache=sym_cache)
         schur_time = time.perf_counter() - t0
+
+        # A4: Persist the new symbolic cache if the full analyze path ran.
+        if '_new_symbolic_cache' in schur_stats:
+            self._symbolic_ii = schur_stats.pop('_new_symbolic_cache')
+        # On symbolic-reuse path, self._symbolic_ii['factor'] was updated
+        # in-place inside _compute_schur_partial — no assignment needed.
 
         # Both paths report factor timing in schur_stats: partial path
         # via 'analyze_s'+'factor_s', chunked path via 'factor_s' alone.

@@ -18,6 +18,10 @@ from .tile_worker_peak import _PeakTrackingMixin
 
 logger = logging.getLogger(__name__)
 
+# A5: bump this constant whenever the smoothing algorithm changes so that
+# existing smoothed-VCS caches are automatically invalidated.
+SMOOTHING_CODE_VERSION: int = 1
+
 
 class _TimeDomainMixin(_PeakTrackingMixin):
     """Mixin providing time-domain methods for TileWorker.
@@ -122,33 +126,216 @@ class _TimeDomainMixin(_PeakTrackingMixin):
 
     # --- 4b. PWL smoothing ---------------------------------------------
 
+    def get_min_pwl_segment_duration(self) -> float:
+        """Return minimum PWL segment / pulse feature duration across raw sources.
+
+        Used by the coordinator's ``smooth='auto'`` logic to decide whether
+        smoothing is necessary.  Scans ``_vec_sources`` (raw VCS) only —
+        must be called after ``init_vectorized_sources()``.
+
+        For PWL waveforms: minimum ``diff(times)`` across all breakpoints.
+        For pulse waveforms: minimum of rise_time, fall_time, width (> 0).
+
+        Returns:
+            Minimum positive duration in seconds.  Returns ``float('inf')``
+            when no time-varying sources are loaded or none have positive
+            segment durations.
+        """
+        vcs = self._vec_sources
+        if vcs is None:
+            return float('inf')
+
+        min_dur = float('inf')
+
+        # PWL: min inter-breakpoint spacing across all waveforms
+        if vcs.n_pwls > 0 and vcs.n_pwl_points > 1:
+            for i in range(vcs.n_pwls):
+                off = int(vcs.pwl_offset[i])
+                cnt = int(vcs.pwl_count[i])
+                if cnt < 2:
+                    continue
+                times_seg = vcs.pwl_times[off:off + cnt]
+                diffs = np.diff(times_seg)
+                pos = diffs[diffs > 0.0]
+                if len(pos) > 0:
+                    min_dur = min(min_dur, float(pos.min()))
+
+        # Pulse: min of rise_time, fall_time, width (> 0)
+        if vcs.n_pulses > 0:
+            for arr in (vcs.pulse_rt, vcs.pulse_ft, vcs.pulse_width):
+                if len(arr) > 0:
+                    pos = arr[arr > 0.0]
+                    if len(pos) > 0:
+                        min_dur = min(min_dur, float(pos.min()))
+
+        return min_dur
+
     def smooth_sources(
         self,
         time_step: float,
         t_start: float,
         t_end: float,
+        pkl_dir: Optional[str] = None,
+        compact_threshold: float = 1e-12,
+        chunk_size: int = 10000,
     ) -> Dict[str, Any]:
         """Apply triangular low-pass smoothing to vectorized sources.
+
+        Supports optional disk caching via ``pkl_dir``.  The smoothed VCS
+        is saved next to the raw cache as
+        ``vcs_tile_X_Y_smoothed_<key>.pkl`` and reloaded on subsequent
+        calls with identical parameters.  The cached payload records the
+        raw pkl's mtime + size; if the raw cache is modified or replaced
+        the smoothed cache is invalidated automatically.
+
+        Cache key is a 12-char MD5 prefix of
+        ``(time_step, t_start, t_end, compact_threshold, chunk_size,
+        SMOOTHING_CODE_VERSION)``.  Bump :data:`SMOOTHING_CODE_VERSION`
+        whenever the smoothing algorithm changes.
 
         Args:
             time_step: Filter window = 2 * time_step (seconds).
             t_start: Simulation start time (seconds).
             t_end: Simulation end time (seconds).
+            pkl_dir: Optional directory for smoothed VCS cache (same dir
+                used by ``init_vectorized_sources``).
+            compact_threshold: PWL compaction threshold passed to
+                ``create_smoothed_copy`` (default 1e-12).
+            chunk_size: Smoothing chunk size passed to
+                ``create_smoothed_copy`` (default 10000).
 
         Returns:
-            Stats dict with smoothing parameters.
+            Stats dict::
+
+                {
+                    'time_step': float,
+                    't_start': float,
+                    't_end': float,
+                    'smooth_time_s': float,   # 0.0 on cache hit
+                    'cached': bool,
+                }
         """
+        import hashlib
+        import os
+        import pickle as _pickle
+
         if self._vec_sources is None:
             raise RuntimeError(
                 "smooth_sources() called before init_vectorized_sources()"
             )
+
+        x, y = self._tile_data.tile_id
+
+        # Build a stable key from all parameters that affect smoothing output.
+        key_str = (
+            f"{time_step:.17g}:{t_start:.17g}:{t_end:.17g}"
+            f":{compact_threshold:.17g}:{chunk_size:d}"
+            f":{SMOOTHING_CODE_VERSION:d}"
+        )
+        key_hash = hashlib.md5(key_str.encode()).hexdigest()[:12]
+
+        # --- Try loading from disk cache ---
+        smoothed_cache_path: Optional[str] = None
+        raw_cache_path: Optional[str] = None
+        if pkl_dir is not None:
+            raw_cache_path = os.path.join(pkl_dir, f'vcs_tile_{x}_{y}.pkl')
+            smoothed_cache_path = os.path.join(
+                pkl_dir, f'vcs_tile_{x}_{y}_smoothed_{key_hash}.pkl'
+            )
+            if (
+                os.path.isfile(smoothed_cache_path)
+                and os.path.isfile(raw_cache_path)
+            ):
+                try:
+                    raw_stat = os.stat(raw_cache_path)
+                    raw_mtime = raw_stat.st_mtime
+                    raw_size = raw_stat.st_size
+                    with open(smoothed_cache_path, 'rb') as _f:
+                        payload = _pickle.load(_f)
+                    # Verify raw cache identity (mtime + size)
+                    if (
+                        payload.get('raw_mtime') == raw_mtime
+                        and payload.get('raw_size') == raw_size
+                    ):
+                        self._smoothed_sources = payload['smoothed_vcs']
+                        self._active_sources = self._smoothed_sources
+                        # A2: active sources changed → invalidate step-column table
+                        self._step_col_table = None
+                        logger.debug(
+                            "Tile (%d,%d): smoothed VCS cache HIT %s",
+                            x, y, smoothed_cache_path,
+                        )
+                        return {
+                            'time_step': time_step,
+                            't_start': t_start,
+                            't_end': t_end,
+                            'smooth_time_s': 0.0,
+                            'cached': True,
+                        }
+                    else:
+                        logger.debug(
+                            "Tile (%d,%d): smoothed cache stale "
+                            "(raw mtime/size changed), recomputing",
+                            x, y,
+                        )
+                except Exception as _exc:
+                    logger.debug(
+                        "Tile (%d,%d): smoothed cache load failed (%s), "
+                        "recomputing",
+                        x, y, _exc,
+                    )
+
+        # --- Cache miss: compute smoothed VCS ---
+        t0 = time.perf_counter()
         self._smoothed_sources = self._vec_sources.create_smoothed_copy(
             time_step, t_start, t_end,
+            compact_threshold=compact_threshold,
+            chunk_size=chunk_size,
         )
+        smooth_time = time.perf_counter() - t0
         self._active_sources = self._smoothed_sources
         # A2: smoothing changes active sources → invalidate step-column table
         self._step_col_table = None
-        return {'time_step': time_step, 't_start': t_start, 't_end': t_end}
+
+        logger.debug(
+            "Tile (%d,%d): smooth_sources computed in %.3fs",
+            x, y, smooth_time,
+        )
+
+        # --- Save to smoothed cache ---
+        if (
+            pkl_dir is not None
+            and smoothed_cache_path is not None
+            and raw_cache_path is not None
+            and os.path.isfile(raw_cache_path)
+        ):
+            try:
+                raw_stat = os.stat(raw_cache_path)
+                payload = {
+                    'raw_mtime': raw_stat.st_mtime,
+                    'raw_size': raw_stat.st_size,
+                    'smoothed_vcs': self._smoothed_sources,
+                }
+                os.makedirs(pkl_dir, exist_ok=True)
+                with open(smoothed_cache_path, 'wb') as _f:
+                    _pickle.dump(payload, _f, protocol=_pickle.HIGHEST_PROTOCOL)
+                logger.debug(
+                    "Tile (%d,%d): saved smoothed VCS to %s (%.3fs)",
+                    x, y, smoothed_cache_path, smooth_time,
+                )
+            except Exception as _exc:
+                logger.warning(
+                    "Tile (%d,%d): smoothed cache save failed (%s)",
+                    x, y, _exc,
+                )
+
+        return {
+            'time_step': time_step,
+            't_start': t_start,
+            't_end': t_end,
+            'smooth_time_s': smooth_time,
+            'cached': False,
+        }
 
     # --- 4c. Source selection -------------------------------------------
 
@@ -953,9 +1140,18 @@ class _TimeDomainMixin(_PeakTrackingMixin):
 
         self._transient_block_system = transient_bs
 
+        # A4: Pass the worker's symbolic cache (populated by DC factor_and_compute_schur).
+        sym_cache = self._symbolic_ii if self._use_symbolic_reuse else None
+
         t0 = time.perf_counter()
-        S_A, schur_stats = compute_explicit_schur(transient_bs)
+        S_A, schur_stats = compute_explicit_schur(transient_bs, symbolic_cache=sym_cache)
         schur_time = time.perf_counter() - t0
+
+        # A4: Persist the new symbolic cache if the full analyze path ran.
+        if '_new_symbolic_cache' in schur_stats:
+            self._symbolic_ii = schur_stats.pop('_new_symbolic_cache')
+        # On symbolic-reuse path, self._symbolic_ii['factor'] was updated
+        # in-place inside _compute_schur_partial — no assignment needed.
 
         # Both paths report factor timing in schur_stats: partial path
         # via 'analyze_s'+'factor_s', chunked path via 'factor_s' alone.

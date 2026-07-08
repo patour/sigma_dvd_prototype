@@ -158,6 +158,22 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
     t0 = _time.perf_counter()
     from pgmath.schur import assemble_schur_complement_system
 
+    # A4: Determine assembly cache.
+    # When topology already exists (repeated DC prepare or post-transient-first):
+    #   reuse or lazily initialise the cache on the topology object.
+    # When topology is None (first DC prepare): create a local dict that will be
+    #   stored on the new DistributedTopologyContext created at the end of this
+    #   function.  This ensures prepare_transient() finds a pre-populated cache
+    #   and its primary assemble_schur_complement_system call gets a cache HIT
+    #   (skipping full_node_to_idx rebuild and per-tile local_to_global lookups).
+    if ctx.topology is not None:
+        if getattr(ctx.topology, '_assembly_cache', None) is None:
+            ctx.topology._assembly_cache = {}
+        _asm_cache: Dict[str, Any] = ctx.topology._assembly_cache
+    else:
+        # Will be attached to the topology object created at step 5 below.
+        _asm_cache = {}
+
     S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx = (
         assemble_schur_complement_system(
             tile_schur_complements=tile_schur_complements,
@@ -165,20 +181,46 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             extra_edges=model.package_data.package_edges,
             dirichlet_nodes=model.pad_nodes,
             dirichlet_voltage=model.vdd,
+            assembly_cache=_asm_cache,
         )
     )
     timings['assemble_interface'] = _time.perf_counter() - t0
 
-    # 2b. Global interface island detection
+    # 2b. Global interface island detection (DC mode — resistive-only extra_edges).
+    # Cache is keyed on topology.island_nodes (the DC field).  A second DC
+    # prepare() call skips the BFS via cache hit.
+    # Cross-mode reuse NOTE: when package_cap_edges is empty (combined_edges ==
+    # resistive_edges) the BFS result is identical for DC and transient, so
+    # the cache is also written to island_nodes_td to enable transient skipping.
+    # When cap edges are present, island_nodes_td is NOT set here; the transient
+    # path runs its own BFS so it uses the correct (smaller) island set.
     t0 = _time.perf_counter()
-    from pgmath.schur import detect_interface_islands
-
-    S_global, rhs_dirichlet, island_nodes = detect_interface_islands(
-        S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
-        pad_nodes=model.pad_nodes,
-        extra_edges=model.package_data.package_edges,
-        dirichlet_voltage=model.vdd,
+    _cached_islands: Optional[Set[str]] = (
+        getattr(ctx.topology, 'island_nodes', None)
+        if ctx.topology is not None else None
     )
+    if _cached_islands is not None:
+        # Cache hit: apply penalty from prior DC BFS result; skip re-detection.
+        island_nodes = _cached_islands
+        if island_nodes:
+            from pgmath.schur import apply_island_penalty
+            S_global, rhs_dirichlet = apply_island_penalty(
+                S_global, rhs_dirichlet, island_nodes,
+                interface_node_to_idx, model.vdd,
+            )
+            logger.debug(
+                "DC island detection: cache hit (%d islands), BFS skipped.",
+                len(island_nodes),
+            )
+    else:
+        # Cache miss: run full BFS detection (resistive-only extra_edges).
+        from pgmath.schur import detect_interface_islands
+        S_global, rhs_dirichlet, island_nodes = detect_interface_islands(
+            S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
+            pad_nodes=model.pad_nodes,
+            extra_edges=model.package_data.package_edges,
+            dirichlet_voltage=model.vdd,
+        )
     timings['detect_interface_islands'] = _time.perf_counter() - t0
 
     if island_nodes:
@@ -332,7 +374,16 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
     ctx.timings = timings
 
     # Build topology context (if not already provided)
+    # Cross-mode cache: when package_cap_edges is empty, DC and transient BFS
+    # produce identical results, so pre-populate island_nodes_td here to let
+    # prepare_transient() skip its BFS.  When cap edges are present, leave
+    # island_nodes_td=None so transient runs its own mode-correct BFS.
+    _pkg_has_cap = bool(model.package_data.package_cap_edges)
     if ctx.topology is None:
+        # A4: _asm_cache was populated by the DC assemble call above.
+        # Storing it on the topology lets prepare_transient() reuse the
+        # per-tile local_to_global index arrays and full_node_to_idx map,
+        # avoiding a full rebuild for its primary assemble call.
         ctx.topology = DistributedTopologyContext(
             interface_nodes=interface_nodes,
             interface_node_to_idx=interface_node_to_idx,
@@ -340,7 +391,17 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             rhs_dirichlet_G=rhs_dirichlet,
             G_package_uu=G_pkg_uu if G_pkg_uu.nnz > 0 else None,
             removed_interface_nodes=island_nodes,
+            island_nodes=island_nodes,  # DC-mode cache
+            island_nodes_td=None if _pkg_has_cap else island_nodes,  # transient cross-mode (safe when no caps)
+            _assembly_cache=_asm_cache,  # A4: pass DC-populated cache
         )
+    elif getattr(ctx.topology, 'island_nodes', None) is None:
+        # Topology exists (from prior prepare or loaded from old checkpoint)
+        # but DC island_nodes not yet cached — store the freshly-computed result.
+        ctx.topology.island_nodes = island_nodes
+        if not _pkg_has_cap and getattr(ctx.topology, 'island_nodes_td', None) is None:
+            # Also populate transient cache (safe: same BFS inputs when no caps).
+            ctx.topology.island_nodes_td = island_nodes
 
     ctx.is_factored = True
 
@@ -506,8 +567,24 @@ def _factor_transient_context(
     from pgmath.schur import (
         assemble_schur_complement_system,
         build_interface_package_matrices,
-        detect_interface_islands,
     )
+
+    # A4: Determine assembly cache.
+    # When topology already exists (post-DC or repeated transient): reuse or
+    #   lazily initialise the cache on the topology.  The DC call already
+    #   populated it, so the primary (combined_edges) assemble below gets
+    #   a cache HIT and skips the full_node_to_idx + local_to_global rebuild.
+    # When topology is None (transient-first, no prior DC prepare): create a
+    #   local dict that will be stored on the new DistributedTopologyContext
+    #   created at the end of this function.  The G-only secondary assemble
+    #   below then also gets a cache HIT.
+    if ctx.topology is not None:
+        if getattr(ctx.topology, '_assembly_cache', None) is None:
+            ctx.topology._assembly_cache = {}
+        _asm_cache: Dict[str, Any] = ctx.topology._assembly_cache
+    else:
+        # Will be attached to the topology object created below.
+        _asm_cache = {}
 
     S_global, rhs_dirichlet_A, interface_nodes, interface_node_to_idx = (
         assemble_schur_complement_system(
@@ -516,26 +593,66 @@ def _factor_transient_context(
             extra_edges=combined_edges,
             dirichlet_nodes=model.pad_nodes,
             dirichlet_voltage=model.vdd,
+            assembly_cache=_asm_cache,
         )
     )
 
     # Also compute G-only Dirichlet RHS (without cap contributions)
-    # needed for correct transient RHS formulation
+    # needed for correct transient RHS formulation.
+    # Reuse the same cache — the node ordering from the first call is consistent.
     _, rhs_dirichlet_G, _, _ = assemble_schur_complement_system(
         tile_schur_complements=tile_schur_complements,
         tile_port_node_lists=tile_port_node_lists,
         extra_edges=list(pkg_res_edges),
         dirichlet_nodes=model.pad_nodes,
         dirichlet_voltage=model.vdd,
+        assembly_cache=_asm_cache,
     )
 
-    # Island detection on transient system
-    S_global, rhs_dirichlet_A, island_nodes = detect_interface_islands(
-        S_global, rhs_dirichlet_A, interface_nodes, interface_node_to_idx,
-        pad_nodes=model.pad_nodes,
-        extra_edges=combined_edges,
-        dirichlet_voltage=model.vdd,
-    )
+    # Island detection on transient system (resistive + cap extra_edges).
+    # Cache lookup order:
+    #   1. island_nodes_td  — transient-mode cache (always mode-correct).
+    #   2. island_nodes     — DC-mode cache; ONLY reused when package_cap_edges
+    #                         is empty, because cap edges can bridge components
+    #                         that are resistively-disconnected, making the
+    #                         transient island set a strict subset of the DC set.
+    #                         Reusing the DC result for transient when caps exist
+    #                         would over-penalise cap-bridged interface nodes.
+    # Old-format checkpoints (no island_nodes_td field) fall back gracefully
+    # via getattr(..., None).
+    _t_island = _time.perf_counter()
+    _td_has_cap = bool(model.package_data.package_cap_edges)
+    _cached_islands_td: Optional[Set[str]] = None
+    if ctx.topology is not None:
+        # 1. Mode-correct transient cache
+        _cached_islands_td = getattr(ctx.topology, 'island_nodes_td', None)
+        if _cached_islands_td is None and not _td_has_cap:
+            # 2. Cross-mode DC cache (safe only when combined_edges == resistive_edges)
+            _cached_islands_td = getattr(ctx.topology, 'island_nodes', None)
+
+    if _cached_islands_td is not None:
+        # Cache hit: apply penalty from prior BFS result; skip re-detection.
+        island_nodes = _cached_islands_td
+        if island_nodes:
+            from pgmath.schur import apply_island_penalty
+            S_global, rhs_dirichlet_A = apply_island_penalty(
+                S_global, rhs_dirichlet_A, island_nodes,
+                interface_node_to_idx, model.vdd,
+            )
+            logger.debug(
+                "Transient island detection: cache hit (%d islands), BFS skipped.",
+                len(island_nodes),
+            )
+    else:
+        # Cache miss: run full BFS detection (resistive + cap extra_edges).
+        from pgmath.schur import detect_interface_islands
+        S_global, rhs_dirichlet_A, island_nodes = detect_interface_islands(
+            S_global, rhs_dirichlet_A, interface_nodes, interface_node_to_idx,
+            pad_nodes=model.pad_nodes,
+            extra_edges=combined_edges,
+            dirichlet_voltage=model.vdd,
+        )
+    timings['detect_interface_islands'] = _time.perf_counter() - _t_island
 
     if island_nodes:
         logger.warning(
@@ -680,8 +797,15 @@ def _factor_transient_context(
     ctx._G_package_uu = G_pkg_uu if G_pkg_uu.nnz > 0 else None
     ctx.timings = timings
 
-    # Build topology context if not already provided
+    # Build topology context if not already provided.
+    # Cross-mode cache: when package_cap_edges is empty, DC and transient BFS
+    # produce identical results, so pre-populate island_nodes (DC field) to
+    # let a subsequent DC prepare() skip its BFS.  When cap edges are present,
+    # leave island_nodes=None so DC runs its own mode-correct BFS.
     if ctx.topology is None:
+        # A4: _asm_cache was populated by the primary transient assemble call
+        # above.  Storing it on the topology lets subsequent prepare() or
+        # prepare_transient() calls reuse the index maps without rebuilding.
         ctx.topology = DistributedTopologyContext(
             interface_nodes=interface_nodes,
             interface_node_to_idx=interface_node_to_idx,
@@ -689,7 +813,18 @@ def _factor_transient_context(
             rhs_dirichlet_G=rhs_dirichlet_G,
             G_package_uu=G_pkg_uu if G_pkg_uu.nnz > 0 else None,
             removed_interface_nodes=island_nodes,
+            island_nodes=None if _td_has_cap else island_nodes,  # DC cross-mode (safe when no caps)
+            island_nodes_td=island_nodes,  # transient-mode cache
+            _assembly_cache=_asm_cache,  # A4: pass transient-populated cache
         )
+    else:
+        # Topology already exists (shared with DC context or loaded checkpoint).
+        # Populate mode-specific fields if not yet cached.
+        if getattr(ctx.topology, 'island_nodes_td', None) is None:
+            ctx.topology.island_nodes_td = island_nodes
+        if not _td_has_cap and getattr(ctx.topology, 'island_nodes', None) is None:
+            # Also populate DC cache (safe: same BFS inputs when no caps).
+            ctx.topology.island_nodes = island_nodes
 
     ctx.is_factored = True
 

@@ -40,8 +40,10 @@ class _SolverTimeDomainMixin:
         time_step: float,
         t_start: float = 0.0,
         t_end: float = 100e-9,
-        smooth: bool = True,
+        smooth: Union[bool, str] = True,
         pkl_dir: Optional[str] = None,
+        compact_threshold: float = 1e-12,
+        chunk_size: int = 10000,
         verbose: bool = False,
     ) -> DistributedSmoothedSources:
         """Initialize vectorized current sources on all tile workers.
@@ -51,16 +53,39 @@ class _SolverTimeDomainMixin:
 
         Args:
             time_step: Simulation time step in seconds (also used as
-                smoothing filter half-width when ``smooth=True``).
+                smoothing filter half-width when ``smooth=True`` or
+                ``smooth='auto'``).
             t_start: Simulation start time in seconds.
             t_end: Simulation end time in seconds.
-            smooth: If True, apply triangular low-pass smoothing.
-            pkl_dir: Optional directory for VCS pickle cache. If None,
-                derives from the first tile's ``.ckt`` parent directory.
-            verbose: Log per-tile stats.
+            smooth: Smoothing policy.
+
+                - ``True`` *(default)*: always apply smoothing.
+                - ``False``: skip smoothing.
+                - ``'auto'``: skip smoothing when ``time_step`` ≤ the
+                  smallest PWL segment duration (inter-breakpoint gap for
+                  PWL waveforms; min of rise_time / fall_time / width for
+                  pulses) across **all** active sources across **all**
+                  tiles.  The rationale is that if the simulation step is
+                  already as fine as or finer than the fastest waveform
+                  feature, no aliasing can occur and the triangular
+                  low-pass filter adds no information.  When all tiles
+                  have only DC sources (no PWL/pulse), the minimum
+                  segment duration is ``inf`` and smoothing is always
+                  skipped by the ``auto`` rule.
+
+            pkl_dir: Optional directory for VCS and smoothed-VCS pickle
+                caches.  If None, derives from the first tile's ``.ckt``
+                parent directory.
+            compact_threshold: PWL compaction threshold passed to
+                ``create_smoothed_copy`` (default 1e-12).
+            chunk_size: Smoothing chunk size passed to
+                ``create_smoothed_copy`` (default 10000).
+            verbose: Log per-tile stats and smoothing summary.
 
         Returns:
-            DistributedSmoothedSources handle.
+            DistributedSmoothedSources handle.  The handle's
+            ``per_tile_smooth_time_s`` and ``smooth_cache_hits`` fields
+            are populated when smoothing runs.
         """
         timings: Dict[str, float] = {}
         model = self.model
@@ -85,16 +110,57 @@ class _SolverTimeDomainMixin:
         )
         timings['init_vcs'] = time.perf_counter() - t0
 
-        # 2. Optionally smooth sources on all workers (parallel)
-        if smooth:
+        # 2. Resolve smooth='auto' via a cheap worker-side probe
+        if smooth == 'auto':
+            t0_probe = time.perf_counter()
+            min_durs = model.backend.call_all(
+                model.workers, 'get_min_pwl_segment_duration',
+            )
+            global_min_dur = min(min_durs) if min_durs else float('inf')
+            smooth_actual: bool = time_step > global_min_dur
+            timings['auto_probe'] = time.perf_counter() - t0_probe
+            if verbose:
+                logger.info(
+                    "smooth='auto': time_step=%.3gs, "
+                    "global_min_segment=%.3gs, smoothing=%s",
+                    time_step, global_min_dur, smooth_actual,
+                )
+        else:
+            smooth_actual = bool(smooth)
+
+        # 3. Optionally smooth sources on all workers (parallel)
+        per_tile_smooth_time_s: Dict[Tuple[int, int], float] = {}
+        smooth_cache_hits = 0
+        if smooth_actual:
             t0 = time.perf_counter()
-            smooth_args = [(time_step, t_start, t_end)] * len(tile_configs)
-            model.backend.call_all(
+            smooth_args = [
+                (time_step, t_start, t_end, pkl_dir, compact_threshold, chunk_size)
+            ] * len(tile_configs)
+            smooth_results = model.backend.call_all(
                 model.workers, 'smooth_sources', smooth_args,
             )
             timings['smooth_sources'] = time.perf_counter() - t0
 
-        # 3. Collect per-tile stats
+            # Collect per-tile stats
+            for i, s_stats in enumerate(smooth_results):
+                tid = tile_configs[i].tile_id
+                per_tile_smooth_time_s[tid] = s_stats.get('smooth_time_s', 0.0)
+                if s_stats.get('cached', False):
+                    smooth_cache_hits += 1
+
+            if verbose:
+                if per_tile_smooth_time_s:
+                    times_list = list(per_tile_smooth_time_s.values())
+                    n_tiles_sm = len(times_list)
+                    logger.info(
+                        "Smoothing: %d tiles, cache hits=%d/%d, "
+                        "per-tile wall: max=%.3fs mean=%.3fs",
+                        n_tiles_sm, smooth_cache_hits, n_tiles_sm,
+                        max(times_list),
+                        sum(times_list) / max(n_tiles_sm, 1),
+                    )
+
+        # 4. Collect per-tile VCS init stats
         per_tile_stats: Dict[Tuple[int, int], Dict[str, int]] = {}
         total_sources = 0
         for i, stats in enumerate(init_results):
@@ -112,16 +178,19 @@ class _SolverTimeDomainMixin:
                 total_sources, len(tile_configs), cached_count,
             )
             for k, v in sorted(timings.items()):
-                logger.info("  %s: %.4fs", k, v)
+                if isinstance(v, (int, float)):
+                    logger.info("  %s: %.4fs", k, v)
 
         return DistributedSmoothedSources(
             time_step=time_step,
             t_start=t_start,
             t_end=t_end,
-            smoothed=smooth,
+            smoothed=smooth_actual,
             n_tiles=len(tile_configs),
             per_tile_stats=per_tile_stats,
             timings=timings,
+            per_tile_smooth_time_s=per_tile_smooth_time_s,
+            smooth_cache_hits=smooth_cache_hits,
         )
 
     def solve_quasi_static(

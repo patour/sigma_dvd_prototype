@@ -77,6 +77,68 @@ class DistributedTopologyContext:
     rhs_dirichlet_G: np.ndarray  # G-only Dirichlet RHS (used by both DC and transient)
     G_package_uu: Optional[sp.csr_matrix]  # Resistive package matrix (unknown-unknown)
     removed_interface_nodes: Set[str] = field(default_factory=set)
+    island_nodes: Optional[Set[str]] = field(default=None)
+    """Cached DC-mode island detection result (resistive-only extra_edges).
+
+    ``None``  — not yet computed (or loaded from a pre-A7 checkpoint).
+    ``set()`` — computed; no islands found.
+    ``{...}`` — computed; these nodes are islands.
+
+    Populated on the first DC prepare call.  When ``package_cap_edges``
+    is empty, ``island_nodes_td`` is also set to the same value on that
+    same call (identical BFS inputs → identical result).
+
+    Persisted through context save/load so that a load()+refactor() cycle
+    does not recompute the BFS.  Old-format checkpoints (field absent)
+    degrade gracefully: the attribute will be missing from the unpickled
+    instance, and all access uses ``getattr(topology, 'island_nodes', None)``
+    to fall back to recomputation.
+
+    .. warning::
+        Cross-mode reuse (using this DC result for transient) is only safe
+        when ``model.package_data.package_cap_edges`` is empty.  When cap
+        edges are present, cap connectivity can bridge components that are
+        resistively-disconnected, making the transient island set a strict
+        subset of the DC island set.  Using the DC set for transient would
+        over-penalise those cap-bridged nodes.  Use ``island_nodes_td`` for
+        transient-mode cache lookups; ``_factor_transient_context`` enforces
+        this guard automatically.
+    """
+
+    island_nodes_td: Optional[Set[str]] = field(default=None)
+    """Cached transient-mode island detection result (resistive + cap extra_edges).
+
+    ``None``  — not yet computed (or not applicable — e.g. old checkpoint).
+    ``set()`` — computed; no islands found.
+    ``{...}`` — computed; these nodes are islands.
+
+    Populated on the first transient prepare call.  When ``package_cap_edges``
+    is empty (so ``combined_edges == resistive_edges``), DC and transient BFS
+    produce identical island sets and both ``island_nodes`` and
+    ``island_nodes_td`` are set to the same value; the transient path can then
+    reuse the DC result without running a second BFS, and vice-versa.
+
+    When ``package_cap_edges`` is non-empty this field is populated
+    independently — the transient BFS uses ``combined_edges`` (resistive
+    + weighted cap), which may have fewer islands than the DC BFS.
+    Cross-mode reuse is suppressed by ``_factor_transient_context``.
+    """
+
+    _assembly_cache: Optional[Dict[str, Any]] = field(default=None)
+    """A4: Mutable assembly-pattern cache for ``assemble_schur_complement_system``.
+
+    Stores ``full_node_to_idx``, per-tile ``local_to_global`` index arrays,
+    and dimension bookkeeping so that the second ``assemble_schur_complement_system``
+    call (transient prepare) can skip per-port dict lookups.
+
+    This field is intentionally NOT included in ``save()`` / ``load()``
+    checkpoints — it can be rebuilt cheaply and the Factor objects it
+    references are not picklable across processes anyway.
+
+    Initialised lazily as an empty ``{}`` on the first ``_factor_dc_context``
+    or ``_factor_transient_context`` call; ``None`` means "not yet
+    initialised".
+    """
 
 
 class DistributedSolverContext:
@@ -312,6 +374,23 @@ class DistributedSmoothedSources:
     entry is the info dict returned by the worker (tier, m, phase0,
     n_src_nodes, memory_mb, build_path, build_time_s).  None = table not
     built or use_step_columns=False.
+    """
+
+    per_tile_smooth_time_s: Dict[Tuple[int, int], float] = field(default_factory=dict)
+    """A5: Per-tile PWL-smoothing wall-clock time in seconds.
+
+    Keys are tile_ids ``(x, y)``.  Populated only when ``smooth=True`` or
+    ``smooth='auto'`` with the auto-decision to smooth.  Zero for tiles
+    that loaded from the smoothed-VCS disk cache.  Empty dict when
+    smoothing was skipped.
+    """
+
+    smooth_cache_hits: int = 0
+    """A5: Number of tiles that loaded their smoothed VCS from disk cache.
+
+    Populated only when ``smooth=True`` or ``smooth='auto'`` with
+    smoothing enabled.  Zero when caching is disabled or all tiles had to
+    recompute.
     """
 
     def is_compatible(

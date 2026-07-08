@@ -2158,3 +2158,293 @@ class TestCurrentNodeMask:
 
         # Count must agree with the mask
         assert count == int(np.sum(expected_mask > 0))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# A7: Island-detection caching on DistributedTopologyContext
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestIslandCaching:
+    """Tests for A7: island detection cached on DistributedTopologyContext.
+
+    A7 spec:
+    - BFS (find_interface_islands) runs ONCE on the first prepare() call;
+      subsequent prepare() / prepare_transient() calls skip the BFS and use
+      the cached island_nodes from the topology context.
+    - island_nodes is persisted through context save()/load() so that a
+      load()+refactor() cycle does not recompute the BFS.
+    - Loading an old-format checkpoint (field absent) must fall back to
+      recomputation gracefully (no AttributeError).
+    """
+
+    def test_island_nodes_set_after_dc_prepare(self):
+        """prepare() populates topology.island_nodes (may be empty set)."""
+        from distributed.solver import DistributedDDMSolver
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare()
+
+        assert ctx.topology is not None
+        # island_nodes must be set (not None) -- empty set is valid (no islands)
+        assert ctx.topology.island_nodes is not None
+        assert isinstance(ctx.topology.island_nodes, set)
+
+    def test_island_nodes_set_after_transient_prepare(self):
+        """prepare_transient() (without prior prepare) populates topology caches.
+
+        With package_cap_edges=[], combined_edges == resistive_edges, so both
+        island_nodes (DC cache) and island_nodes_td (transient cache) are set
+        to the same result.
+        """
+        from distributed.solver import DistributedDDMSolver
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare_transient(dt=1e-10, method='be')
+
+        assert ctx.topology is not None
+        # Transient-mode cache must always be populated.
+        assert ctx.topology.island_nodes_td is not None
+        assert isinstance(ctx.topology.island_nodes_td, set)
+        # With no cap edges, the DC cache is also pre-populated (cross-mode reuse).
+        assert ctx.topology.island_nodes is not None
+        assert isinstance(ctx.topology.island_nodes, set)
+
+    def test_second_prepare_skips_bfs(self, monkeypatch):
+        """BFS (find_interface_islands) is called exactly once for prepare()
+        followed by prepare_transient() when package_cap_edges is empty.
+
+        When package_cap_edges=[], combined_edges == resistive_edges, so the
+        DC BFS result is identical to the transient BFS result.  The DC prepare
+        pre-populates island_nodes_td (transient cache), so prepare_transient()
+        skips its BFS entirely.
+        """
+        import pgmath.schur as _schur_mod
+
+        call_count = {'n': 0}
+        _orig_find = _schur_mod.find_interface_islands
+
+        def _counting_find(*args, **kwargs):
+            call_count['n'] += 1
+            return _orig_find(*args, **kwargs)
+
+        monkeypatch.setattr(_schur_mod, 'find_interface_islands', _counting_find)
+
+        from distributed.solver import DistributedDDMSolver
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        solver = DistributedDDMSolver(model)
+
+        # First prepare: BFS should run once
+        dc_ctx = solver.prepare()
+        assert call_count['n'] == 1, (
+            f"Expected 1 BFS call after DC prepare, got {call_count['n']}"
+        )
+
+        # Second prepare (transient): topology cached, BFS must NOT run again
+        solver.prepare_transient(dt=1e-10, method='be')
+        assert call_count['n'] == 1, (
+            f"Expected still 1 BFS call after transient prepare (cache hit), "
+            f"got {call_count['n']}"
+        )
+
+    def test_dc_then_dc_prepare_skips_bfs(self, monkeypatch):
+        """Calling prepare() twice on the same solver skips BFS on second call."""
+        import pgmath.schur as _schur_mod
+
+        call_count = {'n': 0}
+        _orig_find = _schur_mod.find_interface_islands
+
+        def _counting_find(*args, **kwargs):
+            call_count['n'] += 1
+            return _orig_find(*args, **kwargs)
+
+        monkeypatch.setattr(_schur_mod, 'find_interface_islands', _counting_find)
+
+        from distributed.solver import DistributedDDMSolver
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        solver = DistributedDDMSolver(model)
+
+        solver.prepare()
+        assert call_count['n'] == 1
+
+        solver.prepare()
+        assert call_count['n'] == 1, (
+            f"Expected 1 BFS call after second DC prepare (cache hit), "
+            f"got {call_count['n']}"
+        )
+
+    def test_save_load_round_trip_preserves_island_nodes(self, tmp_path):
+        """DC context save/load preserves both island cache fields on topology."""
+        from distributed.solver import DistributedDDMSolver
+        from distributed.result import DistributedSolverContext
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare()
+
+        island_nodes_orig = ctx.topology.island_nodes
+        island_nodes_td_orig = ctx.topology.island_nodes_td
+        assert island_nodes_orig is not None  # DC cache populated by prepare()
+        assert island_nodes_td_orig is not None  # transient cache (no caps → same value)
+
+        save_path = str(tmp_path / 'dc_context.pkl')
+        ctx.save(path=save_path)
+
+        ctx_loaded = DistributedSolverContext.load(model, save_path)
+
+        assert ctx_loaded.topology is not None
+        assert ctx_loaded.topology.island_nodes is not None, (
+            "island_nodes must survive the pickle round-trip"
+        )
+        assert ctx_loaded.topology.island_nodes == island_nodes_orig
+        assert ctx_loaded.topology.island_nodes_td is not None, (
+            "island_nodes_td must survive the pickle round-trip"
+        )
+        assert ctx_loaded.topology.island_nodes_td == island_nodes_td_orig
+
+    def test_save_load_skips_bfs_on_factor(self, tmp_path, monkeypatch):
+        """After load(), calling factor() uses cached island_nodes (BFS skipped)."""
+        import pgmath.schur as _schur_mod
+        from distributed.solver import DistributedDDMSolver
+        from distributed.result import DistributedSolverContext
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare()
+
+        save_path = str(tmp_path / 'dc_context.pkl')
+        ctx.save(path=save_path)
+
+        # Count BFS calls starting from the load
+        call_count = {'n': 0}
+        _orig_find = _schur_mod.find_interface_islands
+
+        def _counting_find(*args, **kwargs):
+            call_count['n'] += 1
+            return _orig_find(*args, **kwargs)
+
+        monkeypatch.setattr(_schur_mod, 'find_interface_islands', _counting_find)
+
+        # Load + full re-factor (factor(), not just refactor())
+        ctx_loaded = DistributedSolverContext.load(model, save_path)
+        ctx_loaded.factor()
+
+        assert call_count['n'] == 0, (
+            f"BFS must not be called when topology.island_nodes is already "
+            f"cached from the loaded checkpoint; got {call_count['n']} calls"
+        )
+
+    def test_old_format_topology_falls_back_gracefully(self, monkeypatch):
+        """Old-format topology without island cache attributes recomputes gracefully.
+
+        Simulates a pre-A7 (or pre-split) checkpoint by deleting BOTH island
+        cache fields from topology.__dict__.  The factor() code must fall back
+        to BFS (no AttributeError) and repopulate both fields afterwards.
+
+        Note: DC prepare pre-populates island_nodes_td (when package_cap_edges=[]),
+        so we must delete both fields to properly simulate the old format where
+        neither exists.
+        """
+        import pgmath.schur as _schur_mod
+        from distributed.solver import DistributedDDMSolver
+
+        call_count = {'n': 0}
+        _orig_find = _schur_mod.find_interface_islands
+
+        def _counting_find(*args, **kwargs):
+            call_count['n'] += 1
+            return _orig_find(*args, **kwargs)
+
+        monkeypatch.setattr(_schur_mod, 'find_interface_islands', _counting_find)
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        solver = DistributedDDMSolver(model)
+
+        # First prepare: BFS runs, topology is built with both cache fields set
+        ctx = solver.prepare()
+        assert call_count['n'] == 1
+
+        # Simulate old-format checkpoint: delete BOTH island cache fields.
+        # (DC prepare sets both island_nodes and island_nodes_td when no cap edges.)
+        for field_name in ('island_nodes', 'island_nodes_td'):
+            if field_name in ctx.topology.__dict__:
+                del ctx.topology.__dict__[field_name]
+        assert getattr(ctx.topology, 'island_nodes', None) is None
+        assert getattr(ctx.topology, 'island_nodes_td', None) is None
+
+        # Second prepare (transient): should NOT crash; should recompute BFS
+        solver.prepare_transient(dt=1e-10, method='be')
+        assert call_count['n'] == 2, (
+            f"Expected BFS recomputed when both island cache fields missing, "
+            f"got {call_count['n']} calls"
+        )
+
+        # Both cache fields should now be repopulated on the shared topology.
+        assert ctx.topology.island_nodes_td is not None, (
+            "island_nodes_td must be populated after fallback recomputation"
+        )
+        assert ctx.topology.island_nodes is not None, (
+            "island_nodes must be populated after fallback recomputation (no caps)"
+        )
+
+    def test_cap_edges_force_separate_bfs(self, monkeypatch):
+        """When package_cap_edges is non-empty, DC and transient each run their own BFS.
+
+        The DC island set uses resistive-only extra_edges; the transient island
+        set uses resistive + cap extra_edges.  Cap connectivity can bridge
+        components that are resistively-disconnected, making the transient island
+        set a strict subset of the DC island set.  A7 must NOT reuse the DC
+        cache for transient when package_cap_edges is non-empty — doing so would
+        over-penalise any cap-bridged interface node that is a DC-island but not
+        a transient island.
+
+        Two BFS calls (one per mode) are expected; the mode-specific caches
+        (island_nodes for DC, island_nodes_td for transient) must both be
+        non-None afterwards and stored independently on the shared topology.
+        """
+        import pgmath.schur as _schur_mod
+        from distributed.solver import DistributedDDMSolver
+
+        call_count = {'n': 0}
+        _orig_find = _schur_mod.find_interface_islands
+
+        def _counting_find(*args, **kwargs):
+            call_count['n'] += 1
+            return _orig_find(*args, **kwargs)
+
+        monkeypatch.setattr(_schur_mod, 'find_interface_islands', _counting_find)
+
+        # Build model with a non-empty package_cap_edges list.
+        model = _build_two_tile_distributed_model(
+            package_cap_edges=[('pad', 'shared', 100.0)]
+        )
+        solver = DistributedDDMSolver(model)
+
+        # DC prepare: BFS #1 (resistive-only extra_edges)
+        dc_ctx = solver.prepare()
+        assert call_count['n'] == 1, (
+            f"Expected 1 BFS call after DC prepare, got {call_count['n']}"
+        )
+        # DC cache populated; transient cache must NOT be set (cap-edge guard).
+        assert dc_ctx.topology.island_nodes is not None, (
+            "island_nodes (DC cache) must be set after DC prepare"
+        )
+        assert getattr(dc_ctx.topology, 'island_nodes_td', None) is None, (
+            "island_nodes_td must NOT be pre-populated when package_cap_edges "
+            "is non-empty — cross-mode reuse is unsafe"
+        )
+
+        # Transient prepare: BFS #2 (must NOT reuse DC island set)
+        solver.prepare_transient(dt=1e-10, method='be')
+        assert call_count['n'] == 2, (
+            f"Expected 2 BFS calls total (one per mode) when package_cap_edges "
+            f"is non-empty; got {call_count['n']}"
+        )
+        # Transient cache now set independently on the shared topology.
+        assert dc_ctx.topology.island_nodes_td is not None, (
+            "island_nodes_td (transient cache) must be set after transient prepare"
+        )

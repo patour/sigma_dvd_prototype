@@ -99,6 +99,7 @@ def _make_partial_interior_solve(
 
 def _compute_schur_partial(
     block_system: BlockMatrixSystem,
+    symbolic_cache: Optional[Dict[str, Any]] = None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Compute Schur complement via partial Cholesky of the full block matrix.
 
@@ -109,6 +110,25 @@ def _compute_schur_partial(
 
     As a side-effect, sets ``block_system.lu_ii`` and
     ``block_system.factor_adapter``.
+
+    Args:
+        block_system: Per-tile block matrix system.
+        symbolic_cache: Optional dict from a previous call (DC or transient).
+            Keys: ``P_ii`` (permutation array), ``factor`` (CHOLMOD Factor
+            copy used as template), ``ref_indptr`` / ``ref_indices``
+            (CSC pattern of the G_ii used when the cache was built).
+            When provided and the pattern of ``block_system.G_ii`` matches
+            the cached pattern, the CHOLMOD symbolic analysis is skipped and
+            only the numeric values are updated (``cholesky_inplace``).
+            Falls back to a full analyze+factor when the pattern differs or
+            when CHOLMOD is not active.
+
+            On a cache hit, ``stats['symbolic_reuse'] = True`` and
+            ``stats['_new_symbolic_cache']`` is NOT present (caller keeps the
+            existing cache, which was updated in-place numerically).
+
+            On a cache miss, ``stats['_new_symbolic_cache']`` is populated so
+            the caller can store it for future reuse.
     """
     from sksparse.cholmod import cholesky as cholmod_cholesky, analyze as cholmod_analyze
 
@@ -122,6 +142,101 @@ def _compute_schur_partial(
         "_compute_schur_partial: n_interior=%d, n_ports=%d, ordering=%s, mode=%s",
         n_i, n_p, ordering, mode,
     )
+
+    # --- A4: Try symbolic reuse path first ----------------------------------
+    if symbolic_cache is not None and n_i > 0:
+        G_ii_csc = block_system.G_ii.tocsc()
+        ref_indptr = symbolic_cache.get('ref_indptr')
+        ref_indices = symbolic_cache.get('ref_indices')
+        cached_P_ii = symbolic_cache.get('P_ii')
+        cached_factor = symbolic_cache.get('factor')
+
+        pattern_ok = (
+            ref_indptr is not None
+            and ref_indices is not None
+            and cached_P_ii is not None
+            and cached_factor is not None
+            and G_ii_csc.shape == (n_i, n_i)
+            and G_ii_csc.indptr.shape == ref_indptr.shape
+            and np.array_equal(G_ii_csc.indptr, ref_indptr)
+            and np.array_equal(G_ii_csc.indices, ref_indices)
+        )
+
+        if pattern_ok:
+            # ---- Numeric-only refactor: reuse AMD permutation, skip analyze ----
+            t0 = time.perf_counter()
+            P_ii = cached_P_ii
+            full_perm = np.concatenate([P_ii, n_i + np.arange(n_p)])
+            G_full = sp.bmat(
+                [[block_system.G_ii, block_system.G_ip],
+                 [block_system.G_pi, block_system.G_pp]],
+                format='csc',
+            )
+            A_perm = G_full[np.ix_(full_perm, full_perm)].tocsc()
+
+            R_TO_KOHM = 1e-3
+            r_kohm = _PARTIAL_FACTOR_REG_OHMS * R_TO_KOHM
+            g_reg = 1.0 / r_kohm
+            diag = A_perm.diagonal()
+            diag[n_i:] += g_reg
+            A_perm.setdiag(diag)
+
+            # In-place numeric update on a fresh copy of the cached factor.
+            # Using copy() preserves the original DC factor so it remains
+            # valid if the DC lu_ii closure is still in use.
+            factor = cached_factor.copy()
+            factor.cholesky_inplace(A_perm)
+            t_factor = time.perf_counter() - t0
+
+            # Extract Schur from L22
+            t0 = time.perf_counter()
+            L = factor.L()
+            L22 = L[n_i:, n_i:].toarray()
+            S = L22 @ L22.T
+            np.fill_diagonal(S, S.diagonal() - g_reg)
+            t_extract = time.perf_counter() - t0
+
+            block_system.lu_ii = _make_partial_interior_solve(factor, P_ii, n_i, n_p)
+            use_long_str = 'auto' if use_long is None else ('64-bit' if use_long else '32-bit')
+            info_str = (
+                f"cholmod(partial, mode={mode}, ordering={ordering}, "
+                f"natural, idx={use_long_str}, symbolic_reuse=True)"
+            )
+            block_system.factor_adapter = SparseFactorAdapter(factor, 'cholmod', info_str)
+
+            # Update the cache's factor copy so subsequent calls build on the
+            # freshest numeric data (amortises any fill-in changes over time).
+            symbolic_cache['factor'] = factor
+
+            stats = {
+                'path': 'partial_cholesky',
+                'ordering': ordering,
+                'mode': mode,
+                'chunk_size': 0,
+                'n_chunks': 0,
+                'schur_mem_bytes': S.nbytes,
+                'full_factor_nnz': L.nnz,
+                'L22_dense_shape': L22.shape,
+                'analyze_s': 0.0,
+                'factor_s': t_factor,
+                'extract_s': t_extract,
+                'symbolic_reuse': True,
+            }
+            logger.debug(
+                "_compute_schur_partial (symbolic REUSE): S %dx%d (%s), L nnz=%d, "
+                "factor %.3fs, extract %.3fs",
+                n_p, n_p, _format_bytes(S.nbytes), L.nnz,
+                t_factor, t_extract,
+            )
+            return S, stats
+        else:
+            logger.debug(
+                "_compute_schur_partial: symbolic cache MISS "
+                "(pattern_ok=%s); falling back to full analyze+factor.",
+                pattern_ok,
+            )
+
+    # --- Full analyze+factor path (first call or fallback) ------------------
 
     # Phase 1: Analyze G_ii to obtain fill-reducing permutation
     t0 = time.perf_counter()
@@ -184,6 +299,14 @@ def _compute_schur_partial(
         'analyze_s': t_analyze,
         'factor_s': t_factor,
         'extract_s': t_extract,
+        'symbolic_reuse': False,
+        # Populate cache so the caller can store it for the next factorization.
+        '_new_symbolic_cache': {
+            'P_ii': P_ii.copy(),
+            'factor': factor.copy(),  # copy: DC lu_ii closure keeps the original
+            'ref_indptr': G_ii_csc.indptr.copy(),
+            'ref_indices': G_ii_csc.indices.copy(),
+        },
     }
     logger.debug(
         "_compute_schur_partial: S %dx%d (%s), L nnz=%d, "
@@ -200,6 +323,7 @@ def _compute_schur_partial(
 
 def compute_explicit_schur(
     block_system: BlockMatrixSystem,
+    symbolic_cache: Optional[Dict[str, Any]] = None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Compute explicit Schur complement S = G_pp - G_pi * inv(G_ii) * G_ip.
 
@@ -213,6 +337,12 @@ def compute_explicit_schur(
     **Chunked multi-RHS** (when splu backend is active): Solves
     ``G_ii^{-1} @ G_ip`` column-by-column in chunks. Calls
     ``factor_interior()`` internally if ``lu_ii`` is not already set.
+
+    Args:
+        block_system: Per-tile block matrix system.
+        symbolic_cache: Optional symbolic-reuse cache (see
+            :func:`_compute_schur_partial` for details).  Only used when
+            CHOLMOD is the active backend.  Ignored silently otherwise.
     """
     n_ports = block_system.n_ports
     n_interior = block_system.n_interior
@@ -224,7 +354,7 @@ def compute_explicit_schur(
     use_partial = (HAS_CHOLMOD and get_use_cholmod() is not False)
 
     if use_partial:
-        return _compute_schur_partial(block_system)
+        return _compute_schur_partial(block_system, symbolic_cache=symbolic_cache)
 
     # Chunked multi-RHS path (splu fallback)
     t_factor = 0.0
@@ -281,6 +411,7 @@ def assemble_schur_complement_system(
     dirichlet_nodes: Optional[Set[str]] = None,
     dirichlet_voltage: float = 0.0,
     ground_node: str = '0',
+    assembly_cache: Optional[Dict[str, Any]] = None,
 ) -> Tuple[sp.csr_matrix, np.ndarray, List[str], Dict[str, int]]:
     """Assemble global Schur complement system from per-subdomain contributions.
 
@@ -288,6 +419,27 @@ def assemble_schur_complement_system(
         S_global = sum_i P_i^T @ S_i @ P_i + G_extra
 
     Uses COO format for assembly, converts to CSR for factorization.
+
+    Args:
+        tile_schur_complements: Per-tile dense Schur complements.
+        tile_port_node_lists: Per-tile boundary node lists (same order as S_i).
+        extra_edges: Package conductance edges ``(u, v, g_mS)``.
+        dirichlet_nodes: Voltage-source (pad) nodes held at ``dirichlet_voltage``.
+        dirichlet_voltage: Pad voltage (V).
+        ground_node: Ground reference node name.
+        assembly_cache: Optional mutable dict for assembly-pattern reuse
+            (A4 optimisation).  On the **first call** with an empty dict the
+            function populates it with:
+
+            * ``'tile_local_to_global'``: per-tile int32 index arrays
+            * ``'full_node_to_idx'``:  node-name → full-matrix index map
+            * ``'n_full'``, ``'n_unknown'``: dimension bookkeeping
+
+            On **subsequent calls** the cached ``local_to_global`` arrays are
+            reused, skipping per-port dict lookups and ``np.repeat``/``np.tile``
+            calls.  The extra-edges COO is always recomputed (it may differ
+            between DC and transient).  A shape mismatch on any tile forces a
+            full rebuild and silently invalidates the cache.
     """
     if dirichlet_nodes is None:
         dirichlet_nodes = set()
@@ -306,15 +458,31 @@ def assemble_schur_complement_system(
     dirichlet_set = dirichlet_nodes & all_interface_nodes
     unknown_nodes = all_interface_nodes - dirichlet_set
 
-    unknown_list = sorted(unknown_nodes)
-    dirichlet_list = sorted(dirichlet_set)
+    # --- A4: Check whether we can reuse cached node index maps ---------------
+    # The cache stores full_node_to_idx + per-tile local_to_global arrays.
+    # These are valid as long as unknown_list is identical to the cached one.
+    _use_cached_idx = False
+    if assembly_cache and 'full_node_to_idx' in assembly_cache:
+        # Quick check: same n_unknown / n_full and same unknown set
+        if (assembly_cache.get('n_unknown') == len(unknown_nodes)
+                and assembly_cache.get('n_full') == len(unknown_nodes) + len(dirichlet_set)):
+            _use_cached_idx = True
 
-    all_ordered = unknown_list + dirichlet_list
-    full_node_to_idx = {n: i for i, n in enumerate(all_ordered)}
-
-    n_unknown = len(unknown_list)
-    n_dirichlet = len(dirichlet_list)
-    n_full = n_unknown + n_dirichlet
+    if _use_cached_idx:
+        full_node_to_idx = assembly_cache['full_node_to_idx']
+        unknown_list = assembly_cache['unknown_list']
+        dirichlet_list = assembly_cache['dirichlet_list']
+        n_unknown = assembly_cache['n_unknown']
+        n_dirichlet = len(dirichlet_set)
+        n_full = assembly_cache['n_full']
+    else:
+        unknown_list = sorted(unknown_nodes)
+        dirichlet_list = sorted(dirichlet_set)
+        all_ordered = unknown_list + dirichlet_list
+        full_node_to_idx = {n: i for i, n in enumerate(all_ordered)}
+        n_unknown = len(unknown_list)
+        n_dirichlet = len(dirichlet_list)
+        n_full = n_unknown + n_dirichlet
 
     if n_full == 0:
         return (
@@ -324,9 +492,15 @@ def assemble_schur_complement_system(
             {},
         )
 
-    coo_rows, coo_cols, coo_data = [], [], []
+    # --- 1. Scatter-add tile Schur complements (numpy arrays, not Python lists)
+    tile_rows_parts: List[np.ndarray] = []
+    tile_cols_parts: List[np.ndarray] = []
+    tile_data_parts: List[np.ndarray] = []
 
-    # 1. Scatter-add tile Schur complements
+    _cached_l2g = assembly_cache.get('tile_local_to_global', {}) if (assembly_cache and _use_cached_idx) else {}
+    _new_l2g: Dict[Any, np.ndarray] = {}
+    _cache_valid = True  # will be set False on any shape mismatch
+
     for tile_id, S_i in tile_schur_complements.items():
         node_list = tile_port_node_lists[tile_id]
         n_local = len(node_list)
@@ -334,20 +508,38 @@ def assemble_schur_complement_system(
             f"Tile {tile_id}: Schur shape {S_i.shape} != ({n_local}, {n_local})"
         )
 
-        local_to_global = np.array(
-            [full_node_to_idx[n] for n in node_list], dtype=np.int32
-        )
+        # Try cached local_to_global for this tile
+        if tile_id in _cached_l2g:
+            l2g = _cached_l2g[tile_id]
+            if len(l2g) == n_local:
+                local_to_global = l2g
+            else:
+                # Shape mismatch → invalidate cache and recompute
+                _cache_valid = False
+                local_to_global = np.array(
+                    [full_node_to_idx[n] for n in node_list], dtype=np.int32
+                )
+        else:
+            local_to_global = np.array(
+                [full_node_to_idx[n] for n in node_list], dtype=np.int32
+            )
+        _new_l2g[tile_id] = local_to_global
 
         gi_grid = np.repeat(local_to_global, n_local)
         gj_grid = np.tile(local_to_global, n_local)
         vals = S_i.ravel()
 
-        nonzero = vals != 0.0
-        coo_rows.extend(gi_grid[nonzero].tolist())
-        coo_cols.extend(gj_grid[nonzero].tolist())
-        coo_data.extend(vals[nonzero].tolist())
+        # Keep all entries (no nonzero filter) — COO handles zero data correctly
+        # and avoids branching that breaks the cached-path uniformity.
+        tile_rows_parts.append(gi_grid)
+        tile_cols_parts.append(gj_grid)
+        tile_data_parts.append(vals)
 
-    # 2. Add extra edges (package conductances)
+    # --- 2. Extra edges (package conductances) — always recomputed -----------
+    extra_rows_l: List[int] = []
+    extra_cols_l: List[int] = []
+    extra_data_l: List[float] = []
+
     if extra_edges:
         for u, v, g in extra_edges:
             if g <= 0:
@@ -355,25 +547,37 @@ def assemble_schur_complement_system(
             if u == ground_node:
                 if v in full_node_to_idx:
                     iv = full_node_to_idx[v]
-                    coo_rows.append(iv)
-                    coo_cols.append(iv)
-                    coo_data.append(g)
+                    extra_rows_l.append(iv)
+                    extra_cols_l.append(iv)
+                    extra_data_l.append(g)
                 continue
             if v == ground_node:
                 if u in full_node_to_idx:
                     iu = full_node_to_idx[u]
-                    coo_rows.append(iu)
-                    coo_cols.append(iu)
-                    coo_data.append(g)
+                    extra_rows_l.append(iu)
+                    extra_cols_l.append(iu)
+                    extra_data_l.append(g)
                 continue
             if u not in full_node_to_idx or v not in full_node_to_idx:
                 continue
             iu, iv = full_node_to_idx[u], full_node_to_idx[v]
-            coo_rows.extend([iu, iv, iu, iv])
-            coo_cols.extend([iv, iu, iu, iv])
-            coo_data.extend([-g, -g, g, g])
+            extra_rows_l += [iu, iv, iu, iv]
+            extra_cols_l += [iv, iu, iu, iv]
+            extra_data_l += [-g, -g, g, g]
 
-    if coo_data:
+    # --- 3. Concatenate and build CSR ----------------------------------------
+    all_parts_rows = tile_rows_parts
+    all_parts_cols = tile_cols_parts
+    all_parts_data = tile_data_parts
+    if extra_rows_l:
+        all_parts_rows.append(np.array(extra_rows_l, dtype=np.int32))
+        all_parts_cols.append(np.array(extra_cols_l, dtype=np.int32))
+        all_parts_data.append(np.array(extra_data_l, dtype=np.float64))
+
+    if all_parts_data:
+        coo_rows = np.concatenate(all_parts_rows).astype(np.int32)
+        coo_cols = np.concatenate(all_parts_cols).astype(np.int32)
+        coo_data = np.concatenate(all_parts_data).astype(np.float64)
         G_full = sp.coo_matrix(
             (coo_data, (coo_rows, coo_cols)), shape=(n_full, n_full)
         ).tocsr()
@@ -392,6 +596,15 @@ def assemble_schur_complement_system(
         rhs_dirichlet = np.zeros(n_unknown, dtype=np.float64)
 
     unknown_to_idx = {n: i for i, n in enumerate(unknown_list)}
+
+    # --- 4. Update assembly cache -------------------------------------------
+    if assembly_cache is not None and _cache_valid:
+        assembly_cache['tile_local_to_global'] = _new_l2g
+        assembly_cache['full_node_to_idx'] = full_node_to_idx
+        assembly_cache['unknown_list'] = unknown_list
+        assembly_cache['dirichlet_list'] = dirichlet_list
+        assembly_cache['n_unknown'] = n_unknown
+        assembly_cache['n_full'] = n_full
 
     return S_global, rhs_dirichlet, unknown_list, unknown_to_idx
 
