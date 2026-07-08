@@ -121,6 +121,7 @@ class _SolverTimeDomainMixin:
             smoothed=smooth,
             n_tiles=len(tile_configs),
             per_tile_stats=per_tile_stats,
+            timings=timings,
         )
 
     def solve_quasi_static(

@@ -1,0 +1,14 @@
+{
+  "qs_peak_ir_drop_mV": 62.5698,
+  "qs_peak_time_ns": 2.28,
+  "be_peak_ir_drop_mV": 50.9123,
+  "be_peak_time_ns": 4.78,
+  "trap_peak_ir_drop_mV": 78.5102,
+  "trap_peak_time_ns": 2.28,
+  "peak_max_qs_mV": 78.5102,
+  "peak_max_be_mV": 78.5102,
+  "peak_max_trap_mV": 78.5102,
+  "diff_qs_vs_be_uV": 11657.45,
+  "diff_qs_vs_trap_uV": 15940.46,
+  "diff_be_vs_trap_uV": 27597.91
+}

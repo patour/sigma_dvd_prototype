@@ -20,3 +20,4 @@ netlist_data/
 results/
 /parser
 sim
+scripts/benchmark/_executed_notebooks/

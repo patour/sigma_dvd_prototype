@@ -1,0 +1,24 @@
+{
+  "load": 2.6442129630595446,
+  "vcs": 0.0035743555054068565,
+  "smooth": 0.17018625978380442,
+  "dc_prepare": 0.787477282807231,
+  "dc_prepare_detail": {
+    "factor_tiles": 0.04022903647273779,
+    "assemble_interface": 0.3066161787137389,
+    "detect_interface_islands": 0.2964612916111946,
+    "factor_interface": 0.14163907710462809,
+    "total_prepare": 0.7849455839022994
+  },
+  "trans_prepare": 1.0822570212185383,
+  "loop_total": 5.07995821069926,
+  "per_step": {
+    "rhs": 0.027887450885027646,
+    "solve": 0.0014863782469183206,
+    "recovery": 0.019913673987612127
+  },
+  "n_steps": 100,
+  "peak_ir_drop_mV": 32.17037560627256,
+  "peak_time_ns": 0.4,
+  "wall_time_s": 10.187244438566267
+}

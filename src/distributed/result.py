@@ -290,6 +290,20 @@ class DistributedSmoothedSources:
     smoothed: bool
     n_tiles: int
     per_tile_stats: Dict[Tuple[int, int], Dict[str, int]]
+    timings: Dict[str, float] = field(default_factory=dict)
+    """Internal phase timings populated by ``preprocess_sources()`` in ``solver_td.py``.
+
+    Keys (when present):
+
+    - ``init_vcs``: wall time for parallel VCS init across all workers.
+    - ``smooth_sources``: wall time for parallel PWL smoothing (only if
+      ``smooth=True`` was passed to ``preprocess_sources``).
+
+    This field was added to allow benchmark/regression scripts (see
+    ``scripts/benchmark/run_perf_baseline.py``) to report VCS init and
+    smoothing as separate phases, matching the spec's JSON timing schema.
+    It is additive — absent or empty has no effect on solve correctness.
+    """
 
     def is_compatible(
         self, time_step: float, t_start: float, t_end: float, tol: float = 1e-12
