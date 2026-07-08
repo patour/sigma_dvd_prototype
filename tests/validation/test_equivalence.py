@@ -54,6 +54,8 @@ pytestmark = pytest.mark.validation
 # When Phase A2 lands, append: pytest.param({"use_step_columns": True}, id="step_cols")
 SOLVER_VARIANTS: List[pytest.param] = [
     pytest.param({}, id="baseline"),
+    pytest.param({"use_step_columns": True}, id="step_cols_on"),
+    pytest.param({"use_step_columns": False}, id="step_cols_off"),
 ]
 
 # ── FLAG_VARIANTS: cross-comparison gate (flag-ON == flag-OFF) ─────────
