@@ -305,6 +305,15 @@ class DistributedSmoothedSources:
     It is additive — absent or empty has no effect on solve correctness.
     """
 
+    phase_table_info: Optional[Dict[str, Any]] = field(default=None)
+    """Per-tile step-column table metadata from A2 precompute_step_columns.
+
+    Set after ``precompute_step_columns`` is called on all workers.  Each
+    entry is the info dict returned by the worker (tier, m, phase0,
+    n_src_nodes, memory_mb, build_path, build_time_s).  None = table not
+    built or use_step_columns=False.
+    """
+
     def is_compatible(
         self, time_step: float, t_start: float, t_end: float, tol: float = 1e-12
     ) -> bool:

@@ -83,6 +83,7 @@ def run_benchmark(
     dt: float,
     backend: str,
     verbose: bool,
+    use_step_columns: bool = True,
 ) -> dict:
     """Run end-to-end transient solve and return timing dict."""
     from distributed.model import create_distributed_model, load_distributed_partitions
@@ -159,6 +160,7 @@ def run_benchmark(
             t_start=0.0,
             t_end=t_end,
             smoothed_sources=smoothed,
+            use_step_columns=use_step_columns,
             verbose=verbose,
         )
 
@@ -280,6 +282,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Max allowed regression percent before exit-1')
     p.add_argument('--verbose', '-v', action='store_true',
                    help='Verbose solver output')
+    p.add_argument('--no-step-columns', action='store_true',
+                   help='Disable A2 phase-folded step-column table (flag-off A/B)')
     return p
 
 
@@ -292,12 +296,16 @@ def main(argv=None):
     print(f"  backend={args.backend}  t_end={args.t_end*1e9:.2f}ns  dt={args.dt*1e12:.1f}ps", flush=True)
 
     t_wall = time.perf_counter()
+    use_sc = not args.no_step_columns
+    if not use_sc:
+        print("  [A2] --no-step-columns: step-column table disabled", flush=True)
     timings = run_benchmark(
         pkl_dir=pkl_dir,
         t_end=args.t_end,
         dt=args.dt,
         backend=args.backend,
         verbose=args.verbose,
+        use_step_columns=use_sc,
     )
     timings['wall_time_s'] = time.perf_counter() - t_wall
 

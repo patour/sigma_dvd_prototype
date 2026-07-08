@@ -134,6 +134,7 @@ class _SolverTimeDomainMixin:
         smoothed_sources: Optional[DistributedSmoothedSources] = None,
         n_worst_nodes: int = 10,
         track_nodes: Optional[List[str]] = None,
+        use_step_columns: bool = True,
         verbose: bool = False,
     ) -> DistributedQuasiStaticResult:
         """Distributed quasi-static (batch DC) time-domain analysis.
@@ -202,6 +203,52 @@ class _SolverTimeDomainMixin:
         max_drops = np.zeros(len(t_array), dtype=np.float64)
         total_currents = np.zeros(len(t_array), dtype=np.float64)
 
+        # A2: pre-compute step-column tables on workers (if enabled).
+        # GUARD: step-column tables assume a UNIFORM time grid (constant dt).
+        # An explicit t_array may be non-uniform (e.g. log-spaced); in that
+        # case the phase/chunked column mapping silently evaluates at the wrong
+        # times.  Check uniformity before enabling the table; fall back to the
+        # per-step evaluate_at_time path for non-uniform grids.
+        n_steps_qs = len(t_array)
+        _qs_step_col_infos: List[Dict] = []
+        if use_step_columns and n_steps_qs > 1:
+            dt_qs = float(t_array[1] - t_array[0])
+            _qs_grid_uniform = (
+                dt_qs > 0 and bool(
+                    np.allclose(np.diff(t_array), dt_qs, rtol=1e-9, atol=0.0)
+                )
+            )
+            if _qs_grid_uniform:
+                t0_sc = time.perf_counter()
+                # QS time points are t_array[k]; step_idx=k corresponds to t_array[k].
+                # precompute_step_columns builds columns for t_col_start + (k+1)*dt,
+                # so we set t_col_start = t_array[0] - dt_qs to get column k → t_array[k].
+                t_col_start_qs = float(t_array[0]) - dt_qs
+                sc_qs_args = [
+                    (t_col_start_qs, dt_qs, n_steps_qs) for _ in tile_configs
+                ]
+                _qs_step_col_infos = model.backend.call_all(
+                    model.workers, 'precompute_step_columns', sc_qs_args,
+                )
+                timings['precompute_step_columns'] = time.perf_counter() - t0_sc
+                if verbose:
+                    tiers = [info.get('tier', '?') for info in _qs_step_col_infos]
+                    logger.info(
+                        "A2 QS step columns: %d tiles, tiers=%s, %.3fs",
+                        len(tile_configs), tiers,
+                        timings['precompute_step_columns'],
+                    )
+            else:
+                if verbose:
+                    logger.info(
+                        "A2 QS step columns skipped: non-uniform t_array "
+                        "(step-column table requires constant dt; dt[0]=%.4g s "
+                        "but diffs range [%.4g, %.4g] s)",
+                        dt_qs,
+                        float(np.diff(t_array).min()),
+                        float(np.diff(t_array).max()),
+                    )
+
         # Pre-loop: build concatenated scatter index (ONCE, reused every step).
         # tile_index_maps[tid][j] = global interface idx for local port j.
         # This is the SCATTER index (interface nodes only, excludes pads) and
@@ -227,13 +274,21 @@ class _SolverTimeDomainMixin:
         all_step_eval_times: List[List[float]] = []
 
         t0_loop = time.perf_counter()
+        _qs_pass_step_idx = use_step_columns and bool(_qs_step_col_infos)
         for step_idx, t_val in enumerate(t_array):
             # 5a. Workers: evaluate sources + compute reduced RHS (parallel)
+            # A2: pass step_idx when table is active
             t0_rhs = time.perf_counter()
-            rhs_results = model.backend.call_all(
-                model.workers, 'evaluate_and_get_reduced_rhs',
-                [(t_val,)] * len(tile_configs),
-            )
+            if _qs_pass_step_idx:
+                rhs_results = model.backend.call_all(
+                    model.workers, 'evaluate_and_get_reduced_rhs',
+                    [(t_val, step_idx)] * len(tile_configs),
+                )
+            else:
+                rhs_results = model.backend.call_all(
+                    model.workers, 'evaluate_and_get_reduced_rhs',
+                    [(t_val,)] * len(tile_configs),
+                )
 
             # 5b. Coordinator: assemble global RHS via bincount scatter.
             # Concatenate per-tile g_i in tile iteration order (same order
@@ -403,6 +458,7 @@ class _SolverTimeDomainMixin:
         smoothed_sources: Optional[DistributedSmoothedSources] = None,
         n_worst_nodes: int = 10,
         track_nodes: Optional[List[str]] = None,
+        use_step_columns: bool = True,
         verbose: bool = False,
     ) -> DistributedTransientResult:
         """Distributed transient (RC) time-domain analysis.
@@ -596,6 +652,27 @@ class _SolverTimeDomainMixin:
         t_array = np.arange(
             t_start + dt, t_end + dt / 2, dt, dtype=np.float64,
         )
+
+        # A2: pre-compute step-column tables on workers (if enabled).
+        # Each worker builds its own phase table for current source lookup.
+        n_steps_total = len(t_array)
+        _step_col_table_infos: List[Dict] = []
+        if use_step_columns and n_steps_total > 0:
+            t0 = time.perf_counter()
+            sc_args = [
+                (t_start, dt, n_steps_total) for _ in tile_configs
+            ]
+            _step_col_table_infos = model.backend.call_all(
+                model.workers, 'precompute_step_columns', sc_args,
+            )
+            timings['precompute_step_columns'] = time.perf_counter() - t0
+            if verbose:
+                tiers = [info.get('tier', '?') for info in _step_col_table_infos]
+                logger.info(
+                    "A2 step columns: %d tiles, tiers=%s, %.3fs",
+                    len(tile_configs), tiers,
+                    timings['precompute_step_columns'],
+                )
         max_drops = np.zeros(len(t_array), dtype=np.float64)
         total_currents = np.zeros(len(t_array), dtype=np.float64)
 
@@ -606,9 +683,16 @@ class _SolverTimeDomainMixin:
         all_step_rhs_times: List[List[float]] = []
 
         t0_loop = time.perf_counter()
+        # A2: whether to pass step_idx to workers (enables table lookup)
+        _pass_step_idx = use_step_columns and bool(_step_col_table_infos)
         for step_idx, t_val in enumerate(t_array):
             # 7a. Use cached bv_old_arr_list (built before loop or from prev step)
-            bv_old_per_tile = [(t_val, v_arr) for v_arr in bv_old_arr_list]
+            # A2: include step_idx when table is active so workers can
+            # do a direct column gather instead of evaluate_at_time.
+            if _pass_step_idx:
+                bv_old_per_tile = [(t_val, v_arr, step_idx) for v_arr in bv_old_arr_list]
+            else:
+                bv_old_per_tile = [(t_val, v_arr) for v_arr in bv_old_arr_list]
 
             # 7b. Workers: compute transient reduced RHS (array-based)
             t0_rhs = time.perf_counter()

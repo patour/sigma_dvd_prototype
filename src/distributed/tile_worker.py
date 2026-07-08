@@ -102,6 +102,16 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         self._peak_use_arrays: bool = False
         self._tracked_node_indices: Dict[str, int] = {}
 
+        # --- A2: Phase-folded step-column table (tile_worker_td.py) --------
+        # None until precompute_step_columns() is called.
+        self._step_col_table: Optional[Dict] = None
+        # Settings (propagated via configure() from coordinator settings).
+        self._use_step_columns: bool = True
+        self._max_table_mb: float = 512.0
+        # Pre-allocated current buffer for buffer-reuse per step (n_nodes,).
+        # Allocated lazily on first use.
+        self._current_buf: Optional[np.ndarray] = None
+
         # --- Adjoint sensitivity state ---
         self._init_adjoint_state()
 
@@ -128,6 +138,11 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
             set_cholmod_ordering(settings['cholmod_ordering'])
         if 'cholmod_use_long' in settings:
             set_cholmod_use_long(settings['cholmod_use_long'])
+        # A2 step-column table settings
+        if 'use_step_columns' in settings:
+            self._use_step_columns = bool(settings['use_step_columns'])
+        if 'max_table_mb' in settings:
+            self._max_table_mb = float(settings['max_table_mb'])
 
     def setup(
         self,

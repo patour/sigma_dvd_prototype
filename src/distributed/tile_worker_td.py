@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 
@@ -104,6 +104,8 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             sources_dict, node_to_idx, n_nodes,
         )
         self._active_sources = self._vec_sources
+        # A2: new raw sources invalidate any existing step-column table
+        self._step_col_table = None
 
         # Save to disk cache
         if pkl_dir is not None:
@@ -144,6 +146,8 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             time_step, t_start, t_end,
         )
         self._active_sources = self._smoothed_sources
+        # A2: smoothing changes active sources → invalidate step-column table
+        self._step_col_table = None
         return {'time_step': time_step, 't_start': t_start, 't_end': t_end}
 
     # --- 4c. Source selection -------------------------------------------
@@ -162,6 +166,531 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                     "No raw sources; call init_vectorized_sources() first"
                 )
             self._active_sources = self._vec_sources
+        # Changing active sources invalidates the step-column table.
+        self._step_col_table = None
+
+    # --- A2: Step-column table methods ---------------------------------
+
+    def get_period_info(self) -> Dict[str, Any]:
+        """Return period info from active VCS (for coordinator tier selection).
+
+        Returns empty dict when no active sources are loaded.
+        """
+        if self._active_sources is None:
+            return {'has_single_period': False, 'n_active_source_rows': 0}
+        return self._active_sources.get_period_info()
+
+    def precompute_step_columns(
+        self,
+        t_start: float,
+        dt: float,
+        n_steps: int,
+        use_step_columns: Optional[bool] = None,
+        max_table_mb: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Build per-tile step-column current table for the time loop.
+
+        Stores source-carrying rows only (sparse row index + dense values).
+        DC contributions are baked into every column.  The table is reused
+        across steps via :meth:`_get_current_array_for_step`.
+
+        Build paths (in priority order):
+        1. Smoothed-grid direct scatter (production flow): when active sources
+           are smoothed PWLs on the uniform ``actual_step`` grid, reads values
+           directly from the existing smoothed arrays — no evaluate_at_time.
+        2. Vectorized batch build: ``evaluate_at_times(t_grid)`` evaluating
+           all sources at all ``m`` phase-grid times in one vectorized pass.
+        3. Scalar fallback: ``m`` ``evaluate_at_time`` calls (used only when
+           ``n_steps < 32``).
+
+        Tier selection:
+        - **Tier a** (single period, integral P/dt, within memory budget):
+          full phase table of ``m = round(P/dt)`` columns; per step uses
+          column ``(step_idx + phase0) % m``.
+        - **Tier c** (everything else): chunked window, ``W`` steps at a time,
+          rebuilt when the step leaves the window.
+
+        Args:
+            t_start: Simulation start time (s).
+            dt: Time step (s).
+            n_steps: Total number of time steps.
+            use_step_columns: Override the worker's ``_use_step_columns``
+                setting for this call.  None = use worker setting.
+            max_table_mb: Override ``_max_table_mb``.  None = use worker
+                setting.
+
+        Returns:
+            Info dict: ``{tier, m, phase0, memory_mb, build_path, n_src_nodes}``.
+        """
+        # Apply overrides
+        use_sc = self._use_step_columns if use_step_columns is None else bool(use_step_columns)
+        max_mb = self._max_table_mb if max_table_mb is None else float(max_table_mb)
+
+        if not use_sc or self._active_sources is None:
+            self._step_col_table = None
+            return {'tier': 'disabled', 'n_src_nodes': 0, 'memory_mb': 0.0}
+
+        vcs = self._active_sources
+        pinfo = vcs.get_period_info()
+
+        # Determine tier
+        tier = 'chunked'  # default
+        m = 0
+        phase0 = 0
+
+        if pinfo['has_single_period']:
+            P = pinfo['single_period']
+            integral_fn = pinfo['p_over_dt_is_integral']
+            is_int, m_candidate = integral_fn(dt)
+            if is_int and m_candidate > 0:
+                est_mb_fn = pinfo['est_table_mb']
+                if est_mb_fn(m_candidate) <= max_mb:
+                    tier = 'phase'
+                    m = m_candidate
+                    # Phase offset: which column corresponds to step_idx=0?
+                    # Step 0 evaluates at t = t_start + dt.
+                    # t % P = (t_start + dt) % P.
+                    # Column k corresponds to t = k*dt (one-indexed from dt).
+                    # For t_start=0: column for step_idx s is s % m.
+                    # For general t_start: phase0 = round(t_start/dt) % m
+                    if P > 0:
+                        phase0 = int(round(t_start / dt)) % m
+                    else:
+                        phase0 = 0
+
+        if tier == 'phase':
+            info = self._build_phase_table(t_start, dt, m, phase0, n_steps)
+        else:
+            # Tier c: chunked window
+            W = min(512, n_steps)
+            info = self._build_chunked_window(t_start, dt, n_steps, W)
+
+        return info
+
+    def _build_phase_table(
+        self,
+        t_start: float,
+        dt: float,
+        m: int,
+        phase0: int,
+        n_steps: int,
+    ) -> Dict[str, Any]:
+        """Build a full phase table of m columns (tier a).
+
+        Selects build path:
+        1. Smoothed-grid direct scatter if sources are aligned.
+        2. evaluate_at_times_for_rows — row-sparse vectorized batch build.
+        3. Scalar fallback (m < 32).
+
+        All paths work on the pre-computed ``src_rows_candidate`` set so that
+        only source-carrying rows are ever allocated.  Peak build memory is
+        ``O(max(n_pulses, n_pwls) * m + n_src_rows * m)`` rather than
+        ``O(n_nodes * m)``.  The stored table is always row-sparse.
+        """
+        import time as _time
+        t0 = _time.perf_counter()
+
+        vcs = self._active_sources
+        n_nodes = vcs.n_nodes
+
+        # Pre-compute candidate source-carrying rows from VCS metadata.
+        # This is cheap (array ops, no evaluation) and avoids the O(n_nodes×m)
+        # dense intermediate for the batch and direct-scatter build paths.
+        src_rows_candidate = vcs.get_src_node_indices()
+
+        # Build path selection
+        build_path = self._select_build_path(dt, m)
+
+        # True build-time peak (what a naive full build would cost)
+        peak_build_mb_full = n_nodes * m * 8 / 1e6
+
+        if build_path == 'direct_scatter':
+            # Sparse direct scatter: uses src_rows_candidate, returns (n_src, m)
+            C_sparse, src_rows = self._build_via_direct_scatter(
+                m, phase0, dt, t_start, src_rows_candidate
+            )
+            peak_build_mb = len(src_rows_candidate) * m * 8 / 1e6
+        elif m < 32 or build_path == 'scalar':
+            # Scalar fallback: small m → full build acceptable
+            C_dense_full = self._build_via_scalar_fallback(dt, m)
+            row_max = np.abs(C_dense_full).max(axis=1)
+            src_rows = np.where(row_max > 0)[0].astype(np.int32)
+            C_sparse = np.asfortranarray(C_dense_full[src_rows, :])
+            peak_build_mb = peak_build_mb_full  # full array was materialized
+        else:
+            # Path ii: row-sparse vectorized batch build.
+            # Build ONE FULL PERIOD [dt, 2*dt, ..., m*dt] (origin at t=0)
+            # but ONLY for src_rows_candidate — avoids the n_nodes×m spike.
+            # phase0 encodes where t_start falls in this period; per-step
+            # column lookup uses col = (step_idx + phase0) % m.
+            t_grid = np.arange(1, m + 1, dtype=np.float64) * dt
+            # (n_candidate, m) — much smaller than (n_nodes, m)
+            C_pre = vcs.evaluate_at_times_for_rows(t_grid, src_rows_candidate)
+            # Trim to actually-nonzero rows
+            row_max = np.abs(C_pre).max(axis=1)
+            nonzero = row_max > 0
+            src_rows = src_rows_candidate[nonzero]
+            C_sparse = np.asfortranarray(C_pre[nonzero, :])
+            peak_build_mb = len(src_rows_candidate) * m * 8 / 1e6
+
+        if len(src_rows) == 0:
+            # No sources: store empty table
+            self._step_col_table = {
+                'tier': 'phase',
+                'm': m,
+                'phase0': phase0,
+                'src_rows': src_rows,
+                'C_dense': np.empty((0, m), dtype=np.float64, order='F'),
+            }
+        else:
+            self._step_col_table = {
+                'tier': 'phase',
+                'm': m,
+                'phase0': phase0,
+                'src_rows': src_rows,
+                'C_dense': C_sparse,  # (n_src, m), Fortran order
+            }
+
+        # Pre-allocate current buffer for buffer reuse (avoid np.zeros per step)
+        if self._current_buf is None or len(self._current_buf) != n_nodes:
+            self._current_buf = np.zeros(n_nodes, dtype=np.float64)
+
+        build_time = _time.perf_counter() - t0
+        n_src = len(src_rows)
+        mem_mb = n_src * m * 8 / 1e6
+        logger.debug(
+            "Tile %s precompute_step_columns: tier=phase m=%d phase0=%d "
+            "n_src_nodes=%d mem=%.2fMB peak_build=%.2fMB (full=%.2fMB) "
+            "path=%s build=%.3fs",
+            self._tile_data.tile_id if self._tile_data else '?',
+            m, phase0, n_src, mem_mb, peak_build_mb, peak_build_mb_full,
+            build_path, build_time,
+        )
+        return {
+            'tier': 'phase',
+            'm': m,
+            'phase0': phase0,
+            'n_src_nodes': n_src,
+            'memory_mb': mem_mb,
+            'peak_build_mb': peak_build_mb,
+            'build_path': build_path,
+            'build_time_s': build_time,
+        }
+
+    def _build_chunked_window(
+        self,
+        t_start: float,
+        dt: float,
+        n_steps: int,
+        W: int,
+    ) -> Dict[str, Any]:
+        """Build a chunked-window table (tier c).
+
+        The first window of W steps is built eagerly; subsequent windows are
+        built on demand in :meth:`_get_current_array_for_step`.
+
+        Uses the row-sparse build to avoid the ``(n_nodes, W)`` full-dense
+        intermediate: only ``src_rows_candidate`` rows are allocated.
+        Peak build memory is ``O(max(n_pulses, n_pwls) * W + n_src * W)``
+        rather than ``O(n_nodes * W)``.
+        """
+        import time as _time
+        t0 = _time.perf_counter()
+
+        vcs = self._active_sources
+        n_nodes = vcs.n_nodes
+
+        W = min(W, n_steps)
+
+        # Pre-compute candidate source rows (cheap, metadata-only)
+        src_rows_candidate = vcs.get_src_node_indices()
+
+        # Build first window row-sparse to avoid n_nodes × W allocation
+        t_grid = t_start + np.arange(1, W + 1, dtype=np.float64) * dt
+        # (n_candidate, W) — much smaller than (n_nodes, W)
+        C_pre = vcs.evaluate_at_times_for_rows(t_grid, src_rows_candidate)
+
+        row_max = np.abs(C_pre).max(axis=1)
+        nonzero = row_max > 0
+        src_rows = src_rows_candidate[nonzero]
+
+        if len(src_rows) == 0:
+            C_sparse = np.empty((0, W), dtype=np.float64, order='F')
+        else:
+            C_sparse = np.asfortranarray(C_pre[nonzero, :])
+
+        self._step_col_table = {
+            'tier': 'chunked',
+            'W': W,
+            't_start': t_start,
+            'dt': dt,
+            'n_steps': n_steps,
+            # Store candidate rows so window rebuilds use the same candidate set.
+            # Per-window src_rows may differ (late-active sources), but
+            # candidate set never shrinks.
+            '_src_rows_candidate': src_rows_candidate,
+            'src_rows': src_rows,
+            'C_dense': C_sparse,
+            '_chunk_start': 0,   # step_idx of first column in current chunk
+        }
+
+        if self._current_buf is None or len(self._current_buf) != n_nodes:
+            self._current_buf = np.zeros(n_nodes, dtype=np.float64)
+
+        build_time = _time.perf_counter() - t0
+        n_src = len(src_rows)
+        mem_mb = n_src * W * 8 / 1e6
+        peak_build_mb = len(src_rows_candidate) * W * 8 / 1e6
+        peak_build_mb_full = n_nodes * W * 8 / 1e6
+        logger.debug(
+            "Tile %s precompute_step_columns: tier=chunked W=%d "
+            "n_src_nodes=%d mem=%.2fMB peak_build=%.2fMB (full=%.2fMB) build=%.3fs",
+            self._tile_data.tile_id if self._tile_data else '?',
+            W, n_src, mem_mb, peak_build_mb, peak_build_mb_full, build_time,
+        )
+        return {
+            'tier': 'chunked',
+            'W': W,
+            'n_src_nodes': n_src,
+            'memory_mb': mem_mb,
+            'peak_build_mb': peak_build_mb,
+            'build_path': 'evaluate_at_times_for_rows',
+            'build_time_s': build_time,
+        }
+
+    def _select_build_path(self, dt: float, m: int) -> str:
+        """Select build path for phase table: 'direct_scatter', 'batch', or 'scalar'."""
+        if m < 32:
+            return 'scalar'
+        vcs = self._active_sources
+        if vcs is None:
+            return 'scalar'
+        # Path i: smoothed-grid direct scatter
+        # Conditions: n_pulses==0 (all converted to PWL after smoothing),
+        # all_zero_delay, single period, and PWL times align to dt grid.
+        if vcs.n_pulses == 0 and vcs.n_pwls > 0:
+            # Check delay and period
+            pinfo = vcs.get_period_info()
+            if pinfo['all_zero_pwl_delay'] and pinfo['has_single_period']:
+                P = pinfo['single_period']
+                # Check integrality
+                is_int, m_check = pinfo['p_over_dt_is_integral'](dt)
+                if is_int and m_check == m:
+                    # Check grid alignment: first PWL time ≈ 0 (t_start offset baked in)
+                    # Actually we check if the step between consecutive samples ≈ dt
+                    if vcs.n_pwl_points > 0 and vcs.n_pwls > 0:
+                        # Sample the first PWL row's times
+                        off0 = int(vcs.pwl_offset[0])
+                        cnt0 = int(vcs.pwl_count[0])
+                        if cnt0 >= 2:
+                            sample_step = float(vcs.pwl_times[off0 + 1] - vcs.pwl_times[off0])
+                            actual_step = P / m
+                            # Also require that the first sample is at t≈0 so
+                            # that sample index k+1 maps to time (k+1)*dt from
+                            # origin (matching the batch/scalar build convention).
+                            # If smooth_sources was called with t_start!=0 the
+                            # first sample would be at t_start and this guard
+                            # would fall through to the batch path.
+                            first_time = float(vcs.pwl_times[off0])
+                            if (abs(sample_step - actual_step) <= 1e-9 * actual_step
+                                    and abs(first_time) <= 0.5 * actual_step):
+                                return 'direct_scatter'
+        return 'batch'
+
+    def _build_via_direct_scatter(
+        self,
+        m: int,
+        phase0: int,
+        dt: float,
+        t_start: float,
+        src_rows_candidate: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Build phase table via scatter-add of smoothed value arrays.
+
+        Row-sparse: only allocates ``(n_candidate, m)`` instead of
+        ``(n_nodes, m)``.  Returns ``(C_sparse, src_rows)`` where
+        ``C_sparse`` is ``(n_src, m)`` Fortran-order and ``src_rows``
+        is the int32 index array into the full node vector.
+
+        Each column k stores the value at time (k+1)*dt from origin (t=0)
+        for each source row.  ``phase0`` is NOT applied here; it is applied
+        at lookup time in ``_get_current_array_for_step`` via
+        ``col = (step_idx + phase0) % m``.
+
+        Falls back to ``evaluate_at_times_for_rows`` on any mismatch.
+        """
+        try:
+            from parser.current_sources import get_apply_wscale
+            apply_wscale = get_apply_wscale()
+        except ImportError:
+            apply_wscale = True
+
+        vcs = self._active_sources
+        n_nodes = vcs.n_nodes
+        n_candidate = len(src_rows_candidate)
+
+        # node → position in src_rows_candidate (-1 if absent)
+        row_positions = -np.ones(n_nodes, dtype=np.int32)
+        if n_candidate > 0:
+            row_positions[src_rows_candidate] = np.arange(n_candidate, dtype=np.int32)
+
+        # DC base for candidate rows only
+        dc_per_node = np.zeros(n_nodes, dtype=np.float64)
+        if vcs.n_sources > 0:
+            np.add.at(dc_per_node, vcs.source_node_idx, vcs.dc_values)
+
+        # Allocate (n_candidate, m) instead of (n_nodes, m)
+        C = np.empty((n_candidate, m), dtype=np.float64)
+        if n_candidate > 0:
+            C[:] = dc_per_node[src_rows_candidate, np.newaxis]  # DC init
+        else:
+            C[:] = 0.0
+
+        # Scatter each PWL row's values into the appropriate column.
+        # After smoothing, pwl_times starts near t=0 (the t_start offset is
+        # "baked into" the waveform shape — pwl_times[off + i] ≈ i * actual_step).
+        # The phase table is built at ORIGIN (same as the batch and scalar paths):
+        # column k stores the value at time (k+1)*dt from t=0, i.e. sample index
+        # (k+1) % cnt.  phase0 is NOT applied here; it is applied at lookup time
+        # in _get_current_array_for_step via col = (step_idx + phase0) % m.
+        try:
+            for pwl_i in range(vcs.n_pwls):
+                off = int(vcs.pwl_offset[pwl_i])
+                cnt = int(vcs.pwl_count[pwl_i])
+                node = int(vcs.pwl_node_idx[pwl_i])
+                row = int(row_positions[node])
+                if row < 0:
+                    continue  # node not in candidate set (guard)
+                wsc = (float(vcs.pwl_wscale[pwl_i])
+                       if (apply_wscale and len(vcs.pwl_wscale) == vcs.n_pwls)
+                       else 1.0)
+                if cnt < m + 1:
+                    # Not enough samples — fall back
+                    raise ValueError("PWL has fewer samples than m+1")
+                # Columns 0..m-1 use samples at indices 1..m (origin-based).
+                for k in range(m):
+                    sample_idx = (k + 1) % cnt
+                    C[row, k] += wsc * float(vcs.pwl_values[off + sample_idx])
+        except (ValueError, IndexError):
+            # Fall back to evaluate_at_times_for_rows — row-sparse, builds at
+            # ORIGIN so that col = (step_idx + phase0) % m remains valid.
+            t_grid = np.arange(1, m + 1, dtype=np.float64) * dt
+            C_pre = vcs.evaluate_at_times_for_rows(t_grid, src_rows_candidate)
+            row_max = np.abs(C_pre).max(axis=1)
+            nonzero = row_max > 0
+            final_rows = src_rows_candidate[nonzero]
+            return np.asfortranarray(C_pre[nonzero, :]), final_rows
+
+        # Trim to actually-nonzero rows
+        row_max = np.abs(C).max(axis=1)
+        nonzero = row_max > 0
+        final_rows = src_rows_candidate[nonzero]
+        return np.asfortranarray(C[nonzero, :]), final_rows
+
+    def _build_via_scalar_fallback(
+        self, dt: float, m: int,
+    ) -> np.ndarray:
+        """Build phase table via m scalar evaluate_at_time calls (reference path).
+
+        Evaluates at ONE FULL PERIOD [dt, 2*dt, ..., m*dt] from the origin.
+        The per-step column lookup uses ``(step_idx + phase0) % m`` to map
+        simulation steps back into this period grid.
+        """
+        vcs = self._active_sources
+        n_nodes = vcs.n_nodes
+        C = np.empty((n_nodes, m), dtype=np.float64)
+        for k in range(m):
+            t = (k + 1) * dt
+            C[:, k] = vcs.evaluate_at_time(t)
+        return C
+
+    def _get_current_array_for_step(
+        self, step_idx: int, t: float,
+    ) -> np.ndarray:
+        """Return current array for the given step (table or fallback).
+
+        Uses the step-column table when available for O(n_src_nodes) gather
+        instead of a full source evaluation.  Falls back to evaluate_at_time
+        when the table is disabled or not built.
+
+        The returned array is either ``self._current_buf`` (mutated in-place
+        for buffer reuse) or a freshly allocated array from evaluate_at_time.
+        Callers must NOT cache the returned reference across steps.
+
+        Args:
+            step_idx: 0-based index of the current time step.
+            t: Actual time in seconds (used for fallback path only).
+
+        Returns:
+            shape ``(n_nodes,)`` current array.
+        """
+        tbl = self._step_col_table
+        if tbl is None or self._active_sources is None:
+            # Fallback: per-step evaluate_at_time
+            return self._active_sources.evaluate_at_time(t) if self._active_sources else np.zeros(
+                self._block_system.n_ports + self._block_system.n_interior,
+                dtype=np.float64,
+            )
+
+        tier = tbl['tier']
+        src_rows = tbl['src_rows']
+        n_src = len(src_rows)
+
+        if tier == 'phase':
+            m = tbl['m']
+            phase0 = tbl['phase0']
+            col = (step_idx + phase0) % m
+        else:
+            # Chunked: rebuild window if step_idx is outside current chunk
+            W = tbl['W']
+            chunk_start = tbl['_chunk_start']
+            if step_idx < chunk_start or step_idx >= chunk_start + W:
+                # Rebuild window starting at step_idx using stored candidate rows.
+                # The candidate set from _build_chunked_window never shrinks, so
+                # sources active in later windows (zero in window 0) are included.
+                t_start = tbl['t_start']
+                dt = tbl['dt']
+                n_steps = tbl['n_steps']
+                src_rows_candidate = tbl.get('_src_rows_candidate')
+                new_start = step_idx
+                new_end = min(new_start + W, n_steps)
+                W_actual = new_end - new_start
+                t_grid = t_start + np.arange(
+                    new_start + 1, new_end + 1, dtype=np.float64
+                ) * dt
+                vcs = self._active_sources
+                if src_rows_candidate is not None and len(src_rows_candidate) > 0:
+                    # Row-sparse rebuild: only evaluate candidate rows
+                    C_pre = vcs.evaluate_at_times_for_rows(t_grid, src_rows_candidate)
+                    new_row_max = np.abs(C_pre).max(axis=1)
+                    nonzero = new_row_max > 0
+                    src_rows = src_rows_candidate[nonzero]
+                    if len(src_rows) > 0:
+                        tbl['C_dense'] = np.asfortranarray(C_pre[nonzero, :W_actual])
+                    else:
+                        tbl['C_dense'] = np.empty((0, W_actual), dtype=np.float64, order='F')
+                else:
+                    # Fallback: full evaluation (no candidate set stored)
+                    C_win = vcs.evaluate_at_times(t_grid)
+                    new_row_max = np.abs(C_win).max(axis=1)
+                    src_rows = np.where(new_row_max > 0)[0].astype(np.int32)
+                    if len(src_rows) > 0:
+                        tbl['C_dense'] = np.asfortranarray(C_win[src_rows, :W_actual])
+                    else:
+                        tbl['C_dense'] = np.empty((0, W_actual), dtype=np.float64, order='F')
+                tbl['src_rows'] = src_rows
+                tbl['_chunk_start'] = new_start
+                chunk_start = new_start
+            col = step_idx - chunk_start
+
+        # Dense fill into pre-allocated buffer (no np.zeros, no np.add.at)
+        buf = self._current_buf
+        buf[:] = 0.0
+        if n_src > 0:
+            C_dense = tbl['C_dense']
+            buf[src_rows] = C_dense[:, col]
+
+        return buf
 
     # --- 4c'. Current node masking (for near/far decomposition) --------
 
@@ -269,7 +798,9 @@ class _TimeDomainMixin(_PeakTrackingMixin):
     # --- 4d. Quasi-static evaluate + reduced RHS -----------------------
 
     def evaluate_and_get_reduced_rhs(
-        self, t: float,
+        self,
+        t: float,
+        step_idx: Optional[int] = None,
     ) -> Tuple[np.ndarray, float, Dict[str, Any]]:
         """Evaluate time-domain currents and compute reduced RHS.
 
@@ -278,8 +809,14 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         :meth:`recover_and_update_peaks` call recovers interior voltages
         using the same time-varying currents (not the static DC values).
 
+        When ``step_idx`` is provided and a step-column table has been built
+        (via :meth:`precompute_step_columns`), the current array is read from
+        the table instead of evaluating sources at time ``t``.
+
         Args:
-            t: Time in seconds.
+            t: Time in seconds (used when table is absent or step_idx=None).
+            step_idx: 0-based step index for table lookup.  None = force
+                per-step evaluate_at_time path (disables table).
 
         Returns:
             ``(g, total_current, stats)`` -- reduced RHS ``(n_ports,)``,
@@ -304,7 +841,11 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             }
             return rhs, total, stats
 
-        current_array = self._active_sources.evaluate_at_time(t)
+        # A2: use table lookup when step_idx provided and table is built
+        if step_idx is not None and self._step_col_table is not None:
+            current_array = self._get_current_array_for_step(step_idx, t)
+        else:
+            current_array = self._active_sources.evaluate_at_time(t)
         if self._current_node_mask is not None:
             current_array = current_array * self._current_node_mask
         total_current = float(np.sum(current_array))
@@ -581,6 +1122,7 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         self,
         t: float,
         v_p_old: np.ndarray,
+        step_idx: Optional[int] = None,
     ) -> Tuple[np.ndarray, float, Dict[str, Any]]:
         """Compute reduced RHS for one transient step (array-based variant).
 
@@ -589,12 +1131,18 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         instead of a boundary voltage dict, eliminating the per-port
         Python dict-lookup loop for port voltage construction.
 
+        When ``step_idx`` is provided and a step-column table has been built
+        (via :meth:`precompute_step_columns`), the current array is gathered
+        from the table instead of calling evaluate_at_time.
+
         Args:
-            t: Current time in seconds.
+            t: Current time in seconds (used when table is absent).
             v_p_old: Previous-step port voltages, shape ``(n_ports,)``.
                 ``v_p_old[j]`` is the voltage at the tile's j-th port (in
                 ``bs.port_nodes`` order). Pad/Dirichlet ports should
                 already be filled with ``vdd`` by the coordinator.
+            step_idx: 0-based step index for table lookup.  None = force
+                per-step evaluate_at_time path.
 
         Returns:
             ``(g, total_current, stats)`` -- reduced RHS ``(n_ports,)``,
@@ -612,9 +1160,13 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         n_ports = bs.n_ports
         n_interior = bs.n_interior
 
-        # Evaluate currents
+        # Evaluate / gather currents
         if self._active_sources is not None:
-            current_array = self._active_sources.evaluate_at_time(t)
+            # A2: use table lookup when step_idx provided and table built
+            if step_idx is not None and self._step_col_table is not None:
+                current_array = self._get_current_array_for_step(step_idx, t)
+            else:
+                current_array = self._active_sources.evaluate_at_time(t)
             if self._current_node_mask is not None:
                 current_array = current_array * self._current_node_mask
             I_p = current_array[:n_ports]

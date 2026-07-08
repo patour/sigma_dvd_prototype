@@ -875,6 +875,406 @@ class VectorizedCurrentSources:
             'memory_mb': self.memory_bytes() / 1e6,
         }
 
+    def get_period_info(self) -> Dict[str, Any]:
+        """Return period metadata for step-column table tier selection.
+
+        Cheap — only array ops on existing metadata arrays.  Called once
+        per solve by the coordinator to decide which tier to use.
+
+        Returns:
+            Dict with keys:
+
+            - ``unique_pulse_periods`` (list[float]): unique non-zero pulse
+              periods.
+            - ``unique_pwl_periods`` (list[float]): unique non-zero PWL
+              periods.
+            - ``all_zero_pwl_delay`` (bool): True when ALL PWL delays are 0.
+            - ``n_active_source_rows`` (int): total rows with time-varying
+              content (n_pulses + n_pwls).
+            - ``has_single_period`` (bool): True when all time-varying content
+              shares exactly one period P.
+            - ``single_period`` (float | None): that shared period, or None.
+            - ``p_over_dt_is_integral`` (callable): helper that checks
+              ``|P/dt - round(P/dt)| <= 1e-9 * round(P/dt)`` and returns
+              ``(is_integral, m)`` where m = round(P/dt).
+            - ``est_table_mb_per_period`` (float): estimated memory for one
+              full phase-table, source-carrying rows only, in MB.
+        """
+        # Unique non-zero pulse periods
+        if self.n_pulses > 0:
+            pperiod = self.pulse_period
+            up = np.unique(pperiod[pperiod > 0]).tolist()
+        else:
+            up = []
+
+        # Unique non-zero PWL periods
+        if self.n_pwls > 0:
+            qperiod = self.pwl_period
+            uq = np.unique(qperiod[qperiod > 0]).tolist()
+        else:
+            uq = []
+
+        # All-zero PWL delay
+        if self.n_pwls > 0:
+            all_zero_pwl_delay = bool(np.all(self.pwl_delay == 0))
+        else:
+            all_zero_pwl_delay = True
+
+        # Detect aperiodic time-varying content.
+        # A pulse with period<=0 AND v1!=v2 is a one-shot pulse that cannot be
+        # phase-folded.  A PWL with period<=0 AND count>1 is a multi-knot
+        # aperiodic waveform.  DC-only sources (pulse v1==v2, or single-knot
+        # PWL) are harmless even with period=0 because they contribute no AC
+        # content; they don't need to be excluded from the phase tier.
+        if self.n_pulses > 0:
+            has_aperiodic_pulse = bool(np.any(
+                (self.pulse_period <= 0) & (self.pulse_v1 != self.pulse_v2)
+            ))
+        else:
+            has_aperiodic_pulse = False
+
+        if self.n_pwls > 0:
+            has_aperiodic_pwl = bool(np.any(
+                (self.pwl_period <= 0) & (self.pwl_count > 1)
+            ))
+        else:
+            has_aperiodic_pwl = False
+
+        # Determine single shared period.
+        # has_single_period is True ONLY when:
+        #   1. Exactly one unique period P across all periodic rows.
+        #   2. No aperiodic time-varying pulse (period<=0, v1!=v2).
+        #   3. No aperiodic time-varying PWL (period<=0, count>1).
+        # Any aperiodic content routes the tile to the chunked tier, where
+        # columns are built per-window without modular folding.
+        all_periods = list(dict.fromkeys(up + uq))  # dedup, preserve order
+        if (len(all_periods) == 1
+                and not has_aperiodic_pulse
+                and not has_aperiodic_pwl):
+            has_single_period = True
+            single_period: Optional[float] = float(all_periods[0])
+        else:
+            has_single_period = False
+            single_period = None
+
+        # Count source-carrying rows
+        n_active = self.n_pulses + self.n_pwls
+
+        # P/dt integrality helper
+        def p_over_dt_is_integral(dt: float) -> Tuple[bool, int]:
+            if single_period is None or dt <= 0:
+                return False, 0
+            ratio = single_period / dt
+            m = int(round(ratio))
+            if m <= 0:
+                return False, 0
+            return bool(abs(ratio - m) <= 1e-9 * m), m
+
+        # Estimated table memory (source-carrying node rows × m columns)
+        # n_src_nodes ≈ n_active (may be less due to multiple sources per node)
+        n_src_nodes = n_active  # upper bound; exact value known at build time
+        def est_mb(m: int) -> float:
+            return n_src_nodes * m * 8 / 1e6  # float64
+
+        return {
+            'unique_pulse_periods': up,
+            'unique_pwl_periods': uq,
+            'all_zero_pwl_delay': all_zero_pwl_delay,
+            'n_active_source_rows': n_active,
+            'has_aperiodic_pulse': has_aperiodic_pulse,
+            'has_aperiodic_pwl': has_aperiodic_pwl,
+            'has_single_period': has_single_period,
+            'single_period': single_period,
+            'p_over_dt_is_integral': p_over_dt_is_integral,
+            'est_table_mb': est_mb,
+        }
+
+    def get_src_node_indices(self) -> np.ndarray:
+        """Return sorted unique indices of nodes with any source contribution.
+
+        Used by the row-sparse phase-table build to pre-allocate only the
+        needed rows, avoiding an ``(n_nodes, m)`` full-dense intermediate.
+        May include nodes where AC contributions cancel (slightly conservative),
+        but never misses an active row.
+
+        Returns:
+            int32 array of sorted unique node indices.
+        """
+        node_set: set = set()
+        if self.n_sources > 0:
+            mask = self.dc_values != 0
+            if mask.any():
+                node_set.update(self.source_node_idx[mask].tolist())
+        if self.n_pulses > 0:
+            node_set.update(self.pulse_node_idx.tolist())
+        if self.n_pwls > 0:
+            node_set.update(self.pwl_node_idx.tolist())
+        return np.array(sorted(node_set), dtype=np.int32)
+
+    def evaluate_at_times_for_rows(
+        self,
+        t_grid: np.ndarray,
+        row_indices: np.ndarray,
+    ) -> np.ndarray:
+        """Evaluate only at specified node rows (row-sparse, low-memory build).
+
+        Semantically equivalent to
+        ``evaluate_at_times(t_grid)[row_indices, :]``
+        but avoids allocating the full ``(n_nodes, m)`` intermediate.
+        Peak memory is ``O(max(n_pulses, n_pwls) * m + len(row_indices) * m)``
+        instead of ``O(n_nodes * m)``.
+
+        Args:
+            t_grid: shape ``(m,)`` times in seconds.
+            row_indices: sorted unique node indices to evaluate, shape
+                ``(n_rows,)``.  Must be a subset of ``[0, n_nodes)``.
+
+        Returns:
+            np.ndarray of shape ``(n_rows, m)``.  Exactly matches
+            ``evaluate_at_times(t_grid)[row_indices, :]`` (within ≤ 1e-9
+            rel floating-point rounding for periodic modulo).
+        """
+        try:
+            from parser.current_sources import get_apply_wscale
+            apply_wscale = get_apply_wscale()
+        except ImportError:
+            apply_wscale = True
+
+        t_grid = np.asarray(t_grid, dtype=np.float64)
+        m = len(t_grid)
+        row_indices = np.asarray(row_indices, dtype=np.int32)
+        n_rows = len(row_indices)
+
+        if m == 0 or n_rows == 0:
+            return np.zeros((n_rows, m), dtype=np.float64)
+
+        # Mapping: node index → position in row_indices (-1 if absent)
+        row_positions = -np.ones(self.n_nodes, dtype=np.int32)
+        row_positions[row_indices] = np.arange(n_rows, dtype=np.int32)
+
+        # DC contribution (time-independent)
+        dc_per_node = np.zeros(self.n_nodes, dtype=np.float64)
+        if self.n_sources > 0:
+            np.add.at(dc_per_node, self.source_node_idx, self.dc_values)
+
+        result = np.empty((n_rows, m), dtype=np.float64)
+        result[:] = dc_per_node[row_indices, np.newaxis]  # DC init
+
+        # Pulse contribution (n_pulses, m) → scatter to result rows
+        if self.n_pulses > 0:
+            pulse_vals = self._evaluate_pulses_batch(t_grid)  # (n_pulses, m)
+            if apply_wscale and len(self.pulse_wscale) == self.n_pulses:
+                pulse_vals *= self.pulse_wscale[:, np.newaxis]
+            pni = self.pulse_node_idx.astype(np.intp)
+            pos = row_positions[pni]          # -1 for nodes not in row_indices
+            valid = pos >= 0
+            if valid.any():
+                pos_v = pos[valid].astype(np.intp)
+                vals_v = pulse_vals[valid, :]  # (n_valid, m)
+                for k in range(m):
+                    np.add.at(result[:, k], pos_v, vals_v[:, k])
+
+        # PWL contribution (n_pwls, m) → scatter to result rows
+        if self.n_pwls > 0:
+            pwl_vals = self._evaluate_pwls_batch(t_grid)  # (n_pwls, m)
+            if apply_wscale and len(self.pwl_wscale) == self.n_pwls:
+                pwl_vals *= self.pwl_wscale[:, np.newaxis]
+            qni = self.pwl_node_idx.astype(np.intp)
+            pos = row_positions[qni]
+            valid = pos >= 0
+            if valid.any():
+                pos_v = pos[valid].astype(np.intp)
+                vals_v = pwl_vals[valid, :]    # (n_valid, m)
+                for k in range(m):
+                    np.add.at(result[:, k], pos_v, vals_v[:, k])
+
+        return result  # (n_rows, m)
+
+    def evaluate_at_times(self, t_grid: np.ndarray) -> np.ndarray:
+        """Evaluate all current sources at multiple times in one vectorized pass.
+
+        Semantically identical to
+        ``np.column_stack([evaluate_at_time(t) for t in t_grid])``
+        but uses vectorized batch operations for pulses (closed-form broadcast)
+        and PWLs (per-row searchsorted over t_grid).
+
+        Args:
+            t_grid: 1-D array of evaluation times in seconds, shape ``(m,)``.
+
+        Returns:
+            np.ndarray of shape ``(n_nodes, m)`` — current at each node for
+            each time point.  Exactly matches m separate
+            :meth:`evaluate_at_time` calls (within floating-point rounding
+            for the modulo operation on periodic sources, ≤ 1e-9 rel).
+        """
+        try:
+            from parser.current_sources import get_apply_wscale
+            apply_wscale = get_apply_wscale()
+        except ImportError:
+            apply_wscale = True
+
+        t_grid = np.asarray(t_grid, dtype=np.float64)
+        m = len(t_grid)
+        if m == 0:
+            return np.zeros((self.n_nodes, 0), dtype=np.float64)
+
+        # --- DC contribution (time-independent) ---------------------------
+        # dc_values are NOT scaled by wscale (matches evaluate_at_time)
+        dc_per_node = np.zeros(self.n_nodes, dtype=np.float64)
+        if self.n_sources > 0:
+            np.add.at(dc_per_node, self.source_node_idx, self.dc_values)
+
+        # result[i, k] = total current at node i at time t_grid[k]
+        result = np.empty((self.n_nodes, m), dtype=np.float64)
+        result[:] = dc_per_node[:, np.newaxis]  # broadcast DC to all columns
+
+        # --- Pulse contribution -------------------------------------------
+        if self.n_pulses > 0:
+            pulse_vals = self._evaluate_pulses_batch(t_grid)  # (n_pulses, m)
+            if apply_wscale and len(self.pulse_wscale) == self.n_pulses:
+                pulse_vals *= self.pulse_wscale[:, np.newaxis]
+            # Scatter-add: result[pulse_node_idx[j], k] += pulse_vals[j, k]
+            pni = self.pulse_node_idx.astype(np.intp)
+            for k in range(m):
+                result[:, k] += np.bincount(pni, weights=pulse_vals[:, k],
+                                            minlength=self.n_nodes)
+
+        # --- PWL contribution ---------------------------------------------
+        if self.n_pwls > 0:
+            pwl_vals = self._evaluate_pwls_batch(t_grid)  # (n_pwls, m)
+            if apply_wscale and len(self.pwl_wscale) == self.n_pwls:
+                pwl_vals *= self.pwl_wscale[:, np.newaxis]
+            qni = self.pwl_node_idx.astype(np.intp)
+            for k in range(m):
+                result[:, k] += np.bincount(qni, weights=pwl_vals[:, k],
+                                            minlength=self.n_nodes)
+
+        return result
+
+    def _evaluate_pulses_batch(self, t_grid: np.ndarray) -> np.ndarray:
+        """Evaluate all pulses at multiple times via (n_pulses, m) broadcast.
+
+        Args:
+            t_grid: shape ``(m,)`` array of times in seconds.
+
+        Returns:
+            shape ``(n_pulses, m)`` array of pulse values.
+        """
+        n = self.n_pulses
+        m = len(t_grid)
+        if n == 0 or m == 0:
+            return np.empty((n, m), dtype=np.float64)
+
+        # Expand pulse params to (n, 1) for broadcasting with t (1, m)
+        period = self.pulse_period[:, np.newaxis]   # (n, 1)
+        v1     = self.pulse_v1[:, np.newaxis]       # (n, 1)
+        v2     = self.pulse_v2[:, np.newaxis]       # (n, 1)
+        delay  = self.pulse_delay[:, np.newaxis]    # (n, 1)
+        rt     = self.pulse_rt[:, np.newaxis]       # (n, 1)
+        ft     = self.pulse_ft[:, np.newaxis]       # (n, 1)
+        width  = self.pulse_width[:, np.newaxis]    # (n, 1)
+        t      = t_grid[np.newaxis, :]              # (1, m)
+
+        # Same logic as _evaluate_pulses but broadcast to (n, m)
+        t_arr = np.where(period > 0, t % period, t)   # (n, m)
+        t_rel = t_arr - delay
+
+        periodic_neg = (period > 0) & (t_rel < 0)
+        t_rel = np.where(periodic_neg, t_rel + period, t_rel)
+
+        m_before = t_rel < 0
+        m_rise   = (~m_before) & (t_rel < rt)
+        m_high   = (~m_before) & (~m_rise) & (t_rel < rt + width)
+        m_fall   = (~m_before) & (~m_rise) & (~m_high) & (t_rel < rt + width + ft)
+        m_low    = (~m_before) & (~m_rise) & (~m_high) & (~m_fall)
+
+        result = np.where(m_before, v1, np.nan)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rise_frac = np.where(rt > 0, t_rel / rt, 1.0)
+        result = np.where(m_rise, v1 + (v2 - v1) * rise_frac, result)
+        result = np.where(m_high, v2, result)
+
+        t_fall = t_rel - rt - width
+        with np.errstate(divide='ignore', invalid='ignore'):
+            fall_frac = np.where(ft > 0, t_fall / ft, 1.0)
+        result = np.where(m_fall, v2 + (v1 - v2) * fall_frac, result)
+        result = np.where(m_low, v1, result)
+
+        return result  # (n_pulses, m)
+
+    def _evaluate_pwls_batch(self, t_grid: np.ndarray) -> np.ndarray:
+        """Evaluate all PWLs at multiple times via per-row searchsorted.
+
+        For each PWL row ``i``, computes interpolated values at every time in
+        ``t_grid`` using np.searchsorted (binary search in the row's knot
+        times).  This is a Python loop over n_pwls rows but each inner
+        operation is fully vectorised over m time points.
+
+        Args:
+            t_grid: shape ``(m,)`` array of times in seconds.
+
+        Returns:
+            shape ``(n_pwls, m)`` array of PWL values.
+        """
+        n = self.n_pwls
+        m = len(t_grid)
+        if n == 0 or m == 0:
+            return np.empty((n, m), dtype=np.float64)
+
+        result = np.empty((n, m), dtype=np.float64)
+
+        for i in range(n):
+            off    = int(self.pwl_offset[i])
+            cnt    = int(self.pwl_count[i])
+            period_i = float(self.pwl_period[i])
+            delay_i  = float(self.pwl_delay[i])
+
+            row_times  = self.pwl_times[off:off + cnt]
+            row_values = self.pwl_values[off:off + cnt]
+
+            # Time adjustment: subtract delay, then apply modulo for periodic
+            t_adj = t_grid - delay_i
+            if period_i > 0:
+                pos = t_adj >= 0
+                t_adj = t_adj.copy()
+                t_adj[pos] = t_adj[pos] % period_i
+
+            if cnt == 1:
+                result[i, :] = row_values[0]
+                continue
+
+            # Clamp to valid range for safe interpolation
+            t_clamp = np.clip(t_adj, row_times[0], row_times[-1])
+
+            # Per-row searchsorted: find segment for each time point
+            # side='right': for t exactly at knot k, use segment [k, k+1]
+            seg_idx = np.searchsorted(row_times, t_clamp, side='right') - 1
+            seg_idx = np.clip(seg_idx, 0, cnt - 2)
+
+            t1 = row_times[seg_idx]
+            t2 = row_times[seg_idx + 1]
+            v1 = row_values[seg_idx]
+            v2 = row_values[seg_idx + 1]
+
+            dt_seg = t2 - t1
+            safe_dt = np.where(dt_seg > 0, dt_seg, 1.0)
+            frac    = np.where(dt_seg > 0, (t_clamp - t1) / safe_dt, 0.0)
+            vals    = v1 + (v2 - v1) * frac
+
+            # Boundary overrides (same as padded path)
+            before = t_adj <= row_times[0]
+            after  = t_adj >= row_times[-1]
+            vals[before] = row_values[0]
+            if period_i > 0:
+                vals[after] = row_values[0]   # periodic: wrap to start value
+            else:
+                vals[after] = row_values[-1]  # non-periodic: hold last value
+
+            result[i, :] = vals
+
+        return result  # (n_pwls, m)
+
     def evaluate_to_rhs_array(
         self,
         t: float,
