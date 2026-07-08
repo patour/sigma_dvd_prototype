@@ -442,6 +442,7 @@ class TestDecomposeDispatch:
             verbose=False,
             coordinator_solver_config=None,
             worker_solver_config=None,
+            threads_per_worker=None,
         )
         mock_print.assert_called_once()
         mock_result.save_json.assert_called_once()

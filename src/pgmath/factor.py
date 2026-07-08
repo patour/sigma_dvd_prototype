@@ -11,6 +11,7 @@ RULE: this module imports ONLY numpy / scipy / stdlib / optional sksparse.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -18,6 +19,8 @@ from typing import Any, Dict, Optional
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Optional high-performance Cholesky factorization via sksparse/cholmod
@@ -41,6 +44,9 @@ except ImportError:
 _USE_CHOLMOD: Optional[bool] = None
 
 # 'auto', 'simplicial', or 'supernodal'
+#   'auto': for matrices with nnz > AUTO_SUPERNODAL_NNZ_THRESHOLD, resolves to
+#           'supernodal'; below the threshold, CHOLMOD's own heuristic applies
+#           (unchanged from prior behavior for small/medium systems).
 _CHOLMOD_MODE: str = 'auto'
 
 # 'default', 'natural', 'amd', 'metis', 'nesdis', 'colamd', 'best'
@@ -53,6 +59,21 @@ _VALID_CHOLMOD_MODES = ('auto', 'simplicial', 'supernodal')
 _VALID_CHOLMOD_ORDERINGS = (
     'default', 'natural', 'amd', 'metis', 'nesdis', 'colamd', 'best',
 )
+
+# ---------------------------------------------------------------------------
+# CHOLMOD supernodal guardrail
+# ---------------------------------------------------------------------------
+
+# Matrices with nnz above this threshold are forced to 'supernodal' when the
+# requested mode is 'auto'.  Measured BRCM regression: 74 s (supernodal) vs
+# 1,668 s (simplicial) on the 138K-interface system — 22x difference.
+# Unit: raw nonzero count (int).
+AUTO_SUPERNODAL_NNZ_THRESHOLD: int = int(5e7)
+
+# Once-per-process latch for the simplicial guardrail warning (per-tile factor
+# calls would otherwise repeat the identical warning dozens of times per
+# prepare).  Tests reset this to re-arm the warning.
+_SIMPLICIAL_GUARDRAIL_WARNED: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -201,12 +222,23 @@ class SparseFactorAdapter:
 
     Attributes:
         backend: String indicating which backend is used ('cholmod' or 'splu')
+        resolved_mode: Canonical string describing the actual backend/mode used,
+            e.g. 'cholmod-supernodal', 'cholmod-simplicial', 'cholmod-auto', 'splu'.
+            Useful for recording which path was taken when 'auto' mode may have
+            been promoted to 'supernodal' by the guardrail logic.
     """
 
-    def __init__(self, factor: Any, backend: str, backend_info: str = ''):
+    def __init__(
+        self,
+        factor: Any,
+        backend: str,
+        backend_info: str = '',
+        resolved_mode: str = '',
+    ):
         self._factor = factor
         self._backend = backend
         self._backend_info = backend_info
+        self._resolved_mode = resolved_mode or backend  # fallback to backend name
 
     @property
     def backend(self) -> str:
@@ -217,6 +249,18 @@ class SparseFactorAdapter:
     def backend_info(self) -> str:
         """Return human-readable backend configuration string."""
         return self._backend_info
+
+    @property
+    def resolved_mode(self) -> str:
+        """Return the canonical resolved backend/mode string.
+
+        Possible values:
+            'cholmod-supernodal' — CHOLMOD supernodal path (explicit or auto-promoted)
+            'cholmod-simplicial' — CHOLMOD simplicial path (explicitly configured)
+            'cholmod-auto'       — CHOLMOD with its own heuristic (mode passed as 'auto')
+            'splu'               — scipy SuperLU
+        """
+        return self._resolved_mode
 
     def solve(self, rhs: np.ndarray) -> np.ndarray:
         """Solve A x = rhs using the cached factorization.
@@ -315,11 +359,38 @@ def _factor_conductance_matrix(
             "Install with: pip install scikit-sparse"
         )
 
+    # Resolve 'auto' CHOLMOD mode and apply supernodal guardrail.
+    # For large matrices (nnz > threshold), 'auto' is promoted to 'supernodal'
+    # to avoid the CHOLMOD simplicial fallback which is 22x slower on the
+    # BRCM-class 138K-interface system (74 s supernodal vs 1,668 s simplicial).
+    nnz = matrix.nnz if hasattr(matrix, 'nnz') else 0
+    resolved_cholmod_mode = eff_mode  # what we actually pass to CHOLMOD
+
+    if eff_use_cholmod:
+        if eff_mode == 'auto' and nnz > AUTO_SUPERNODAL_NNZ_THRESHOLD:
+            # Large matrix: override CHOLMOD's heuristic with supernodal
+            resolved_cholmod_mode = 'supernodal'
+        elif eff_mode == 'simplicial' and nnz > AUTO_SUPERNODAL_NNZ_THRESHOLD:
+            # User explicitly chose simplicial for a large matrix — warn loudly,
+            # but only once per process (per-tile factor calls would otherwise
+            # repeat the identical warning dozens of times per prepare).
+            global _SIMPLICIAL_GUARDRAIL_WARNED
+            if not _SIMPLICIAL_GUARDRAIL_WARNED:
+                _SIMPLICIAL_GUARDRAIL_WARNED = True
+                logger.warning(
+                    "CHOLMOD guardrail: matrix has %d nnz (> %d threshold) but "
+                    "cholmod_mode='simplicial' is in effect. On the BRCM 138K-interface "
+                    "system this caused interface factorization to take 1,668 s vs 74 s "
+                    "with supernodal (22x regression). Consider cholmod_mode='supernodal' "
+                    "or 'auto'. (Warning emitted once per process.)",
+                    nnz, AUTO_SUPERNODAL_NNZ_THRESHOLD,
+                )
+
     t_factor_start = time.perf_counter()
     if eff_use_cholmod:
         factor = _cholmod_cholesky(
             matrix,
-            mode=eff_mode,
+            mode=resolved_cholmod_mode,
             ordering_method=eff_ordering,
             use_long=eff_use_long,
         )
@@ -327,13 +398,22 @@ def _factor_conductance_matrix(
         use_long_str = (
             'auto' if eff_use_long is None else ('64-bit' if eff_use_long else '32-bit')
         )
+        # backend_info shows the RESOLVED mode so callers see what actually ran
         backend_info = (
-            f"cholmod(mode={eff_mode}, ordering={eff_ordering}, idx={use_long_str})"
+            f"cholmod(mode={resolved_cholmod_mode}, ordering={eff_ordering}, idx={use_long_str})"
         )
+        # Canonical resolved_mode string
+        if resolved_cholmod_mode == 'supernodal':
+            resolved_mode_str = 'cholmod-supernodal'
+        elif resolved_cholmod_mode == 'simplicial':
+            resolved_mode_str = 'cholmod-simplicial'
+        else:
+            resolved_mode_str = 'cholmod-auto'
     else:
         factor = spla.splu(matrix)
         backend = 'splu'
         backend_info = 'splu'
+        resolved_mode_str = 'splu'
     t_factor_end = time.perf_counter()
     factor_time_ms = (t_factor_end - t_factor_start) * 1000
 
@@ -344,4 +424,4 @@ def _factor_conductance_matrix(
             f"factorization {factor_time_ms:.2f} ms"
         )
 
-    return SparseFactorAdapter(factor, backend, backend_info)
+    return SparseFactorAdapter(factor, backend, backend_info, resolved_mode_str)

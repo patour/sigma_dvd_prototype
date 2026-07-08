@@ -116,6 +116,9 @@ def cmd_solve(args: argparse.Namespace) -> None:
         backend=args.backend,
         coordinator_solver_config=getattr(args, 'coordinator_solver_config', None),
         worker_solver_config=getattr(args, 'worker_solver_config', None),
+        threads_per_worker=_parse_threads_per_worker(
+            getattr(args, 'threads_per_worker', None)
+        ),
     )
 
     try:
@@ -343,6 +346,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         backend=args.backend,
         coordinator_solver_config=getattr(args, 'coordinator_solver_config', None),
         worker_solver_config=getattr(args, 'worker_solver_config', None),
+        threads_per_worker=_parse_threads_per_worker(
+            getattr(args, 'threads_per_worker', None)
+        ),
     )
     t_model = time.perf_counter() - t0
     logger.info(f"Model creation: {t_model:.3f}s")
@@ -457,6 +463,9 @@ def cmd_decompose(args: argparse.Namespace) -> None:
             verbose=args.verbose,
             coordinator_solver_config=getattr(args, 'coordinator_solver_config', None),
             worker_solver_config=getattr(args, 'worker_solver_config', None),
+            threads_per_worker=_parse_threads_per_worker(
+                getattr(args, 'threads_per_worker', None)
+            ),
         )
 
         elapsed = time.perf_counter() - t0
@@ -542,6 +551,17 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
                          help=f'Cholmod ordering for {role}')
         grp.add_argument(f'--{role}-cholmod-use-long', action='store_true', default=None,
                          help=f'Force 64-bit indices for {role}')
+
+    # Per-actor threading (Ray backend only)
+    parser.add_argument(
+        '--threads-per-worker', type=str, default=None,
+        dest='threads_per_worker',
+        help=(
+            'Threads per Ray worker actor for BLAS/OMP (int or "auto"). '
+            '"auto" = max(1, cpus // n_workers). '
+            'No effect on local backend. (default: system default)'
+        ),
+    )
 
     # Reporting / profiling
     parser.add_argument('--top-k', type=int, default=100,
@@ -780,6 +800,14 @@ def _merge_decompose_config(
     # Per-role overrides from solver: coordinator: / worker: sub-dicts
     _apply_yaml_role_configs(solver_cfg, args)
 
+    # threads_per_worker (YAML only; CLI flag --threads-per-worker takes precedence)
+    if solver_cfg.get('threads_per_worker') is not None:
+        if getattr(args, 'threads_per_worker', None) is None:
+            yaml_tpw = solver_cfg['threads_per_worker']
+            args.threads_per_worker = (
+                'auto' if yaml_tpw == 'auto' else int(yaml_tpw)
+            )
+
     logger.info("Merged decompose config from YAML")
     return args
 
@@ -788,8 +816,9 @@ def _merge_decompose_config(
 _VALID_SOLVER_YAML_KEYS = frozenset({
     'use_cholmod', 'mode', 'cholmod_mode', 'ordering', 'cholmod_ordering',
     'cholmod_use_long', 'use_long', 'coordinator', 'worker',
+    'threads_per_worker',
 })
-_VALID_ROLE_YAML_KEYS = _VALID_SOLVER_YAML_KEYS - {'coordinator', 'worker'}
+_VALID_ROLE_YAML_KEYS = _VALID_SOLVER_YAML_KEYS - {'coordinator', 'worker', 'threads_per_worker'}
 _VALID_DECOMPOSE_TOP_KEYS = frozenset({
     'netlist_dir', 'net', 'backend', 'time', 'analysis',
     'aggressor', 'output', 'solver',
@@ -987,6 +1016,21 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
         logger.info("Worker backend override: %s",
                      args.worker_solver_config)
 
+    # -- threads_per_worker (YAML first; CLI flag takes precedence) ----------
+    if not hasattr(args, 'threads_per_worker'):
+        args.threads_per_worker = None
+    if _raw_config is not None:
+        solver_cfg_tpw = _raw_config.get('solver', {})
+        yaml_tpw = solver_cfg_tpw.get('threads_per_worker')
+        if yaml_tpw is not None and args.threads_per_worker is None:
+            if yaml_tpw == 'auto':
+                args.threads_per_worker = 'auto'
+            else:
+                args.threads_per_worker = int(yaml_tpw)
+
+    if args.threads_per_worker is not None:
+        logger.info("threads_per_worker: %s", args.threads_per_worker)
+
     return args
 
 
@@ -1031,6 +1075,34 @@ def _collect_role_config(
         cholmod_ordering=ordering or 'default',
         cholmod_use_long=use_long,
     )
+
+
+def _parse_threads_per_worker(value: Optional[str]) -> Optional[Any]:
+    """Convert a CLI/YAML threads_per_worker value to int or 'auto'.
+
+    Args:
+        value: ``None``, ``'auto'``, or a numeric string (e.g. ``'4'``).
+
+    Returns:
+        ``None`` when not set, ``'auto'`` for 'auto', or ``int`` otherwise.
+
+    Raises:
+        ValueError: If value is not None, 'auto', or a valid integer string.
+    """
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    s = str(value).strip()
+    if s == 'auto':
+        return 'auto'
+    try:
+        return int(s)
+    except ValueError:
+        raise ValueError(
+            f"Invalid threads_per_worker {value!r}. "
+            "Must be an integer or 'auto'."
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:

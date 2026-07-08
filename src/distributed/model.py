@@ -169,11 +169,21 @@ def load_distributed_partitions(
 # ---------------------------------------------------------------------------
 
 def _init_backend(
-    backend: str, backend_kwargs: Dict[str, Any],
+    backend: str,
+    backend_kwargs: Dict[str, Any],
+    threads_per_worker: Any = None,
 ) -> ComputeBackend:
-    """Create and initialize compute backend."""
+    """Create and initialize compute backend.
+
+    Args:
+        backend: 'local' or 'ray'
+        backend_kwargs: Extra kwargs passed to backend.initialize()
+        threads_per_worker: For RayBackend — number of BLAS/OMP threads per
+            actor process (int), or 'auto' for ``max(1, cpus // n_workers)``.
+            Has no effect on LocalBackend (workers run in-process).
+    """
     if backend == 'ray':
-        be = RayBackend()
+        be = RayBackend(threads_per_worker=threads_per_worker)
         be.initialize(**backend_kwargs)
     else:
         be = LocalBackend()
@@ -216,6 +226,7 @@ def create_distributed_model(
     n_workers: Optional[int] = None,
     coordinator_solver_config: Optional[SolverBackendConfig] = None,
     worker_solver_config: Optional[SolverBackendConfig] = None,
+    threads_per_worker: Any = None,
     # Legacy kwargs (deprecated -- use ParsedTileBundle instead)
     use_pkl: bool = False,
     pkl_dir: Optional[str] = None,
@@ -238,11 +249,16 @@ def create_distributed_model(
         bundle_or_metadata: A ``ParsedTileBundle`` (new) or
             ``PowerGridMetaData`` (legacy, deprecated).
         backend: 'local' or 'ray'
-        n_workers: Number of workers (only for ray backend)
+        n_workers: Number of workers (only for ray backend; currently
+            informational — tile count is determined by the bundle).
         coordinator_solver_config: Backend settings for the coordinator
             (interface factorization).  ``None`` = use module globals.
         worker_solver_config: Backend settings for tile workers.
             ``None`` = use module globals.
+        threads_per_worker: For RayBackend — threads per actor process.
+            int: explicit count.  'auto': ``max(1, cpus // n_workers)``.
+            ``None`` (default): no env override, system defaults apply.
+            No effect on LocalBackend (workers are in-process).
         use_pkl: (Deprecated) If True, use pre-parsed TileData.
         pkl_dir: (Deprecated) Directory containing tile_X_Y.pkl files.
         boundary_nodes: (Deprecated) Pre-collected boundary nodes.
@@ -282,6 +298,7 @@ def create_distributed_model(
         bundle, backend,
         coordinator_solver_config=coordinator_solver_config,
         worker_solver_config=worker_solver_config,
+        threads_per_worker=threads_per_worker,
         **backend_kwargs,
     )
     if _legacy_temp_dir:
@@ -384,6 +401,7 @@ def _create_distributed_model_from_bundle(
     backend: str = 'local',
     coordinator_solver_config: Optional[SolverBackendConfig] = None,
     worker_solver_config: Optional[SolverBackendConfig] = None,
+    threads_per_worker: Any = None,
     **backend_kwargs,
 ) -> DistributedPowerGridModel:
     """Core factory: create model from a ParsedTileBundle.
@@ -395,7 +413,7 @@ def _create_distributed_model_from_bundle(
     metadata = bundle.metadata
 
     # 1. Create backend
-    be = _init_backend(backend, backend_kwargs)
+    be = _init_backend(backend, backend_kwargs, threads_per_worker=threads_per_worker)
 
     # 2. Compute interface nodes
     die_net_map = getattr(metadata.package_data, 'die_attachment_net_map', {})

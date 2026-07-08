@@ -80,7 +80,14 @@ class ComputeBackend(ABC):
 
 
 class LocalBackend(ComputeBackend):
-    """In-process sequential execution. Zero dependencies."""
+    """In-process sequential execution. Zero dependencies.
+
+    ``threads_per_worker`` is intentionally a no-op for this backend: all
+    workers share the calling process, so changing thread-count env vars
+    would affect the coordinator too and would have no effect on parallel
+    throughput (workers run sequentially).  Use the Ray backend for true
+    parallel multi-worker execution with per-actor thread budgets.
+    """
 
     def initialize(self, **kwargs) -> None:
         pass
@@ -118,11 +125,36 @@ class LocalBackend(ComputeBackend):
 
 
 class RayBackend(ComputeBackend):
-    """Ray-based distributed execution. Lazy import of ray."""
+    """Ray-based distributed execution. Lazy import of ray.
 
-    def __init__(self):
+    Per-actor thread budgets
+    ------------------------
+    When ``threads_per_worker`` is set (via :attr:`threads_per_worker`), each
+    actor's ``runtime_env`` is configured with ``OMP_NUM_THREADS``,
+    ``OPENBLAS_NUM_THREADS``, and ``MKL_NUM_THREADS`` so that BLAS/OMP
+    libraries inside each worker process use at most that many threads.
+    This prevents over-subscription when multiple workers share one node.
+
+    Use ``threads_per_worker='auto'`` to set the value to
+    ``max(1, available_cpus // n_workers)`` at actor-creation time.
+
+    The coordinator process environment is *not* touched.
+    """
+
+    def __init__(self, threads_per_worker: Optional[Any] = None):
         self._ray = None
         self._initialized = False
+        # int, 'auto', or None (no-op)
+        self._threads_per_worker: Optional[Any] = threads_per_worker
+
+    @property
+    def threads_per_worker(self) -> Optional[Any]:
+        """Current threads_per_worker setting (int, 'auto', or None)."""
+        return self._threads_per_worker
+
+    @threads_per_worker.setter
+    def threads_per_worker(self, value: Optional[Any]) -> None:
+        self._threads_per_worker = value
 
     def initialize(self, **kwargs) -> None:
         import ray
@@ -136,13 +168,46 @@ class RayBackend(ComputeBackend):
             ray.init(_system_config=system_config, **kwargs)
         self._initialized = True
 
+    def _resolve_threads_per_worker(self, n_workers: int) -> Optional[int]:
+        """Resolve 'auto' to an integer, or return the stored int / None."""
+        tpw = self._threads_per_worker
+        if tpw is None:
+            return None
+        if tpw == 'auto':
+            ray = self._ray
+            try:
+                total_cpus = int(ray.available_resources().get('CPU', n_workers))
+            except Exception:
+                total_cpus = n_workers
+            return max(1, total_cpus // max(1, n_workers))
+        return max(1, int(tpw))
+
     def create_actors(self, actor_class: Type, configs: List[Any]) -> List[Any]:
         if not self._initialized:
             raise RuntimeError("Backend not initialized. Call initialize() first.")
         ray = self._ray
-        # Create a Ray remote class from the actor class
+        n = len(configs)
+
+        tpw = self._resolve_threads_per_worker(n)
         RemoteClass = ray.remote(actor_class)
-        return [RemoteClass.remote() for _ in configs]
+
+        if tpw is not None:
+            env_vars = {
+                'OMP_NUM_THREADS': str(tpw),
+                'OPENBLAS_NUM_THREADS': str(tpw),
+                'MKL_NUM_THREADS': str(tpw),
+            }
+            logger.info(
+                "RayBackend: spawning %d actors with threads_per_worker=%d "
+                "(OMP/OPENBLAS/MKL_NUM_THREADS=%d)",
+                n, tpw, tpw,
+            )
+            return [
+                RemoteClass.options(runtime_env={'env_vars': env_vars}).remote()
+                for _ in configs
+            ]
+        else:
+            return [RemoteClass.remote() for _ in configs]
 
     def call(self, actor: Any, method: str, *args, **kwargs) -> Any:
         ray = self._ray

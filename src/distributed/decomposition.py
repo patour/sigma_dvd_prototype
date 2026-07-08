@@ -268,6 +268,7 @@ def analyze_distributed_decomposition(
     verbose: bool = False,
     coordinator_solver_config: Optional[SolverBackendConfig] = None,
     worker_solver_config: Optional[SolverBackendConfig] = None,
+    threads_per_worker: Optional[Any] = None,
 ) -> Tuple[DecompositionResult, Any, Any]:
     """Run distributed near/far IR-drop decomposition analysis.
 
@@ -336,6 +337,7 @@ def analyze_distributed_decomposition(
         bundle, backend=backend,
         coordinator_solver_config=coordinator_solver_config,
         worker_solver_config=worker_solver_config,
+        threads_per_worker=threads_per_worker,
     )
     solver = DistributedDDMSolver(model)
     timings['load_model'] = time_module.perf_counter() - t0

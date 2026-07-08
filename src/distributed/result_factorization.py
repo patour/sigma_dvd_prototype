@@ -246,6 +246,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
         'factor_time_s': timings['factor_interface'],
         'backend': interface_lu_result.backend,
         'backend_info': interface_lu_result.backend_info,
+        'resolved_mode': interface_lu_result.resolved_mode,
         'islands_penalized': len(island_nodes),
     }
 
@@ -599,6 +600,7 @@ def _factor_transient_context(
         'factor_time_s': timings['factor_transient_interface'],
         'backend': interface_lu_result.backend,
         'backend_info': interface_lu_result.backend_info,
+        'resolved_mode': interface_lu_result.resolved_mode,
         'has_capacitance': has_cap,
         'pkg_C_uu_nnz': C_pkg_uu.nnz if C_pkg_uu is not None else 0,
         'pkg_G_uu_nnz': G_pkg_uu.nnz if G_pkg_uu is not None else 0,
