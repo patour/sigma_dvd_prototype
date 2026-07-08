@@ -575,6 +575,106 @@ class _TimeDomainMixin(_PeakTrackingMixin):
 
         return g, total_current, stats
 
+    # --- 4f'. Transient reduced RHS (array-based) ----------------------
+
+    def get_transient_reduced_rhs_arr(
+        self,
+        t: float,
+        v_p_old: np.ndarray,
+    ) -> Tuple[np.ndarray, float, Dict[str, Any]]:
+        """Compute reduced RHS for one transient step (array-based variant).
+
+        Array-based variant of :meth:`get_transient_reduced_rhs`: takes
+        ``v_p_old`` as a pre-gathered float64 ndarray ``(n_ports,)``
+        instead of a boundary voltage dict, eliminating the per-port
+        Python dict-lookup loop for port voltage construction.
+
+        Args:
+            t: Current time in seconds.
+            v_p_old: Previous-step port voltages, shape ``(n_ports,)``.
+                ``v_p_old[j]`` is the voltage at the tile's j-th port (in
+                ``bs.port_nodes`` order). Pad/Dirichlet ports should
+                already be filled with ``vdd`` by the coordinator.
+
+        Returns:
+            ``(g, total_current, stats)`` -- reduced RHS ``(n_ports,)``,
+            scalar sum of currents (mA), and stats dict.
+        """
+        t0 = time.perf_counter()
+
+        if self._transient_block_system is None:
+            raise RuntimeError(
+                "get_transient_reduced_rhs_arr() requires factor_transient_system()"
+            )
+
+        bs = self._block_system
+        tbs = self._transient_block_system
+        n_ports = bs.n_ports
+        n_interior = bs.n_interior
+
+        # Evaluate currents
+        if self._active_sources is not None:
+            current_array = self._active_sources.evaluate_at_time(t)
+            if self._current_node_mask is not None:
+                current_array = current_array * self._current_node_mask
+            I_p = current_array[:n_ports]
+            I_i = current_array[n_ports:n_ports + n_interior]
+        else:
+            I_p = np.zeros(n_ports, dtype=np.float64)
+            I_i = np.zeros(n_interior, dtype=np.float64)
+            for node, cur in self._tile_data.current_injections.items():
+                if node in bs.port_to_idx:
+                    I_p[bs.port_to_idx[node]] += cur
+                elif node in bs.interior_to_idx:
+                    I_i[bs.interior_to_idx[node]] += cur
+            current_array = np.concatenate([I_p, I_i])
+
+        total_current = float(np.sum(current_array))
+
+        # v_p_old: direct ndarray input — no per-port dict-lookup loop needed
+        v_i_old = (
+            self._v_interior_old
+            if self._v_interior_old is not None
+            else np.zeros(n_interior, dtype=np.float64)
+        )
+
+        rhs_d_p = self._rhs_dirichlet[:n_ports]
+        rhs_d_i = self._rhs_dirichlet[n_ports:n_ports + n_interior]
+
+        if self._transient_method == 'trap':
+            f_i = (
+                -2.0 * I_i
+                + self._C_coeff * self._c_ii_diag * v_i_old
+                - bs.G_ii @ v_i_old - bs.G_ip @ v_p_old
+                + 2.0 * rhs_d_i
+            )
+            f_p = (
+                -2.0 * I_p
+                + self._C_coeff * self._c_pp_diag * v_p_old
+                - bs.G_pi @ v_i_old - bs.G_pp @ v_p_old
+                + 2.0 * rhs_d_p
+            )
+        else:  # Backward Euler
+            f_i = -I_i + self._C_coeff * self._c_ii_diag * v_i_old + rhs_d_i
+            f_p = -I_p + self._C_coeff * self._c_pp_diag * v_p_old + rhs_d_p
+
+        self._last_f_i = f_i
+
+        if n_interior > 0 and tbs.lu_ii is not None:
+            g = f_p - tbs.G_pi @ tbs.lu_ii(f_i)
+        else:
+            g = f_p
+
+        rhs_time = time.perf_counter() - t0
+        rhs_norm = float(np.linalg.norm(g))
+        stats = {
+            'rhs_time_s': rhs_time,
+            'total_current': total_current,
+            'rhs_norm': rhs_norm,
+        }
+
+        return g, total_current, stats
+
     # --- 4g. Transient interior recovery + state update ----------------
 
     def get_transient_interior_voltages(
@@ -667,6 +767,44 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         )
 
         # Set _v_interior_old directly from recovered voltages
+        v_i = np.zeros(bs.n_interior, dtype=np.float64)
+        for node, idx in bs.interior_to_idx.items():
+            if node in interior_voltages:
+                v_i[idx] = interior_voltages[node]
+        self._v_interior_old = v_i
+
+        return {'n_interior': bs.n_interior, 'n_ports': bs.n_ports}
+
+    def recover_and_set_initial_voltages_arr(
+        self,
+        v_p: np.ndarray,
+    ) -> Dict[str, Any]:
+        """Recover DC interior voltages and set as transient IC (array-based).
+
+        Array-based variant of :meth:`recover_and_set_initial_voltages`:
+        takes ``v_p`` as a pre-gathered float64 ndarray ``(n_ports,)``
+        instead of a boundary voltage dict, eliminating the per-port
+        Python dict-lookup loop for port voltage construction.
+
+        Args:
+            v_p: Pre-gathered port voltages from the DC interface solve,
+                shape ``(n_ports,)``. ``v_p[j]`` is the voltage at the
+                tile's j-th port (in ``bs.port_nodes`` order).
+                Pad/Dirichlet ports should be filled with ``vdd``.
+
+        Returns:
+            Stats dict with recovery metadata.
+        """
+        from pgmath.block_system import recover_bottom_voltages
+
+        bs = self._block_system
+
+        interior_voltages = recover_bottom_voltages(
+            bs, v_p,
+            self._tile_data.current_injections,
+            self._rhs_dirichlet,
+        )
+
         v_i = np.zeros(bs.n_interior, dtype=np.float64)
         for node, idx in bs.interior_to_idx.items():
             if node in interior_voltages:

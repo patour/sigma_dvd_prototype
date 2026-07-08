@@ -250,6 +250,70 @@ class _PeakTrackingMixin:
 
         return all_voltages
 
+    # --- QS combined recover + peak update (array-based) -----------------
+
+    def recover_and_update_peaks_arr(
+        self,
+        v_p: np.ndarray,
+        t: float,
+    ) -> float:
+        """Recover interior voltages and update peak stats (array-based, QS).
+
+        Array-based variant of :meth:`recover_and_update_peaks`: takes
+        ``v_p`` as a pre-gathered float64 ndarray ``(n_ports,)`` instead
+        of a boundary voltage dict, eliminating the per-port Python
+        dict-lookup loop for port voltage construction.
+
+        Args:
+            v_p: Pre-gathered port voltages, shape ``(n_ports,)``.
+                ``v_p[j]`` is the voltage at the tile's j-th port (in
+                ``bs.port_nodes`` order). Pad/Dirichlet ports should
+                already be filled with ``vdd`` by the coordinator.
+            t: Current time in seconds.
+
+        Returns:
+            Scalar max IR-drop for this tile at this time step.
+        """
+        bs = self._block_system
+        n_ports = bs.n_ports
+
+        if self._last_qs_rhs_i is not None:
+            # Use cached interior RHS from evaluate_and_get_reduced_rhs
+            if bs.n_interior > 0 and bs.lu_ii is not None:
+                v_i = bs.lu_ii(self._last_qs_rhs_i - bs.G_ip @ v_p)
+            else:
+                v_i = np.array([], dtype=np.float64)
+            self._last_qs_rhs_i = None  # Consumed; prevent stale use
+        else:
+            # No VCS case: static DC recovery using tile current injections
+            from pgmath.block_system import recover_bottom_voltages
+            interior_voltages = recover_bottom_voltages(
+                bs, v_p,
+                self._tile_data.current_injections,
+                self._rhs_dirichlet,
+            )
+            if bs.n_interior > 0:
+                v_i = np.zeros(bs.n_interior, dtype=np.float64)
+                for node, idx in bs.interior_to_idx.items():
+                    if node in interior_voltages:
+                        v_i[idx] = interior_voltages[node]
+            else:
+                v_i = np.array([], dtype=np.float64)
+
+        # Build all-node voltage dict for peak tracking (same as dict path)
+        all_voltages: Dict[str, float] = {}
+        for j, node in enumerate(bs.port_nodes):
+            all_voltages[node] = float(v_p[j])
+        for i, node in enumerate(bs.interior_nodes):
+            all_voltages[node] = float(v_i[i]) if i < len(v_i) else 0.0
+
+        if self._peak_tracking_active:
+            return self.update_peak_stats(all_voltages, t)
+        vdd = self._peak_vdd if self._peak_vdd > 0 else 0.0
+        if vdd > 0:
+            return max((vdd - v for v in all_voltages.values()), default=0.0)
+        return 0.0
+
     # --- Transient combined recover + peak update (vectorized) ------------
 
     def recover_transient_and_update_peaks(
@@ -292,6 +356,102 @@ class _PeakTrackingMixin:
         for node, idx in bs.port_to_idx.items():
             if node in boundary_voltages_dict:
                 v_p[idx] = boundary_voltages_dict[node]
+
+        # Sparse solve for interior voltages
+        if n_interior > 0 and tbs.lu_ii is not None:
+            v_i = tbs.lu_ii(self._last_f_i - tbs.G_ip @ v_p)
+        else:
+            v_i = np.array([], dtype=np.float64)
+
+        # Update state for next time step
+        self._v_interior_old = v_i.copy()
+
+        # Compute IR-drops vectorized (no per-node Python loop)
+        max_drop = 0.0
+        drops_p = np.empty(0, dtype=np.float64)
+        drops_i = np.empty(0, dtype=np.float64)
+        if vdd > 0:
+            if n_ports > 0:
+                drops_p = vdd - v_p
+                max_drop = float(np.max(drops_p))
+            if len(v_i) > 0:
+                drops_i = vdd - v_i
+                max_drop = max(max_drop, float(np.max(drops_i)))
+
+        # Vectorized peak update using numpy arrays
+        if (self._peak_tracking_active
+                and self._peak_drops_array is not None):
+            self._peak_use_arrays = True
+            pa = self._peak_drops_array
+            pt = self._peak_times_array
+
+            if n_ports > 0:
+                mask_p = drops_p > pa[:n_ports]
+                pa[:n_ports][mask_p] = drops_p[mask_p]
+                pt[:n_ports][mask_p] = t
+
+            if len(drops_i) > 0:
+                pa_i = pa[n_ports:n_ports + n_interior]
+                pt_i = pt[n_ports:n_ports + n_interior]
+                mask_i = drops_i > pa_i
+                pa_i[mask_i] = drops_i[mask_i]
+                pt_i[mask_i] = t
+
+            # Tracked waveforms (typically 0-10 nodes)
+            if self._tracked_node_indices:
+                for node, idx in self._tracked_node_indices.items():
+                    if idx < n_ports:
+                        v = float(v_p[idx])
+                    elif idx - n_ports < len(v_i):
+                        v = float(v_i[idx - n_ports])
+                    else:
+                        continue
+                    self._tracked_waveforms.setdefault(node, []).append(v)
+
+        return max_drop
+
+    # --- Transient combined recover + peak update (array-based) ----------
+
+    def recover_transient_and_update_peaks_arr(
+        self,
+        v_p: np.ndarray,
+        t: float,
+    ) -> float:
+        """Recover transient interior voltages and update peaks (array-based).
+
+        Array-based variant of :meth:`recover_transient_and_update_peaks`:
+        takes ``v_p`` as a pre-gathered float64 ndarray ``(n_ports,)``
+        instead of a boundary voltage dict, eliminating the per-port
+        Python dict-lookup loop for port voltage construction.
+
+        Args:
+            v_p: Pre-gathered port voltages, shape ``(n_ports,)``.
+                ``v_p[j]`` is the voltage at the tile's j-th port (in
+                ``bs.port_nodes`` order). Pad/Dirichlet ports should
+                already be filled with ``vdd`` by the coordinator.
+            t: Current time in seconds.
+
+        Returns:
+            Scalar max IR-drop for this tile at this time step.
+        """
+        if self._transient_block_system is None:
+            raise RuntimeError(
+                "recover_transient_and_update_peaks_arr() requires "
+                "factor_transient_system()"
+            )
+        if self._last_f_i is None:
+            raise RuntimeError(
+                "recover_transient_and_update_peaks_arr() needs a preceding "
+                "get_transient_reduced_rhs_arr() call"
+            )
+
+        tbs = self._transient_block_system
+        bs = self._block_system
+        n_ports = bs.n_ports
+        n_interior = bs.n_interior
+        vdd = self._peak_vdd if self._peak_vdd > 0 else 0.0
+
+        # v_p: direct ndarray input — no per-port dict-lookup loop needed
 
         # Sparse solve for interior voltages
         if n_interior > 0 and tbs.lu_ii is not None:

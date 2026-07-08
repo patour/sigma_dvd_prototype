@@ -202,6 +202,24 @@ class _SolverTimeDomainMixin:
         max_drops = np.zeros(len(t_array), dtype=np.float64)
         total_currents = np.zeros(len(t_array), dtype=np.float64)
 
+        # Pre-loop: build concatenated scatter index (ONCE, reused every step).
+        # tile_index_maps[tid][j] = global interface idx for local port j.
+        # This is the SCATTER index (interface nodes only, excludes pads) and
+        # is correct for np.bincount. It is NOT used as the gather index.
+        tile_idx_maps_qs = [ctx.tile_index_maps[tc.tile_id] for tc in tile_configs]
+        all_idx_qs = np.concatenate(tile_idx_maps_qs)
+
+        # Pre-loop: per-tile port-gather arrays + pad mask for boundary voltage
+        # exchange. _precompute_port_gathers yields port_gather[j] = global
+        # interface index for port j (or 0 for pad ports), and pad_mask[j] =
+        # True where port j is a pad/Dirichlet node that must be filled with
+        # vdd. Per step: v_arr = np.where(pad_mask, vdd, v_gamma[port_gather]).
+        # This is the correct GATHER path; tile_idx_maps_qs / all_idx_qs above
+        # is the SCATTER path only.
+        port_gathers_qs, pad_masks_qs = _precompute_port_gathers(
+            tile_configs, ctx.interface_node_to_idx, model.tile_boundary_nodes,
+        )
+
         # Cumulative timing accumulators for the time loop
         cum_rhs_time = 0.0
         cum_asm_solve_time = 0.0
@@ -217,19 +235,24 @@ class _SolverTimeDomainMixin:
                 [(t_val,)] * len(tile_configs),
             )
 
-            # 5b. Coordinator: assemble global RHS
-            global_rhs = np.zeros(n_interface, dtype=np.float64)
+            # 5b. Coordinator: assemble global RHS via bincount scatter.
+            # Concatenate per-tile g_i in tile iteration order (same order
+            # as the old np.add.at loop) so bincount is bit-identical.
             step_total_current = 0.0
             step_eval_times: List[float] = []
-            for i, (g_i, tile_current, tile_rhs_stats) in enumerate(rhs_results):
-                tid = tile_configs[i].tile_id
-                idx_map = ctx.tile_index_maps[tid]
-                np.add.at(global_rhs, idx_map, g_i)
+            all_g_list_qs: List[np.ndarray] = []
+            for g_i, tile_current, tile_rhs_stats in rhs_results:
+                all_g_list_qs.append(g_i)
                 step_total_current += tile_current
                 step_eval_times.append(
                     tile_rhs_stats.get('eval_time_s', 0.0)
                 )
             all_step_eval_times.append(step_eval_times)
+            global_rhs = np.bincount(
+                all_idx_qs,
+                weights=np.concatenate(all_g_list_qs),
+                minlength=n_interface,
+            )
             cum_rhs_time += time.perf_counter() - t0_rhs
 
             global_rhs += ctx.rhs_dirichlet_interface
@@ -240,17 +263,18 @@ class _SolverTimeDomainMixin:
             v_gamma = ctx.interface_lu(global_rhs)
             cum_asm_solve_time += time.perf_counter() - t0_asm
 
-            # 5d. Build per-tile boundary voltage dicts
-            bv_per_tile = _build_bv_dicts(
-                tile_configs, ctx.tile_index_maps, ctx.interface_nodes,
-                model.tile_boundary_nodes, v_gamma, vdd,
-            )
-            bv_per_tile_t = [(bv, t_val) for bv in bv_per_tile]
+            # 5d. Gather per-tile boundary voltage arrays (replacing dict exchange).
+            # v_arr[j] = v_gamma[port_gather[j]] for interface ports; vdd for
+            # pad/Dirichlet ports (pad_mask[j]=True). Shape always (n_ports,).
+            bv_per_tile_t = [
+                (np.where(pad_mask, vdd, v_gamma[port_gather]), t_val)
+                for port_gather, pad_mask in zip(port_gathers_qs, pad_masks_qs)
+            ]
 
             # 5e. Workers: recover interior + update peaks (parallel)
             t0_rec = time.perf_counter()
             step_max_drops = model.backend.call_all(
-                model.workers, 'recover_and_update_peaks', bv_per_tile_t,
+                model.workers, 'recover_and_update_peaks_arr', bv_per_tile_t,
             )
             cum_recovery_time += time.perf_counter() - t0_rec
 
@@ -498,27 +522,39 @@ class _SolverTimeDomainMixin:
                 model.workers, 'evaluate_and_get_reduced_rhs', eval_args,
             )
 
-            # Assemble global DC RHS
-            global_rhs_init = np.zeros(n_interface, dtype=np.float64)
-            for i, (g_i, _, _stats) in enumerate(rhs_results):
-                tid = tile_configs[i].tile_id
-                idx_map = dc_ctx.tile_index_maps[tid]
-                np.add.at(global_rhs_init, idx_map, g_i)
+            # Assemble global DC RHS via bincount scatter.
+            # tile_index_maps[tid][j] = global interface idx for local port j,
+            # in the same order as g_i (both derived from boundary_list order).
+            dc_tile_idx_maps_ic = [
+                dc_ctx.tile_index_maps[tc.tile_id] for tc in tile_configs
+            ]
+            all_g_dc_ic = np.concatenate(
+                [g_i for g_i, _cur, _stats in rhs_results]
+            )
+            global_rhs_init = np.bincount(
+                np.concatenate(dc_tile_idx_maps_ic),
+                weights=all_g_dc_ic,
+                minlength=n_interface,
+            )
             global_rhs_init += dc_ctx.rhs_dirichlet_interface
 
             # Solve DC interface for initial voltages
             v_gamma_init = dc_ctx.interface_lu(global_rhs_init)
 
-            # Workers: recover interior voltages and set as IC in one call
-            # (avoids coordinator round-trip -- data stays on workers)
-            bv_init_list = _build_bv_dicts(
-                tile_configs, dc_ctx.tile_index_maps,
-                dc_ctx.interface_nodes, model.tile_boundary_nodes,
-                v_gamma_init, vdd,
+            # Workers: recover interior voltages and set as IC (array-based).
+            # Use _precompute_port_gathers so pad/Dirichlet ports (not in
+            # interface_node_to_idx) are correctly filled with vdd rather than
+            # gathered from v_gamma_init with the wrong (shorter) index array.
+            dc_port_gathers_ic, dc_pad_masks_ic = _precompute_port_gathers(
+                tile_configs, dc_ctx.interface_node_to_idx, model.tile_boundary_nodes,
             )
-            bv_init_args = [(bv,) for bv in bv_init_list]
+            bv_init_arr_args = [
+                (np.where(pad_mask, vdd, v_gamma_init[port_gather]),)
+                for port_gather, pad_mask in zip(dc_port_gathers_ic, dc_pad_masks_ic)
+            ]
             model.backend.call_all(
-                model.workers, 'recover_and_set_initial_voltages', bv_init_args,
+                model.workers, 'recover_and_set_initial_voltages_arr',
+                bv_init_arr_args,
             )
             timings['dc_initial'] = time.perf_counter() - t0
 
@@ -532,13 +568,29 @@ class _SolverTimeDomainMixin:
         )
         timings['init_peak_tracking'] = time.perf_counter() - t0
 
-        # 6. Compute initial v_gamma_old from initial interface voltages
-        v_gamma_old = v_gamma_init.copy()
-        bv_old_list = _build_bv_dicts(
-            tile_configs, trans_ctx.tile_index_maps,
-            trans_ctx.interface_nodes, model.tile_boundary_nodes,
-            v_gamma_old, vdd,
+        # Pre-loop: build concatenated scatter index (ONCE, reused every step).
+        # tile_index_maps[tid][j] = global interface idx for local port j.
+        # This is the SCATTER index (interface nodes only, excludes pads) and
+        # is correct for np.bincount. It is NOT used as the gather index.
+        tile_idx_maps_trans = [
+            trans_ctx.tile_index_maps[tc.tile_id] for tc in tile_configs
+        ]
+        all_idx_trans = np.concatenate(tile_idx_maps_trans)
+
+        # Pre-loop: per-tile port-gather arrays + pad mask for boundary voltage
+        # exchange. Tiles whose port list includes pad/Dirichlet nodes must
+        # have those ports filled with vdd, not gathered from v_gamma_new/old.
+        port_gathers_trans, pad_masks_trans = _precompute_port_gathers(
+            tile_configs, trans_ctx.interface_node_to_idx, model.tile_boundary_nodes,
         )
+
+        # 6. Compute initial bv_old arrays from initial interface voltages.
+        # np.where(pad_mask, vdd, v_gamma_old[port_gather]) fills pads with vdd.
+        v_gamma_old = v_gamma_init.copy()
+        bv_old_arr_list = [
+            np.where(pad_mask, vdd, v_gamma_old[port_gather])
+            for port_gather, pad_mask in zip(port_gathers_trans, pad_masks_trans)
+        ]
 
         # 7. Time loop
         t_array = np.arange(
@@ -555,28 +607,33 @@ class _SolverTimeDomainMixin:
 
         t0_loop = time.perf_counter()
         for step_idx, t_val in enumerate(t_array):
-            # 7a. Use cached bv_old_list (built before loop or from previous step)
-            bv_old_per_tile = [(t_val, bv) for bv in bv_old_list]
+            # 7a. Use cached bv_old_arr_list (built before loop or from prev step)
+            bv_old_per_tile = [(t_val, v_arr) for v_arr in bv_old_arr_list]
 
-            # 7b. Workers: compute transient reduced RHS (parallel)
+            # 7b. Workers: compute transient reduced RHS (array-based)
             t0_rhs = time.perf_counter()
             rhs_results = model.backend.call_all(
-                model.workers, 'get_transient_reduced_rhs', bv_old_per_tile,
+                model.workers, 'get_transient_reduced_rhs_arr', bv_old_per_tile,
             )
 
-            # 7c. Coordinator: assemble global RHS
-            global_rhs = np.zeros(n_interface, dtype=np.float64)
+            # 7c. Coordinator: assemble global RHS via bincount scatter.
+            # Concatenate per-tile g_i in tile iteration order (same as the
+            # old np.add.at loop) so bincount produces bit-identical results.
             step_total_current = 0.0
             step_rhs_times: List[float] = []
-            for i, (g_i, tile_current, tile_rhs_stats) in enumerate(rhs_results):
-                tid = tile_configs[i].tile_id
-                idx_map = trans_ctx.tile_index_maps[tid]
-                np.add.at(global_rhs, idx_map, g_i)
+            all_g_list_trans: List[np.ndarray] = []
+            for g_i, tile_current, tile_rhs_stats in rhs_results:
+                all_g_list_trans.append(g_i)
                 step_total_current += tile_current
                 step_rhs_times.append(
                     tile_rhs_stats.get('rhs_time_s', 0.0)
                 )
             all_step_rhs_times.append(step_rhs_times)
+            global_rhs = np.bincount(
+                all_idx_trans,
+                weights=np.concatenate(all_g_list_trans),
+                minlength=n_interface,
+            )
             cum_rhs_time += time.perf_counter() - t0_rhs
 
             total_currents[step_idx] = step_total_current
@@ -604,19 +661,20 @@ class _SolverTimeDomainMixin:
             v_gamma_new = trans_ctx.interface_lu(global_rhs)
             cum_asm_solve_time += time.perf_counter() - t0_asm
 
-            # 7e. Build per-tile boundary voltage dicts for new step
-            bv_new_list = _build_bv_dicts(
-                tile_configs, trans_ctx.tile_index_maps,
-                trans_ctx.interface_nodes, model.tile_boundary_nodes,
-                v_gamma_new, vdd,
-            )
-            bv_per_tile_t = [(bv, t_val) for bv in bv_new_list]
+            # 7e. Gather per-tile boundary voltage arrays for new step.
+            # np.where(pad_mask, vdd, v_gamma_new[port_gather]) fills pads
+            # with vdd and interface ports with their solved voltage.
+            bv_new_arr_list = [
+                np.where(pad_mask, vdd, v_gamma_new[port_gather])
+                for port_gather, pad_mask in zip(port_gathers_trans, pad_masks_trans)
+            ]
+            bv_per_tile_t = [(v_arr, t_val) for v_arr in bv_new_arr_list]
 
-            # 7f. Workers: recover transient interior + update peaks (parallel)
+            # 7f. Workers: recover transient interior + update peaks (array-based)
             t0_rec = time.perf_counter()
             step_max_drops = model.backend.call_all(
                 model.workers,
-                'recover_transient_and_update_peaks',
+                'recover_transient_and_update_peaks_arr',
                 bv_per_tile_t,
             )
             cum_recovery_time += time.perf_counter() - t0_rec
@@ -627,7 +685,7 @@ class _SolverTimeDomainMixin:
 
             # 7g. Advance state
             v_gamma_old = v_gamma_new
-            bv_old_list = bv_new_list  # cache for next step
+            bv_old_arr_list = bv_new_arr_list  # cache for next step
 
             if verbose and (step_idx % 10 == 0 or step_idx == len(t_array) - 1):
                 logger.info(
@@ -729,7 +787,13 @@ def _build_bv_dicts(
     v_gamma,
     vdd,
 ) -> List[Dict[str, float]]:
-    """Build per-tile boundary voltage dicts from solved v_gamma."""
+    """Build per-tile boundary voltage dicts from solved v_gamma.
+
+    Dead in the per-step hot loops (replaced by the array-based exchange;
+    see ``recover_transient_and_update_peaks_arr``). Kept as the reference
+    implementation of the gather semantics and for its unit tests. The
+    adjoint path builds its own dicts independently and does not call this.
+    """
     bv_list = []
     for tc in tile_configs:
         tid = tc.tile_id
@@ -743,6 +807,63 @@ def _build_bv_dicts(
                 bv[n] = vdd
         bv_list.append(bv)
     return bv_list
+
+
+def _precompute_port_gathers(
+    tile_configs,
+    interface_node_to_idx: Dict[str, int],
+    tile_boundary_nodes,
+):
+    """Precompute per-tile port gather arrays for array-based boundary exchange.
+
+    Computed ONCE per solve (before the time loop) and reused each step.
+
+    For each tile i, computes:
+    - ``port_gather[j]`` = global interface index for the tile's j-th port
+      (in ``bs.port_nodes`` order), OR 0 (dummy) for pad/Dirichlet ports.
+    - ``pad_mask[j]`` = True where port j is a pad (Dirichlet) node that
+      should be filled with ``vdd`` rather than gathered from ``v_gamma``.
+
+    Per step, the coordinator computes::
+
+        v_arr = np.where(pad_mask, vdd, v_gamma[port_gather])
+
+    and sends it to the worker, which uses it directly as ``v_p``.
+
+    CRITICAL for bit-exactness: the resulting ``v_arr[j]`` == the value
+    that ``_build_bv_dicts`` / dict-lookup would have placed at local port
+    index j, so the numerical path is identical.
+
+    Args:
+        tile_configs: Sequence of tile config objects (with ``.tile_id``).
+        interface_node_to_idx: Mapping node name → global interface index.
+        tile_boundary_nodes: Per-tile list of port node names in
+            ``bs.port_nodes`` order (from ``model.tile_boundary_nodes``).
+
+    Returns:
+        ``(port_gather_list, pad_mask_list)`` — one array per tile.
+    """
+    port_gather_list = []
+    pad_mask_list = []
+    for tc in tile_configs:
+        tid = tc.tile_id
+        boundary_list = tile_boundary_nodes[tid]  # list(bs.port_nodes)
+        n_ports = len(boundary_list)
+
+        port_gather = np.zeros(n_ports, dtype=np.int32)
+        pad_mask = np.zeros(n_ports, dtype=bool)
+
+        for j, node in enumerate(boundary_list):
+            if node in interface_node_to_idx:
+                port_gather[j] = interface_node_to_idx[node]
+            else:
+                # Pad/Dirichlet: dummy index 0 (overridden by pad_mask fill)
+                pad_mask[j] = True
+
+        port_gather_list.append(port_gather)
+        pad_mask_list.append(pad_mask)
+
+    return port_gather_list, pad_mask_list
 
 
 def _collect_tracked_waveforms(
