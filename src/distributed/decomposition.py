@@ -27,7 +27,7 @@ import time as time_module
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
-    from solver.unified_solver import SolverBackendConfig
+    from pgmath.factor import SolverBackendConfig
 
 import numpy as np
 

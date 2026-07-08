@@ -361,12 +361,12 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             complement, ordered port node names, total capacitance (fF),
             and stats dict.
         """
-        from solver.coupled_system import (
+        from pgmath.block_system import (
             BlockMatrixSystem,
             build_grounded_capacitance_diags,
-            compute_explicit_schur,
             _format_bytes,
         )
+        from pgmath.schur import compute_explicit_schur
         import scipy.sparse as sp_mod
 
         bs = self._block_system
@@ -651,7 +651,7 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         Returns:
             Stats dict with recovery metadata.
         """
-        from solver.coupled_system import recover_bottom_voltages
+        from pgmath.block_system import recover_bottom_voltages
 
         bs = self._block_system
 

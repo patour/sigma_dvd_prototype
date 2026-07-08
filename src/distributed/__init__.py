@@ -57,7 +57,7 @@ from .heatmap import (
 def __getattr__(name: str):
     """Lazy import for SolverBackendConfig to avoid eager cross-package load."""
     if name == 'SolverBackendConfig':
-        from solver.unified_solver import SolverBackendConfig
+        from pgmath.factor import SolverBackendConfig
         return SolverBackendConfig
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

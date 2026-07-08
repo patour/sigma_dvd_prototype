@@ -9,7 +9,7 @@ import pytest
 from legacy.generate_power_grid import generate_power_grid
 from legacy.grid_partitioner import GridPartitioner, PartitionResult
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.validation]
 
 
 def build_test_grid():

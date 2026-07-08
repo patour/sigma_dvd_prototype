@@ -20,7 +20,7 @@ from functools import wraps
 import numpy as np
 import pytest
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.validation]
 
 
 def timeout(seconds):

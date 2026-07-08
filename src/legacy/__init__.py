@@ -1,5 +1,9 @@
 """IR-drop analysis package for power grid simulation.
 
+Validation reference path: the legacy synthetic-grid solver (flat LU on small
+grids) is used as a numeric oracle when validating the distributed DDM solver.
+Not on the primary production path for large PDNs.
+
 Exports core classes for building models, generating stimuli, and solving IR-drop.
 """
 

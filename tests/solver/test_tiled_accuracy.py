@@ -42,7 +42,7 @@ from model.factory import create_model_from_pdn
 from solver.unified_solver import UnifiedIRDropSolver
 from graph.converter import detect_graph_type, ensure_rustworkx_graph
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.validation]
 
 
 class Logger:

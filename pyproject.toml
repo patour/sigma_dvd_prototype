@@ -23,6 +23,7 @@ where = ["src"]
 [project.scripts]
 pdn-parse = "parser.pdn_parser:main"
 pdn-solve = "solver.pdn_solver:main"
+sigma-dvd = "distributed.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -33,4 +34,6 @@ addopts = [
 markers = [
     "unit: fast isolated unit tests",
     "integration: integration tests (slow, require test netlists)",
+    "validation: validation reference path tests (hierarchical, tiled, legacy)",
+    "benchmark: performance benchmark tests (slow, measure throughput)",
 ]

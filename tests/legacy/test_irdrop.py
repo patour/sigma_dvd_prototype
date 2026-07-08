@@ -7,7 +7,7 @@ import pytest
 from legacy.generate_power_grid import generate_power_grid, NodeID
 from legacy import PowerGridModel, StimulusGenerator, IRDropSolver, EffectiveResistanceCalculator, plot_voltage_map, plot_ir_drop_map
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.validation]
 
 
 def build_small():

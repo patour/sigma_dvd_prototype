@@ -18,7 +18,7 @@ from .parser import PackageData, PowerGridMetaData, TileConfig
 from .tile_worker import TileData, TileWorker
 
 if TYPE_CHECKING:
-    from solver.unified_solver import SolverBackendConfig
+    from pgmath.factor import SolverBackendConfig
 
 logger = logging.getLogger(__name__)
 
@@ -414,12 +414,12 @@ def _create_distributed_model_from_bundle(
     workers = be.create_actors(TileWorker, metadata.tile_configs)
 
     # 3b. Propagate solver settings to workers
-    from solver.coupled_system import get_partial_factor_reg_resistance
+    from pgmath.block_system import get_partial_factor_reg_resistance
 
     # Build worker settings dict: use explicit config or snapshot globals.
-    # partial_factor_reg_ohms is a separate concern (coupled_system.py),
+    # partial_factor_reg_ohms is a separate concern (block_system.py),
     # not included in SolverBackendConfig; always inherited from globals.
-    from solver.unified_solver import SolverBackendConfig as _SBC
+    from pgmath.factor import SolverBackendConfig as _SBC
     solver_settings = {
         **(worker_solver_config or _SBC.from_globals()).to_dict(),
         'partial_factor_reg_ohms': get_partial_factor_reg_resistance(),

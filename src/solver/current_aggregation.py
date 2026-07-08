@@ -1,5 +1,9 @@
 """Current aggregation utilities for hierarchical IR-drop solving.
 
+Validation reference path: used by solve_hierarchical() and
+solve_hierarchical_coupled(), which serve as in-process validation oracles.
+Not on the primary production path for large PDNs.
+
 This module provides the CurrentAggregator class for distributing load currents
 to port nodes using shortest-path or effective resistance weighting.
 """

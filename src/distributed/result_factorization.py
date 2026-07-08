@@ -64,7 +64,7 @@ def _restore_role_configs(
     """
     if model is None:
         return
-    from solver.unified_solver import SolverBackendConfig
+    from pgmath.factor import SolverBackendConfig
 
     for attr in ('coordinator_solver_config', 'worker_solver_config'):
         saved = data.get(attr)
@@ -125,7 +125,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
         per_tile_stats.append(tile_stats)
 
     # Coordinator-side DEBUG: per-tile factor/schur details
-    from solver.coupled_system import _format_bytes
+    from pgmath.block_system import _format_bytes
     for i, ts in enumerate(per_tile_stats):
         tid = model.metadata.tile_configs[i].tile_id
         n_ii = ts.get('n_interior', 0)
@@ -156,7 +156,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
 
     # 2. Assemble global interface system
     t0 = _time.perf_counter()
-    from solver.coupled_system import assemble_schur_complement_system
+    from pgmath.schur import assemble_schur_complement_system
 
     S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx = (
         assemble_schur_complement_system(
@@ -171,7 +171,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
 
     # 2b. Global interface island detection
     t0 = _time.perf_counter()
-    from solver.coupled_system import detect_interface_islands
+    from pgmath.schur import detect_interface_islands
 
     S_global, rhs_dirichlet, island_nodes = detect_interface_islands(
         S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
@@ -208,7 +208,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
 
     # 3. Factor interface system
     t0 = _time.perf_counter()
-    from solver.unified_solver import _factor_conductance_matrix
+    from pgmath.factor import _factor_conductance_matrix
 
     interface_lu_result = _factor_conductance_matrix(
         S_global, verbose=False, config=model.coordinator_solver_config,
@@ -227,7 +227,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
     timings['total_prepare'] = sum(timings.values())
 
     # --- Build solver_stats ---
-    from solver.coupled_system import _sparse_mem_bytes, _format_bytes as _fb
+    from pgmath.block_system import _sparse_mem_bytes, _format_bytes as _fb
 
     # Interface system stats
     n_unknowns = S_global.shape[0]
@@ -310,7 +310,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
         logger.info("=== Total Prepare: %.3fs ===", timings['total_prepare'])
 
     # 5. Build package G matrix for topology
-    from solver.coupled_system import build_interface_package_matrices
+    from pgmath.schur import build_interface_package_matrices
     n_interface = len(interface_nodes)
     G_pkg_uu, _ = build_interface_package_matrices(
         package_edges=model.package_data.package_edges,
@@ -404,7 +404,7 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
             "full factorization, or load a checkpoint that includes "
             "S_global."
         )
-    from solver.unified_solver import _factor_conductance_matrix
+    from pgmath.factor import _factor_conductance_matrix
 
     coord_config = ctx.model.coordinator_solver_config if ctx.model is not None else None
     t0 = _time.perf_counter()
@@ -465,7 +465,7 @@ def _factor_transient_context(
         per_tile_stats.append(tile_stats)
 
     # Coordinator-side DEBUG: per-tile transient factor details
-    from solver.coupled_system import _format_bytes
+    from pgmath.block_system import _format_bytes
     from distributed.solver import _fmt_count
     for i, ts in enumerate(per_tile_stats):
         tid = tile_configs[i].tile_id
@@ -502,7 +502,7 @@ def _factor_transient_context(
     ctx.has_capacitance = has_cap
 
     # 3. Assemble transient interface system
-    from solver.coupled_system import (
+    from pgmath.schur import (
         assemble_schur_complement_system,
         build_interface_package_matrices,
         detect_interface_islands,
@@ -556,7 +556,7 @@ def _factor_transient_context(
 
     # 5. Factor transient interface system
     t0 = _time.perf_counter()
-    from solver.unified_solver import _factor_conductance_matrix
+    from pgmath.factor import _factor_conductance_matrix
 
     interface_lu_result = _factor_conductance_matrix(
         S_global, verbose=verbose, config=model.coordinator_solver_config,
@@ -580,7 +580,7 @@ def _factor_transient_context(
 
     # --- Build solver_stats ---
     from distributed.solver import _minmeanmax
-    from solver.coupled_system import _sparse_mem_bytes, _format_bytes as _fb
+    from pgmath.block_system import _sparse_mem_bytes, _format_bytes as _fb
 
     # Interface system stats
     n_unknowns = S_global.shape[0]
@@ -775,7 +775,7 @@ def _refactor_transient_context(
             "full factorization, or load a checkpoint that includes "
             "S_global."
         )
-    from solver.unified_solver import _factor_conductance_matrix
+    from pgmath.factor import _factor_conductance_matrix
 
     coord_config = ctx.model.coordinator_solver_config if ctx.model is not None else None
     t0 = _time.perf_counter()

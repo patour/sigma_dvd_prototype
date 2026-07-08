@@ -111,8 +111,8 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         Propagates solver backend settings (CHOLMOD mode, ordering, etc.)
         so that Ray workers match the driver-side configuration.
         """
-        from solver.coupled_system import set_partial_factor_reg_resistance
-        from solver.unified_solver import (
+        from pgmath.block_system import set_partial_factor_reg_resistance
+        from pgmath.factor import (
             set_use_cholmod,
             set_cholmod_mode,
             set_cholmod_ordering,
@@ -212,7 +212,7 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
             islands_removed, kept_nonlargest_iface = self._remove_floating_islands(port_nodes_local)
 
         # Build BlockMatrixSystem from edges (no factorization yet)
-        from solver.coupled_system import build_block_system_from_edges
+        from pgmath.block_system import build_block_system_from_edges
         self._block_system, self._rhs_dirichlet = build_block_system_from_edges(
             edges=self._tile_data.resistive_edges,
             port_nodes=port_nodes_local,
@@ -317,10 +317,8 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         Returns:
             Tuple of (S_i as numpy array, boundary_node_list, stats dict)
         """
-        from solver.coupled_system import (
-            compute_explicit_schur,
-            _format_bytes, _sparse_mem_bytes,
-        )
+        from pgmath.schur import compute_explicit_schur
+        from pgmath.block_system import _format_bytes, _sparse_mem_bytes
 
         bs = self._block_system
         t_total_start = time.perf_counter()
@@ -394,7 +392,7 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         Returns:
             Tuple of (reduced RHS numpy array (n_ports,), stats dict)
         """
-        from solver.coupled_system import compute_reduced_rhs
+        from pgmath.block_system import compute_reduced_rhs
 
         if current_injections is None:
             current_injections = self._tile_data.current_injections
@@ -437,7 +435,7 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         Returns:
             Tuple of (Dict mapping all tile nodes -> voltage, stats dict)
         """
-        from solver.coupled_system import recover_bottom_voltages
+        from pgmath.block_system import recover_bottom_voltages
 
         t0 = time.perf_counter()
 

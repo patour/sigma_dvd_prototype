@@ -510,7 +510,7 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
                         help='Config file path (.yaml, .yml, or .json)')
 
     # Solver backend (cholmod / splu)
-    from solver.unified_solver import _VALID_CHOLMOD_MODES, _VALID_CHOLMOD_ORDERINGS
+    from pgmath.factor import _VALID_CHOLMOD_MODES, _VALID_CHOLMOD_ORDERINGS
     _modes = list(_VALID_CHOLMOD_MODES)
     _orderings = list(_VALID_CHOLMOD_ORDERINGS)
 
@@ -832,7 +832,7 @@ def _build_config_from_yaml_section(
     """
     if not section:
         return None
-    from solver.unified_solver import SolverBackendConfig
+    from pgmath.factor import SolverBackendConfig
 
     # Merge: parent scalar settings provide defaults, section overrides.
     # Filter parent to exclude sub-dicts (coordinator/worker).
@@ -892,7 +892,7 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
 
     Reuses ``load_config`` / ``merge_config_with_args`` from
     ``solver.pdn_solver`` and the global cholmod setters from
-    ``solver.unified_solver``, mirroring ``PDNSolver._configure_solver_backend``.
+    ``pgmath.factor``, mirroring ``PDNSolver._configure_solver_backend``.
 
     Parameters
     ----------
@@ -924,7 +924,7 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
         logger.info("Loaded config from: %s", args.config)
 
     # -- cholmod backend ----------------------------------------------------
-    from solver.unified_solver import (
+    from pgmath.factor import (
         set_use_cholmod,
         set_cholmod_mode,
         set_cholmod_ordering,
@@ -998,7 +998,7 @@ def _collect_role_config(
 
     Returns ``None`` if no role-specific flags were set.
     """
-    from solver.unified_solver import SolverBackendConfig
+    from pgmath.factor import SolverBackendConfig
 
     prefix = role.replace('-', '_')
     use_cholmod_flag = getattr(args, f'{prefix}_use_cholmod', None)

@@ -1,5 +1,9 @@
 """Tiling infrastructure for hierarchical IR-drop solving.
 
+Validation reference path: used by solve_hierarchical_tiled(), which is an
+in-process validation oracle for the distributed DDM solver.  Not on the
+primary production path for large PDNs.
+
 This module provides:
 - solve_single_tile: Module-level function for parallel tile solves (picklable)
 - TileManager: Class for tile generation, connectivity validation, and result merging
