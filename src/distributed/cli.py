@@ -460,6 +460,8 @@ def cmd_decompose(args: argparse.Namespace) -> None:
             aggressor_top_k=args.aggressor_top_k,
             adjoint_method=args.adjoint_method,
             adjoint_memory_window=args.adjoint_memory_window,
+            qs_candidate_factor=getattr(args, 'qs_candidate_factor', 3000),
+            max_qs_candidates=getattr(args, 'max_qs_candidates', 10000),
             verbose=args.verbose,
             coordinator_solver_config=getattr(args, 'coordinator_solver_config', None),
             worker_solver_config=getattr(args, 'worker_solver_config', None),
@@ -695,6 +697,8 @@ def _merge_decompose_config(
         'aggressor_top_k': 0,
         'adjoint_method': 'dynamic',
         'adjoint_memory_window': 20,
+        'qs_candidate_factor': 3000,
+        'max_qs_candidates': 10000,
         'output': './irdrop_decomp_results',
         'no_plot': False,
         'plot_layers': None,
@@ -723,6 +727,10 @@ def _merge_decompose_config(
         args.window_percent = float(analysis_cfg['window_percent'])
     if analysis_cfg.get('integration') is not None and _cli_is_default('method'):
         args.method = str(analysis_cfg['integration'])
+    if analysis_cfg.get('qs_candidate_factor') is not None and _cli_is_default('qs_candidate_factor'):
+        args.qs_candidate_factor = int(analysis_cfg['qs_candidate_factor'])
+    if analysis_cfg.get('max_qs_candidates') is not None and _cli_is_default('max_qs_candidates'):
+        args.max_qs_candidates = int(analysis_cfg['max_qs_candidates'])
 
     # Smooth: three-way merge (CLI explicit > config > default True).
     # args.smooth is None when user didn't pass --smooth or --no-smooth.
@@ -1222,6 +1230,28 @@ def build_parser() -> argparse.ArgumentParser:
     decomp.add_argument(
         '--instances', type=str, default=None,
         help='Comma-separated victim node names (skips initial transient)',
+    )
+    decomp.add_argument(
+        '--qs-candidate-factor', type=int, default=3000,
+        dest='qs_candidate_factor',
+        help=(
+            'Multiplier on top_k for QS pre-selection candidates (default: 3000). '
+            'Increase when capacitive-history effects push transient victims '
+            'below the QS ranking cutoff; a safety-net transient will warn '
+            'and fire automatically, but raising this factor avoids it.'
+        ),
+    )
+    decomp.add_argument(
+        '--max-qs-candidates', type=int, default=10000,
+        dest='max_qs_candidates',
+        help=(
+            'Absolute cap on QS pre-selection candidates tracked per Phase 2b '
+            'transient (default: 10000). Bounds per-step Python-loop overhead '
+            'and worker-side waveform memory (each tracked node stores one float '
+            'per time step). Victims outside the cap are caught by the safety-net '
+            'targeted transient. Increase for netlists where top-K transient '
+            'victims rank beyond this position in the quasi-static ranking.'
+        ),
     )
 
     # Aggressor parameters

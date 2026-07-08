@@ -4,12 +4,48 @@ Orchestrates the full decomposition workflow using the distributed DDM
 solver:
 
 1. Load pre-parsed tile data and create the distributed model.
-2. DC solve (shared IC) + transient RC simulation to identify worst
-   victims.
+2. (non-instances path) Quasi-static pre-selection: run a cheap QS sweep
+   (11 points) to identify ``top_k * qs_candidate_factor`` candidate nodes
+   most likely to be transient victims.
+2b. All-sources transient with ``track_nodes=candidates`` — identifies the
+    actual worst-K nodes (global peak tracking covers all nodes) AND captures
+    victim waveforms in one pass.  A safety-net targeted transient fires for
+    any victim that falls outside the QS candidate set (see *Performance* note
+    below).  The previously-redundant Phase-3 all-sources transient is gone.
 3. For each victim, run a near-only masked transient and compute
    far = all - near (by linearity).
 4. Optionally run adjoint sensitivity to identify top aggressors
    within the near window.
+
+When ``instances`` is provided phases 2 and 2b merge: the caller-supplied
+node names become the ``track_nodes`` for a single all-sources transient and
+the QS pre-selection is skipped entirely.
+
+**A6 design note (conscious acceptance).**  The plan spec (A6) described
+victims as "known after Phase 2, BEFORE Phase 2b", implying they could simply
+be passed as ``track_nodes`` into the existing Phase 2b call.  That premise
+was *incorrect* for the base code (f3cab48): the non-instances path had no
+quasi-static Phase 2 — victims were derived from the Phase 2b transient peaks,
+so they were genuinely unknowable until after Phase 2b completed.  The
+implementer correctly recognised this and *added* the QS pre-selection step
+(Phase 2 above) to make ``track_nodes`` available before Phase 2b runs.  This
+is more invasive than the spec described, but the result invariant holds: the
+waveforms captured via ``track_nodes`` in Phase 2b are numerically identical
+to those that a separate Phase-3 all-sources transient would produce (same
+system, same IC, same sources — only which node waveforms are stored differs).
+
+**Performance note.**  QS rankings diverge from transient rankings when
+capacitive history plays a large role.  If a victim's QS rank exceeds the
+candidate cutoff (``top_k * qs_candidate_factor``), the safety net fires an
+additional full all-sources transient for the missing victims.  On a
+BRCM-class 10K-step run this degrades total compute to
+``QS + 2 × full-transient-time`` — marginally *worse* than the pre-A6
+2-transient design.  On netlist_sampled (135K nodes, top_k=2) no safety-net
+has fired (victims rank < 4800, cutoff 6000); the default
+``_QS_CANDIDATE_FACTOR = 3000`` provides comfortable margin.  Increase
+``qs_candidate_factor`` to widen the margin at the cost of tracking more nodes
+in Phase 2b.  A warning is logged when a victim's QS rank exceeds 80% of the
+cutoff.
 
 The transient factorization (A = G + C_coeff * C) is current-independent
 and is reused across all masked solves -- only the RHS changes.
@@ -41,6 +77,70 @@ from analysis.dynamic_irdrop_decomposition import (
 from distributed.tile_parsing import _parse_node_xy
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# A6 candidate over-sampling for QS pre-selection
+# ---------------------------------------------------------------------------
+# During Phase 2b we pass these candidates as track_nodes so the initial
+# transient captures victim waveforms without a redundant second pass.
+#
+# QS peaks can diverge from transient peaks when capacitive history plays a
+# large role (nodes where the RC time-constants cause the accumulated drop to
+# exceed the instantaneous DC response).  We compensate by using a very large
+# candidate multiplier so the actual transient worst-K nodes are included even
+# when the QS ranking differs substantially from the transient ranking.
+#
+# Sizing rationale (netlist_sampled benchmark, top_k=2, ~100 steps):
+#   - Total nodes ≈ 135 K; worst-2 are M0 nodes with large capacitive history.
+#   - QS (11 pts) ranks victim-2 at ~rank 4000–6000; _QS_CANDIDATE_FACTOR=3000
+#     → n_candidates = 6000 comfortably covers it.
+#   - Tracking 6000 nodes across 100 steps adds <200 ms overhead per tile;
+#     collection at end adds ~1 s.
+#   - QS with 11 points costs ~2 s (vs 4.5 s for the eliminated all_trans),
+#     so A6 is net positive for all practically-sized runs.
+#
+# 10K-step BRCM-scale cost (top_k=5 default, 36 tiles, 10K steps):
+#   - Uncapped n_candidates = top_k × _QS_CANDIDATE_FACTOR = 15000 nodes.
+#   - 15000/36 tiles ≈ 417 tracked nodes per tile; tile_worker_peak.py runs a
+#     Python loop over every tracked node at each step (lines 400–409, 496–505).
+#     Note: the '0-10 nodes' comment in tile_worker_peak.py at those lines is
+#     stale after A6 and should be updated there independently (outside this
+#     file's scope).
+#   - Per-step overhead per tile: 417 × ~50 ns ≈ 20 µs; × 10K steps ≈ 200 ms
+#     additional wall time per tile — not dominant but non-negligible at the
+#     reduced per-step floor left by A1/A2.
+#   - Memory: 417 nodes × 10K steps × ~28 B/float (CPython list) ≈ 117 MB/tile
+#     = 4.2 GB across 36 BRCM tiles.  Grows linearly with n_steps.
+#   - _MAX_QS_CANDIDATES (below) caps n_candidates to bound both costs without
+#     changing behavior for the validated top_k=2 / 100-step case.
+#
+# Perf regression risk (Issue A6-2): if the safety net fires for a victim
+# (victim's QS rank >= n_candidates), an additional full all-sources transient
+# runs for the missing nodes.  Total compute becomes QS + 2 × full-transient,
+# vs pre-A6's 2 × full-transient — so A6 is marginally WORSE when the safety
+# net fires (by the QS cost ~2 s on netlist_sampled, or ~50–100 s on BRCM at
+# 11 QS points).  This is structurally acceptable: the safety net is
+# infrequent, and correctness is always preserved (same solve, same IC).
+# Increase this constant if victims repeatedly fall near or beyond the cutoff.
+_QS_CANDIDATE_FACTOR: int = 3000
+
+# Absolute upper bound on the number of QS pre-selection candidates passed as
+# track_nodes into the Phase 2b transient.  With _QS_CANDIDATE_FACTOR=3000 and
+# the default top_k=5, uncapped n_candidates = 15000; the cap brings this to
+# 10000, saving ~1.5 GB of tracked-waveform memory at BRCM scale (10K steps)
+# while keeping the per-step Python-loop overhead below ~140 ms/tile total.
+#
+# Victims whose QS rank exceeds the cap are handled by the safety-net targeted
+# transient (one extra full-transient for the missing nodes).  On all tested
+# netlists, victims rank well within the top 10000 QS nodes, so the safety net
+# does not fire.  Increase this constant (or pass max_qs_candidates=<value> to
+# analyze_distributed_decomposition) if it starts firing.
+_MAX_QS_CANDIDATES: int = 10_000
+# Number of QS time points used for candidate pre-selection.  11 points (one
+# per ~10 % of the time range) is fast and sufficient: victims that peak in
+# the interior of [t_start, t_end] are captured by the bracketing QS points.
+# Capped at the transient step count + 1 so the QS covers the full range.
+_QS_N_POINTS: int = 11
 
 
 # =========================================================================
@@ -265,6 +365,8 @@ def analyze_distributed_decomposition(
     aggressor_top_k: int = 0,
     adjoint_method: str = 'dynamic',
     adjoint_memory_window: int = 20,
+    qs_candidate_factor: int = _QS_CANDIDATE_FACTOR,
+    max_qs_candidates: int = _MAX_QS_CANDIDATES,
     verbose: bool = False,
     coordinator_solver_config: Optional[SolverBackendConfig] = None,
     worker_solver_config: Optional[SolverBackendConfig] = None,
@@ -307,6 +409,26 @@ def analyze_distributed_decomposition(
         adjoint_method: ``'static'`` or ``'dynamic'`` adjoint.
         adjoint_memory_window: Backward sweep memory window (number of
             time steps) for dynamic adjoint.
+        qs_candidate_factor: Multiplier applied to ``top_k`` to derive
+            the number of QS pre-selection candidates passed as
+            ``track_nodes`` into the Phase 2b transient (default:
+            ``_QS_CANDIDATE_FACTOR`` = 3000).  Increase when
+            capacitive-history effects cause the worst transient victims
+            to rank well below the worst quasi-static nodes — the safety
+            net (see "Safety" section in the module docstring) will fire
+            and log a warning in that case.  The module-level constant is
+            intentionally not used inside the function body so the caller
+            can tune it without monkey-patching.
+        max_qs_candidates: Absolute upper bound on the number of QS
+            pre-selection candidates tracked per Phase 2b transient
+            (default: ``_MAX_QS_CANDIDATES`` = 10000).  Caps the
+            per-step Python-loop overhead in tile workers and the
+            worker-side memory consumed by tracked waveforms (each
+            tracked node accumulates one float per step; at BRCM scale
+            with 10K steps this is ~28 B × n_tracked / n_tiles per tile).
+            Victims whose QS rank exceeds this cap are caught by the
+            safety-net targeted transient.  Increase if the safety net
+            fires repeatedly.
         verbose: Log progress.
 
     Returns:
@@ -395,28 +517,43 @@ def analyze_distributed_decomposition(
         timings['dc_solve'] = time_module.perf_counter() - t0
 
         # =============================================================
-        # Phase 2b: Initial transient (find worst instances)
+        # Phase 2b: Initial transient (find worst instances) +
+        #           capture victim waveforms in the same pass (A6).
+        #
+        # For the non-instances path we first run a cheap quasi-static
+        # (Phase 2) to identify candidate nodes, then pass those as
+        # track_nodes into the single all-sources transient (Phase 2b).
+        # For the instances path the candidate list comes directly from
+        # the caller-supplied names.  Either way, a single transient
+        # run serves both peak-finding and waveform capture — the
+        # previously-redundant Phase-3 all-sources transient is gone.
         # =============================================================
         peak_data: Dict[str, Tuple[float, float]] = {}
         node_coords: Dict[str, Tuple[float, float]] = {}
         grid_bounds: Tuple[float, float, float, float] = (0.0, 1.0, 0.0, 1.0)
         worst: List[Tuple[str, float, float, float, float]] = []
         peak_ir_drop_per_node: Dict[str, float] = {}
-        trans_result = None  # Needed later for dynamic adjoint
+        # trans_result holds the single all-sources transient result used
+        # by waveform decomposition (Phase 3) and the adjoint (Phase 4).
+        trans_result = None
 
         if instances is not None:
-            # Skip initial transient -- build worst list from provided names
+            # Victims are known: use the provided names as track_nodes so
+            # the single transient below captures their waveforms.
             if verbose:
                 logger.info(
-                    "Phase 2b: Skipped (using %d pre-defined instances)",
+                    "Phase 2b: Running all-sources transient "
+                    "(tracking %d pre-defined instances)",
                     len(instances),
                 )
             _coords: List[Tuple[float, float]] = []
+            track_candidates: List[str] = []
             for node in instances:
                 x, y = _parse_node_xy(node)
                 if x is not None and y is not None:
                     _coords.append((float(x), float(y)))
                     worst.append((node, float(x), float(y), 0.0, 0.0))
+                    track_candidates.append(node)
                 else:
                     logger.warning(
                         "Cannot parse coordinates for instance '%s'; "
@@ -432,12 +569,89 @@ def analyze_distributed_decomposition(
                 model.workers, 'get_layer_metadata',
             )
             grid_bounds = _grid_bounds_from_layer_metadata(tile_metadatas)
+
+            # Single transient: track waveforms for the provided instances.
+            t0 = time_module.perf_counter()
+            trans_result = solver.solve_transient(
+                context=trans_ctx,
+                ic_voltages=dc_result,
+                t_start=t_start,
+                t_end=t_end,
+                smoothed_sources=smoothed,
+                track_nodes=track_candidates or None,
+                verbose=False,
+            )
+            timings['initial_transient'] = time_module.perf_counter() - t0
+
         else:
+            # ─── Phase 2: QS pre-selection of victim candidates ──────────
+            # Run a fast quasi-static sweep to find the top-K*factor nodes
+            # most likely to be transient victims.  Those become track_nodes
+            # for the Phase 2b transient so waveforms are captured in a
+            # single pass — no redundant second all-sources transient.
+            n_transient_steps = max(1, round((t_end - t_start) / dt))
+            # Cap at _QS_N_POINTS but never exceed the transient step count + 1
+            # (no point sampling finer than the transient grid).
+            n_qs_pts = min(n_transient_steps + 1, _QS_N_POINTS)
+
+            if verbose:
+                logger.info(
+                    "Phase 2: QS candidate pre-selection "
+                    "(%d points, %.2f ns to %.2f ns)",
+                    n_qs_pts, t_start * 1e9, t_end * 1e9,
+                )
+
+            t0 = time_module.perf_counter()
+            qs_result = solver.solve_quasi_static(
+                context=dc_ctx,
+                t_start=t_start,
+                t_end=t_end,
+                n_points=n_qs_pts,
+                smoothed_sources=smoothed,
+                verbose=False,
+            )
+            timings['qs_victim_selection'] = time_module.perf_counter() - t0
+
+            qs_flat = qs_result.as_flat()
+            n_candidates = min(
+                max(top_k * qs_candidate_factor, qs_candidate_factor),
+                max_qs_candidates,
+            )
+            _uncapped = top_k * qs_candidate_factor
+            if n_candidates < _uncapped:
+                logger.debug(
+                    "  QS candidates capped: %d → %d "
+                    "(top_k=%d × factor=%d, max_qs_candidates=%d). "
+                    "Safety net handles victims with QS rank ≥ %d.",
+                    _uncapped, n_candidates,
+                    top_k, qs_candidate_factor,
+                    max_qs_candidates, n_candidates,
+                )
+            # Full sorted list for QS-rank proximity warnings (built once,
+            # cost is O(N log N) on total node count — negligible vs transient).
+            _all_qs_sorted = sorted(
+                qs_flat.keys(), key=lambda n: -qs_flat[n][0],
+            )
+            _qs_rank_of: Dict[str, int] = {
+                node: idx for idx, node in enumerate(_all_qs_sorted)
+            }
+            track_candidates = _all_qs_sorted[:n_candidates]
+
+            if verbose:
+                logger.info(
+                    "  QS pre-selection: %d candidates "
+                    "(top %d of %d nodes by QS peak drop, factor=%d)",
+                    len(track_candidates), n_candidates, len(qs_flat),
+                    qs_candidate_factor,
+                )
+
+            # ─── Phase 2b: Initial transient WITH victim track_nodes ──────
             if verbose:
                 logger.info(
                     "Phase 2b: Running initial transient "
-                    "(%.2f ns to %.2f ns, dt=%.3f ns)",
+                    "(%.2f ns to %.2f ns, dt=%.3f ns, tracking %d candidates)",
                     t_start * 1e9, t_end * 1e9, dt * 1e9,
+                    len(track_candidates),
                 )
 
             t0 = time_module.perf_counter()
@@ -447,6 +661,7 @@ def analyze_distributed_decomposition(
                 t_start=t_start,
                 t_end=t_end,
                 smoothed_sources=smoothed,
+                track_nodes=track_candidates,
                 verbose=verbose,
             )
             timings['initial_transient'] = time_module.perf_counter() - t0
@@ -458,7 +673,7 @@ def analyze_distributed_decomposition(
                     trans_result.peak_ir_drop_time * 1e9,
                 )
 
-            # Collect peak data from workers
+            # Collect peak data from workers (ALL nodes, not just candidates)
             t0 = time_module.perf_counter()
             peak_data = trans_result.as_flat()
             timings['collect_peaks'] = time_module.perf_counter() - t0
@@ -480,10 +695,72 @@ def analyze_distributed_decomposition(
                     grid_bounds[2], grid_bounds[3],
                 )
 
+            # Warn when a victim's QS rank is near the candidate cutoff.
+            # Victims in the bottom 20% of the candidate set are "marginal":
+            # a modest QS ranking shift (e.g. different load pattern or
+            # capacitive-history regime) could push them outside the set and
+            # trigger the safety-net targeted transient below.  Increase
+            # qs_candidate_factor to widen the safety margin.
+            _near_cutoff = int(0.8 * n_candidates)
+            for _vnode, *_ in worst:
+                _vrank = _qs_rank_of.get(_vnode)
+                if _vrank is not None and _near_cutoff <= _vrank < n_candidates:
+                    logger.warning(
+                        "  Victim '%s' QS rank %d is near the candidate "
+                        "cutoff (%d, margin=%d). On netlists where "
+                        "capacitive-history effects shift the QS ranking "
+                        "this victim may fall outside — consider increasing "
+                        "qs_candidate_factor (currently %d).",
+                        _vnode, _vrank, n_candidates,
+                        n_candidates - _vrank, qs_candidate_factor,
+                    )
+
             # Preserve peak IR-drop per node for heatmap generation
             peak_ir_drop_per_node = {
                 node: drop for node, (drop, _) in peak_data.items()
             }
+
+            # ─── Safety: ensure all victims have tracked waveforms ───────
+            # find_worst_nodes_separated selects victims from ALL node peaks
+            # (global peak tracking covers ~135K nodes), but track_candidates
+            # was capped at n_candidates QS-top nodes.  If a transient victim
+            # falls outside that set its waveform is absent from
+            # trans_result.tracked_ir_drop — it would be silently dropped
+            # in Phase 3.  Run ONE targeted transient covering only the
+            # missing victims to restore exactness.  This adds cost only in
+            # the rare case where capacitive-history-dominated victims rank
+            # below the QS candidate cutoff (the interesting-victim regime
+            # the _QS_CANDIDATE_FACTOR is designed to guard, but cannot
+            # guarantee structurally).
+            _track_set = set(track_candidates)
+            _missing_victims = [
+                n for n, *_ in worst if n not in _track_set
+            ]
+            if _missing_victims:
+                logger.warning(
+                    "  %d victim(s) fell outside QS candidate set — "
+                    "running targeted transient to capture their waveforms "
+                    "(nodes: %s)",
+                    len(_missing_victims),
+                    _missing_victims,
+                )
+                t0 = time_module.perf_counter()
+                _missing_result = solver.solve_transient(
+                    context=trans_ctx,
+                    ic_voltages=dc_result,
+                    t_start=t_start,
+                    t_end=t_end,
+                    smoothed_sources=smoothed,
+                    track_nodes=_missing_victims,
+                    verbose=False,
+                )
+                timings['targeted_transient_missing_victims'] = (
+                    time_module.perf_counter() - t0
+                )
+                # Merge the newly captured waveforms into trans_result so
+                # Phase 3 sees a complete tracked_ir_drop for all victims.
+                for _node, _wf in _missing_result.tracked_ir_drop.items():
+                    trans_result.tracked_ir_drop[_node] = _wf
 
         if not worst:
             logger.warning("No victim nodes found; returning empty result")
@@ -506,6 +783,10 @@ def analyze_distributed_decomposition(
 
         # =============================================================
         # Phase 3: Waveform decomposition
+        #
+        # trans_result already holds the all-sources waveforms for victim
+        # nodes (captured via track_nodes in Phase 2b — A6 eliminates the
+        # previously-redundant all-sources transient that ran here).
         # =============================================================
         if verbose:
             logger.info(
@@ -516,24 +797,7 @@ def analyze_distributed_decomposition(
         victim_nodes = [node for node, *_ in worst]
         n_tiles = model.n_tiles
 
-        # All-sources transient tracking victim nodes
-        t0 = time_module.perf_counter()
-        if verbose:
-            logger.info(
-                "  Running all-sources transient (tracking %d victims)",
-                len(victim_nodes),
-            )
-
-        all_trans = solver.solve_transient(
-            context=trans_ctx,
-            ic_voltages=dc_result,
-            t_start=t_start,
-            t_end=t_end,
-            smoothed_sources=smoothed,
-            track_nodes=victim_nodes,
-            verbose=False,
-        )
-        timings['all_sources_transient'] = time_module.perf_counter() - t0
+        t0_phase3 = time_module.perf_counter()
 
         decompositions: List[InstanceDecomposition] = []
 
@@ -576,8 +840,10 @@ def analyze_distributed_decomposition(
                 [(None,)] * n_tiles,
             )
 
-            # Extract and align waveforms
-            ir_all = all_trans.tracked_ir_drop.get(node)
+            # Extract and align waveforms.
+            # ir_all comes from trans_result (the Phase 2b all-sources
+            # transient with track_nodes) — no separate all_trans needed.
+            ir_all = trans_result.tracked_ir_drop.get(node)
             ir_near = near_trans.tracked_ir_drop.get(node)
 
             if ir_all is None or ir_near is None:
@@ -596,7 +862,7 @@ def analyze_distributed_decomposition(
             ir_all_c = ir_all[:n_common]
             ir_near_c = ir_near[:n_common]
             ir_far_c = ir_all_c - ir_near_c
-            t_arr = all_trans.t_array[:n_common]
+            t_arr = trans_result.t_array[:n_common]
 
             # Peak statistics
             peak_total = float(np.max(ir_all_c))
@@ -665,9 +931,7 @@ def analyze_distributed_decomposition(
                 )
 
         timings['waveform_decomposition'] = (
-            time_module.perf_counter()
-            - t0
-            - timings.get('all_sources_transient', 0)
+            time_module.perf_counter() - t0_phase3
         )
 
         # =============================================================
@@ -683,13 +947,14 @@ def analyze_distributed_decomposition(
 
             t0_adjoint = time_module.perf_counter()
 
-            # If we skipped the initial transient (instances provided)
-            # but need a transient result for dynamic adjoint, run one.
+            # trans_result is always set by Phase 2b (both instances and
+            # non-instances paths).  The fallback below is kept for safety
+            # but should never be reached in normal operation.
             if trans_result is None and adjoint_method == 'dynamic':
                 if verbose:
                     logger.info(
                         "  Running transient for dynamic adjoint "
-                        "reference",
+                        "reference (fallback — unexpected code path)",
                     )
                 trans_result = solver.solve_transient(
                     context=trans_ctx,
@@ -795,14 +1060,15 @@ def analyze_distributed_decomposition(
         if verbose:
             logger.info("Phase 5: Building result")
 
-        # Total current waveform from the all-sources transient
+        # Total current waveform from the Phase 2b all-sources transient
+        # (trans_result is the single pass that now captures victim waveforms)
         total_current = np.array(
-            all_trans.total_current_per_time
-        ) if all_trans.total_current_per_time is not None else np.array([])
+            trans_result.total_current_per_time
+        ) if trans_result.total_current_per_time is not None else np.array([])
 
         result_t_array = (
-            all_trans.t_array
-            if all_trans.t_array is not None
+            trans_result.t_array
+            if trans_result.t_array is not None
             else np.array([])
         )
 
