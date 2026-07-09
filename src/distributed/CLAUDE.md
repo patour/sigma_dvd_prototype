@@ -1,6 +1,6 @@
 # `src/distributed/` — distributed DDM solver
 
-> Root `CLAUDE.md` already covers the file map, the context-lifecycle skeleton, and the long list of distributed pitfalls (Dirichlet RHS in transient, partial Cholesky, Ray globals, save-before-release, island detection with caps, etc.). This file is the deeper internals reference: numerics, near/far decomposition, heatmap pipeline, CLI surface.
+> Root `CLAUDE.md` already covers the file map, context-lifecycle skeleton, distributed pitfalls (Dirichlet RHS, partial Cholesky, Ray globals, save-before-release, island detection, Phase-A/B features). This file is the deeper internals reference: numerics, phase-folded RHS, symbolic reuse, interface solver, retiling, streaming assembly, near/far decomposition, heatmap pipeline, CLI surface.
 
 ## Numerics & matrix structure
 
@@ -13,7 +13,7 @@
 
 ## Topology context
 
-`DistributedTopologyContext` is immutable, computed once on first `prepare()` / `prepare_transient()`, cached on `solver._topology`. Both DC and transient contexts share it.
+`DistributedTopologyContext` is immutable, computed once on first `prepare()` / `prepare_transient()`, cached on `solver._topology`. Both DC and transient contexts share it. Island detection results are cached here (A7 — computed once, not re-run for transient prepare).
 
 ```
 solver.prepare()  ─┐
@@ -36,6 +36,67 @@ ctx.refactor()    # rebuilds coordinator LU from saved S_global
 
 `save()` must run **before** `release()` because release clears `S_global`. After `load()`, both `refactor()` (coordinator) and `factor()` (workers) are required before the next solve.
 
+## A2 — Phase-folded RHS (step columns)
+
+`VectorizedCurrentSources` sources are periodic (smoothing retains period, folds delay). With `use_step_columns=True` (default), the coordinator probes workers via `get_period_info()` then calls `precompute_step_columns(t_start, dt, m)` once before the loop. Workers build a `(n_active_nodes, m)` float64 table `C` (Fortran order, port-first); per step `k`, the worker gathers column `C[:, (k + phase0) % m]` instead of calling `evaluate_at_time`.
+
+**Tiers (auto-selected by `get_period_info` probe):**
+1. **Single period** — one table of `m = round(P/dt)` columns. Build via smoothed-grid direct scatter when sources are already smoothed (build ≈ free); else vectorized `evaluate_at_times(t_grid)`; else scalar loop fallback.
+2. **Multi-period** — per-group tables, summed per step.
+3. **Aperiodic or table exceeds `max_table_mb`** — chunked window (`W ≈ 512` steps), streamed; still hoists segment search from inner loop.
+
+**Invalidation rule**: `_step_cols` is cleared by `init_vectorized_sources`, `smooth_sources`, and `use_smoothed_sources`. Call `precompute_step_columns` after any of these, not before.
+
+**Equivalence tolerance**: column gather vs direct `evaluate_at_time` ≤ 1e-9 mA (fp-modulo roundoff from `t % P`). End-to-end transient results equal to flag-off ≤ 1e-12 V.
+
+Near/far mask (`_current_node_mask`) is applied post-gather, so the same `C` table serves all decomposition victims without rebuilding.
+
+## A4 — Symbolic and assembly-pattern reuse
+
+**Tile symbolic reuse**: `_compute_schur_partial` caches the CHOLMOD symbolic object (`_symbolic_ii`) from the DC factor. Transient factor (`A_ii = G_ii + C_coeff·diag(c)`) shares `G_ii`'s sparsity pattern, so only a numeric refactor is needed. If the pattern check fails (e.g., after retiling a context that was saved pre-split), falls back to full re-analyze — correct but slower. Also benefits `refactor()` after `load()`.
+
+**Interface assembly-pattern reuse**: `assemble_schur_complement_system` caches its COO/CSR index arrays on the `DistributedTopologyContext`. Subsequent calls (transient prepare, refactor) substitute values into the cached pattern without re-computing sparsity structure.
+
+## A5 — Smoothed-VCS disk cache
+
+Cache path: `<pkl_dir>/vcs_tile_<id>_smoothed_<hash>.pkl` where `hash` covers `(time_step, t_start, t_end, compact_threshold, SMOOTHING_CODE_VERSION)`.
+
+**Invalidation rule**: bump `SMOOTHING_CODE_VERSION` (integer constant in `tile_worker_td.py`) whenever smoothing logic changes. The old hash no longer matches, so all tiles silently rebuild on next run. The raw VCS cache (separate file, no version suffix) is not affected.
+
+`preprocess_sources(smooth='auto')` skips smoothing when `time_step` ≤ the smallest PWL segment (no aliasing risk). Always pass `smooth=False` when running the equivalence suite to keep source inputs identical on both sides.
+
+## B1 — Balanced retiling
+
+`retile.py` runs inside `DistributedNetlistParser.parse_and_dump()`. Tiles with `n_interior > max_interior` are recursively bisected by node coordinates (`_parse_node_xy` from `tile_parsing.py`).
+
+- Parent `(x, y)` yields sub-tiles with 3-tuple IDs `(x, y, k)`.
+- `_tile_id_str(tile_id)` converts any-length tuple to `'_'`-joined slug for filenames, VCS cache paths, and log messages.
+- `_try_axis_split` sweeps coordinate-value transition points only (O(distinct_coord_values), not O(n)); tiles with identical coordinates are left unsplit with a warning.
+- `split_tile(tile_data, max_interior, alpha=0.5)` is the public entry in `retile.py`; `alpha` controls balance vs. cut-cost trade-off. `parser._apply_tile_splits()` calls it for each oversized tile.
+- `create_distributed_model(..., tiles_per_worker='auto')` packs tiles into `PackedTileWorker` groups when tile count exceeds actor budget.
+
+**Exactness**: DC/QS exact. Transient FP noise ≤ 2e-14 V for one-level bisections (BRCM-class); up to ~60 nV (BE) / ~6 µV (TR) for very aggressive four-level splits — below integration-method truncation error.
+
+## B2 — Iterative interface solve
+
+`interface_iterative.py`: `InterfaceCGSolver` implements CG on the SPD global Schur `S_global` with block-Jacobi preconditioner (per-tile diagonal `S_i` blocks). `auto_select_interface_solver(n_interface)` returns `'direct'` when `n_interface < AUTO_CG_N_INTERFACE_THRESHOLD` (200,000) and estimated factor memory is within budget; else `'cg'`.
+
+Override via `model.settings['interface_solver'] = 'direct'|'cg'|'auto'` or YAML config. The resolved mode is stored as `ctx._interface_solver_mode` and propagated through `save()`/`load()`. Adjoint code checks `_interface_solver_mode` before choosing the solve path.
+
+Warm-start from previous step's `v_gamma` (transient changes slowly → typically few iterations/step on smooth waveforms).
+
+## B3 — Streaming Schur assembly
+
+`streaming_assembly=False` (default): assemble `S_global` fully in memory before factoring — straightforward, requires full `n_interface² × density` RAM.
+
+`streaming_assembly=True`: workers cache `S_i` via `factor_and_cache_schur()` and return it as COO shards via `get_schur_coo_shards(n_shards, tile_index_map)` (first call uses a two-pass index-only/data-only protocol: `get_schur_coo_indices_only` + `get_schur_data_flat`); coordinator accumulates into a pre-allocated CSR using the A4 cached assembly pattern, freeing each shard immediately. Peak memory is proportional to one tile's shard, not the sum of all `S_i`.
+
+`streaming_assembly='auto'`: switches to streaming when the estimated `S_i` peak exceeds `STREAMING_ASSEMBLY_AUTO_BYTES` (default 512 MB). Override via `model.settings['streaming_assembly_auto_bytes']`.
+
+**Constraint**: `streaming_assembly=True` is incompatible with assembling `S_global` for `interface_solver='cg'` (CG uses `S_global` explicitly in the non-tilewise-matvec mode). When `interface_solver='cg'` with tilewise matvec, `S_global` assembly can be skipped entirely.
+
+The transient path reuses the B3 `factor_transient_and_cache_schur()` code path for the streaming DC-factor structure.
+
 ## Near/far decomposition (`decomposition.py`)
 
 Spatially partitions the solve so far-field current sources are folded into a static contribution and only near-field sources are stepped.
@@ -45,7 +106,9 @@ Spatially partitions the solve so far-field current sources are folded into a st
 - `extract_instance_locations_from_peaks(...)` — bridge from quasi-static peaks to instance coords
 - `analyze_distributed_decomposition(...)` — diagnostic / validation helper
 
-Tile-side: `TileWorker.set_current_node_mask(mask)` + `build_node_mask_for_window(x0, x1, y0, y1, inside=True)` enable spatially-filtered transient solves. Mask is applied in both `evaluate_and_get_reduced_rhs` (QS) and `get_transient_reduced_rhs` (transient) **after** `evaluate_at_time(t)`. The transient factorization (`A = G + α·C`) is current-independent and reused across masked solves.
+Tile-side: `TileWorker.set_current_node_mask(mask)` + `build_node_mask_for_window(x0, x1, y0, y1, inside=True)` enable spatially-filtered transient solves. Mask is applied post-column-gather (A2), so the same phase table `C` serves all victims. The transient factorization (`A = G + α·C`) is current-independent and reused across masked solves.
+
+**A6**: victim waveforms are now captured during the Phase 2b main sweep via `_PeakTrackingMixin.get_tracked_waveforms`; the redundant Phase-3 all-sources transient in `decomposition.py` is eliminated.
 
 ## Heatmap pipeline (`heatmap.py`)
 
@@ -62,30 +125,32 @@ Root mentions the high-level pipeline; here are the building blocks:
 
 `prebin_tile` is intentionally stateless and uses lazy imports so it pickles cleanly to Ray workers. Current heatmaps skip layers with no current sources (all-zero bin check) — upper metals typically have none. For binning, filter out-of-range with `valid_mask`, never `np.clip` (clamping corrupts edge bin values).
 
-## CLI (`python -m distributed`, `cli.py`)
+## CLI (`sigma-dvd` / `python -m distributed`, `cli.py`)
 
 Subcommands: `parse`, `solve`, `run`, `decompose`. Important flags:
 
 ```bash
-python -m distributed solve <pkl_dir> \
+sigma-dvd solve <pkl_dir> \
     --backend {local,ray} \
     --mode {dc,quasi-static,transient} \
     --t-end 10ns --dt 100ps --n-points 11 \
+    --max-interior 400000 \
+    --tiles-per-worker auto \
     --plot [--plot-layers M0,M1] [--max-stripes 2000] \
     --config solver.yaml \
     --verbose
 ```
 
-YAML config supports per-role solver settings (coordinator vs tile workers) — see `_apply_yaml_role_configs`. CLI also supports file logging (`_setup_logging`, `_add_file_logging`) and writes a top-K worst IR-drop report via the shared `reports.topk_irdrop.generate_topk_report`.
+YAML config supports per-role solver settings (coordinator vs tile workers) — see `_apply_yaml_role_configs`. `interface_solver`, `streaming_assembly`, `use_step_columns`, `max_table_mb`, CHOLMOD knobs are all settable via YAML. CLI also supports file logging (`_setup_logging`, `_add_file_logging`) and writes a top-K worst IR-drop report via the shared `reports.topk_irdrop.generate_topk_report`.
 
 ## Backends (`backend.py`)
 
 Both implement the `ComputeBackend` ABC:
 
-- `LocalBackend` — in-process; useful for tests and small models
-- `RayBackend` — multi-process via Ray; workers are `TileWorker` actors
+- `LocalBackend` — in-process; useful for tests and small models; supports `PackedTileWorker` (tiles_per_worker > 1)
+- `RayBackend` — multi-process via Ray; workers are `TileWorker` actors; `PackedTileWorkerActor` routes batched calls
 
-Backend is selected by `create_distributed_model(metadata, backend='local'|'ray')` or by `load_distributed_partitions(path, backend=...)`. Module-level globals (CHOLMOD settings, regularization) do NOT propagate to Ray workers — `TileWorker.configure(settings)` is called once during `create_distributed_model` to push them through. CHOLMOD knobs (`use_cholmod`, `cholmod_mode`, `cholmod_ordering`, `cholmod_use_long`) are propagated automatically via the settings dict.
+Backend is selected by `create_distributed_model(metadata, backend='local'|'ray')` or by `load_distributed_partitions(path, backend=...)`. Module-level globals (CHOLMOD settings, regularization) do NOT propagate to Ray workers — `TileWorker.configure(settings)` is called once during `create_distributed_model` to push them through. CHOLMOD knobs (`use_cholmod`, `cholmod_mode`, `cholmod_ordering`, `cholmod_use_long`) are propagated automatically via the settings dict. `RayBackend` also sets `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS` per actor via `runtime_env` from `threads_per_worker`.
 
 ## Tile parsing (`tile_parsing.py`)
 
@@ -103,11 +168,11 @@ Unit constants (`R_TO_KOHM`, `C_TO_FF`, `I_TO_MA`) are duplicated here from `par
 
 `TileWorker` is composed via mixins to keep each file under ~800 lines:
 
-- `_TimeDomainMixin` (`tile_worker_td.py`) — VCS init, transient factor/RHS/recovery, current-node masking
+- `_TimeDomainMixin` (`tile_worker_td.py`) — VCS init, smooth/cache, `precompute_step_columns`, transient factor/RHS/recovery, current-node masking
 - `_PeakTrackingMixin` (`tile_worker_peak.py`) — peak init, dict/array update, accessors, fused recover+peak
 - `_AdjointWorkerMixin` (`tile_worker_adjoint.py`) — terminal/step RHS, lambda recovery, contribution accumulation
 
-`tile_worker.py` re-exports all `tile_parsing.py` symbols for backward compat.
+`tile_worker.py` re-exports all `tile_parsing.py` symbols for backward compat. The module docstring describes math delegation to `pgmath` (not `solver/coupled_system.py` — that is a shim).
 
 ## Solver mixins
 
@@ -141,10 +206,21 @@ Net filtering happens at parse time (`PowerGridMetaData` set by the distributed 
 - `tests/distributed/test_time_domain*.py` — quasi-static + transient validation
 - `tests/distributed/test_adjoint_integration.py` — adjoint sensitivity validation
 - `tests/distributed/test_distributed_cli.py` — CLI surface
+- `tests/validation/test_equivalence.py` — flat-vs-distributed equivalence gate (marker `validation`)
 - Integration: `*_integration.py` files (mark `@pytest.mark.integration`)
 
 `tests/distributed/test_time_domain.py::_build_two_tile_distributed_model` is the standard fixture for minimal 2-tile models with optional cap edges.
 
-## Benchmark snapshot
+## Benchmark snapshot (netlist_sampled, post Phase A–B)
 
-`netlist_sampled` benchmark: Ray with 9 workers ≈ 2.7× total speedup; `factor_tiles` dominates the prepare phase.
+Measured on `netlist_sampled` (Ray, 9 workers, 100 steps, BE). Baseline captured in `scripts/benchmark/baselines/perf_netlist_sampled.json`.
+
+| Metric | Pre-refactor (BRCM-scale estimate) | Post-refactor (netlist_sampled measured) |
+|--------|-----------------------------------|------------------------------------------|
+| Transient loop total | –31% vs pre-A baseline | loop_total ≈ 5.1 s (100 steps) |
+| Transient prepare | –70% vs pre-A baseline | trans_prepare ≈ 1.1 s |
+| Smoothing (first run) | –98% cached (A5) | smooth ≈ 0.17 s first run / ~seconds cached |
+| DC prepare | –12% vs pre-A baseline | dc_prepare ≈ 0.79 s |
+| Per-step RHS | A2 step-cols: ~1164× on periodic waveforms | rhs ≈ 28 ms/step |
+
+All 68/68 notebook regression metrics within tolerance. BRCM re-measurement pending bundle access (no BRCM netlist on this host).

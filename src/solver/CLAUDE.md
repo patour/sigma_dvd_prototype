@@ -1,6 +1,8 @@
-# `src/solver/` — flat / hierarchical / coupled / tiled solvers
+# `src/solver/` — flat / hierarchical / coupled / tiled solvers (validation oracles)
 
-> Root `CLAUDE.md` covers conventions, units, and lists distributed pitfalls. This file is the API reference for the in-process solver hierarchy.
+> These solvers are **validation reference paths** — exact flat-LU and iterative Schur baselines used to verify the distributed DDM solver. The distributed DDM path (see `src/distributed/`) is the primary production solver for large PDNs. Root `CLAUDE.md` covers conventions, units, and distributed pitfalls. This file is the API reference for the in-process solver hierarchy.
+>
+> `solver/coupled_system.py` and `solver/interface_assembly.py` are now **re-export shims** — all math has moved to `src/pgmath/`. Import from `pgmath` directly in new code; the shims exist for backward compat only.
 
 ## Mode comparison
 

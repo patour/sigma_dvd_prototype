@@ -306,7 +306,37 @@ fold near/far decomposition into a single forward solve, instead of re-running t
 
 ---
 
-## 7. Implementation sequencing
+## 7. Status tracker — landed fixes vs BRCM projection
+
+> **Measurement note**: BRCM netlist (`brcm_transient.log`, 30.67 M nodes, 36 tiles, 10 K steps @ 5 ps) is **not available on this host**. netlist_sampled deltas are measured; BRCM projections use the plan arithmetic from the baseline data. BRCM re-measurement is pending bundle access.
+
+| Fix # | Description | Commit | Branch | netlist_sampled measured delta | BRCM projected saving | Status |
+|--------|------------|--------|--------|-------------------------------|----------------------|--------|
+| 1 | `bincount` scatter (Fix 2) + hoist DC constant (Fix 1) | `f72bd88` (A1) | distributed-10x | loop_total –31% vs pre-A baseline | ~10,000–14,000 s (array exchange + bincount) | **Landed** |
+| 2 | Phase-folded RHS precompute (`use_step_columns`, Fix 3 Tier 1) | `7fb92bc` (A2) | distributed-10x | rhs/step ≈ 28 ms vs ~276 ms pre-A (10×); loop –31% accumulated with Fix 1 | ~29,000 s (3.3 s/step → ~0.4 s/step straggler backsolve) | **Landed** |
+| 3 | CHOLMOD supernodal guardrails + per-actor threads (A3) | `d79ca2c` | distributed-10x | dc_prepare –12% | ~3,275 s (supernodal trap removal) + ~1,000 s tile factors | **Landed** |
+| 4 | Symbolic + assembly-pattern reuse DC→transient (A4) | `0f4ac88` | distributed-10x | trans_prepare –70% vs pre-A baseline | ~1,500–1,800 s of 2,459 s transient prepare | **Landed** |
+| 5 | Smoothed-VCS disk cache + `smooth='auto'` (A5) | `0f4ac88` | distributed-10x | smooth ≈ 0.17 s first / ~seconds cached (vs ~150 s uncached on netlist_sampled) | ~2,700 s first run → ~30 s cached | **Landed** |
+| 6 | Island detection cache (A7) | `0f4ac88` | distributed-10x | detect_interface_islands shared across DC+transient prepare | ~400 s/run (404 s × 2 in baseline) | **Landed** |
+| 7 | Decomposition: capture victims in main sweep, drop Phase-3 redo (A6) | `df256df` | distributed-10x | N/A (decompose workflow; not in per-step perf JSON) | ~12 h/decompose run eliminated | **Landed** |
+| 8 | Balanced retiling via parser-side tile splitting (B1) | `80fae0c` | distributed-10x | not yet measured separately on netlist_sampled | ~1,240 s tile factor wall → ~300 s; straggler backsolve –70% | **Landed** |
+| 9 | Iterative interface CG + block-Jacobi preconditioner (B2) | `e66f65a` | distributed-10x | auto selects direct for n_interface < 200K on netlist_sampled | removes ~200 GB coordinator memory wall at 1 M+ interface nodes | **Landed** |
+| 10 | Streaming Schur shard assembly (B3) | `9818280` + `10695f5` | distributed-10x | peak 3.5 MB vs 15.6 MB bulk on netlist_sampled; auto at 512 MB+ estimated S_i peak | caps coordinator peak memory; enables 100M+ node PDNs | **Landed** |
+
+### Cumulative projected BRCM end-to-end (from plan arithmetic)
+
+| Phase complete | Projected total | vs baseline 68,900 s |
+|---|---|---|
+| Baseline | 68,900 s | 1× |
+| After Phase A (Fixes 1–7) | ~16,900 s | ~4.1× |
+| + B1 balanced tiling (Fix 8) | ~7,400–9,400 s | ~7.3–9.3× |
+| + threaded interface backsolve | ≤ 7,400 s | ~10× target |
+
+BRCM re-measurement pending. Proxies: netlist_sampled perf JSON in
+`scripts/benchmark/baselines/perf_netlist_sampled.json`; per-op microbenchmarks recorded in Phase V
+equivalence suite (`tests/validation/test_equivalence.py`, marker `validation`).
+
+### Original implementation sequencing (for reference)
 
 | # | Change | Risk | Payoff | Depends on |
 |---|---|---|---|---|
@@ -320,8 +350,7 @@ fold near/far decomposition into a single forward solve, instead of re-running t
 | 7 | Density-aware tile partitioning | med | factor wall + RHS straggler | — |
 | 8 | Phase 3: avoid duplicate full transient | med | ~12 h/decompose run | Fix 3 |
 
-Recommended first PR: **probe → Fixes 1+2 → Fix 3 Tier 1 behind a flag with the equivalence test**.
-That attacks the 54–70 % of the 12–17 h loop with a change that is exact by construction.
+All items above are now landed on branch `distributed-10x`.
 
 ---
 

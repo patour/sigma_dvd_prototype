@@ -397,7 +397,7 @@ class _PeakTrackingMixin:
                 pa_i[mask_i] = drops_i[mask_i]
                 pt_i[mask_i] = t
 
-            # Tracked waveforms (typically 0-10 nodes)
+            # Tracked waveforms (number set by caller via init_peak_tracking)
             if self._tracked_node_indices:
                 for node, idx in self._tracked_node_indices.items():
                     if idx < n_ports:
@@ -493,7 +493,7 @@ class _PeakTrackingMixin:
                 pa_i[mask_i] = drops_i[mask_i]
                 pt_i[mask_i] = t
 
-            # Tracked waveforms (typically 0-10 nodes)
+            # Tracked waveforms (number set by caller via init_peak_tracking)
             if self._tracked_node_indices:
                 for node, idx in self._tracked_node_indices.items():
                     if idx < n_ports:

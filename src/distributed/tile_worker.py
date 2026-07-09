@@ -1,7 +1,7 @@
 """Tile worker for distributed DDM solver.
 
 Thin stateful actor that holds per-tile BlockMatrixSystem and delegates
-ALL math to solver/coupled_system.py building blocks.
+ALL math to pgmath (block_system, schur, factor) building blocks.
 
 Parsing helpers (TileData, _parse_tile_ckt, etc.) live in tile_parsing.py
 and are re-exported here for backward compatibility.
