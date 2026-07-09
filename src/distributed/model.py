@@ -184,21 +184,36 @@ def load_distributed_partitions(
 # ---------------------------------------------------------------------------
 
 def _init_backend(
-    backend: str,
+    backend,
     backend_kwargs: Dict[str, Any],
     threads_per_worker: Any = None,
 ) -> ComputeBackend:
     """Create and initialize compute backend.
 
     Args:
-        backend: 'local' or 'ray'
+        backend: 'local', 'ray', 'task', or a ComputeBackend instance.
+            When a ComputeBackend instance is passed directly (e.g.,
+            TaskDataflowBackend()), it is initialized with backend_kwargs
+            and returned as-is. This supports B4 task-based backends
+            without modifying the existing string-dispatch path.
         backend_kwargs: Extra kwargs passed to backend.initialize()
         threads_per_worker: For RayBackend — number of BLAS/OMP threads per
             actor process (int), or 'auto' for ``max(1, cpus // n_workers)``.
             Has no effect on LocalBackend (workers run in-process).
     """
+    # Accept ComputeBackend instances directly (B4 task backend and future backends)
+    if isinstance(backend, ComputeBackend):
+        be = backend
+        if not be._initialized:
+            be.initialize(**backend_kwargs)
+        return be
     if backend == 'ray':
         be = RayBackend(threads_per_worker=threads_per_worker)
+        be.initialize(**backend_kwargs)
+    elif backend == 'task':
+        # B4: task-based dataflow backend (alias for TaskDataflowBackend())
+        from .task_backend import TaskDataflowBackend
+        be = TaskDataflowBackend(threads_per_worker=threads_per_worker)
         be.initialize(**backend_kwargs)
     else:
         be = LocalBackend()

@@ -22,6 +22,7 @@ from .backend import (
     PackedTileWorkerActor,
     VirtualWorkerHandle,
 )
+from .task_backend import TaskDataflowBackend
 from .parser import (
     DistributedNetlistParser,
     TileConfig,
@@ -82,6 +83,7 @@ __all__ = [
     "ComputeBackend",
     "LocalBackend",
     "RayBackend",
+    "TaskDataflowBackend",
     "PackedTileWorker",
     "PackedTileWorkerActor",
     "VirtualWorkerHandle",
