@@ -66,7 +66,7 @@ python -m distributed solve ./pkl_dir --mode transient --t-end 10ns --dt 100ps -
 
 ### Distributed solver (`src/distributed/`)
 
-DDM is structurally exact — matches the flat solver to floating-point precision (0 µV diff on validation). Files use a mixin pattern to keep each under ~800 lines:
+DDM is algebraically exact for any partition (DC, QS, and transient). The flat-vs-distributed comparison gives 0 µV diff. For B1 split-vs-unsplit: DC/QS exact; transient FP noise grows with the number of interface (cut) nodes — ≤ 2e-14 V for one-level bisections (max_interior ≈ 8000 on a 135K-node PDN), up to ~60 nV (BE) / ~6 µV (TR) for very aggressive four-level splits. Files use a mixin pattern to keep each under ~800 lines:
 
 | File | Role |
 |------|------|
@@ -135,6 +135,9 @@ Heatmap pipeline: `get_layer_metadata()` → `build_global_bin_spec()` → `preb
 - **Circular imports inside `distributed/`**: `parser.py` cannot import `model.py` at module level (model.py imports from parser.py). Use lazy imports. `result_factorization.py` uses `TYPE_CHECKING` for `result.py`/`model.py`.
 - **`_parse_current_source_line`** (in `parser/current_sources.py`) returns Amperes; conversion to mA happens post-parse in `_prepare_instance_source` (`current_sources.py`, also `parallel.py`). Multiply by `I_TO_MA` if you call it directly.
 - **`_parse_node_xy`**: shared utility in `distributed/tile_parsing.py` for `'1000_2000_M1'` → `(1000.0, 2000.0)`. Don't reimplement.
+- **B1 split exactness**: DC/QS exact; BE/TR FP noise ≤ 2e-14 V for one-level bisection. For aggressive splits (4+ levels), noise can reach ~60 nV (BE) / ~6 µV (TR). This is below integration-method truncation error and is NOT a physics bug.
+- **B1 unsplit tiles warning**: `_apply_tile_splits` emits `WARNING ... n_tiles_over_max ... tiles still have n_interior > max_interior` when a tile cannot be bisected (all candidates cut coupling caps, or all interior nodes share identical coordinates). These tiles remain oversized and factor slowly but are otherwise correct.
+- **B1 candidate sweep**: `_try_axis_split` uses a transition-point sweep (not exhaustive O(n)) for large tiles (n > 1000). Only tries cut positions at coordinate-value transitions; O(distinct_coord_values) not O(n). Cheap 0-interior pre-check skipped if uncoordinated interior nodes exist.
 
 ### Visualization / heatmaps
 - **Current heatmaps**: only render layers that actually have current sources (all-zero check). Upper metals typically have none.

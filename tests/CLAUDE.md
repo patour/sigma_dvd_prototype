@@ -63,7 +63,7 @@ These are the load-bearing checks — break one and you almost certainly broke p
 - `R_eff(u, v) == R_eff(v, u)` and triangle inequality (within tolerance)
 - Partition balance ratio ≤ 3.5; pads excluded from partitions
 - Floating-island detection removes disconnected components
-- DDM exactness: distributed solver matches flat to floating-point precision (0 µV diff) on validation graphs
+- DDM exactness: distributed solver matches flat to floating-point precision (0 µV diff) on validation graphs; B1 split-vs-unsplit is DC-exact and transient machine-precision (≤ 2e-14 V) for one-level bisections; `TestForcedSplitNetlistSampled` (integration) guards this
 - PWL smoothing equivalence: `TestSparseVsDenseEquivalence`, `TestSparseSmoothingFunctions` in `tests/analysis/test_pwl_smoothing.py`
 
 ## Naming

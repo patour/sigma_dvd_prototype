@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
-from .backend import ComputeBackend, LocalBackend, RayBackend
+from .backend import ComputeBackend, LocalBackend, PackedTileWorker, RayBackend, VirtualWorkerHandle
 from .parser import PackageData, PowerGridMetaData, TileConfig
 from .tile_worker import TileData, TileWorker
 
@@ -51,16 +51,16 @@ class DistributedPowerGridModel:
 
     # Interface topology
     interface_nodes: Set[str]  # All boundary + promoted M13 nodes
-    tile_boundary_nodes: Dict[Tuple[int, int], List[str]]  # per-tile boundary lists
-    tile_interior_counts: Dict[Tuple[int, int], int]  # per-tile interior node counts
+    tile_boundary_nodes: Dict[tuple, List[str]]  # per-tile boundary lists
+    tile_interior_counts: Dict[tuple, int]  # per-tile interior node counts
 
     # Package / voltage sources
     package_data: PackageData
 
     # Metadata
     metadata: PowerGridMetaData
-    island_stats: Dict[Tuple[int, int], Dict] = field(default_factory=dict)
-    tile_kept_nonlargest_iface: Dict[Tuple[int, int], List[str]] = field(default_factory=dict)
+    island_stats: Dict[tuple, Dict] = field(default_factory=dict)
+    tile_kept_nonlargest_iface: Dict[tuple, List[str]] = field(default_factory=dict)
 
     # Per-role solver backend configs (None = use module globals)
     coordinator_solver_config: Optional[SolverBackendConfig] = field(default=None, repr=False)
@@ -69,8 +69,14 @@ class DistributedPowerGridModel:
     # Internal: temp pkl_dir created by legacy shim (cleaned up in shutdown)
     _owns_pkl_dir: Optional[str] = field(default=None, repr=False)
 
+    # pkl_dir: the output directory that contains tile_*.pkl files for this model.
+    # Used as the default VCS cache directory in preprocess_sources() so that
+    # sub-tile VCS caches land in the PKL output dir, NOT in the source netlist dir.
+    # None when created from legacy paths that don't have an output dir concept.
+    pkl_dir: Optional[str] = field(default=None, repr=False)
+
     @property
-    def tile_ids(self) -> List[Tuple[int, int]]:
+    def tile_ids(self) -> List[tuple]:
         return [tc.tile_id for tc in self.metadata.tile_configs]
 
     @property
@@ -194,10 +200,10 @@ def _init_backend(
 def _collect_setup_results(
     setup_results: List[Dict[str, Any]],
 ) -> Tuple[
-    Dict[Tuple[int, int], List[str]],
-    Dict[Tuple[int, int], int],
-    Dict[Tuple[int, int], Dict],
-    Dict[Tuple[int, int], List[str]],
+    Dict[tuple, List[str]],
+    Dict[tuple, int],
+    Dict[tuple, Dict],
+    Dict[tuple, List[str]],
 ]:
     """Parse worker setup results into per-tile dicts.
 
@@ -205,10 +211,10 @@ def _collect_setup_results(
         (tile_boundary_nodes, tile_interior_counts, island_stats,
          tile_kept_nonlargest_iface)
     """
-    tile_boundary_nodes: Dict[Tuple[int, int], List[str]] = {}
-    tile_interior_counts: Dict[Tuple[int, int], int] = {}
-    island_stats: Dict[Tuple[int, int], Dict] = {}
-    tile_kept_nonlargest_iface: Dict[Tuple[int, int], List[str]] = {}
+    tile_boundary_nodes: Dict[tuple, List[str]] = {}
+    tile_interior_counts: Dict[tuple, int] = {}
+    island_stats: Dict[tuple, Dict] = {}
+    tile_kept_nonlargest_iface: Dict[tuple, List[str]] = {}
 
     for result in setup_results:
         tid = tuple(result['tile_id'])
@@ -229,11 +235,12 @@ def create_distributed_model(
     threads_per_worker: Any = None,
     use_step_columns: bool = True,
     max_table_mb: float = 512.0,
+    tiles_per_worker: Any = None,
     # Legacy kwargs (deprecated -- use ParsedTileBundle instead)
     use_pkl: bool = False,
     pkl_dir: Optional[str] = None,
     boundary_nodes: Optional[Set[str]] = None,
-    tile_data_dict: Optional[Dict[Tuple[int, int], TileData]] = None,
+    tile_data_dict: Optional[Dict[tuple, TileData]] = None,
     **backend_kwargs,
 ) -> DistributedPowerGridModel:
     """Factory function for distributed model (analogous to create_model_from_pdn).
@@ -261,6 +268,14 @@ def create_distributed_model(
             int: explicit count.  'auto': ``max(1, cpus // n_workers)``.
             ``None`` (default): no env override, system defaults apply.
             No effect on LocalBackend (workers are in-process).
+        tiles_per_worker: V1 in-process packing (LocalBackend only).
+            int: pack every *k* tile workers into one :class:`PackedTileWorker`.
+            ``'auto'``: ``ceil(n_tiles / cpu_count())``.
+            ``None`` (default): no packing; one actor per tile.
+            Ignored silently for RayBackend (not yet implemented).
+            The coordinator ``call_all`` API is unchanged — the workers list
+            still has one entry per tile, backed by
+            :class:`VirtualWorkerHandle` proxies when packing is active.
         use_step_columns: Enable A2 phase-folded step-column table on all
             workers (default True).  Propagated via ``TileWorker.configure``
             so Ray workers receive the setting even though module globals don't
@@ -311,6 +326,7 @@ def create_distributed_model(
         threads_per_worker=threads_per_worker,
         use_step_columns=use_step_columns,
         max_table_mb=max_table_mb,
+        tiles_per_worker=tiles_per_worker,
         **backend_kwargs,
     )
     if _legacy_temp_dir:
@@ -323,7 +339,7 @@ def _adapt_legacy_args(
     use_pkl: bool,
     pkl_dir: Optional[str],
     boundary_nodes: Optional[Set[str]],
-    tile_data_dict: Optional[Dict[Tuple[int, int], TileData]],
+    tile_data_dict: Optional[Dict[tuple, TileData]],
 ) -> ParsedTileBundle:
     """Convert legacy create_distributed_model() kwargs into a ParsedTileBundle.
 
@@ -389,7 +405,7 @@ def _adapt_legacy_args(
 def _dump_tile_data_to_dir(
     metadata: PowerGridMetaData,
     boundary_nodes: Set[str],
-    tile_data_dict: Dict[Tuple[int, int], TileData],
+    tile_data_dict: Dict[tuple, TileData],
     output_dir: str,
 ) -> None:
     """Dump TileData + metadata to a directory (helper for legacy shim)."""
@@ -397,8 +413,8 @@ def _dump_tile_data_to_dir(
     out.mkdir(parents=True, exist_ok=True)
 
     for tid, td in tile_data_dict.items():
-        x, y = tid
-        with open(out / f'tile_{x}_{y}.pkl', 'wb') as f:
+        tile_str = '_'.join(str(c) for c in tid)
+        with open(out / f'tile_{tile_str}.pkl', 'wb') as f:
             pickle.dump(td, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     with open(out / 'metadata.pkl', 'wb') as f:
@@ -406,6 +422,115 @@ def _dump_tile_data_to_dir(
             {'metadata': metadata, 'boundary_nodes': boundary_nodes},
             f, protocol=pickle.HIGHEST_PROTOCOL,
         )
+
+
+def _resolve_k(tiles_per_worker: Any, n: int) -> int:
+    """Convert tiles_per_worker ('auto' or int) to a k value >= 1."""
+    import math
+    import os
+
+    if tiles_per_worker == 'auto':
+        k = math.ceil(n / max(1, os.cpu_count() or 1))
+    else:
+        k = int(tiles_per_worker)
+    return max(1, k)
+
+
+def _pack_workers(workers: List[Any], tiles_per_worker: Any, be: ComputeBackend) -> List[Any]:
+    """Wrap *workers* into :class:`PackedTileWorker` groups (LocalBackend).
+
+    Returns a list of :class:`VirtualWorkerHandle` objects of the same length
+    as *workers*, one per tile, pointing into the appropriate packed actor.
+
+    For :class:`RayBackend`, packing is handled upstream in
+    :func:`_create_packed_ray_workers` before ``setup_from_pkl``.  Calling this
+    function with a ``RayBackend`` is a no-op with a warning.
+    """
+    import math
+
+    if isinstance(be, RayBackend):
+        logger.warning(
+            "tiles_per_worker is a no-op for RayBackend at this stage; "
+            "Ray packing should be applied before setup_from_pkl.",
+        )
+        return workers
+
+    n = len(workers)
+    k = _resolve_k(tiles_per_worker, n)
+
+    if k <= 1:
+        # No-op: k=1 means one tile per actor (same as unpacked)
+        return workers
+
+    handles: List[Any] = []
+    for i in range(0, n, k):
+        batch = workers[i:i + k]
+        packed = PackedTileWorker(batch)
+        handles.extend(packed.handles())
+
+    logger.info(
+        "LocalBackend: packed %d tile workers into %d PackedTileWorker groups "
+        "(tiles_per_worker=%s, k=%d)",
+        n, math.ceil(n / k), tiles_per_worker, k,
+    )
+    return handles
+
+
+def _create_packed_ray_workers(
+    be: 'RayBackend',
+    n_tiles: int,
+    tiles_per_worker: Any,
+) -> Optional[List[Any]]:
+    """Create packed Ray actors for RayBackend when tiles_per_worker > 1.
+
+    Returns a list of :class:`~distributed.backend.VirtualWorkerHandle` objects
+    (one per tile) that route calls through ``PackedTileWorkerActor.call_worker``
+    on the Ray side.  Returns *None* when k <= 1 (no packing needed).
+
+    The caller must have already built *solver_settings* and *setup_args* (one
+    per tile) and must call ``be.call_all(handles, ...)`` for configure and
+    setup_from_pkl AFTER this function returns the handles.
+    """
+    import math
+
+    from distributed.backend import PackedTileWorkerActor, VirtualWorkerHandle
+
+    k = _resolve_k(tiles_per_worker, n_tiles)
+    if k <= 1:
+        return None
+
+    tpw = be._resolve_threads_per_worker(math.ceil(n_tiles / k))
+    RemotePacked = be._ray.remote(PackedTileWorkerActor)
+
+    if tpw is not None:
+        env_vars = {
+            'OMP_NUM_THREADS': str(tpw),
+            'OPENBLAS_NUM_THREADS': str(tpw),
+            'MKL_NUM_THREADS': str(tpw),
+        }
+        def _make(batch_size):
+            return RemotePacked.options(
+                runtime_env={'env_vars': env_vars}
+            ).remote(batch_size)
+    else:
+        def _make(batch_size):
+            return RemotePacked.remote(batch_size)
+
+    handles: List[Any] = []
+    n_packed = 0
+    for i in range(0, n_tiles, k):
+        batch_size = min(k, n_tiles - i)
+        packed_actor = _make(batch_size)
+        n_packed += 1
+        for j in range(batch_size):
+            handles.append(VirtualWorkerHandle(packed_actor, j))
+
+    logger.info(
+        "RayBackend: packed %d tiles into %d Ray actors "
+        "(tiles_per_worker=%s, k=%d, threads_per_worker=%s)",
+        n_tiles, n_packed, tiles_per_worker, k, tpw,
+    )
+    return handles
 
 
 def _create_distributed_model_from_bundle(
@@ -416,6 +541,7 @@ def _create_distributed_model_from_bundle(
     threads_per_worker: Any = None,
     use_step_columns: bool = True,
     max_table_mb: float = 512.0,
+    tiles_per_worker: Any = None,
     **backend_kwargs,
 ) -> DistributedPowerGridModel:
     """Core factory: create model from a ParsedTileBundle.
@@ -442,11 +568,9 @@ def _create_distributed_model_from_bundle(
         f"{len(metadata.package_data.die_attachment_nodes)} die attachment)"
     )
 
-    # 3. Create workers
-    workers = be.create_actors(TileWorker, metadata.tile_configs)
-
-    # 3b. Propagate solver settings to workers
+    # 3. Build solver settings and per-tile setup args (needed for all paths)
     from pgmath.block_system import get_partial_factor_reg_resistance
+    from pgmath.factor import SolverBackendConfig as _SBC
 
     # Build worker settings dict: use explicit config or snapshot globals.
     # partial_factor_reg_ohms is a separate concern (block_system.py),
@@ -454,32 +578,56 @@ def _create_distributed_model_from_bundle(
     # A2 step-column settings (use_step_columns, max_table_mb) must be
     # propagated here so Ray workers receive them — module-level globals
     # do NOT propagate to Ray worker processes.
-    from pgmath.factor import SolverBackendConfig as _SBC
     solver_settings = {
         **(worker_solver_config or _SBC.from_globals()).to_dict(),
         'partial_factor_reg_ohms': get_partial_factor_reg_resistance(),
         'use_step_columns': use_step_columns,
         'max_table_mb': max_table_mb,
     }
-    be.call_all(workers, 'configure', [(solver_settings,)] * len(workers))
 
-    # 4. Setup workers: each loads its own .pkl and builds block system
     pkl_path = Path(bundle.pkl_dir)
     setup_args = [
-        (str(pkl_path / f'tile_{tc.tile_id[0]}_{tc.tile_id[1]}.pkl'), interface_nodes)
+        (str(pkl_path / f'tile_{"_".join(str(c) for c in tc.tile_id)}.pkl'), interface_nodes)
         for tc in metadata.tile_configs
     ]
-    setup_results = be.call_all(workers, 'setup_from_pkl', setup_args)
+
+    n_tiles = len(metadata.tile_configs)
+
+    if tiles_per_worker is not None and isinstance(be, RayBackend):
+        # RayBackend packing: create packed Ray actors BEFORE setup_from_pkl
+        # so that n_tiles / k Ray actors are spawned, each owning k in-process
+        # TileWorkers.  VirtualWorkerHandle proxies are used as the workers list;
+        # be.call_all routes each call via PackedTileWorkerActor.call_worker.remote.
+        packed_handles = _create_packed_ray_workers(be, n_tiles, tiles_per_worker)
+        if packed_handles is not None:
+            workers = packed_handles
+        else:
+            # k <= 1: fall back to standard one-actor-per-tile
+            workers = be.create_actors(TileWorker, metadata.tile_configs)
+        # configure + setup route through VirtualWorkerHandle → call_worker.remote
+        be.call_all(workers, 'configure', [(solver_settings,)] * len(workers))
+        setup_results = be.call_all(workers, 'setup_from_pkl', setup_args)
+        tiles_per_worker = None  # Packing done; skip the LocalBackend step below.
+    else:
+        # Standard path: one actor (in-process or Ray) per tile.
+        workers = be.create_actors(TileWorker, metadata.tile_configs)
+        be.call_all(workers, 'configure', [(solver_settings,)] * len(workers))
+        setup_results = be.call_all(workers, 'setup_from_pkl', setup_args)
 
     # 5. Collect results
     (tile_boundary_nodes, tile_interior_counts,
      island_stats, tile_kept_nonlargest_iface) = _collect_setup_results(setup_results)
 
+    # 6. Optional: pack multiple tile workers into one physical actor (LocalBackend)
+    # For RayBackend this was already done above (tiles_per_worker set to None).
+    if tiles_per_worker is not None:
+        workers = _pack_workers(workers, tiles_per_worker, be)
+
     total_interior = sum(tile_interior_counts.values())
     total_boundary = sum(len(v) for v in tile_boundary_nodes.values())
     t_elapsed = time.perf_counter() - t_start
     logger.info(
-        f"Model created in {t_elapsed:.3f}s: {len(workers)} tiles, "
+        f"Model created in {t_elapsed:.3f}s: {len(workers)} tile-worker handles, "
         f"{total_interior} interior nodes, {total_boundary} boundary entries, "
         f"{len(interface_nodes)} interface nodes"
     )
@@ -496,4 +644,5 @@ def _create_distributed_model_from_bundle(
         tile_kept_nonlargest_iface=tile_kept_nonlargest_iface,
         coordinator_solver_config=coordinator_solver_config,
         worker_solver_config=worker_solver_config,
+        pkl_dir=bundle.pkl_dir,
     )

@@ -12,6 +12,109 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Worker packing support (B1 V1: in-process packed workers)
+# ---------------------------------------------------------------------------
+
+class PackedTileWorker:
+    """Owns k TileWorker instances in-process and fans method calls out serially.
+
+    V1 implementation: all k workers live in the same process.  No parallelism
+    is added — the benefit is reducing the number of remote Ray actors when the
+    ``RayBackend`` wraps ``PackedTileWorker`` actors in a future iteration.
+
+    Workers are routed via the paired ``VirtualWorkerHandle`` objects returned
+    by ``handles()``.  The coordinator's ``call_all`` dispatches each handle
+    to the appropriate inner worker transparently.
+    """
+
+    def __init__(self, workers: List[Any]) -> None:
+        self._workers: List[Any] = list(workers)
+
+    def call_worker(self, local_idx: int, method: str, args: Any) -> Any:
+        """Call *method* on the inner worker at *local_idx*.
+
+        *args* follows the same convention as ``call_all``'s ``args_per_actor``
+        elements: a tuple/list (unpacked as ``*args``), a dict (unpacked as
+        ``**kwargs``), ``None`` (no arguments), or a single non-iterable value
+        (passed as a positional argument).
+        """
+        w = self._workers[local_idx]
+        if args is None:
+            return getattr(w, method)()
+        elif isinstance(args, dict):
+            return getattr(w, method)(**args)
+        elif isinstance(args, (tuple, list)):
+            return getattr(w, method)(*args)
+        else:
+            return getattr(w, method)(args)
+
+    def handles(self) -> List['VirtualWorkerHandle']:
+        """Return one :class:`VirtualWorkerHandle` per inner worker."""
+        return [VirtualWorkerHandle(self, i) for i in range(len(self._workers))]
+
+    def __len__(self) -> int:
+        return len(self._workers)
+
+
+class VirtualWorkerHandle:
+    """A logical tile-worker slot inside a :class:`PackedTileWorker`.
+
+    The coordinator's ``workers`` list may contain these proxies instead of
+    bare actor references when ``tiles_per_worker`` packing is enabled.
+    :meth:`~LocalBackend.call_all` detects them and routes each call to the
+    correct inner worker.
+    """
+
+    def __init__(self, packed: PackedTileWorker, local_idx: int) -> None:
+        self._packed = packed
+        self._local_idx = local_idx
+
+    @property
+    def physical_actor(self) -> PackedTileWorker:
+        return self._packed
+
+    @property
+    def local_idx(self) -> int:
+        return self._local_idx
+
+
+class PackedTileWorkerActor:
+    """k TileWorker instances owned in-process, designed for use as a Ray actor.
+
+    Each ``PackedTileWorkerActor`` holds *k* uninitialized ``TileWorker`` instances.
+    Calls are routed to the correct inner worker via
+    ``call_worker(local_idx, method, args)``.
+
+    Typical RayBackend usage::
+
+        RemotePacked = ray.remote(PackedTileWorkerActor)
+        actor = RemotePacked.remote(batch_size)
+        # Then route all per-tile calls via VirtualWorkerHandle → call_worker.remote
+
+    This reduces n Ray actors to ceil(n/k), cutting actor-creation and
+    scheduling overhead when tile count >> core count.
+    """
+
+    def __init__(self, k: int) -> None:
+        # Lazy import: avoids circular import in Ray worker processes where
+        # distributed/__init__.py imports from backend.py.
+        from distributed.tile_worker import TileWorker  # noqa: PLC0415
+        self._pack = PackedTileWorker([TileWorker() for _ in range(k)])
+
+    def call_worker(self, local_idx: int, method: str, args: Any) -> Any:
+        """Route *method* to the inner TileWorker at *local_idx*."""
+        return self._pack.call_worker(local_idx, method, args)
+
+    def size(self) -> int:
+        """Number of inner TileWorker instances."""
+        return len(self._pack)
+
+
+# ---------------------------------------------------------------------------
+# Abstract base
+# ---------------------------------------------------------------------------
+
 class ComputeBackend(ABC):
     """Abstract compute backend for local vs distributed execution."""
 
@@ -101,16 +204,17 @@ class LocalBackend(ComputeBackend):
     def call_all(self, actors: List[Any], method: str, args_per_actor: Optional[List] = None) -> List[Any]:
         results = []
         for i, actor in enumerate(actors):
-            if args_per_actor is not None:
-                args = args_per_actor[i]
-                if isinstance(args, dict):
-                    result = getattr(actor, method)(**args)
-                elif isinstance(args, (tuple, list)):
-                    result = getattr(actor, method)(*args)
-                else:
-                    result = getattr(actor, method)(args)
-            else:
+            args = args_per_actor[i] if args_per_actor is not None else None
+            if isinstance(actor, VirtualWorkerHandle):
+                result = actor.physical_actor.call_worker(actor.local_idx, method, args)
+            elif args is None:
                 result = getattr(actor, method)()
+            elif isinstance(args, dict):
+                result = getattr(actor, method)(**args)
+            elif isinstance(args, (tuple, list)):
+                result = getattr(actor, method)(*args)
+            else:
+                result = getattr(actor, method)(args)
             results.append(result)
         return results
 
@@ -218,16 +322,22 @@ class RayBackend(ComputeBackend):
         ray = self._ray
         futures = []
         for i, actor in enumerate(actors):
-            if args_per_actor is not None:
-                args = args_per_actor[i]
-                if isinstance(args, dict):
-                    future = getattr(actor, method).remote(**args)
-                elif isinstance(args, (tuple, list)):
-                    future = getattr(actor, method).remote(*args)
-                else:
-                    future = getattr(actor, method).remote(args)
-            else:
+            args = args_per_actor[i] if args_per_actor is not None else None
+            if isinstance(actor, VirtualWorkerHandle):
+                # Physical actor is a ray.remote(PackedTileWorkerActor) handle.
+                # Route via call_worker.remote(local_idx, method, args).
+                # PackedTileWorkerActor.call_worker handles arg unpacking internally.
+                future = actor.physical_actor.call_worker.remote(
+                    actor.local_idx, method, args
+                )
+            elif args is None:
                 future = getattr(actor, method).remote()
+            elif isinstance(args, dict):
+                future = getattr(actor, method).remote(**args)
+            elif isinstance(args, (tuple, list)):
+                future = getattr(actor, method).remote(*args)
+            else:
+                future = getattr(actor, method).remote(args)
             futures.append(future)
         return ray.get(futures)
 

@@ -88,7 +88,10 @@ def cmd_parse(args: argparse.Namespace) -> None:
         t0 = time.perf_counter()
 
         parser = DistributedNetlistParser(args.netlist_dir, net_filter=args.net)
-        out_path, _bundle = parser.parse_and_dump(out_dir, backend=args.backend)
+        max_interior = getattr(args, 'max_interior', None)
+        out_path, _bundle = parser.parse_and_dump(
+            out_dir, backend=args.backend, max_interior=max_interior,
+        )
 
         elapsed = time.perf_counter() - t0
         logger.info(f"parse_and_dump completed in {elapsed:.3f}s -> {out_path}")
@@ -118,6 +121,9 @@ def cmd_solve(args: argparse.Namespace) -> None:
         worker_solver_config=getattr(args, 'worker_solver_config', None),
         threads_per_worker=_parse_threads_per_worker(
             getattr(args, 'threads_per_worker', None)
+        ),
+        tiles_per_worker=_parse_threads_per_worker(
+            getattr(args, 'tiles_per_worker', None)
         ),
     )
 
@@ -335,7 +341,10 @@ def cmd_run(args: argparse.Namespace) -> None:
     t0 = time.perf_counter()
     parser = DistributedNetlistParser(args.netlist_dir, net_filter=args.net)
     pkl_dir = args.pkl_dir or str(Path(args.netlist_dir) / 'distributed_pkl')
-    _out_path, bundle = parser.parse_and_dump(pkl_dir, backend=args.backend)
+    max_interior = getattr(args, 'max_interior', None)
+    _out_path, bundle = parser.parse_and_dump(
+        pkl_dir, backend=args.backend, max_interior=max_interior,
+    )
     t_parse = time.perf_counter() - t0
     logger.info(f"Parse phase: {t_parse:.3f}s")
 
@@ -348,6 +357,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         worker_solver_config=getattr(args, 'worker_solver_config', None),
         threads_per_worker=_parse_threads_per_worker(
             getattr(args, 'threads_per_worker', None)
+        ),
+        tiles_per_worker=_parse_threads_per_worker(
+            getattr(args, 'tiles_per_worker', None)
         ),
     )
     t_model = time.perf_counter() - t0
@@ -562,6 +574,18 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
             'Threads per Ray worker actor for BLAS/OMP (int or "auto"). '
             '"auto" = max(1, cpus // n_workers). '
             'No effect on local backend. (default: system default)'
+        ),
+    )
+
+    # Worker packing (B1: useful when retiling produces tile count >> cores)
+    parser.add_argument(
+        '--tiles-per-worker', type=str, default=None,
+        dest='tiles_per_worker',
+        help=(
+            'Pack multiple tiles per worker (int or "auto"). '
+            '"auto" = ceil(n_tiles / n_cpus). '
+            'Reduces actor overhead when --max-interior splitting produces '
+            'many sub-tiles. (default: one tile per worker)'
         ),
     )
 
@@ -1128,6 +1152,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_parse.add_argument('--backend', '-b', default='local', choices=['local', 'ray'],
                          help='Compute backend (default: local)')
     p_parse.add_argument('--output', '-o', default=None, help='Output directory for .pkl files')
+    p_parse.add_argument(
+        '--max-interior', type=int, default=None, dest='max_interior',
+        help=(
+            'B1 balanced retiling: split tiles with more than this many interior '
+            'nodes via recursive geometric bisection.  None = disabled (default).'
+        ),
+    )
     p_parse.add_argument('--verbose', '-v', action='store_true')
     p_parse.set_defaults(func=cmd_parse)
 
@@ -1159,6 +1190,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help='Compute backend (default: local)')
     p_run.add_argument('--pkl-dir', default=None,
                        help='Directory for intermediate .pkl files (default: <netlist_dir>/distributed_pkl)')
+    p_run.add_argument(
+        '--max-interior', type=int, default=None, dest='max_interior',
+        help=(
+            'B1 balanced retiling: split tiles with more than this many interior '
+            'nodes via recursive geometric bisection.  None = disabled (default).'
+        ),
+    )
     p_run.add_argument('--output', '-o', default=None, help='Output directory for results')
     p_run.add_argument('--verbose', '-v', action='store_true')
     p_run.add_argument('--plot', action='store_true', help='Generate heatmaps after solve')

@@ -533,7 +533,7 @@ def compute_boundary_ownership(
         ``model.metadata.tile_configs``.
     """
     # Map tile_id -> config index
-    tile_id_to_idx: Dict[Tuple[int, int], int] = {}
+    tile_id_to_idx: Dict[tuple, int] = {}
     for i, tc in enumerate(model.metadata.tile_configs):
         tile_id_to_idx[tc.tile_id] = i
 

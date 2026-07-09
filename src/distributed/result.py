@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class TileSolveResult:
     """Per-tile solve result. Voltages for one tile (interior + boundary)."""
 
-    tile_id: Tuple[int, int]
+    tile_id: tuple  # 2-tuple (x, y) for original tiles; 3-tuple (x, y, k) for sub-tiles
     voltages: Dict[str, float]  # All nodes in this tile (interior + boundary)
     n_interior: int
     n_boundary: int
@@ -39,7 +39,7 @@ class DistributedSolveResult:
     (e.g., for validation against flat solver). IR-drop is computed on demand.
     """
 
-    tile_results: Dict[Tuple[int, int], TileSolveResult]
+    tile_results: Dict[tuple, TileSolveResult]
     interface_voltages: Dict[str, float]  # Boundary node voltages (from interface solve)
     pad_voltages: Dict[str, float]  # Dirichlet node voltages (= vdd)
     nominal_voltage: float
@@ -73,7 +73,7 @@ class DistributedTopologyContext:
 
     interface_nodes: List[str]
     interface_node_to_idx: Dict[str, int]
-    tile_index_maps: Dict[Tuple[int, int], np.ndarray]
+    tile_index_maps: Dict[tuple, np.ndarray]
     rhs_dirichlet_G: np.ndarray  # G-only Dirichlet RHS (used by both DC and transient)
     G_package_uu: Optional[sp.csr_matrix]  # Resistive package matrix (unknown-unknown)
     removed_interface_nodes: Set[str] = field(default_factory=set)
@@ -160,7 +160,7 @@ class DistributedSolverContext:
         interface_nodes: Optional[List[str]] = None,
         interface_node_to_idx: Optional[Dict[str, int]] = None,
         rhs_dirichlet_interface: Optional[np.ndarray] = None,
-        tile_index_maps: Optional[Dict[Tuple[int, int], np.ndarray]] = None,
+        tile_index_maps: Optional[Dict[tuple, np.ndarray]] = None,
         removed_interface_nodes: Optional[Set[str]] = None,
         timings: Optional[Dict[str, Any]] = None,
     ):
@@ -175,7 +175,7 @@ class DistributedSolverContext:
         self._interface_nodes: Optional[List[str]] = interface_nodes
         self._interface_node_to_idx: Optional[Dict[str, int]] = interface_node_to_idx
         self._rhs_dirichlet_interface: Optional[np.ndarray] = rhs_dirichlet_interface
-        self._tile_index_maps: Optional[Dict[Tuple[int, int], np.ndarray]] = tile_index_maps
+        self._tile_index_maps: Optional[Dict[tuple, np.ndarray]] = tile_index_maps
         self._removed_interface_nodes: Set[str] = (
             removed_interface_nodes if removed_interface_nodes is not None else set()
         )
@@ -321,7 +321,7 @@ class DistributedSolverContext:
         return None
 
     @property
-    def tile_index_maps(self) -> Dict[Tuple[int, int], np.ndarray]:
+    def tile_index_maps(self) -> Dict[tuple, np.ndarray]:
         if self._tile_index_maps is not None:
             return self._tile_index_maps
         if self.topology is not None:
@@ -351,7 +351,7 @@ class DistributedSmoothedSources:
     t_end: float
     smoothed: bool
     n_tiles: int
-    per_tile_stats: Dict[Tuple[int, int], Dict[str, int]]
+    per_tile_stats: Dict[tuple, Dict[str, int]]
     timings: Dict[str, float] = field(default_factory=dict)
     """Internal phase timings populated by ``preprocess_sources()`` in ``solver_td.py``.
 
@@ -376,7 +376,7 @@ class DistributedSmoothedSources:
     built or use_step_columns=False.
     """
 
-    per_tile_smooth_time_s: Dict[Tuple[int, int], float] = field(default_factory=dict)
+    per_tile_smooth_time_s: Dict[tuple, float] = field(default_factory=dict)
     """A5: Per-tile PWL-smoothing wall-clock time in seconds.
 
     Keys are tile_ids ``(x, y)``.  Populated only when ``smooth=True`` or
@@ -451,7 +451,7 @@ class DistributedTransientContext:
         interface_nodes: Optional[List[str]] = None,
         interface_node_to_idx: Optional[Dict[str, int]] = None,
         rhs_dirichlet_interface: Optional[np.ndarray] = None,
-        tile_index_maps: Optional[Dict[Tuple[int, int], np.ndarray]] = None,
+        tile_index_maps: Optional[Dict[tuple, np.ndarray]] = None,
         dt_scaled: Optional[float] = None,
         integration_method: Optional[str] = None,
         has_capacitance: bool = False,
@@ -490,7 +490,7 @@ class DistributedTransientContext:
         self._interface_lu: Optional[Callable] = interface_lu
         self._interface_nodes: Optional[List[str]] = interface_nodes
         self._interface_node_to_idx: Optional[Dict[str, int]] = interface_node_to_idx
-        self._tile_index_maps: Optional[Dict[Tuple[int, int], np.ndarray]] = tile_index_maps
+        self._tile_index_maps: Optional[Dict[tuple, np.ndarray]] = tile_index_maps
         self._removed_interface_nodes: Set[str] = (
             removed_interface_nodes if removed_interface_nodes is not None else set()
         )
@@ -659,7 +659,7 @@ class DistributedTransientContext:
         self._rhs_dirichlet_G = value
 
     @property
-    def tile_index_maps(self) -> Dict[Tuple[int, int], np.ndarray]:
+    def tile_index_maps(self) -> Dict[tuple, np.ndarray]:
         if self._tile_index_maps is not None:
             return self._tile_index_maps
         if self.topology is not None:
@@ -725,7 +725,7 @@ class DistributedQuasiStaticResult:
     _model: Optional[Any] = field(default=None, repr=False)
     _peak_collected: bool = field(default=False, repr=False)
     _peak_cache: Optional[
-        Dict[Tuple[int, int], Dict[str, Tuple[float, float]]]
+        Dict[tuple, Dict[str, Tuple[float, float]]]
     ] = field(default=None, repr=False)
 
     def _collect_peaks(self) -> None:
@@ -753,7 +753,7 @@ class DistributedQuasiStaticResult:
 
     def as_per_tile(
         self,
-    ) -> Dict[Tuple[int, int], Dict[str, Tuple[float, float]]]:
+    ) -> Dict[tuple, Dict[str, Tuple[float, float]]]:
         """Collect peak data from workers.
 
         Returns:

@@ -481,7 +481,12 @@ class DistributedNetlistParser:
             package_cap_edges=package_cap_edges,
         )
 
-    def parse_and_dump(self, output_dir: str, backend: str = 'local'):
+    def parse_and_dump(
+        self,
+        output_dir: str,
+        backend: str = 'local',
+        max_interior: Optional[int] = None,
+    ):
         """Parse netlist and dump per-tile TileData + metadata as .pkl files.
 
         Creates output_dir (if needed) with:
@@ -496,6 +501,9 @@ class DistributedNetlistParser:
         Args:
             output_dir: Directory to write .pkl files into
             backend: Compute backend for tile parsing ('local' or 'ray')
+            max_interior: If set, tiles with more than this many interior
+                nodes are recursively bisected and replaced by sub-tile pkls
+                (B1 balanced retiling).  ``None`` disables splitting (default).
 
         Returns:
             Tuple of (Path to output_dir, ParsedTileBundle).
@@ -526,10 +534,24 @@ class DistributedNetlistParser:
         ]
         worker_results = be.map_func(parse_and_dump_tile, args_list)
 
-        # 3. Merge per-tile boundary nodes + die_attachment_net_map
-        per_tile_boundaries = [r['boundary_nodes'] for r in worker_results]
-        shared_boundary_nodes = compute_shared_boundary_nodes(per_tile_boundaries)
-
+        # 3. Merge per-tile die_attachment_net_map from UNSPLIT worker results.
+        #
+        # ORDERING RATIONALE (die-node ordering fix):
+        # _apply_tile_splits reads metadata.package_data.die_attachment_nodes to
+        # build parent_port_nodes for pre_clean.  On the common path the initial
+        # _parse_package already populates die_attachment_nodes via a pattern scan
+        # of all_resistor_nodes.  However, when that initial parse yields empty
+        # pad_nodes (fallback path), die_attachment_nodes is only populated after
+        # the worker-validated die_net_map is merged and package is re-parsed.
+        # If _apply_tile_splits ran first (old ordering), die_attachment_nodes would
+        # be empty at split time, causing pre_clean to drop cap-stub components that
+        # are connected only through die-attachment nodes — producing up to 173 µV
+        # (BE) / 509 µV (TR) transient divergence.
+        #
+        # Fix: resolve die_attachment_nodes BEFORE calling _apply_tile_splits.
+        # The die_attachment_net_map is collected from the UNSPLIT worker results
+        # (original tiles know which die nodes they contain; sub-tiles inherit
+        # subsets of that map in _apply_tile_splits itself).
         merged_die_map: Dict[str, str] = {}
         for r in worker_results:
             merged_die_map.update(r.get('die_attachment_net_map', {}))
@@ -545,10 +567,26 @@ class DistributedNetlistParser:
                 metadata.net_name, metadata.vdd, die_net_map=merged_die_map,
             )
 
-        # Set die_attachment_net_map and narrow die_attachment_nodes once
+        # Set die_attachment_net_map and narrow die_attachment_nodes once.
+        # After this point die_attachment_nodes is fully resolved and safe to use
+        # in _apply_tile_splits → _pre_clean_tile_data.
         if merged_die_map:
             metadata.package_data.die_attachment_net_map = merged_die_map
             metadata.package_data.die_attachment_nodes = set(merged_die_map.keys())
+
+        # 2b. Optional: split oversized tiles (B1 balanced retiling).
+        # Runs AFTER die_attachment_nodes is resolved so _pre_clean_tile_data
+        # receives the full port_nodes set (pre_split_shared_bnd | die_attachment_nodes).
+        if max_interior is not None:
+            worker_results, metadata = self._apply_tile_splits(
+                worker_results, metadata, out_path, max_interior, pickle,
+            )
+
+        # 3b. Recompute per-tile boundary nodes from POST-split worker_results.
+        # (Pre-split results were used above for die-map collection; post-split
+        # results reflect any new sub-tile boundary nodes introduced by the cut.)
+        per_tile_boundaries = [r['boundary_nodes'] for r in worker_results]
+        shared_boundary_nodes = compute_shared_boundary_nodes(per_tile_boundaries)
 
         if not metadata.package_data.pad_nodes:
             logger.warning(
@@ -568,11 +606,11 @@ class DistributedNetlistParser:
         )
 
         for r in worker_results:
-            x, y = r['tile_id']
+            tile_str = '_'.join(str(c) for c in r['tile_id'])
             logger.info(
-                f"Tile ({x},{y}): {r['n_nodes']} nodes, "
+                f"Tile ({tile_str}): {r['n_nodes']} nodes, "
                 f"{r['n_edges']} edges, "
-                f"{r['n_currents']} current sources -> tile_{x}_{y}.pkl"
+                f"{r['n_currents']} current sources -> tile_{tile_str}.pkl"
             )
 
         # 4. Dump metadata + shared boundary nodes
@@ -599,6 +637,202 @@ class DistributedNetlistParser:
         )
 
         return out_path, bundle
+
+    # ------------------------------------------------------------------
+    # B1: tile-splitting helper
+    # ------------------------------------------------------------------
+
+    def _apply_tile_splits(
+        self,
+        worker_results: List[Dict],
+        metadata: 'PowerGridMetaData',
+        out_path: 'Path',
+        max_interior: int,
+        pickle_mod,
+    ):
+        """Split oversized tiles and update worker_results + metadata in-place.
+
+        For each tile whose interior node count > max_interior:
+        1. Loads the already-written pkl from *out_path*.
+        2. Pre-cleans the parent tile: runs island detection using the parent's
+           global interface nodes (boundary_nodes shared across tiles in the
+           pre-split partition).  This removes genuinely floating nodes before
+           splitting so sub-tiles never need aggressive island removal.
+        3. Calls :func:`retile.split_tile` recursively.
+        4. Writes sub-tile pkls, deletes the original.
+        5. Replaces the tile's entry in worker_results and metadata.tile_configs.
+
+        Sub-tiles carry ``TileData.pre_cleaned=True``, which causes
+        :meth:`TileWorker._remove_floating_islands` to use a threshold of 1
+        (instead of 5) so that nodes legitimately connected through cut
+        interface nodes are never wrongly discarded.
+
+        Args:
+            worker_results: List returned by ``be.map_func``.  Modified in-place.
+            metadata: PowerGridMetaData with tile_configs list. Modified in-place.
+            out_path: Directory where pkls live.
+            max_interior: Threshold for splitting.
+            pickle_mod: The ``pickle`` module (passed in to avoid re-import).
+
+        Returns:
+            ``(new_worker_results, metadata)`` tuple.
+        """
+        from .retile import split_tile, _pre_clean_tile_data
+
+        # Build lookup: tile_id → TileConfig
+        tc_by_id = {tc.tile_id: tc for tc in metadata.tile_configs}
+
+        # Compute the pre-split shared boundary nodes for parent-level island
+        # detection.  These are the nodes shared between tiles in the CURRENT
+        # (unsplit) partition — they serve as port_nodes when running island
+        # detection on a parent tile before it is bisected.
+        pre_split_shared_bnd = compute_shared_boundary_nodes(
+            [r['boundary_nodes'] for r in worker_results]
+        )
+
+        new_results: List[Dict] = []
+        new_tile_configs: List[TileConfig] = []
+        # Track tiles that remain over max_interior after all split attempts
+        # (coupling caps on every candidate, identical coordinates, etc.).
+        n_tiles_over_max: int = 0
+
+        for r in worker_results:
+            tid = r['tile_id']
+            n_interior = r['n_nodes'] - len(r['boundary_nodes'])
+
+            if n_interior <= max_interior:
+                new_results.append(r)
+                new_tile_configs.append(tc_by_id[tid])
+                continue
+
+            # Need to split this tile
+            tile_str = '_'.join(str(c) for c in tid)
+            orig_pkl = out_path / f'tile_{tile_str}.pkl'
+
+            try:
+                with open(orig_pkl, 'rb') as f:
+                    tile_data = pickle_mod.load(f)
+            except Exception as exc:
+                logger.warning(
+                    "Tile %s: cannot load pkl for splitting (%s); keeping unsplit "
+                    "(n_interior=%d > max_interior=%d)",
+                    tile_str, exc, n_interior, max_interior,
+                )
+                new_results.append(r)
+                new_tile_configs.append(tc_by_id[tid])
+                n_tiles_over_max += 1
+                continue
+
+            # --- B1 blocker fix: parent-level island detection ----------------
+            # Run island detection on the PARENT tile before splitting.  Port
+            # nodes must EXACTLY MATCH what create_distributed_model passes to
+            # TileWorker._remove_floating_islands for the unsplit path:
+            #   interface_nodes = shared_boundary_nodes | die_attachment_nodes
+            # (same threshold=5 used by TileWorker.MIN_INTERFACE_NODES_KEEP).
+            #
+            # CRITICAL: the original bug used only
+            #   tile_data.boundary_nodes & pre_split_shared_bnd
+            # which omitted die_attachment_nodes.  Die nodes are in
+            # tile_data.all_nodes but NOT in tile_data.boundary_nodes (they are
+            # not marked '*' in the .ckt file), so intersecting with
+            # boundary_nodes was silently dropping them.  This caused 434 nodes
+            # to be removed from the split path that the unsplit path kept,
+            # changing ~1710 fF of grounded capacitance and producing 173 µV
+            # (BE) / 509 µV (TR) transient divergence.
+            #
+            # After this call tile_data.pre_cleaned=True.  That flag propagates
+            # to all sub-tiles via split_tile/_build_halves, signalling
+            # TileWorker to use threshold=1 rather than 5 when sub-tile island
+            # detection runs.  A cut may create small components (< 5 port nodes)
+            # that are still legitimate — they were connected in the parent and
+            # remain connected through at least one cut-interface port node.
+            die_attachment_nodes = metadata.package_data.die_attachment_nodes
+            parent_port_nodes = pre_split_shared_bnd | die_attachment_nodes
+            # _pre_clean_tile_data further intersects with tile_data.all_nodes
+            _pre_clean_tile_data(tile_data, parent_port_nodes)
+
+            sub_tiles = split_tile(tile_data, max_interior)
+
+            if len(sub_tiles) == 1:
+                # Split refused (e.g. coupling caps block all candidates)
+                new_results.append(r)
+                new_tile_configs.append(tc_by_id[tid])
+                n_tiles_over_max += 1
+                continue
+
+            # Delete original pkl; write sub-tile pkls
+            orig_pkl.unlink(missing_ok=True)
+            tc = tc_by_id[tid]
+            parent_die_map = r.get('die_attachment_net_map', {})
+
+            for sub in sub_tiles:
+                sub_str = '_'.join(str(c) for c in sub.tile_id)
+                sub_pkl = out_path / f'tile_{sub_str}.pkl'
+                with open(sub_pkl, 'wb') as f:
+                    pickle_mod.dump(sub, f, protocol=pickle_mod.HIGHEST_PROTOCOL)
+
+                # Die attachment nodes: only those that ended up in this sub-tile
+                sub_die_map = {
+                    n: v for n, v in parent_die_map.items()
+                    if n in sub.all_nodes
+                }
+
+                sub_interior = len(sub.all_nodes) - len(sub.boundary_nodes)
+                # Check if the sub-tile is still over max_interior (recursive
+                # bisection may have exhausted all valid cut points for its
+                # own branch before reaching the threshold).
+                if sub_interior > max_interior:
+                    n_tiles_over_max += 1
+                logger.info(
+                    "Tile %s → sub-tile %s: %d nodes (%d interior), "
+                    "%d edges, %d current sources -> tile_%s.pkl",
+                    tile_str, sub_str,
+                    len(sub.all_nodes), sub_interior,
+                    len(sub.resistive_edges),
+                    len(sub.current_injections),
+                    sub_str,
+                )
+
+                new_results.append({
+                    'tile_id': sub.tile_id,
+                    'boundary_nodes': sub.boundary_nodes,
+                    'die_attachment_net_map': sub_die_map,
+                    'n_nodes': len(sub.all_nodes),
+                    'n_edges': len(sub.resistive_edges),
+                    'n_currents': len(sub.current_injections),
+                    'n_cap_edges': len(sub.capacitive_edges),
+                })
+                # Sub-tile TileConfig re-uses parent ckt/nd/instance paths.
+                # VCS init loads from instance_path but filters to sub-tile nodes.
+                new_tile_configs.append(TileConfig(
+                    tile_id=sub.tile_id,
+                    ckt_path=tc.ckt_path,
+                    nd_path=tc.nd_path,
+                    instance_path=tc.instance_path,
+                    net_filter=tc.net_filter,
+                ))
+
+        # Major 4: Surface oversized-tile count loudly so it is never silent.
+        if n_tiles_over_max > 0:
+            logger.warning(
+                "_apply_tile_splits: %d tile(s) still have n_interior > max_interior=%d "
+                "after all split attempts. These tiles remain oversized and will take "
+                "longer to factor. Possible causes: (a) all split candidates cross a "
+                "coupling cap, (b) all interior nodes share identical (x, y) coordinates "
+                "(name-based bisection not yet implemented). To suppress this warning, "
+                "increase max_interior or remove coupling caps between distant nodes.",
+                n_tiles_over_max, max_interior,
+            )
+        else:
+            logger.info(
+                "_apply_tile_splits: all %d tile(s) split successfully "
+                "(0 tiles over max_interior=%d remaining).",
+                len([r for r in new_results if r['n_nodes'] - len(r['boundary_nodes']) > 0]),
+                max_interior,
+            )
+
+        metadata.tile_configs = new_tile_configs
+        return new_results, metadata
 
     def collect_boundary_nodes(self, tile_configs: List[TileConfig]) -> Set[str]:
         """Pre-scan all tile .ckt files to collect *all* ``*``-prefixed boundary nodes.

@@ -18,6 +18,9 @@ from .backend import (
     ComputeBackend,
     LocalBackend,
     RayBackend,
+    PackedTileWorker,
+    PackedTileWorkerActor,
+    VirtualWorkerHandle,
 )
 from .parser import (
     DistributedNetlistParser,
@@ -42,6 +45,9 @@ from .solver import (
 )
 from .decomposition import (
     analyze_distributed_decomposition,
+)
+from .retile import (
+    split_tile,
 )
 from .heatmap import (
     LayerBinSpec,
@@ -76,6 +82,9 @@ __all__ = [
     "ComputeBackend",
     "LocalBackend",
     "RayBackend",
+    "PackedTileWorker",
+    "PackedTileWorkerActor",
+    "VirtualWorkerHandle",
     # Parser
     "DistributedNetlistParser",
     "TileConfig",
@@ -97,6 +106,8 @@ __all__ = [
     "SolverBackendConfig",
     # Decomposition
     "analyze_distributed_decomposition",
+    # Retiling (B1)
+    "split_tile",
     # Heatmap
     "LayerBinSpec",
     "GlobalBinSpec",

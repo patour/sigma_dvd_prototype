@@ -257,19 +257,40 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
             'kept_nonlargest_iface': sorted(kept_nonlargest_iface),
         }
 
-    # Minimum interface node count for a non-largest component to be kept.
+    # Minimum interface node count for a non-largest component to be kept
+    # in a tile that has NOT been pre-cleaned at the parent level.
     MIN_INTERFACE_NODES_KEEP = 5
+    # Threshold used for sub-tiles created by split_tile().  After parent-level
+    # pre-cleaning, any component connected to ≥1 port node is legitimate
+    # (it was part of the parent's clean network and became visually
+    # disconnected only because of the geometric cut).
+    MIN_INTERFACE_NODES_KEEP_PRE_CLEANED = 1
 
     def _remove_floating_islands(self, port_nodes: Set[str]) -> Tuple[int, Set[str]]:
         """Remove disconnected components that are isolated fragments.
 
-        Keeps the largest component plus any component with enough interface
-        node connectivity (>= MIN_INTERFACE_NODES_KEEP interface nodes) to
-        be a legitimate cross-tile strip.
+        For ordinary tiles (``tile_data.pre_cleaned=False``) keeps the
+        largest component plus any component with ``>= MIN_INTERFACE_NODES_KEEP``
+        interface nodes.
+
+        For sub-tiles produced by :func:`~distributed.retile.split_tile`
+        (``tile_data.pre_cleaned=True``) uses ``MIN_INTERFACE_NODES_KEEP_PRE_CLEANED=1``
+        instead: genuinely floating nodes were already removed at the parent
+        level before the split, so any component that connects to even one
+        port node (including cut-interface nodes) is legitimate and must not
+        be dropped.
 
         Returns:
             Tuple of (islands_removed, kept_nonlargest_iface).
         """
+        # Select threshold: pre-cleaned sub-tiles use threshold=1.
+        is_pre_cleaned = getattr(self._tile_data, 'pre_cleaned', False)
+        min_iface_keep = (
+            self.MIN_INTERFACE_NODES_KEEP_PRE_CLEANED
+            if is_pre_cleaned
+            else self.MIN_INTERFACE_NODES_KEEP
+        )
+
         # Build adjacency
         adj: Dict[str, Set[str]] = {}
         for u, v, g in self._tile_data.resistive_edges:
@@ -308,7 +329,7 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
             if comp is largest:
                 continue
             n_interface = len(comp & port_nodes)
-            if n_interface >= self.MIN_INTERFACE_NODES_KEEP:
+            if n_interface >= min_iface_keep:
                 kept_nonlargest_iface.update(comp & port_nodes)
                 continue
             removed_nodes.update(comp)

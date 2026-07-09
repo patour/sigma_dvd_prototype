@@ -46,6 +46,7 @@ class TileData:
     boundary_nodes: Set[str]
     current_injections: Dict[str, float]  # node -> current in mA (positive = sink)
     capacitive_edges: List[Tuple[str, str, float]] = field(default_factory=list)  # (u, v, C_fF)
+    pre_cleaned: bool = False  # True if island detection ran at parent level before splitting
 
 
 def _is_gzip_file(path: str) -> bool:
@@ -510,8 +511,8 @@ def parse_and_dump_tile(
     import pickle
     from pathlib import Path
     tile_data = parse_tile_with_instances(ckt_path, nd_path, net_filter, tile_id, instance_path)
-    x, y = tile_id
-    pkl_path = Path(output_dir) / f'tile_{x}_{y}.pkl'
+    tile_str = '_'.join(str(c) for c in tile_id)
+    pkl_path = Path(output_dir) / f'tile_{tile_str}.pkl'
     with open(pkl_path, 'wb') as f:
         pickle.dump(tile_data, f, protocol=pickle.HIGHEST_PROTOCOL)
     die_found = {}
