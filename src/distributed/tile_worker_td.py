@@ -1289,6 +1289,33 @@ class _TimeDomainMixin(_PeakTrackingMixin):
 
         return S_A, list(bs.port_nodes), self._total_cap, stats
 
+    def factor_transient_and_cache_schur(
+        self,
+        dt_scaled: float,
+        method: str = 'be',
+    ) -> Tuple[List[str], float, Dict[str, Any]]:
+        """Factor transient system and cache S_A worker-side without returning it.
+
+        B3 streaming transient path: analogous to ``factor_and_cache_schur``
+        for DC.  The coordinator calls this first (factors all tiles in
+        parallel), then calls ``get_schur_coo_shards`` tile-by-tile to stream
+        the COO shards of S_A.  S_A never crosses the coordinator boundary as
+        a dense matrix.
+
+        Returns:
+            Tuple of (port_list, total_cap_fF, stats) — same as
+            ``factor_transient_system`` minus the dense S_A.
+        """
+        S_A, port_list, total_cap, stats = self.factor_transient_system(
+            dt_scaled=dt_scaled, method=method
+        )
+        # Cache S_A worker-side for subsequent get_schur_coo_shards calls.
+        # Reuses the same _cached_schur slot used by the DC streaming path;
+        # this works because DC and transient prepare() are independent
+        # lifecycle calls and are never interleaved.
+        self._cached_schur = S_A
+        return port_list, total_cap, stats
+
     # --- 4f. Transient reduced RHS ------------------------------------
 
     def get_transient_reduced_rhs(
