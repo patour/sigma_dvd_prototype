@@ -66,6 +66,15 @@ class DistributedPowerGridModel:
     coordinator_solver_config: Optional[SolverBackendConfig] = field(default=None, repr=False)
     worker_solver_config: Optional[SolverBackendConfig] = field(default=None, repr=False)
 
+    # B2: Coordinator-side solver settings dict.
+    # Keys recognised:
+    #   'interface_solver': 'direct' | 'cg' | 'auto' (default 'auto')
+    #   'interface_matvec_mode': 'assembled' | 'tilewise' (default 'assembled')
+    #   'interface_preconditioner': 'block_jacobi' | 'jacobi' | 'none' | 'amg'
+    #   'interface_cg_rtol': float (default 1e-10)
+    # These affect only the coordinator; they are NOT propagated to workers.
+    settings: Dict[str, Any] = field(default_factory=dict, repr=False)
+
     # Internal: temp pkl_dir created by legacy shim (cleaned up in shutdown)
     _owns_pkl_dir: Optional[str] = field(default=None, repr=False)
 

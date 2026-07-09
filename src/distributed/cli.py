@@ -127,6 +127,23 @@ def cmd_solve(args: argparse.Namespace) -> None:
         ),
     )
 
+    # B2: Push interface-solver settings into model.settings (coordinator-side)
+    _iface_solver = getattr(args, 'interface_solver', 'auto')
+    _iface_matvec = getattr(args, 'interface_matvec_mode', 'assembled')
+    _iface_precond = getattr(args, 'interface_preconditioner', 'block_jacobi')
+    _iface_rtol = getattr(args, 'interface_cg_rtol', 1e-12)
+    model.settings.update({
+        'interface_solver': _iface_solver,
+        'interface_matvec_mode': _iface_matvec,
+        'interface_preconditioner': _iface_precond,
+        'interface_cg_rtol': _iface_rtol,
+    })
+    if args.verbose:
+        logger.info(
+            "Interface solver: %s (matvec=%s, precond=%s, rtol=%.2e)",
+            _iface_solver, _iface_matvec, _iface_precond, _iface_rtol,
+        )
+
     try:
         solver = DistributedDDMSolver(model)
 
@@ -362,6 +379,15 @@ def cmd_run(args: argparse.Namespace) -> None:
             getattr(args, 'tiles_per_worker', None)
         ),
     )
+
+    # B2: Push interface-solver settings into model.settings (coordinator-side)
+    model.settings.update({
+        'interface_solver': getattr(args, 'interface_solver', 'auto'),
+        'interface_matvec_mode': getattr(args, 'interface_matvec_mode', 'assembled'),
+        'interface_preconditioner': getattr(args, 'interface_preconditioner', 'block_jacobi'),
+        'interface_cg_rtol': getattr(args, 'interface_cg_rtol', 1e-12),
+    })
+
     t_model = time.perf_counter() - t0
     logger.info(f"Model creation: {t_model:.3f}s")
 
@@ -587,6 +613,50 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
             'Reduces actor overhead when --max-interior splitting produces '
             'many sub-tiles. (default: one tile per worker)'
         ),
+    )
+
+    # B2: Interface solver selection
+    iface_grp = parser.add_argument_group('interface solver (B2)')
+    iface_grp.add_argument(
+        '--interface-solver', type=str, default='auto',
+        choices=['direct', 'cg', 'auto'],
+        dest='interface_solver',
+        help=(
+            'Interface solve method.  '
+            "'direct' = CHOLMD/SuperLU factorization (existing behaviour). "
+            "'cg' = iterative CG (no factor; saves ~100-300 GB at 1M interface nodes). "
+            "'auto' (default) = direct when n_interface < 200K and factor fits "
+            "memory budget; else CG.  'auto' is backwards-compatible (existing "
+            "netlists with small interface systems get 'direct')."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-matvec-mode', type=str, default='assembled',
+        choices=['assembled', 'tilewise'],
+        dest='interface_matvec_mode',
+        help=(
+            'CG matvec mode (only used when --interface-solver=cg or auto selects CG). '
+            "'assembled' = matvec on assembled sparse S_global. "
+            "'tilewise' = sum_i P_i^T S_i P_i x using per-tile dense Schur blocks "
+            "(avoids global assembly entirely; coordinator O(n*k) memory). "
+            "(default: assembled)"
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-preconditioner', type=str, default='block_jacobi',
+        choices=['block_jacobi', 'jacobi', 'none', 'amg'],
+        dest='interface_preconditioner',
+        help=(
+            'CG preconditioner (only used when CG is selected). '
+            "'block_jacobi' (default) = block-diagonal from per-tile Schur submatrices. "
+            "'jacobi' = diagonal of S_global.  'none' = identity.  "
+            "'amg' = algebraic multigrid via pyamg (requires pyamg)."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-cg-rtol', type=float, default=1e-12,
+        dest='interface_cg_rtol',
+        help='CG convergence tolerance (default: 1e-12)',
     )
 
     # Reporting / profiling
@@ -849,6 +919,9 @@ _VALID_SOLVER_YAML_KEYS = frozenset({
     'use_cholmod', 'mode', 'cholmod_mode', 'ordering', 'cholmod_ordering',
     'cholmod_use_long', 'use_long', 'coordinator', 'worker',
     'threads_per_worker',
+    # B2: interface solver settings
+    'interface_solver', 'interface_matvec_mode',
+    'interface_preconditioner', 'interface_cg_rtol',
 })
 _VALID_ROLE_YAML_KEYS = _VALID_SOLVER_YAML_KEYS - {'coordinator', 'worker', 'threads_per_worker'}
 _VALID_DECOMPOSE_TOP_KEYS = frozenset({
@@ -1062,6 +1135,19 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
 
     if args.threads_per_worker is not None:
         logger.info("threads_per_worker: %s", args.threads_per_worker)
+
+    # -- B2: interface_solver (YAML first; CLI flags take precedence) ---------
+    _iface_yaml_keys = (
+        'interface_solver', 'interface_matvec_mode',
+        'interface_preconditioner', 'interface_cg_rtol',
+    )
+    if _raw_config is not None:
+        solver_cfg_iface = _raw_config.get('solver', {})
+        for _k in _iface_yaml_keys:
+            _yaml_val = solver_cfg_iface.get(_k)
+            if _yaml_val is not None and getattr(args, _k, None) in (None, 'auto', 'assembled', 'block_jacobi', 1e-12):
+                # Apply YAML default only when CLI left at argparse default
+                setattr(args, _k, _yaml_val)
 
     return args
 

@@ -3,6 +3,30 @@
 Extracted from result.py to keep file sizes manageable (mixin pattern).
 All functions take the context as the first argument and mutate it in place,
 mirroring the original method bodies exactly.
+
+Interface-solver setting (B2)
+------------------------------
+The ``interface_solver`` setting controls how the global Schur complement
+S_global is solved at the coordinator.  Three values:
+
+  'direct' -- direct CHOLMOD/SuperLU factorization (existing behaviour).
+  'cg'     -- iterative CG via InterfaceCGSolver (removes the factor).
+  'auto'   -- select based on n_interface + estimated factor memory.
+              DEFAULT is 'auto', which resolves to 'direct' for the
+              netlist_sampled benchmark (n_interface ~2-4K << 200K threshold).
+              EXISTING MODELS THEREFORE GET IDENTICAL BEHAVIOUR.
+
+The setting is read from ``model.settings.get('interface_solver', 'auto')``
+(same dict plumbed via TileWorker.configure / YAML / CLI ``--interface-solver``).
+If the model has no settings dict, the default is 'auto'.
+
+Adjoint note (v1)
+-----------------
+analyze_adjoint* uses ctx._interface_lu.  CG mode is compatible for DC
+adjoint because CG provides the same solve-callable interface.  Tilewise
+CG adjoint would need per-tile S_i blocks at adjoint time; that is not
+implemented in v1 -- the assembled CG mode works fine.  The context stores
+``_interface_solver_mode`` so the adjoint code can check if needed.
 """
 
 from __future__ import annotations
@@ -25,6 +49,25 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helper: read interface_solver setting from model (or default 'auto')
+# ---------------------------------------------------------------------------
+
+def _get_interface_solver_setting(model: Optional[Any]) -> str:
+    """Read the interface_solver setting from model.settings (default 'auto').
+
+    The model may or may not have a .settings dict.  Fall back gracefully
+    so that models created before B2 land continue to get 'auto' behaviour
+    (which maps to 'direct' for small interface systems).
+    """
+    if model is None:
+        return 'auto'
+    settings = getattr(model, 'settings', None)
+    if settings is None:
+        return 'auto'
+    return settings.get('interface_solver', 'auto')
 
 
 # ---------------------------------------------------------------------------
@@ -248,16 +291,9 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
                 len(saved),
             )
 
-    # 3. Factor interface system
-    t0 = _time.perf_counter()
-    from pgmath.factor import _factor_conductance_matrix
-
-    interface_lu_result = _factor_conductance_matrix(
-        S_global, verbose=False, config=model.coordinator_solver_config,
-    )
-    timings['factor_interface'] = _time.perf_counter() - t0
-
-    # 4. Build tile index maps (local port indices -> global interface indices)
+    # 3. Build tile index maps (local port indices -> global interface indices).
+    # Must be built BEFORE step 4 (interface solver setup) so that CG tilewise
+    # mode can reference tile_index_maps when constructing InterfaceCGSolver.
     tile_index_maps: Dict[Tuple[int, int], np.ndarray] = {}
     for tid, boundary_list in tile_port_node_lists.items():
         local_to_global = np.array(
@@ -265,6 +301,88 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             dtype=np.int32,
         )
         tile_index_maps[tid] = local_to_global
+
+    # 4. Factor (or set up iterative solver for) interface system.
+    #
+    # B2: The interface_solver setting controls whether a direct CHOLMD/SuperLU
+    # factorization or iterative CG is used.  'auto' selects direct for small
+    # systems (n_interface < 200K) and CG for large ones.  The default 'auto'
+    # maps to 'direct' for netlist_sampled (n_interface ~2-4K), so existing
+    # model behaviour is unchanged.
+    t0 = _time.perf_counter()
+    _iface_solver_setting = _get_interface_solver_setting(model)
+    _model_settings = getattr(model, 'settings', {}) if model is not None else {}
+
+    _cg_stats: Dict[str, Any] = {}
+    _cg_solver = None  # InterfaceCGSolver if CG is used, else None
+
+    # Resolve 'auto' here (before branching) so we can log it
+    if _iface_solver_setting == 'auto':
+        from .interface_iterative import auto_select_interface_solver
+        _iface_resolved_mode = auto_select_interface_solver(
+            len(interface_nodes), S_global
+        )
+    else:
+        _iface_resolved_mode = _iface_solver_setting
+
+    if _iface_resolved_mode == 'direct':
+        from pgmath.factor import _factor_conductance_matrix
+        interface_lu_result = _factor_conductance_matrix(
+            S_global, verbose=False, config=model.coordinator_solver_config,
+        )
+    else:
+        # CG mode
+        from .interface_iterative import InterfaceCGSolver
+        _matvec_mode = _model_settings.get('interface_matvec_mode', 'assembled')
+        _preconditioner = _model_settings.get('interface_preconditioner', 'block_jacobi')
+        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-12))
+
+        # For tilewise mode, compute the package-edge contribution not included
+        # in per-tile Schur complements.  S_extra = S_global - sum_i(P_i^T S_i P_i).
+        _S_extra: Optional[sp.spmatrix] = None
+        if _matvec_mode == 'tilewise':
+            n_iface = len(interface_nodes)
+            S_tile_sum = sp.lil_matrix((n_iface, n_iface), dtype=np.float64)
+            for tid, S_i_dense in tile_schur_complements.items():
+                idx = tile_index_maps[tid]
+                for li, gi in enumerate(idx):
+                    for lj, gj in enumerate(idx):
+                        S_tile_sum[gi, gj] += S_i_dense[li, lj]
+            S_tile_sum_csr = S_tile_sum.tocsr()
+            _S_extra = (S_global.tocsr() - S_tile_sum_csr).tocsr()
+            # Zero out negligible entries to keep it sparse
+            _S_extra.eliminate_zeros()
+
+        _cg_solver = InterfaceCGSolver(
+            n_interface=len(interface_nodes),
+            matvec_mode=_matvec_mode,
+            S_global=S_global,
+            tile_schur_complements=tile_schur_complements,
+            tile_index_maps=tile_index_maps,
+            S_extra=_S_extra,
+            preconditioner=_preconditioner,
+            rtol=_cg_rtol,
+            stats_dict=_cg_stats,
+        )
+
+        # Synthetic stats object (matching SparseFactorAdapter fields used below)
+        class _CGSolveResult:
+            backend = 'cg'
+            backend_info = (
+                f"CG/{_cg_solver.matvec_mode}/"
+                f"precond={_cg_solver.preconditioner}"
+            )
+            resolved_mode = 'cg'
+            solve = _cg_solver
+
+        interface_lu_result = _CGSolveResult()
+        if verbose:
+            logger.info(
+                "Interface CG solver: mode=%s, precond=%s, rtol=%.2e, n=%d",
+                _matvec_mode, _preconditioner, _cg_rtol, len(interface_nodes),
+            )
+
+    timings['factor_interface'] = _time.perf_counter() - t0
 
     timings['total_prepare'] = sum(timings.values())
 
@@ -372,6 +490,9 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
     ctx._removed_interface_nodes = island_nodes
     ctx._S_global = S_global
     ctx.timings = timings
+    # B2: store resolved interface solver mode and optional CG solver
+    ctx._interface_solver_mode = _iface_resolved_mode
+    ctx._cg_solver = _cg_solver  # InterfaceCGSolver or None
 
     # Build topology context (if not already provided)
     # Cross-mode cache: when package_cap_edges is empty, DC and transient BFS
@@ -423,6 +544,10 @@ def _save_dc_context(ctx: 'DistributedSolverContext', path: Optional[str] = None
         'topology': ctx.topology,
         'S_global': ctx._S_global,
         'timings': ctx.timings,
+        # B2: persist the resolved interface solver mode so refactor() can
+        # reconstruct the same callable type.  Per-tile S_i blocks are NOT
+        # saved (too large; always recomputed in tilewise mode).
+        'interface_solver_mode': getattr(ctx, '_interface_solver_mode', 'direct'),
         **_save_role_configs(ctx.model),
     }
 
@@ -452,6 +577,9 @@ def _load_dc_context(
     ctx = cls(model=model, topology=data['topology'])
     ctx._S_global = data.get('S_global')
     ctx.timings = data.get('timings', {})
+    # B2: restore interface_solver_mode (default 'direct' for old checkpoints)
+    ctx._interface_solver_mode = data.get('interface_solver_mode', 'direct')
+    ctx._cg_solver = None  # Re-created on refactor()
     _restore_role_configs(data, model)
     # NOT factored -- caller must call refactor() or factor()
     logger.info("Loaded DC context from %s (is_factored=False)", path)
@@ -459,26 +587,65 @@ def _load_dc_context(
 
 
 def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -> None:
-    """Rebuild coordinator LU from saved S_global (DC). Workers must already be factored."""
+    """Rebuild coordinator solve callable from saved S_global (DC).
+
+    For direct mode: rebuilds the CHOLMOD/SuperLU LU factorization.
+    For CG mode: reconstructs the InterfaceCGSolver (assembled matvec only;
+      tilewise mode requires a full factor() to re-obtain per-tile S_i blocks).
+
+    Workers must already be factored before calling this.
+    """
     if ctx._S_global is None:
         raise RuntimeError(
             "Cannot refactor without S_global. Use factor() for a "
             "full factorization, or load a checkpoint that includes "
             "S_global."
         )
-    from pgmath.factor import _factor_conductance_matrix
+
+    # Determine the mode from the context (set during factor() or load())
+    _mode = getattr(ctx, '_interface_solver_mode', 'direct')
+    # Allow override via model settings (e.g. if user changes setting between
+    # save and load+refactor).
+    _model_setting = _get_interface_solver_setting(ctx.model)
+    if _model_setting != 'auto':
+        # Explicit setting overrides the stored mode
+        _mode = _model_setting
 
     coord_config = ctx.model.coordinator_solver_config if ctx.model is not None else None
     t0 = _time.perf_counter()
-    interface_lu_result = _factor_conductance_matrix(
-        ctx._S_global, verbose=verbose, config=coord_config,
-    )
-    elapsed = _time.perf_counter() - t0
 
-    ctx._interface_lu = interface_lu_result.solve
+    if _mode == 'direct':
+        from pgmath.factor import _factor_conductance_matrix
+        interface_lu_result = _factor_conductance_matrix(
+            ctx._S_global, verbose=verbose, config=coord_config,
+        )
+        ctx._interface_lu = interface_lu_result.solve
+        ctx._cg_solver = None
+        ctx._interface_solver_mode = 'direct'
+    else:
+        # CG assembled mode (no per-tile S_i needed)
+        from .interface_iterative import InterfaceCGSolver
+        _model_settings = getattr(ctx.model, 'settings', {}) if ctx.model is not None else {}
+        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-12))
+        _preconditioner = _model_settings.get('interface_preconditioner', 'block_jacobi')
+        _cg_stats: Dict[str, Any] = {}
+        cg_solver = InterfaceCGSolver(
+            n_interface=ctx._S_global.shape[0],
+            matvec_mode='assembled',  # tilewise needs per-tile S_i; use assembled on refactor
+            S_global=ctx._S_global,
+            preconditioner=_preconditioner,
+            rtol=_cg_rtol,
+            stats_dict=_cg_stats,
+        )
+        ctx._interface_lu = cg_solver
+        ctx._cg_solver = cg_solver
+        ctx._interface_solver_mode = 'cg'
+
+    elapsed = _time.perf_counter() - t0
     ctx.is_factored = True
     logger.info(
-        "Refactored coordinator LU from saved S_global in %.3fs", elapsed,
+        "Refactored DC coordinator solve (%s) from saved S_global in %.3fs",
+        _mode, elapsed,
     )
 
 
@@ -672,16 +839,7 @@ def _factor_transient_context(
         dirichlet_nodes=model.pad_nodes,
     )
 
-    # 5. Factor transient interface system
-    t0 = _time.perf_counter()
-    from pgmath.factor import _factor_conductance_matrix
-
-    interface_lu_result = _factor_conductance_matrix(
-        S_global, verbose=verbose, config=model.coordinator_solver_config,
-    )
-    timings['factor_transient_interface'] = _time.perf_counter() - t0
-
-    # 6. Build tile index maps
+    # 5. Build tile index maps (must be before step 6 so CG tilewise can use them).
     tile_index_maps: Dict[Tuple[int, int], np.ndarray] = {}
     for tid, port_list in tile_port_node_lists.items():
         local_to_global = np.array(
@@ -690,6 +848,78 @@ def _factor_transient_context(
             dtype=np.int32,
         )
         tile_index_maps[tid] = local_to_global
+
+    # 6. Factor (or set up iterative solver for) transient interface system.
+    # B2: Same auto-select logic as DC context (same model settings apply).
+    t0 = _time.perf_counter()
+    _iface_solver_setting_td = _get_interface_solver_setting(model)
+    _model_settings_td = getattr(model, 'settings', {}) if model is not None else {}
+
+    _cg_stats_td: Dict[str, Any] = {}
+    _cg_solver_td = None
+
+    if _iface_solver_setting_td == 'auto':
+        from .interface_iterative import auto_select_interface_solver
+        _iface_resolved_mode_td = auto_select_interface_solver(
+            len(interface_nodes), S_global
+        )
+    else:
+        _iface_resolved_mode_td = _iface_solver_setting_td
+
+    if _iface_resolved_mode_td == 'direct':
+        from pgmath.factor import _factor_conductance_matrix
+        interface_lu_result = _factor_conductance_matrix(
+            S_global, verbose=verbose, config=model.coordinator_solver_config,
+        )
+    else:
+        # CG mode for transient
+        from .interface_iterative import InterfaceCGSolver
+        _matvec_mode_td = _model_settings_td.get('interface_matvec_mode', 'assembled')
+        _preconditioner_td = _model_settings_td.get('interface_preconditioner', 'block_jacobi')
+        _cg_rtol_td = float(_model_settings_td.get('interface_cg_rtol', 1e-12))
+
+        # For tilewise mode: compute S_extra (package-edge contribution)
+        _S_extra_td: Optional[sp.spmatrix] = None
+        if _matvec_mode_td == 'tilewise':
+            n_iface_td = len(interface_nodes)
+            S_tile_sum_td = sp.lil_matrix((n_iface_td, n_iface_td), dtype=np.float64)
+            for tid, S_i_d in tile_schur_complements.items():
+                idx = tile_index_maps[tid]
+                for li, gi in enumerate(idx):
+                    for lj, gj in enumerate(idx):
+                        S_tile_sum_td[gi, gj] += S_i_d[li, lj]
+            _S_extra_td = (S_global.tocsr() - S_tile_sum_td.tocsr()).tocsr()
+            _S_extra_td.eliminate_zeros()
+
+        _cg_solver_td = InterfaceCGSolver(
+            n_interface=len(interface_nodes),
+            matvec_mode=_matvec_mode_td,
+            S_global=S_global,
+            tile_schur_complements=tile_schur_complements,
+            tile_index_maps=tile_index_maps,
+            S_extra=_S_extra_td,
+            preconditioner=_preconditioner_td,
+            rtol=_cg_rtol_td,
+            stats_dict=_cg_stats_td,
+        )
+
+        class _CGSolveResultTD:
+            backend = 'cg'
+            backend_info = (
+                f"CG/{_cg_solver_td.matvec_mode}/"
+                f"precond={_cg_solver_td.preconditioner}"
+            )
+            resolved_mode = 'cg'
+            solve = _cg_solver_td
+
+        interface_lu_result = _CGSolveResultTD()
+        if verbose:
+            logger.info(
+                "Transient interface CG solver: mode=%s, precond=%s, rtol=%.2e, n=%d",
+                _matvec_mode_td, _preconditioner_td, _cg_rtol_td, len(interface_nodes),
+            )
+
+    timings['factor_transient_interface'] = _time.perf_counter() - t0
 
     timings['total_prepare_transient'] = sum(
         v for k, v in timings.items()
@@ -796,6 +1026,11 @@ def _factor_transient_context(
     ctx.C_package_uu = C_pkg_uu if C_pkg_uu.nnz > 0 else None
     ctx._G_package_uu = G_pkg_uu if G_pkg_uu.nnz > 0 else None
     ctx.timings = timings
+    # B2: store resolved interface solver mode and optional CG solver.
+    # The transient time loop uses warm-start from v_gamma_old; the CG solver
+    # retains the last solution as x0 automatically via InterfaceCGSolver.
+    ctx._interface_solver_mode = _iface_resolved_mode_td
+    ctx._cg_solver = _cg_solver_td  # InterfaceCGSolver or None
 
     # Build topology context if not already provided.
     # Cross-mode cache: when package_cap_edges is empty, DC and transient BFS
@@ -855,6 +1090,8 @@ def _save_transient_context(
         'C_package_uu': ctx.C_package_uu,
         'G_package_uu': ctx._G_package_uu,
         'timings': ctx.timings,
+        # B2: persist the resolved interface solver mode
+        'interface_solver_mode': getattr(ctx, '_interface_solver_mode', 'direct'),
         **_save_role_configs(ctx.model),
     }
 
@@ -894,6 +1131,9 @@ def _load_transient_context(
     ctx.C_package_uu = data.get('C_package_uu')
     ctx._G_package_uu = data.get('G_package_uu')
     ctx.timings = data.get('timings', {})
+    # B2: restore interface_solver_mode (default 'direct' for old checkpoints)
+    ctx._interface_solver_mode = data.get('interface_solver_mode', 'direct')
+    ctx._cg_solver = None  # Re-created on refactor()
     _restore_role_configs(data, model)
     # NOT factored -- caller must call refactor() or factor()
     logger.info(
@@ -905,25 +1145,57 @@ def _load_transient_context(
 def _refactor_transient_context(
     ctx: 'DistributedTransientContext', verbose: bool = False
 ) -> None:
-    """Rebuild coordinator LU from saved S_global (transient). Workers must already be factored."""
+    """Rebuild coordinator solve callable from saved S_global (transient).
+
+    For direct mode: rebuilds the CHOLMD/SuperLU LU factorization.
+    For CG mode: reconstructs the InterfaceCGSolver (assembled matvec only).
+
+    Workers must already be factored before calling this.
+    """
     if ctx._S_global is None:
         raise RuntimeError(
             "Cannot refactor without S_global. Use factor() for a "
             "full factorization, or load a checkpoint that includes "
             "S_global."
         )
-    from pgmath.factor import _factor_conductance_matrix
+
+    _mode = getattr(ctx, '_interface_solver_mode', 'direct')
+    _model_setting = _get_interface_solver_setting(ctx.model)
+    if _model_setting != 'auto':
+        _mode = _model_setting
 
     coord_config = ctx.model.coordinator_solver_config if ctx.model is not None else None
     t0 = _time.perf_counter()
-    interface_lu_result = _factor_conductance_matrix(
-        ctx._S_global, verbose=verbose, config=coord_config,
-    )
-    elapsed = _time.perf_counter() - t0
 
-    ctx._interface_lu = interface_lu_result.solve
+    if _mode == 'direct':
+        from pgmath.factor import _factor_conductance_matrix
+        interface_lu_result = _factor_conductance_matrix(
+            ctx._S_global, verbose=verbose, config=coord_config,
+        )
+        ctx._interface_lu = interface_lu_result.solve
+        ctx._cg_solver = None
+        ctx._interface_solver_mode = 'direct'
+    else:
+        from .interface_iterative import InterfaceCGSolver
+        _model_settings = getattr(ctx.model, 'settings', {}) if ctx.model is not None else {}
+        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-12))
+        _preconditioner = _model_settings.get('interface_preconditioner', 'block_jacobi')
+        _cg_stats: Dict[str, Any] = {}
+        cg_solver = InterfaceCGSolver(
+            n_interface=ctx._S_global.shape[0],
+            matvec_mode='assembled',
+            S_global=ctx._S_global,
+            preconditioner=_preconditioner,
+            rtol=_cg_rtol,
+            stats_dict=_cg_stats,
+        )
+        ctx._interface_lu = cg_solver
+        ctx._cg_solver = cg_solver
+        ctx._interface_solver_mode = 'cg'
+
+    elapsed = _time.perf_counter() - t0
     ctx.is_factored = True
     logger.info(
-        "Refactored transient coordinator LU from saved S_global "
-        "in %.3fs", elapsed,
+        "Refactored transient coordinator solve (%s) from saved S_global "
+        "in %.3fs", _mode, elapsed,
     )
