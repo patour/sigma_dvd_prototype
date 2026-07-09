@@ -334,5 +334,152 @@ class TestDetectInterfaceIslands(unittest.TestCase):
         self.assertIsInstance(result[2], set)
 
 
+# ---------------------------------------------------------------------------
+# REGRESSION: Finding 2 — find_interface_islands must skip explicit zero entries
+#
+# The A4 "keep-all" COO assembly stores explicit structural zeros in S_global
+# when a tile has an all-zero port row/col (a port node with no resistive path
+# within that tile).  Before the fix, find_interface_islands iterated all stored
+# (row, col) pairs without checking the value — a structural zero at (r, c) with
+# r != c was treated as an edge, connecting an isolated island port to the rest
+# of the graph.  This made the BFS consider the island reachable from the pad
+# component, so no penalty was applied and S_global remained singular.
+#
+# The fix: iterate (row, col, val) and skip entries where val == 0.0.
+# ---------------------------------------------------------------------------
+
+
+class TestFinding2ExplicitZeroIslandDetection(unittest.TestCase):
+    """Regression: explicit zeros in S_global must not create fake adjacency."""
+
+    def test_explicit_zero_off_diagonal_does_not_bridge_island(self):
+        """A structural zero at off-diagonal (r, c) must NOT connect r and c.
+
+        Construct S_global with an explicit structural zero coupling island
+        node C to connected node A.  Without the fix, the BFS would treat this
+        as a real edge and mark C as reachable from the pad — so C would NOT be
+        detected as an island, leaving the system singular.  With the fix, C is
+        correctly detected as an island.
+        """
+        from solver.coupled_system import find_interface_islands
+
+        nodes = ['A', 'B', 'C']
+        idx = {n: i for i, n in enumerate(nodes)}
+
+        # Build S_global with:
+        #   - Real edge A--B (off-diagonal nonzero)
+        #   - Explicit zero at (A, C) and (C, A) — structural zero from A4 keep-all
+        #   - No real edge involving C
+
+        # Use CSR/CSC/COO with explicit zeros (scipy stores them if we insert directly)
+        rows = [0, 1, 0, 1, 0, 2, 2, 0]  # A-B real edges + explicit zeros A-C
+        cols = [1, 0, 0, 1, 2, 0, 2, 0]  # diagonal + off-diagonal
+        data = [-1.0, -1.0, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+        # Explicit zeros: (A,C)=0.0 and (C,A)=0.0 and diagonal C=0.0 and extra A diag
+
+        S = sp.coo_matrix((data, (rows, cols)), shape=(3, 3)).tocsr()
+        # Verify explicit zeros ARE stored (not eliminated)
+        # scipy may eliminate zeros on tocsr(); add them back manually
+        # to simulate the A4 keep-all behaviour which avoids eliminate_zeros()
+        S_data = S.toarray()
+        # Manually construct CSR with structural zeros (simulate no eliminate_zeros)
+        all_rows = []
+        all_cols = []
+        all_data = []
+        # Real Laplacian: A--B with g=1
+        for (r, c, v) in [(0, 1, -1.0), (1, 0, -1.0), (0, 0, 1.0), (1, 1, 1.0)]:
+            all_rows.append(r)
+            all_cols.append(c)
+            all_data.append(v)
+        # Structural zeros at (A,C), (C,A), (C,C) — simulating A4 keep-all
+        for (r, c) in [(0, 2), (2, 0), (2, 2)]:
+            all_rows.append(r)
+            all_cols.append(c)
+            all_data.append(0.0)
+
+        S_with_zeros = sp.coo_matrix(
+            (all_data, (all_rows, all_cols)), shape=(3, 3)
+        ).tocsr()
+        # Verify the zeros are stored (nnz counts them)
+        assert S_with_zeros.nnz >= 7, (
+            "Expected explicit zeros in CSR; got nnz=%d" % S_with_zeros.nnz
+        )
+
+        # Pad connects to A
+        extra = [('A', 'PAD1', 5.0)]
+        pads = {'PAD1'}
+
+        islands = find_interface_islands(S_with_zeros, nodes, idx, pads, extra)
+
+        # C has only zero-valued entries — it IS an island.
+        # Pre-fix: the zero at (A,C) was treated as a real edge, so C was wrongly
+        # considered connected to A (and thus to PAD1) → NOT detected as island.
+        # Post-fix: zero skipped → C correctly detected as island.
+        self.assertIn(
+            'C', islands,
+            "Finding 2: node C (all-zero port row) must be detected as island. "
+            "Explicit structural zero at (A,C) must not create fake adjacency."
+        )
+        self.assertNotIn('A', islands)
+        self.assertNotIn('B', islands)
+
+    def test_island_with_explicit_zeros_is_penalized_and_system_is_solvable(self):
+        """After penalty, the system with explicit-zero island is non-singular.
+
+        This is the full end-to-end repro from the finding:
+        tile with all-zero port row → island detected → penalized → factorization succeeds.
+        """
+        from solver.coupled_system import detect_interface_islands
+        import scipy.sparse.linalg as spla
+
+        nodes = ['A', 'B', 'C']
+        idx = {n: i for i, n in enumerate(nodes)}
+
+        # Build S_global simulating A4 keep-all: C has only structural zeros
+        all_rows = [0, 1, 0, 1, 0, 2, 2, 0]
+        all_cols = [1, 0, 0, 1, 2, 0, 2, 0]
+        # Note: C's diagonal is also 0.0 (isolated node, no conductance to ground)
+        all_data = [-1.0, -1.0, 6.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+        S = sp.coo_matrix((all_data, (all_rows, all_cols)), shape=(3, 3)).tocsr()
+
+        rhs = np.zeros(3)
+        rhs[0] = 5.0  # Dirichlet contribution from pad
+        extra = [('A', 'PAD1', 5.0)]
+        pads = {'PAD1'}
+        vdd = 1.0
+
+        S_out, rhs_out, island_set = detect_interface_islands(
+            S, rhs, nodes, idx, pads, extra,
+            dirichlet_voltage=vdd, penalty_conductance=1e5,
+        )
+
+        self.assertIn('C', island_set,
+                      "C must be detected as island (all-zero port row).")
+
+        # After penalty, system must be non-singular
+        v = spla.spsolve(S_out.tocsc(), rhs_out)
+        self.assertTrue(np.all(np.isfinite(v)),
+                        "System must be solvable after island penalty.")
+        # Island node C should be pinned to vdd by penalty
+        self.assertAlmostEqual(v[idx['C']], vdd, places=2,
+                               msg="Island node C must be pinned near Vdd after penalty.")
+
+    def test_nonzero_off_diagonal_still_creates_adjacency(self):
+        """Non-zero off-diagonal entries must still create adjacency (regression guard)."""
+        from solver.coupled_system import find_interface_islands
+
+        nodes = ['A', 'B']
+        idx = {n: i for i, n in enumerate(nodes)}
+        # Standard Laplacian: A--B connected
+        S = _make_laplacian(2, [(0, 1, 1.0)])
+        extra = [('A', 'PAD1', 5.0)]
+        pads = {'PAD1'}
+
+        islands = find_interface_islands(S, nodes, idx, pads, extra)
+        # Both A and B are connected to pad → no islands
+        self.assertEqual(islands, set(),
+                         "Non-zero off-diagonal must still create adjacency (regression guard).")
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1490,5 +1490,483 @@ class TestPeakBuildMbInInfoDict(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Finding 5: direct_scatter sample-index must wrap at m, not cnt
+# ---------------------------------------------------------------------------
+
+def _make_sawtooth_smoothed_vcs(worker, period=10e-9, dt=100e-12):
+    """Construct a smoothed-grid-like periodic PWL with a *sawtooth* shape.
+
+    Deliberately uses values[0] != values[m] (values[0]=0, values[m]=1.0) so
+    that the Finding-5 wrap convention matters:
+      - evaluate_at_time(P) folds t % P → 0 → row_values[0] = 0.0
+      - a table wrapping at cnt (= m+1) would store values[m] = 1.0 at col m-1
+
+    The VCS looks like a smoothed grid: n_pulses==0, delay=0, single period,
+    m+1 uniform samples starting at t=0 — the direct_scatter trigger.
+    """
+    from analysis.vectorized_sources import VectorizedCurrentSources
+    from parser.current_sources import CurrentSource, PWL
+
+    n_ports = worker._block_system.n_ports
+    n_interior = worker._block_system.n_interior
+    n_nodes = n_ports + n_interior
+    node_to_idx = dict(worker._block_system.port_to_idx)
+    for node, idx in worker._block_system.interior_to_idx.items():
+        node_to_idx[node] = idx + n_ports
+
+    interior_nodes = list(worker._block_system.interior_to_idx.keys())
+    target = interior_nodes[0]
+
+    m = int(round(period / dt))
+    actual_step = period / m
+    # Sawtooth: values[0]=0.0, values[m]=1.0 (they differ!)
+    times = [i * actual_step for i in range(m + 1)]
+    values = [i / m for i in range(m + 1)]
+
+    pwl = PWL(delay=0.0, period=period, points=list(zip(times, values)))
+    src = CurrentSource(
+        name='i_saw', node1=target, node2='0', dc_value=0.0, pwls=[pwl],
+    )
+    vcs = VectorizedCurrentSources.from_current_sources(
+        {'i_saw': src}, node_to_idx, n_nodes,
+    )
+    worker._vec_sources = vcs
+    worker._active_sources = vcs
+    worker._current_buf = np.zeros(n_nodes, dtype=np.float64)
+    return vcs
+
+
+class TestFinding5WrapConvention(unittest.TestCase):
+    """direct_scatter sample index must wrap at m (matching evaluate_at_time).
+
+    Finding 5 (tile_worker_td.py:_build_via_direct_scatter): the old inner
+    loop used ``sample_idx = (k + 1) % cnt``.  For a periodic PWL with cnt=m+1
+    samples, column m-1 mapped to sample index m (the last sample), while
+    ``evaluate_at_time(P)`` folds t % P → 0 and returns values[0].  These only
+    agree when values[m] == values[0].  Fix: wrap at m, i.e. ``(k + 1) % m``.
+    """
+
+    def test_column_m_minus_1_matches_evaluate_at_P(self):
+        """Sawtooth (values[0]!=values[m]): col m-1 == evaluate_at_time(P) == values[0]."""
+        period = 10e-9
+        dt = 100e-12
+        m = int(round(period / dt))  # 100
+
+        w = _make_worker_with_tile(
+            edges=[('p', 'a', 1.0), ('a', '0', 1.0)],
+            port_nodes={'p'},
+        )
+        vcs = _make_sawtooth_smoothed_vcs(w, period=period, dt=dt)
+
+        # Ensure direct_scatter is actually the selected build path
+        path = w._select_build_path(dt, m)
+        self.assertEqual(
+            path, 'direct_scatter',
+            msg=f'Expected direct_scatter build path for smoothed-grid sawtooth, got {path!r}',
+        )
+
+        info = w.precompute_step_columns(t_start=0.0, dt=dt, n_steps=2 * m)
+        self.assertEqual(info['tier'], 'phase')
+        self.assertEqual(info.get('build_path'), 'direct_scatter')
+
+        tbl = w._step_col_table
+        src_rows = tbl['src_rows']
+        self.assertGreater(len(src_rows), 0)
+
+        # Column m-1 corresponds to step_idx = m-1, t = m*dt = P.
+        # evaluate_at_time(P) folds P % P = 0 → values[0] = 0.0.
+        t_P = m * dt
+        ref_P = vcs.evaluate_at_time(t_P)
+        col_m1 = w._get_current_array_for_step(m - 1, t_P).copy()
+
+        # Sanity: reference at P is values[0] == 0.0 (NOT values[m] == 1.0)
+        node_row = src_rows[0]
+        self.assertAlmostEqual(
+            ref_P[node_row], 0.0, places=12,
+            msg='Reference evaluate_at_time(P) must fold to values[0]=0.0',
+        )
+        np.testing.assert_allclose(
+            col_m1[src_rows], ref_P[src_rows], atol=1e-12,
+            err_msg=(
+                'Finding 5: column m-1 must equal evaluate_at_time(P) (values[0]), '
+                'not the stored values[m]. Old code wrapped at cnt, returning values[m].'
+            ),
+        )
+
+    def test_all_columns_match_reference_sawtooth(self):
+        """Every column of the sawtooth phase table matches evaluate_at_time."""
+        period = 10e-9
+        dt = 100e-12
+        m = int(round(period / dt))
+
+        w = _make_worker_with_tile(
+            edges=[('p', 'a', 1.0), ('a', '0', 1.0)],
+            port_nodes={'p'},
+        )
+        vcs = _make_sawtooth_smoothed_vcs(w, period=period, dt=dt)
+        if w._select_build_path(dt, m) != 'direct_scatter':
+            self.skipTest('direct_scatter not selected')
+
+        info = w.precompute_step_columns(t_start=0.0, dt=dt, n_steps=2 * m)
+        self.assertEqual(info.get('build_path'), 'direct_scatter')
+        tbl = w._step_col_table
+        src_rows = tbl['src_rows']
+
+        max_err = 0.0
+        for k in range(2 * m):
+            t_k = (k + 1) * dt
+            ref = vcs.evaluate_at_time(t_k)
+            col = w._get_current_array_for_step(k, t_k).copy()
+            max_err = max(max_err, float(np.max(np.abs(col[src_rows] - ref[src_rows]))))
+        self.assertLessEqual(
+            max_err, 1e-12,
+            msg=f'Finding 5: sawtooth phase table max_err={max_err:.3e} (expected <= 1e-12)',
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finding 15: vectorized direct_scatter row fill
+# ---------------------------------------------------------------------------
+
+class TestFinding15VectorizedBuild(unittest.TestCase):
+    """The vectorized direct_scatter row fill matches a scalar loop exactly.
+
+    Finding 15 (tile_worker_td.py:_build_via_direct_scatter): the per-PWL row
+    fill was an O(n_pwls * m) Python scalar loop.  It is now a single numpy
+    gather + add per row (``C[row, :] += wsc * pwl_values[off + col_indices]``).
+    The result must be bit-identical to the scalar reference, and the build
+    must be fast on large tables.
+    """
+
+    def _make_multi_pwl_smoothed_vcs(self, worker, targets, period=5e-9, dt=100e-12):
+        """Attach several distinct periodic sawtooth PWLs (smoothed-grid-like)."""
+        from analysis.vectorized_sources import VectorizedCurrentSources
+        from parser.current_sources import CurrentSource, PWL
+
+        n_ports = worker._block_system.n_ports
+        n_interior = worker._block_system.n_interior
+        n_nodes = n_ports + n_interior
+        node_to_idx = dict(worker._block_system.port_to_idx)
+        for node, idx in worker._block_system.interior_to_idx.items():
+            node_to_idx[node] = idx + n_ports
+
+        m = int(round(period / dt))
+        actual_step = period / m
+        times = [i * actual_step for i in range(m + 1)]
+
+        sources = {}
+        for j, tgt in enumerate(targets):
+            # Different amplitude/shape per source (still values[0]!=values[m])
+            amp = 1.0 + 0.5 * j
+            values = [amp * (i / m) for i in range(m + 1)]
+            pwl = PWL(delay=0.0, period=period, points=list(zip(times, values)))
+            sources[f'i_{j}'] = CurrentSource(
+                name=f'i_{j}', node1=tgt, node2='0', dc_value=0.1 * j, pwls=[pwl],
+            )
+        vcs = VectorizedCurrentSources.from_current_sources(
+            sources, node_to_idx, n_nodes,
+        )
+        worker._vec_sources = vcs
+        worker._active_sources = vcs
+        worker._current_buf = np.zeros(n_nodes, dtype=np.float64)
+        return vcs, m
+
+    def test_vectorized_matches_scalar_loop(self):
+        """Vectorized build == scalar reference build (array_equal, not approx)."""
+        period = 5e-9
+        dt = 100e-12  # m = 50
+
+        # Three interior nodes carrying three distinct PWLs.
+        w = _make_worker_with_tile(
+            edges=[('p', 'a', 1.0), ('p', 'b', 1.0), ('p', 'c', 1.0),
+                   ('a', '0', 1.0), ('b', '0', 1.0), ('c', '0', 1.0)],
+            port_nodes={'p'},
+        )
+        interior = list(w._block_system.interior_to_idx.keys())
+        vcs, m = self._make_multi_pwl_smoothed_vcs(w, interior[:3], period=period, dt=dt)
+        if w._select_build_path(dt, m) != 'direct_scatter':
+            self.skipTest('direct_scatter not selected')
+
+        src_rows_candidate = vcs.get_src_node_indices()
+
+        # Actual (vectorized) build under test.
+        C_vec, rows_vec = w._build_via_direct_scatter(
+            m, 0, dt, 0.0, src_rows_candidate,
+        )
+
+        # Independent scalar reference (mirrors pre-Finding-15 loop, but with
+        # the Finding-5 wrap-at-m convention so we test only the vectorization).
+        try:
+            from parser.current_sources import get_apply_wscale
+            apply_wscale = get_apply_wscale()
+        except ImportError:
+            apply_wscale = True
+
+        n_nodes = vcs.n_nodes
+        n_candidate = len(src_rows_candidate)
+        row_positions = -np.ones(n_nodes, dtype=np.int64)
+        row_positions[src_rows_candidate] = np.arange(n_candidate, dtype=np.int64)
+        dc_per_node = np.zeros(n_nodes, dtype=np.float64)
+        if vcs.n_sources > 0:
+            np.add.at(dc_per_node, vcs.source_node_idx, vcs.dc_values)
+        C_ref = np.empty((n_candidate, m), dtype=np.float64)
+        C_ref[:] = dc_per_node[src_rows_candidate, np.newaxis]
+        for pwl_i in range(vcs.n_pwls):
+            off = int(vcs.pwl_offset[pwl_i])
+            node = int(vcs.pwl_node_idx[pwl_i])
+            row = int(row_positions[node])
+            if row < 0:
+                continue
+            wsc = (float(vcs.pwl_wscale[pwl_i])
+                   if (apply_wscale and len(vcs.pwl_wscale) == vcs.n_pwls)
+                   else 1.0)
+            for k in range(m):
+                sample_idx = (k + 1) % m
+                C_ref[row, k] += wsc * float(vcs.pwl_values[off + sample_idx])
+        row_max = np.abs(C_ref).max(axis=1)
+        nonzero = row_max > 0
+        C_ref_final = np.asfortranarray(C_ref[nonzero, :])
+        rows_ref = src_rows_candidate[nonzero]
+
+        np.testing.assert_array_equal(
+            rows_vec, rows_ref,
+            err_msg='Finding 15: vectorized build src_rows differ from scalar loop',
+        )
+        np.testing.assert_array_equal(
+            C_vec, C_ref_final,
+            err_msg='Finding 15: vectorized build values differ from scalar loop',
+        )
+
+    def test_large_table_build_is_fast(self):
+        """1000 PWLs × m=500 direct_scatter build completes in < 1s."""
+        import time as _time
+        from analysis.vectorized_sources import VectorizedCurrentSources
+        from parser.current_sources import CurrentSource, PWL
+
+        n_pwls = 1000
+        period = 50e-9
+        dt = 100e-12
+        m = int(round(period / dt))  # 500
+        actual_step = period / m
+        times = [i * actual_step for i in range(m + 1)]
+
+        # Build a worker whose block system has >= n_pwls interior nodes.
+        # Each interior node j: edge (p, node_j) and (node_j, 0).
+        edges = []
+        for j in range(n_pwls):
+            nj = f'n{j}'
+            edges.append(('p', nj, 1.0))
+            edges.append((nj, '0', 1.0))
+        w = _make_worker_with_tile(edges=edges, port_nodes={'p'})
+
+        n_ports = w._block_system.n_ports
+        n_interior = w._block_system.n_interior
+        n_nodes = n_ports + n_interior
+        node_to_idx = dict(w._block_system.port_to_idx)
+        for node, idx in w._block_system.interior_to_idx.items():
+            node_to_idx[node] = idx + n_ports
+        interior = list(w._block_system.interior_to_idx.keys())
+        self.assertGreaterEqual(len(interior), n_pwls)
+
+        sources = {}
+        for j in range(n_pwls):
+            values = [(i / m) for i in range(m + 1)]
+            pwl = PWL(delay=0.0, period=period, points=list(zip(times, values)))
+            sources[f'i_{j}'] = CurrentSource(
+                name=f'i_{j}', node1=interior[j], node2='0', dc_value=0.0, pwls=[pwl],
+            )
+        vcs = VectorizedCurrentSources.from_current_sources(
+            sources, node_to_idx, n_nodes,
+        )
+        w._vec_sources = vcs
+        w._active_sources = vcs
+        w._current_buf = np.zeros(n_nodes, dtype=np.float64)
+
+        if w._select_build_path(dt, m) != 'direct_scatter':
+            self.skipTest('direct_scatter not selected')
+
+        src_rows_candidate = vcs.get_src_node_indices()
+        t0 = _time.perf_counter()
+        C, rows = w._build_via_direct_scatter(m, 0, dt, 0.0, src_rows_candidate)
+        elapsed = _time.perf_counter() - t0
+
+        self.assertEqual(C.shape, (n_pwls, m))
+        self.assertLess(
+            elapsed, 1.0,
+            msg=f'Finding 15: direct_scatter build of {n_pwls}x{m} took {elapsed:.3f}s (expected < 1s)',
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: non-grid-aligned t_start must fall through to chunked tier
+# ---------------------------------------------------------------------------
+
+class TestFinding1MisalignedTStart(unittest.TestCase):
+    """Phase tier requires t_start on the dt grid; else fall to chunked (exact).
+
+    Finding 1 (tile_worker_td.py:precompute_step_columns): phase0 was computed
+    as round(t_start/dt) % m, silently snapping non-grid-aligned t_start to the
+    nearest step (up to dt/2 shift).  The chunked tier handles arbitrary t_start
+    exactly, so a misaligned t_start must fall through to it.
+    """
+
+    def _worker_with_pulse(self, period=50e-9):
+        w = _make_worker_with_tile(
+            edges=[('p', 'a', 1.0), ('a', '0', 1.0)],
+            port_nodes={'p'},
+        )
+        _attach_pulse_vcs(w, period=period, v2=3.0, dc=0.5)
+        return w
+
+    def test_misaligned_t_start_selects_chunked(self):
+        """t_start=3.333333ns, dt=100ps → ratio=33.33333 (non-integral) → chunked."""
+        w = self._worker_with_pulse(period=50e-9)
+        info = w.precompute_step_columns(
+            t_start=3.333333e-9, dt=100e-12, n_steps=1000,
+        )
+        self.assertEqual(
+            info['tier'], 'chunked',
+            msg=(
+                'Finding 1: non-grid-aligned t_start (t_start/dt not integral) '
+                f"must select chunked tier, got tier='{info['tier']}'."
+            ),
+        )
+
+    def test_misaligned_t_start_values_match_reference(self):
+        """Chunked columns with misaligned t_start match evaluate_at_time exactly."""
+        dt = 100e-12
+        t_start = 3.333333e-9
+        n_steps = 50
+
+        w = self._worker_with_pulse(period=50e-9)
+        info = w.precompute_step_columns(t_start=t_start, dt=dt, n_steps=n_steps)
+        self.assertEqual(info['tier'], 'chunked')
+
+        tbl = w._step_col_table
+        src_rows = tbl['src_rows']
+        max_err = 0.0
+        for k in range(n_steps):
+            t_k = t_start + (k + 1) * dt
+            ref = vcs = w._active_sources.evaluate_at_time(t_k)
+            col = w._get_current_array_for_step(k, t_k).copy()
+            max_err = max(max_err, float(np.max(np.abs(col[src_rows] - ref[src_rows]))))
+        self.assertLessEqual(
+            max_err, 1e-12,
+            msg=f'Finding 1: misaligned t_start chunked max_err={max_err:.3e} (expected <= 1e-12)',
+        )
+
+    def test_aligned_t_start_still_phase(self):
+        """t_start=10ns, dt=100ps → ratio=100 (integral) → phase tier retained."""
+        w = self._worker_with_pulse(period=50e-9)
+        info = w.precompute_step_columns(
+            t_start=10e-9, dt=100e-12, n_steps=1000,
+        )
+        self.assertEqual(
+            info['tier'], 'phase',
+            msg='Finding 1: grid-aligned t_start must retain the phase tier',
+        )
+        # phase0 = round(10ns/100ps) % 500 = 100
+        self.assertEqual(info['phase0'], 100)
+
+    def test_zero_t_start_still_phase(self):
+        """t_start=0 must remain phase tier (regression guard for the ts_m<=0 branch)."""
+        w = self._worker_with_pulse(period=50e-9)
+        info = w.precompute_step_columns(
+            t_start=0.0, dt=100e-12, n_steps=1000,
+        )
+        self.assertEqual(info['tier'], 'phase')
+        self.assertEqual(info['phase0'], 0)
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: nonzero PWL delay must disqualify the phase tier
+# ---------------------------------------------------------------------------
+
+class TestFinding3PWLDelayBlocksPhase(unittest.TestCase):
+    """A periodic PWL with nonzero delay must route to the chunked tier.
+
+    Finding 3 (tile_worker_td.py:precompute_step_columns): a periodic PWL with
+    delay TD is only *eventually* periodic — it holds row_values[0] for t < TD,
+    then becomes periodic.  The phase table would bake in the pre-delay hold and
+    replay it every period.  The tier selection must check all_zero_pwl_delay
+    and fall through to chunked when any PWL has nonzero delay.  Pulses are NOT
+    affected (pulse eval folds t % P before subtracting the delay).
+    """
+
+    def _worker_with_delayed_pwl(self, period=4e-9, delay=2e-9):
+        from analysis.vectorized_sources import VectorizedCurrentSources
+        from parser.current_sources import CurrentSource, PWL
+
+        w = _make_worker_with_tile(
+            edges=[('p', 'a', 1.0), ('a', '0', 1.0)],
+            port_nodes={'p'},
+        )
+        n_ports = w._block_system.n_ports
+        n_interior = w._block_system.n_interior
+        n_nodes = n_ports + n_interior
+        node_to_idx = dict(w._block_system.port_to_idx)
+        for node, idx in w._block_system.interior_to_idx.items():
+            node_to_idx[node] = idx + n_ports
+        target = list(w._block_system.interior_to_idx.keys())[0]
+
+        # Sawtooth over one period, periodic with a nonzero delay.
+        pwl = PWL(delay=delay, period=period, points=[(0.0, 0.0), (period, 1.0)])
+        src = CurrentSource(name='i_d', node1=target, node2='0',
+                            dc_value=0.0, pwls=[pwl])
+        vcs = VectorizedCurrentSources.from_current_sources(
+            {'i_d': src}, node_to_idx, n_nodes,
+        )
+        w._vec_sources = vcs
+        w._active_sources = vcs
+        w._current_buf = np.zeros(n_nodes, dtype=np.float64)
+        return w, vcs
+
+    def test_delayed_pwl_selects_chunked(self):
+        """P=4ns, TD=2ns, dt=1ns (m=4): nonzero PWL delay → chunked tier."""
+        dt = 1e-9
+        w, vcs = self._worker_with_delayed_pwl(period=4e-9, delay=2e-9)
+        info = w.precompute_step_columns(t_start=0.0, dt=dt, n_steps=50)
+        self.assertEqual(
+            info['tier'], 'chunked',
+            msg=(
+                'Finding 3: a periodic PWL with nonzero delay must select the '
+                f"chunked tier (only eventually-periodic), got tier='{info['tier']}'."
+            ),
+        )
+
+    def test_delayed_pwl_columns_match_reference(self):
+        """Chunked columns for the delayed PWL match evaluate_at_time exactly."""
+        dt = 1e-9
+        n_steps = 50
+        t_start = 0.0
+        w, vcs = self._worker_with_delayed_pwl(period=4e-9, delay=2e-9)
+        info = w.precompute_step_columns(t_start=t_start, dt=dt, n_steps=n_steps)
+        self.assertEqual(info['tier'], 'chunked')
+
+        tbl = w._step_col_table
+        src_rows = tbl['src_rows']
+        max_err = 0.0
+        for k in range(n_steps):
+            t_k = t_start + (k + 1) * dt
+            ref = vcs.evaluate_at_time(t_k)
+            col = w._get_current_array_for_step(k, t_k).copy()
+            max_err = max(max_err, float(np.max(np.abs(col[src_rows] - ref[src_rows]))))
+        self.assertLessEqual(
+            max_err, 1e-12,
+            msg=f'Finding 3: delayed-PWL chunked max_err={max_err:.3e} (expected <= 1e-12)',
+        )
+
+    def test_zero_delay_pwl_still_phase(self):
+        """Sanity: the same periodic PWL with delay=0 still selects the phase tier."""
+        dt = 1e-9
+        w, vcs = self._worker_with_delayed_pwl(period=4e-9, delay=0.0)
+        info = w.precompute_step_columns(t_start=0.0, dt=dt, n_steps=50)
+        self.assertEqual(
+            info['tier'], 'phase',
+            msg='Finding 3: zero-delay periodic PWL must retain the phase tier',
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

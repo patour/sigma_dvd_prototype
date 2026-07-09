@@ -144,6 +144,9 @@ def cmd_solve(args: argparse.Namespace) -> None:
             _iface_solver, _iface_matvec, _iface_precond, _iface_rtol,
         )
 
+    # B3: Push streaming_assembly / use_step_columns / max_table_mb into model.settings
+    _push_b3_settings(model, args)
+
     try:
         solver = DistributedDDMSolver(model)
 
@@ -161,6 +164,37 @@ def cmd_solve(args: argparse.Namespace) -> None:
     finally:
         model.shutdown()
         _close_file_logging(fh)
+
+
+def _push_b3_settings(model: Any, args: argparse.Namespace) -> None:
+    """Push B3 streaming-assembly and A2 step-column settings into model.settings.
+
+    Reads from args attributes populated by YAML or CLI:
+        streaming_assembly  — None (skip) | False | True | 'auto' | 'false'|'true' string
+        use_step_columns    — bool (optional, only set when present on args)
+        max_table_mb        — float (optional, only set when present on args)
+    """
+    sa_raw = getattr(args, 'streaming_assembly', None)
+    if sa_raw is not None:
+        # Normalise string choices from CLI ('false'/'true'/'auto') to bool/'auto'
+        if isinstance(sa_raw, str):
+            if sa_raw.lower() == 'false':
+                sa_val: Any = False
+            elif sa_raw.lower() == 'true':
+                sa_val = True
+            else:
+                sa_val = 'auto'
+        else:
+            sa_val = bool(sa_raw)
+        model.settings['streaming_assembly'] = sa_val
+
+    usc = getattr(args, 'use_step_columns', None)
+    if usc is not None:
+        model.settings['use_step_columns'] = bool(usc)
+
+    mtm = getattr(args, 'max_table_mb', None)
+    if mtm is not None:
+        model.settings['max_table_mb'] = float(mtm)
 
 
 def _solve_dc(
@@ -387,6 +421,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         'interface_preconditioner': getattr(args, 'interface_preconditioner', 'block_jacobi'),
         'interface_cg_rtol': getattr(args, 'interface_cg_rtol', 1e-12),
     })
+
+    # B3: Push streaming_assembly / use_step_columns / max_table_mb into model.settings
+    _push_b3_settings(model, args)
 
     t_model = time.perf_counter() - t0
     logger.info(f"Model creation: {t_model:.3f}s")
@@ -659,6 +696,23 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
         help='CG convergence tolerance (default: 1e-12)',
     )
 
+    # B3: streaming Schur assembly
+    asm_grp = parser.add_argument_group('streaming assembly (B3)')
+    asm_grp.add_argument(
+        '--streaming-assembly', type=str, default=None,
+        choices=['false', 'true', 'auto'],
+        dest='streaming_assembly',
+        help=(
+            'Streaming Schur assembly mode.  '
+            "'false' (default): assemble S_global fully in memory before factoring. "
+            "'true': workers cache S_i shards and stream them one tile at a time; "
+            "peak memory is O(one tile's shard) instead of O(sum of all S_i). "
+            "'auto': switch to streaming when estimated S_i peak exceeds 512 MB. "
+            'Incompatible with interface_solver=cg when matvec_mode=assembled. '
+            '(default: None → use model.settings default, which is False)'
+        ),
+    )
+
     # Reporting / profiling
     parser.add_argument('--top-k', type=int, default=100,
                         help='Number of worst nodes to report (default: 100)')
@@ -922,6 +976,8 @@ _VALID_SOLVER_YAML_KEYS = frozenset({
     # B2: interface solver settings
     'interface_solver', 'interface_matvec_mode',
     'interface_preconditioner', 'interface_cg_rtol',
+    # B3: streaming Schur assembly + A2 step-column table
+    'streaming_assembly', 'use_step_columns', 'max_table_mb',
 })
 _VALID_ROLE_YAML_KEYS = _VALID_SOLVER_YAML_KEYS - {'coordinator', 'worker', 'threads_per_worker'}
 _VALID_DECOMPOSE_TOP_KEYS = frozenset({
@@ -1148,6 +1204,24 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
             if _yaml_val is not None and getattr(args, _k, None) in (None, 'auto', 'assembled', 'block_jacobi', 1e-12):
                 # Apply YAML default only when CLI left at argparse default
                 setattr(args, _k, _yaml_val)
+
+    # -- B3: streaming_assembly, use_step_columns, max_table_mb (YAML first) --
+    # These map directly into model.settings; store on args so cmd_solve /
+    # cmd_run can push them with the same pattern as interface_solver.
+    if _raw_config is not None:
+        solver_cfg_b3 = _raw_config.get('solver', {})
+        # streaming_assembly: bool or 'auto' in YAML; store as-is (resolved later)
+        _yaml_sa = solver_cfg_b3.get('streaming_assembly')
+        if _yaml_sa is not None and getattr(args, 'streaming_assembly', None) is None:
+            setattr(args, 'streaming_assembly', _yaml_sa)
+        # use_step_columns: bool
+        _yaml_usc = solver_cfg_b3.get('use_step_columns')
+        if _yaml_usc is not None and not hasattr(args, 'use_step_columns'):
+            setattr(args, 'use_step_columns', bool(_yaml_usc))
+        # max_table_mb: float
+        _yaml_mtm = solver_cfg_b3.get('max_table_mb')
+        if _yaml_mtm is not None and not hasattr(args, 'max_table_mb'):
+            setattr(args, 'max_table_mb', float(_yaml_mtm))
 
     return args
 

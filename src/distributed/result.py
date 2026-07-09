@@ -169,6 +169,8 @@ class DistributedSolverContext:
         self.is_factored: bool = False
         self.timings: Dict[str, Any] = timings if timings is not None else {}
         self._S_global: Optional[sp.csc_matrix] = None  # saved for potential re-factor
+        # B2: CG solver handle (InterfaceCGSolver or None); set by factor(), cleared by release().
+        self._cg_solver = None
 
         # Direct field storage (populated by factor() or backward-compat constructor)
         self._interface_lu: Optional[Callable] = interface_lu
@@ -204,6 +206,9 @@ class DistributedSolverContext:
         if self._interface_lu is not None:
             self._interface_lu = None
         self._S_global = None
+        # B2: CG solver holds S_global + preconditioner factors — free it too
+        # so that release() actually reclaims memory in CG mode.
+        self._cg_solver = None
         self.is_factored = False
         # Clear worker DC factorizations if we have a model reference
         if self.model is not None:
@@ -485,6 +490,8 @@ class DistributedTransientContext:
         self._G_package_uu: Optional[sp.csr_matrix] = G_package_uu
 
         self._S_global: Optional[sp.csc_matrix] = None
+        # B2: CG solver handle (InterfaceCGSolver or None); set by factor(), cleared by release().
+        self._cg_solver = None
 
         # Direct field storage (populated by factor() or backward-compat constructor)
         self._interface_lu: Optional[Callable] = interface_lu
@@ -520,6 +527,9 @@ class DistributedTransientContext:
         if self._interface_lu is not None:
             self._interface_lu = None
         self._S_global = None
+        # B2: CG solver holds S_global + preconditioner factors — free it too
+        # so that release() actually reclaims memory in CG mode.
+        self._cg_solver = None
         self.rhs_dirichlet_A = None
         self._rhs_dirichlet_G = None
         self.C_package_uu = None

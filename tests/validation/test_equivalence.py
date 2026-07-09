@@ -948,51 +948,60 @@ class TestDCNetlistTest:
         """
         logging.disable(logging.WARNING)
         warnings.filterwarnings("ignore")
+        dc_ctx = None
+        dist_model = None
+        try:
+            # ── Distributed ────────────────────────────────────────────────
+            from distributed.parser import DistributedNetlistParser
+            from distributed.model import create_distributed_model
+            from distributed.solver import DistributedDDMSolver
 
-        # ── Distributed ────────────────────────────────────────────────
-        from distributed.parser import DistributedNetlistParser
-        from distributed.model import create_distributed_model
-        from distributed.solver import DistributedDDMSolver
+            parser = DistributedNetlistParser(str(_NETLIST_TEST_DIR), net_filter="VDD")
+            metadata = parser.parse_metadata()
+            dist_model = create_distributed_model(metadata, backend="local")
+            dist_solver = DistributedDDMSolver(dist_model)
+            dc_ctx = dist_solver.prepare(verbose=False)
+            dc_result = dist_solver.solve_dc(dc_ctx, verbose=False)
+            dist_v = dc_result.flatten()
 
-        parser = DistributedNetlistParser(str(_NETLIST_TEST_DIR), net_filter="VDD")
-        metadata = parser.parse_metadata()
-        dist_model = create_distributed_model(metadata, backend="local")
-        dist_solver = DistributedDDMSolver(dist_model)
-        dc_ctx = dist_solver.prepare(verbose=False)
-        dc_result = dist_solver.solve_dc(dc_ctx, verbose=False)
-        dist_v = dc_result.flatten()
+            # ── Flat ───────────────────────────────────────────────────────
+            from parser.netlist import NetlistParser
+            from model.factory import create_model_from_pdn
+            from solver.unified_solver import UnifiedIRDropSolver
 
-        # ── Flat ───────────────────────────────────────────────────────
-        from parser.netlist import NetlistParser
-        from model.factory import create_model_from_pdn
-        from solver.unified_solver import UnifiedIRDropSolver
+            flat_parser = NetlistParser(str(_NETLIST_TEST_DIR))
+            flat_graph = flat_parser.parse()
+            flat_model = create_model_from_pdn(flat_graph, "VDD")
+            flat_solver = UnifiedIRDropSolver(flat_model)
+            flat_load = flat_model.extract_current_sources()
+            flat_result = flat_solver.solve(flat_load)
+            flat_v = flat_result.voltages
 
-        flat_parser = NetlistParser(str(_NETLIST_TEST_DIR))
-        flat_graph = flat_parser.parse()
-        flat_model = create_model_from_pdn(flat_graph, "VDD")
-        flat_solver = UnifiedIRDropSolver(flat_model)
-        flat_load = flat_model.extract_current_sources()
-        flat_result = flat_solver.solve(flat_load)
-        flat_v = flat_result.voltages
-
-        # ── Compare ────────────────────────────────────────────────────
-        common = sorted(set(dist_v.keys()) & set(flat_v.keys()))
-        assert len(common) > 10, f"Only {len(common)} common nodes"
-        diffs = np.abs(
-            np.array([dist_v[n] for n in common]) -
-            np.array([flat_v[n] for n in common])
-        )
-        max_diff = float(diffs.max())
-        assert max_diff <= self.NETLIST_TEST_DC_ATOL, (
-            f"netlist_test DC: max |dist - flat| = {max_diff:.3e} V "
-            f"> {self.NETLIST_TEST_DC_ATOL:.0e} V "
-            f"(expected ~30 µV parsing delta; see class docstring)"
-        )
-
-        # Teardown
-        dc_ctx.release()
-        dist_model.shutdown()
-        logging.disable(logging.NOTSET)
+            # ── Compare ────────────────────────────────────────────────────
+            common = sorted(set(dist_v.keys()) & set(flat_v.keys()))
+            assert len(common) > 10, f"Only {len(common)} common nodes"
+            diffs = np.abs(
+                np.array([dist_v[n] for n in common]) -
+                np.array([flat_v[n] for n in common])
+            )
+            max_diff = float(diffs.max())
+            assert max_diff <= self.NETLIST_TEST_DC_ATOL, (
+                f"netlist_test DC: max |dist - flat| = {max_diff:.3e} V "
+                f"> {self.NETLIST_TEST_DC_ATOL:.0e} V "
+                f"(expected ~30 µV parsing delta; see class docstring)"
+            )
+        finally:
+            if dc_ctx is not None:
+                try:
+                    dc_ctx.release()
+                except Exception:
+                    pass
+            if dist_model is not None:
+                try:
+                    dist_model.shutdown()
+                except Exception:
+                    pass
+            logging.disable(logging.NOTSET)
 
     @pytest.mark.integration
     @pytest.mark.skipif(not NETLIST_TEST_EXISTS, reason="netlist_test not available")
@@ -1012,46 +1021,56 @@ class TestDCNetlistTest:
         """
         logging.disable(logging.WARNING)
         warnings.filterwarnings("ignore")
+        dc_ctx = None
+        dist_model = None
+        try:
+            from distributed.parser import DistributedNetlistParser
+            from distributed.model import create_distributed_model
+            from distributed.solver import DistributedDDMSolver
 
-        from distributed.parser import DistributedNetlistParser
-        from distributed.model import create_distributed_model
-        from distributed.solver import DistributedDDMSolver
+            parser = DistributedNetlistParser(str(_NETLIST_TEST_DIR), net_filter="VDD")
+            metadata = parser.parse_metadata()
+            dist_model = create_distributed_model(metadata, backend="local")
+            dist_solver = DistributedDDMSolver(dist_model)
+            dc_ctx = dist_solver.prepare(verbose=False)
+            dc_result = dist_solver.solve_dc(dc_ctx, verbose=False)
+            dist_v = dc_result.flatten()
 
-        parser = DistributedNetlistParser(str(_NETLIST_TEST_DIR), net_filter="VDD")
-        metadata = parser.parse_metadata()
-        dist_model = create_distributed_model(metadata, backend="local")
-        dist_solver = DistributedDDMSolver(dist_model)
-        dc_ctx = dist_solver.prepare(verbose=False)
-        dc_result = dist_solver.solve_dc(dc_ctx, verbose=False)
-        dist_v = dc_result.flatten()
+            from parser.netlist import NetlistParser
+            from model.factory import create_model_from_pdn
+            from solver.unified_solver import UnifiedIRDropSolver
 
-        from parser.netlist import NetlistParser
-        from model.factory import create_model_from_pdn
-        from solver.unified_solver import UnifiedIRDropSolver
+            flat_parser = NetlistParser(str(_NETLIST_TEST_DIR))
+            flat_graph = flat_parser.parse()
+            flat_model = create_model_from_pdn(flat_graph, "VDD")
+            flat_solver = UnifiedIRDropSolver(flat_model)
+            flat_load = flat_model.extract_current_sources()
+            flat_result = flat_solver.solve(flat_load)
+            flat_v = flat_result.voltages
 
-        flat_parser = NetlistParser(str(_NETLIST_TEST_DIR))
-        flat_graph = flat_parser.parse()
-        flat_model = create_model_from_pdn(flat_graph, "VDD")
-        flat_solver = UnifiedIRDropSolver(flat_model)
-        flat_load = flat_model.extract_current_sources()
-        flat_result = flat_solver.solve(flat_load)
-        flat_v = flat_result.voltages
-
-        common = sorted(set(dist_v.keys()) & set(flat_v.keys()))
-        assert len(common) > 10, f"Only {len(common)} common nodes"
-        diffs = np.abs(
-            np.array([dist_v[n] for n in common]) -
-            np.array([flat_v[n] for n in common])
-        )
-        max_diff = float(diffs.max())
-        assert max_diff <= DC_ATOL, (
-            f"netlist_test DC at spec: max |dist - flat| = {max_diff:.3e} V "
-            f"> DC_ATOL={DC_ATOL:.0e} V  (expected ~30 µV parsing delta)"
-        )
-
-        dc_ctx.release()
-        dist_model.shutdown()
-        logging.disable(logging.NOTSET)
+            common = sorted(set(dist_v.keys()) & set(flat_v.keys()))
+            assert len(common) > 10, f"Only {len(common)} common nodes"
+            diffs = np.abs(
+                np.array([dist_v[n] for n in common]) -
+                np.array([flat_v[n] for n in common])
+            )
+            max_diff = float(diffs.max())
+            assert max_diff <= DC_ATOL, (
+                f"netlist_test DC at spec: max |dist - flat| = {max_diff:.3e} V "
+                f"> DC_ATOL={DC_ATOL:.0e} V  (expected ~30 µV parsing delta)"
+            )
+        finally:
+            if dc_ctx is not None:
+                try:
+                    dc_ctx.release()
+                except Exception:
+                    pass
+            if dist_model is not None:
+                try:
+                    dist_model.shutdown()
+                except Exception:
+                    pass
+            logging.disable(logging.NOTSET)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1228,47 +1247,57 @@ class TestDCSampledFullParse:
         """DC after fresh parse equals flat within DC_ATOL."""
         logging.disable(logging.WARNING)
         warnings.filterwarnings("ignore")
+        dc_ctx = None
+        dist_model = None
+        try:
+            from distributed.parser import DistributedNetlistParser
+            from distributed.model import create_distributed_model
+            from distributed.solver import DistributedDDMSolver
+            from parser.netlist import NetlistParser
+            from model.factory import create_model_from_pdn
+            from solver.unified_solver import UnifiedIRDropSolver
 
-        from distributed.parser import DistributedNetlistParser
-        from distributed.model import create_distributed_model
-        from distributed.solver import DistributedDDMSolver
-        from parser.netlist import NetlistParser
-        from model.factory import create_model_from_pdn
-        from solver.unified_solver import UnifiedIRDropSolver
+            # Distributed
+            parser = DistributedNetlistParser(str(_SAMPLED_DIR), net_filter="VDD_XLV")
+            metadata = parser.parse_metadata()
+            dist_model = create_distributed_model(metadata, backend="local")
+            dist_solver = DistributedDDMSolver(dist_model)
+            dc_ctx = dist_solver.prepare(verbose=False)
+            dc_result = dist_solver.solve_dc(dc_ctx, verbose=False)
+            dist_v = dc_result.flatten()
 
-        # Distributed
-        parser = DistributedNetlistParser(str(_SAMPLED_DIR), net_filter="VDD_XLV")
-        metadata = parser.parse_metadata()
-        dist_model = create_distributed_model(metadata, backend="local")
-        dist_solver = DistributedDDMSolver(dist_model)
-        dc_ctx = dist_solver.prepare(verbose=False)
-        dc_result = dist_solver.solve_dc(dc_ctx, verbose=False)
-        dist_v = dc_result.flatten()
+            # Flat
+            flat_parser = NetlistParser(str(_SAMPLED_DIR))
+            flat_graph = flat_parser.parse()
+            flat_model = create_model_from_pdn(flat_graph, "VDD_XLV")
+            flat_solver = UnifiedIRDropSolver(flat_model)
+            flat_load = flat_model.extract_current_sources()
+            flat_result = flat_solver.solve(flat_load)
+            flat_v = flat_result.voltages
 
-        # Flat
-        flat_parser = NetlistParser(str(_SAMPLED_DIR))
-        flat_graph = flat_parser.parse()
-        flat_model = create_model_from_pdn(flat_graph, "VDD_XLV")
-        flat_solver = UnifiedIRDropSolver(flat_model)
-        flat_load = flat_model.extract_current_sources()
-        flat_result = flat_solver.solve(flat_load)
-        flat_v = flat_result.voltages
-
-        common = sorted(set(dist_v.keys()) & set(flat_v.keys()))
-        assert len(common) > 10000, f"Only {len(common)} common nodes"
-        diffs = np.abs(
-            np.array([dist_v[n] for n in common]) -
-            np.array([flat_v[n] for n in common])
-        )
-        max_diff = float(diffs.max())
-        assert max_diff <= DC_ATOL, (
-            f"netlist_sampled fresh-parse DC: max diff = {max_diff:.3e} V "
-            f"> {DC_ATOL:.0e} V"
-        )
-
-        dc_ctx.release()
-        dist_model.shutdown()
-        logging.disable(logging.NOTSET)
+            common = sorted(set(dist_v.keys()) & set(flat_v.keys()))
+            assert len(common) > 10000, f"Only {len(common)} common nodes"
+            diffs = np.abs(
+                np.array([dist_v[n] for n in common]) -
+                np.array([flat_v[n] for n in common])
+            )
+            max_diff = float(diffs.max())
+            assert max_diff <= DC_ATOL, (
+                f"netlist_sampled fresh-parse DC: max diff = {max_diff:.3e} V "
+                f"> {DC_ATOL:.0e} V"
+            )
+        finally:
+            if dc_ctx is not None:
+                try:
+                    dc_ctx.release()
+                except Exception:
+                    pass
+            if dist_model is not None:
+                try:
+                    dist_model.shutdown()
+                except Exception:
+                    pass
+            logging.disable(logging.NOTSET)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1303,43 +1332,44 @@ class TestAdjointNetlistTest:
         s = netlist_test_setup
         logging.disable(logging.WARNING)
         warnings.filterwarnings("ignore")
+        try:
+            if s.victim_node is None:
+                pytest.skip("No interior node with VCS sources found in netlist_test")
 
-        if s.victim_node is None:
-            pytest.skip("No interior node with VCS sources found in netlist_test")
+            obs_time = s.t_end
 
-        obs_time = s.t_end
+            # Distributed static adjoint
+            dist_attr = s.dist_solver.analyze_adjoint_static(
+                victim_nodes=s.victim_node,
+                observation_time=obs_time,
+                dc_context=s.dc_ctx,
+                top_k=self.TOP_K,
+                verbose=False,
+            )
 
-        # Distributed static adjoint
-        dist_attr = s.dist_solver.analyze_adjoint_static(
-            victim_nodes=s.victim_node,
-            observation_time=obs_time,
-            dc_context=s.dc_ctx,
-            top_k=self.TOP_K,
-            verbose=False,
-        )
+            # Flat static adjoint
+            from analysis.adjoint_sensitivity import AdjointSensitivitySolver
+            flat_adj = AdjointSensitivitySolver(s.flat_model, s.flat_graph,
+                                                vectorize_threshold=0)
+            flat_attr = flat_adj.analyze_victim_static(
+                victim_node=s.victim_node,
+                observation_time=obs_time,
+                top_k=self.TOP_K,
+            )
 
-        # Flat static adjoint
-        from analysis.adjoint_sensitivity import AdjointSensitivitySolver
-        flat_adj = AdjointSensitivitySolver(s.flat_model, s.flat_graph,
-                                            vectorize_threshold=0)
-        flat_attr = flat_adj.analyze_victim_static(
-            victim_node=s.victim_node,
-            observation_time=obs_time,
-            top_k=self.TOP_K,
-        )
+            dist_nodes = {ac.node for ac in dist_attr.top_aggressors}
+            flat_nodes = {ac.node for ac in flat_attr.top_aggressors}
 
-        dist_nodes = {ac.node for ac in dist_attr.top_aggressors}
-        flat_nodes = {ac.node for ac in flat_attr.top_aggressors}
+            assert dist_nodes, "Distributed static adjoint returned empty top_aggressors"
+            assert flat_nodes, "Flat static adjoint returned empty top_aggressors"
 
-        assert dist_nodes, "Distributed static adjoint returned empty top_aggressors"
-        assert flat_nodes, "Flat static adjoint returned empty top_aggressors"
-
-        overlap = dist_nodes & flat_nodes
-        assert len(overlap) >= 2, (
-            f"netlist_test static adjoint top-K overlap too small ({len(overlap)}); "
-            f"dist={sorted(dist_nodes)[:5]} flat={sorted(flat_nodes)[:5]}"
-        )
-        logging.disable(logging.NOTSET)
+            overlap = dist_nodes & flat_nodes
+            assert len(overlap) >= 2, (
+                f"netlist_test static adjoint top-K overlap too small ({len(overlap)}); "
+                f"dist={sorted(dist_nodes)[:5]} flat={sorted(flat_nodes)[:5]}"
+            )
+        finally:
+            logging.disable(logging.NOTSET)
 
     @pytest.mark.integration
     @pytest.mark.skipif(not NETLIST_TEST_EXISTS, reason="netlist_test not available")
@@ -1349,49 +1379,50 @@ class TestAdjointNetlistTest:
         s = netlist_test_setup
         logging.disable(logging.WARNING)
         warnings.filterwarnings("ignore")
+        try:
+            if s.victim_node is None:
+                pytest.skip("No interior node with VCS sources found in netlist_test")
 
-        if s.victim_node is None:
-            pytest.skip("No interior node with VCS sources found in netlist_test")
+            obs_time = s.t_end
+            dist_attr = s.dist_solver.analyze_adjoint_static(
+                victim_nodes=s.victim_node,
+                observation_time=obs_time,
+                dc_context=s.dc_ctx,
+                top_k=self.TOP_K,
+                verbose=False,
+            )
+            from analysis.adjoint_sensitivity import AdjointSensitivitySolver
+            flat_adj = AdjointSensitivitySolver(s.flat_model, s.flat_graph,
+                                                vectorize_threshold=0)
+            flat_attr = flat_adj.analyze_victim_static(
+                victim_node=s.victim_node,
+                observation_time=obs_time,
+                top_k=self.TOP_K,
+            )
 
-        obs_time = s.t_end
-        dist_attr = s.dist_solver.analyze_adjoint_static(
-            victim_nodes=s.victim_node,
-            observation_time=obs_time,
-            dc_context=s.dc_ctx,
-            top_k=self.TOP_K,
-            verbose=False,
-        )
-        from analysis.adjoint_sensitivity import AdjointSensitivitySolver
-        flat_adj = AdjointSensitivitySolver(s.flat_model, s.flat_graph,
-                                            vectorize_threshold=0)
-        flat_attr = flat_adj.analyze_victim_static(
-            victim_node=s.victim_node,
-            observation_time=obs_time,
-            top_k=self.TOP_K,
-        )
+            dist_contribs = {ac.node: ac.contribution_mV for ac in dist_attr.top_aggressors}
+            flat_contribs = {ac.node: ac.contribution_mV for ac in flat_attr.top_aggressors}
+            common = set(dist_contribs.keys()) & set(flat_contribs.keys())
+            assert len(common) >= 2, (
+                f"Too few common aggressors to compare ({len(common)}); "
+                f"dist had {len(dist_contribs)}, flat had {len(flat_contribs)}"
+            )
 
-        dist_contribs = {ac.node: ac.contribution_mV for ac in dist_attr.top_aggressors}
-        flat_contribs = {ac.node: ac.contribution_mV for ac in flat_attr.top_aggressors}
-        common = set(dist_contribs.keys()) & set(flat_contribs.keys())
-        assert len(common) >= 2, (
-            f"Too few common aggressors to compare ({len(common)}); "
-            f"dist had {len(dist_contribs)}, flat had {len(flat_contribs)}"
-        )
+            failures = []
+            for name in sorted(common):
+                d = dist_contribs[name]
+                f = flat_contribs[name]
+                rel = abs(d - f) / max(abs(f), 1e-9)
+                if rel > ADJOINT_SPEC_REL_TOL:
+                    failures.append(f"  {name}: dist={d:.4e} flat={f:.4e} rel={rel:.2e}")
 
-        failures = []
-        for name in sorted(common):
-            d = dist_contribs[name]
-            f = flat_contribs[name]
-            rel = abs(d - f) / max(abs(f), 1e-9)
-            if rel > ADJOINT_SPEC_REL_TOL:
-                failures.append(f"  {name}: dist={d:.4e} flat={f:.4e} rel={rel:.2e}")
-
-        assert not failures, (
-            f"netlist_test adjoint static at spec {ADJOINT_SPEC_REL_TOL:.0e}: "
-            f"{len(failures)}/{len(common)} common aggressors exceed tolerance:\n"
-            + "\n".join(failures)
-        )
-        logging.disable(logging.NOTSET)
+            assert not failures, (
+                f"netlist_test adjoint static at spec {ADJOINT_SPEC_REL_TOL:.0e}: "
+                f"{len(failures)}/{len(common)} common aggressors exceed tolerance:\n"
+                + "\n".join(failures)
+            )
+        finally:
+            logging.disable(logging.NOTSET)
 
     @pytest.mark.integration
     @pytest.mark.skipif(not NETLIST_TEST_EXISTS, reason="netlist_test not available")
@@ -1405,64 +1436,70 @@ class TestAdjointNetlistTest:
         s = netlist_test_setup
         logging.disable(logging.WARNING)
         warnings.filterwarnings("ignore")
+        trans_ctx = None
+        try:
+            if s.victim_node is None:
+                pytest.skip("No interior node with VCS sources found in netlist_test")
 
-        if s.victim_node is None:
-            pytest.skip("No interior node with VCS sources found in netlist_test")
+            from analysis.transient_solver import IntegrationMethod
 
-        from analysis.transient_solver import IntegrationMethod
+            obs_time = s.t_end
 
-        obs_time = s.t_end
+            # Distributed dynamic adjoint — raw sources (smooth=False) on both sides.
+            # Using the same discipline as QS/BE transient: identical raw sources
+            # avoids the dual-smoother pattern warned against in project memory.
+            dist_sources = s.dist_solver.preprocess_sources(
+                time_step=s.dt, t_start=s.t_start, t_end=s.t_end,
+                smooth=False, verbose=False,
+            )
+            trans_ctx = s.dist_solver.prepare_transient(dt=s.dt, method="be", verbose=False)
+            trans_result = s.dist_solver.solve_transient(
+                trans_ctx,
+                dc_context=s.dc_ctx,
+                t_start=s.t_start,
+                t_end=s.t_end,
+                smoothed_sources=dist_sources,
+                verbose=False,
+            )
+            dist_attr = s.dist_solver.analyze_adjoint(
+                victim_nodes=s.victim_node,
+                observation_time=obs_time,
+                trans_context=trans_ctx,
+                transient_result=trans_result,
+                dc_context=s.dc_ctx,
+                top_k=self.TOP_K,
+                verbose=False,
+            )
 
-        # Distributed dynamic adjoint — raw sources (smooth=False) on both sides.
-        # Using the same discipline as QS/BE transient: identical raw sources
-        # avoids the dual-smoother pattern warned against in project memory.
-        dist_sources = s.dist_solver.preprocess_sources(
-            time_step=s.dt, t_start=s.t_start, t_end=s.t_end,
-            smooth=False, verbose=False,
-        )
-        trans_ctx = s.dist_solver.prepare_transient(dt=s.dt, method="be", verbose=False)
-        trans_result = s.dist_solver.solve_transient(
-            trans_ctx,
-            dc_context=s.dc_ctx,
-            t_start=s.t_start,
-            t_end=s.t_end,
-            smoothed_sources=dist_sources,
-            verbose=False,
-        )
-        dist_attr = s.dist_solver.analyze_adjoint(
-            victim_nodes=s.victim_node,
-            observation_time=obs_time,
-            trans_context=trans_ctx,
-            transient_result=trans_result,
-            dc_context=s.dc_ctx,
-            top_k=self.TOP_K,
-            verbose=False,
-        )
-        trans_ctx.release()
+            # Flat dynamic adjoint — raw VCS (no smoothed_sources) to match dist smooth=False
+            from analysis.adjoint_sensitivity import AdjointSensitivitySolver
+            flat_adj = AdjointSensitivitySolver(s.flat_model, s.flat_graph,
+                                                vectorize_threshold=0)
+            flat_attr = flat_adj.analyze_victim(
+                victim_node=s.victim_node,
+                observation_time=obs_time,
+                dt=s.dt,
+                method=IntegrationMethod.BACKWARD_EULER,
+                # No smoothed_sources: raw VCS to match distributed smooth=False
+                top_k=self.TOP_K,
+            )
 
-        # Flat dynamic adjoint — raw VCS (no smoothed_sources) to match dist smooth=False
-        from analysis.adjoint_sensitivity import AdjointSensitivitySolver
-        flat_adj = AdjointSensitivitySolver(s.flat_model, s.flat_graph,
-                                            vectorize_threshold=0)
-        flat_attr = flat_adj.analyze_victim(
-            victim_node=s.victim_node,
-            observation_time=obs_time,
-            dt=s.dt,
-            method=IntegrationMethod.BACKWARD_EULER,
-            # No smoothed_sources: raw VCS to match distributed smooth=False
-            top_k=self.TOP_K,
-        )
-
-        dist_nodes = {ac.node for ac in dist_attr.top_aggressors}
-        flat_nodes = {ac.node for ac in flat_attr.top_aggressors}
-        assert dist_nodes, "Distributed dynamic adjoint returned empty top_aggressors"
-        assert flat_nodes, "Flat dynamic adjoint returned empty top_aggressors"
-        overlap = dist_nodes & flat_nodes
-        assert len(overlap) >= 2, (
-            f"netlist_test dynamic adjoint top-K overlap too small ({len(overlap)}); "
-            f"dist={sorted(dist_nodes)[:5]} flat={sorted(flat_nodes)[:5]}"
-        )
-        logging.disable(logging.NOTSET)
+            dist_nodes = {ac.node for ac in dist_attr.top_aggressors}
+            flat_nodes = {ac.node for ac in flat_attr.top_aggressors}
+            assert dist_nodes, "Distributed dynamic adjoint returned empty top_aggressors"
+            assert flat_nodes, "Flat dynamic adjoint returned empty top_aggressors"
+            overlap = dist_nodes & flat_nodes
+            assert len(overlap) >= 2, (
+                f"netlist_test dynamic adjoint top-K overlap too small ({len(overlap)}); "
+                f"dist={sorted(dist_nodes)[:5]} flat={sorted(flat_nodes)[:5]}"
+            )
+        finally:
+            if trans_ctx is not None:
+                try:
+                    trans_ctx.release()
+                except Exception:
+                    pass
+            logging.disable(logging.NOTSET)
 
     @pytest.mark.integration
     @pytest.mark.skipif(not NETLIST_TEST_EXISTS, reason="netlist_test not available")
@@ -1477,71 +1514,77 @@ class TestAdjointNetlistTest:
         s = netlist_test_setup
         logging.disable(logging.WARNING)
         warnings.filterwarnings("ignore")
+        trans_ctx = None
+        try:
+            if s.victim_node is None:
+                pytest.skip("No interior node with VCS sources found in netlist_test")
 
-        if s.victim_node is None:
-            pytest.skip("No interior node with VCS sources found in netlist_test")
+            from analysis.transient_solver import IntegrationMethod
 
-        from analysis.transient_solver import IntegrationMethod
+            obs_time = s.t_end
 
-        obs_time = s.t_end
+            # Raw sources (smooth=False) on both sides — same discipline as transient tests.
+            dist_sources = s.dist_solver.preprocess_sources(
+                time_step=s.dt, t_start=s.t_start, t_end=s.t_end,
+                smooth=False, verbose=False,
+            )
+            trans_ctx = s.dist_solver.prepare_transient(dt=s.dt, method="be", verbose=False)
+            trans_result = s.dist_solver.solve_transient(
+                trans_ctx,
+                dc_context=s.dc_ctx,
+                t_start=s.t_start,
+                t_end=s.t_end,
+                smoothed_sources=dist_sources,
+                verbose=False,
+            )
+            dist_attr = s.dist_solver.analyze_adjoint(
+                victim_nodes=s.victim_node,
+                observation_time=obs_time,
+                trans_context=trans_ctx,
+                transient_result=trans_result,
+                dc_context=s.dc_ctx,
+                top_k=self.TOP_K,
+                verbose=False,
+            )
 
-        # Raw sources (smooth=False) on both sides — same discipline as transient tests.
-        dist_sources = s.dist_solver.preprocess_sources(
-            time_step=s.dt, t_start=s.t_start, t_end=s.t_end,
-            smooth=False, verbose=False,
-        )
-        trans_ctx = s.dist_solver.prepare_transient(dt=s.dt, method="be", verbose=False)
-        trans_result = s.dist_solver.solve_transient(
-            trans_ctx,
-            dc_context=s.dc_ctx,
-            t_start=s.t_start,
-            t_end=s.t_end,
-            smoothed_sources=dist_sources,
-            verbose=False,
-        )
-        dist_attr = s.dist_solver.analyze_adjoint(
-            victim_nodes=s.victim_node,
-            observation_time=obs_time,
-            trans_context=trans_ctx,
-            transient_result=trans_result,
-            dc_context=s.dc_ctx,
-            top_k=self.TOP_K,
-            verbose=False,
-        )
-        trans_ctx.release()
+            from analysis.adjoint_sensitivity import AdjointSensitivitySolver
+            flat_adj = AdjointSensitivitySolver(s.flat_model, s.flat_graph,
+                                                vectorize_threshold=0)
+            flat_attr = flat_adj.analyze_victim(
+                victim_node=s.victim_node,
+                observation_time=obs_time,
+                dt=s.dt,
+                method=IntegrationMethod.BACKWARD_EULER,
+                # No smoothed_sources: raw VCS to match distributed smooth=False
+                top_k=self.TOP_K,
+            )
 
-        from analysis.adjoint_sensitivity import AdjointSensitivitySolver
-        flat_adj = AdjointSensitivitySolver(s.flat_model, s.flat_graph,
-                                            vectorize_threshold=0)
-        flat_attr = flat_adj.analyze_victim(
-            victim_node=s.victim_node,
-            observation_time=obs_time,
-            dt=s.dt,
-            method=IntegrationMethod.BACKWARD_EULER,
-            # No smoothed_sources: raw VCS to match distributed smooth=False
-            top_k=self.TOP_K,
-        )
+            dist_contribs = {ac.node: ac.contribution_mV for ac in dist_attr.top_aggressors}
+            flat_contribs = {ac.node: ac.contribution_mV for ac in flat_attr.top_aggressors}
+            common = set(dist_contribs.keys()) & set(flat_contribs.keys())
+            assert len(common) >= 2, (
+                f"Too few common aggressors to compare ({len(common)}); "
+                f"dist had {len(dist_contribs)}, flat had {len(flat_contribs)}"
+            )
 
-        dist_contribs = {ac.node: ac.contribution_mV for ac in dist_attr.top_aggressors}
-        flat_contribs = {ac.node: ac.contribution_mV for ac in flat_attr.top_aggressors}
-        common = set(dist_contribs.keys()) & set(flat_contribs.keys())
-        assert len(common) >= 2, (
-            f"Too few common aggressors to compare ({len(common)}); "
-            f"dist had {len(dist_contribs)}, flat had {len(flat_contribs)}"
-        )
-
-        failures = []
-        for name in sorted(common):
-            d = dist_contribs[name]
-            f = flat_contribs[name]
-            rel = abs(d - f) / max(abs(f), 1e-9)
-            if rel > ADJOINT_SPEC_REL_TOL:
-                failures.append(f"  {name}: dist={d:.4e} flat={f:.4e} rel={rel:.2e}")
-        assert not failures, (
-            f"netlist_test dynamic adjoint at spec {ADJOINT_SPEC_REL_TOL:.0e}: "
-            f"{len(failures)}/{len(common)} exceeded:\n" + "\n".join(failures)
-        )
-        logging.disable(logging.NOTSET)
+            failures = []
+            for name in sorted(common):
+                d = dist_contribs[name]
+                f = flat_contribs[name]
+                rel = abs(d - f) / max(abs(f), 1e-9)
+                if rel > ADJOINT_SPEC_REL_TOL:
+                    failures.append(f"  {name}: dist={d:.4e} flat={f:.4e} rel={rel:.2e}")
+            assert not failures, (
+                f"netlist_test dynamic adjoint at spec {ADJOINT_SPEC_REL_TOL:.0e}: "
+                f"{len(failures)}/{len(common)} exceeded:\n" + "\n".join(failures)
+            )
+        finally:
+            if trans_ctx is not None:
+                try:
+                    trans_ctx.release()
+                except Exception:
+                    pass
+            logging.disable(logging.NOTSET)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1577,97 +1620,106 @@ class TestAdjointSampledPkl:
         """Per-aggressor static contributions agree within ADJOINT_REL_TOL."""
         logging.disable(logging.WARNING)
         warnings.filterwarnings("ignore")
+        dc_ctx = None
+        dist_model = None
+        try:
+            # ── Distributed ────────────────────────────────────────────────
+            from distributed.model import load_distributed_partitions, create_distributed_model
+            from distributed.solver import DistributedDDMSolver
+            from distributed.tile_parsing import _iter_instance_sources
 
-        # ── Distributed ────────────────────────────────────────────────
-        from distributed.model import load_distributed_partitions, create_distributed_model
-        from distributed.solver import DistributedDDMSolver
-        from distributed.tile_parsing import _iter_instance_sources
+            bundle = load_distributed_partitions(str(_PKL_DIR))
+            dist_model = create_distributed_model(bundle, backend="local")
+            dist_solver = DistributedDDMSolver(dist_model)
+            dc_ctx = dist_solver.prepare(verbose=False)
 
-        bundle = load_distributed_partitions(str(_PKL_DIR))
-        dist_model = create_distributed_model(bundle, backend="local")
-        dist_solver = DistributedDDMSolver(dist_model)
-        dc_ctx = dist_solver.prepare(verbose=False)
+            # Pick a victim node: interior node with current sources nearby
+            interface_set = set(dc_ctx.interface_nodes)
+            nodes_with_sources: set = set()
+            for tc in dist_model.metadata.tile_configs:
+                if tc.instance_path is None:
+                    continue
+                for prep in _iter_instance_sources(tc.instance_path, tc.net_filter, tc.nd_path):
+                    n = prep.cs.node1
+                    if n and n != "0":
+                        nodes_with_sources.add(n)
+            interior_with_sources = sorted(
+                n for n in nodes_with_sources
+                if n not in interface_set and not n.endswith("_vsrc")
+            )
+            assert interior_with_sources, "No interior nodes with sources found"
+            victim = interior_with_sources[0]
 
-        # Pick a victim node: interior node with current sources nearby
-        interface_set = set(dc_ctx.interface_nodes)
-        nodes_with_sources: set = set()
-        for tc in dist_model.metadata.tile_configs:
-            if tc.instance_path is None:
-                continue
-            for prep in _iter_instance_sources(tc.instance_path, tc.net_filter, tc.nd_path):
-                n = prep.cs.node1
-                if n and n != "0":
-                    nodes_with_sources.add(n)
-        interior_with_sources = sorted(
-            n for n in nodes_with_sources
-            if n not in interface_set and not n.endswith("_vsrc")
-        )
-        assert interior_with_sources, "No interior nodes with sources found"
-        victim = interior_with_sources[0]
+            obs_time = 5e-9  # observation time: 5 ns (arbitrary within t_end)
 
-        obs_time = 5e-9  # observation time: 5 ns (arbitrary within t_end)
+            dist_attr = dist_solver.analyze_adjoint_static(
+                victim_nodes=victim,
+                observation_time=obs_time,
+                dc_context=dc_ctx,
+                top_k=self.TOP_K,
+                verbose=False,
+            )
 
-        dist_attr = dist_solver.analyze_adjoint_static(
-            victim_nodes=victim,
-            observation_time=obs_time,
-            dc_context=dc_ctx,
-            top_k=self.TOP_K,
-            verbose=False,
-        )
+            # ── Flat ───────────────────────────────────────────────────────
+            from parser.netlist import NetlistParser
+            from model.factory import create_model_from_pdn
+            from solver.unified_solver import UnifiedIRDropSolver
+            from analysis.adjoint_sensitivity import AdjointSensitivitySolver
 
-        # ── Flat ───────────────────────────────────────────────────────
-        from parser.netlist import NetlistParser
-        from model.factory import create_model_from_pdn
-        from solver.unified_solver import UnifiedIRDropSolver
-        from analysis.adjoint_sensitivity import AdjointSensitivitySolver
+            flat_parser = NetlistParser(str(_SAMPLED_DIR))
+            flat_graph = flat_parser.parse()
+            flat_model = create_model_from_pdn(flat_graph, "VDD_XLV")
+            flat_adj = AdjointSensitivitySolver(flat_model, flat_graph,
+                                                vectorize_threshold=0)
+            flat_attr = flat_adj.analyze_victim_static(
+                victim_node=victim,
+                observation_time=obs_time,
+                top_k=self.TOP_K,
+            )
 
-        flat_parser = NetlistParser(str(_SAMPLED_DIR))
-        flat_graph = flat_parser.parse()
-        flat_model = create_model_from_pdn(flat_graph, "VDD_XLV")
-        flat_adj = AdjointSensitivitySolver(flat_model, flat_graph,
-                                            vectorize_threshold=0)
-        flat_attr = flat_adj.analyze_victim_static(
-            victim_node=victim,
-            observation_time=obs_time,
-            top_k=self.TOP_K,
-        )
+            # ── Compare top-K contributions on common aggressor node set ─────
+            dist_contribs: Dict[str, float] = {
+                ac.node: ac.contribution_mV
+                for ac in dist_attr.top_aggressors
+            }
+            flat_contribs: Dict[str, float] = {
+                ac.node: ac.contribution_mV
+                for ac in flat_attr.top_aggressors
+            }
+            common = set(dist_contribs.keys()) & set(flat_contribs.keys())
+            assert len(common) >= 3, (
+                f"Too few common aggressors ({len(common)}); "
+                f"dist had {len(dist_contribs)}, flat had {len(flat_contribs)}"
+            )
 
-        # ── Compare top-K contributions on common aggressor node set ─────
-        dist_contribs: Dict[str, float] = {
-            ac.node: ac.contribution_mV
-            for ac in dist_attr.top_aggressors
-        }
-        flat_contribs: Dict[str, float] = {
-            ac.node: ac.contribution_mV
-            for ac in flat_attr.top_aggressors
-        }
-        common = set(dist_contribs.keys()) & set(flat_contribs.keys())
-        assert len(common) >= 3, (
-            f"Too few common aggressors ({len(common)}); "
-            f"dist had {len(dist_contribs)}, flat had {len(flat_contribs)}"
-        )
+            failures = []
+            for name in sorted(common):
+                d = dist_contribs[name]
+                f = flat_contribs[name]
+                denom = max(abs(f), 1e-9)  # avoid division by tiny numbers
+                rel = abs(d - f) / denom
+                if rel > ADJOINT_REL_TOL:
+                    failures.append(
+                        f"  {name}: dist={d:.4e} flat={f:.4e} rel={rel:.2e}"
+                    )
 
-        failures = []
-        for name in sorted(common):
-            d = dist_contribs[name]
-            f = flat_contribs[name]
-            denom = max(abs(f), 1e-9)  # avoid division by tiny numbers
-            rel = abs(d - f) / denom
-            if rel > ADJOINT_REL_TOL:
-                failures.append(
-                    f"  {name}: dist={d:.4e} flat={f:.4e} rel={rel:.2e}"
-                )
-
-        assert not failures, (
-            f"Adjoint static contributions exceed ADJOINT_REL_TOL={ADJOINT_REL_TOL:.0e} "
-            f"on {len(failures)}/{len(common)} common aggressors:\n"
-            + "\n".join(failures)
-        )
-
-        # Teardown
-        dc_ctx.release()
-        dist_model.shutdown()
-        logging.disable(logging.NOTSET)
+            assert not failures, (
+                f"Adjoint static contributions exceed ADJOINT_REL_TOL={ADJOINT_REL_TOL:.0e} "
+                f"on {len(failures)}/{len(common)} common aggressors:\n"
+                + "\n".join(failures)
+            )
+        finally:
+            if dc_ctx is not None:
+                try:
+                    dc_ctx.release()
+                except Exception:
+                    pass
+            if dist_model is not None:
+                try:
+                    dist_model.shutdown()
+                except Exception:
+                    pass
+            logging.disable(logging.NOTSET)
 
     @pytest.mark.integration
     @pytest.mark.skipif(not PKL_DIR_EXISTS, reason="distributed_pkl not available")
@@ -1682,76 +1734,84 @@ class TestAdjointSampledPkl:
         """
         logging.disable(logging.WARNING)
         warnings.filterwarnings("ignore")
+        dc_ctx = None
+        dist_model = None
+        try:
+            from distributed.model import load_distributed_partitions, create_distributed_model
+            from distributed.solver import DistributedDDMSolver
+            from distributed.tile_parsing import _iter_instance_sources
 
-        from distributed.model import load_distributed_partitions, create_distributed_model
-        from distributed.solver import DistributedDDMSolver
-        from distributed.tile_parsing import _iter_instance_sources
+            bundle = load_distributed_partitions(str(_PKL_DIR))
+            dist_model = create_distributed_model(bundle, backend="local")
+            dist_solver = DistributedDDMSolver(dist_model)
+            dc_ctx = dist_solver.prepare(verbose=False)
 
-        bundle = load_distributed_partitions(str(_PKL_DIR))
-        dist_model = create_distributed_model(bundle, backend="local")
-        dist_solver = DistributedDDMSolver(dist_model)
-        dc_ctx = dist_solver.prepare(verbose=False)
+            interface_set = set(dc_ctx.interface_nodes)
+            nodes_with_sources: set = set()
+            for tc in dist_model.metadata.tile_configs:
+                if tc.instance_path is None:
+                    continue
+                for prep in _iter_instance_sources(tc.instance_path, tc.net_filter, tc.nd_path):
+                    n = prep.cs.node1
+                    if n and n != "0":
+                        nodes_with_sources.add(n)
+            interior_with_sources = sorted(
+                n for n in nodes_with_sources
+                if n not in interface_set and not n.endswith("_vsrc")
+            )
+            if not interior_with_sources:
+                pytest.skip("No interior nodes with sources")
+            victim = interior_with_sources[0]
 
-        interface_set = set(dc_ctx.interface_nodes)
-        nodes_with_sources: set = set()
-        for tc in dist_model.metadata.tile_configs:
-            if tc.instance_path is None:
-                continue
-            for prep in _iter_instance_sources(tc.instance_path, tc.net_filter, tc.nd_path):
-                n = prep.cs.node1
-                if n and n != "0":
-                    nodes_with_sources.add(n)
-        interior_with_sources = sorted(
-            n for n in nodes_with_sources
-            if n not in interface_set and not n.endswith("_vsrc")
-        )
-        if not interior_with_sources:
-            dc_ctx.release()
-            dist_model.shutdown()
-            pytest.skip("No interior nodes with sources")
-        victim = interior_with_sources[0]
+            dist_attr = dist_solver.analyze_adjoint_static(
+                victim_nodes=victim,
+                observation_time=5e-9,
+                dc_context=dc_ctx,
+                top_k=self.TOP_K,
+                verbose=False,
+            )
 
-        dist_attr = dist_solver.analyze_adjoint_static(
-            victim_nodes=victim,
-            observation_time=5e-9,
-            dc_context=dc_ctx,
-            top_k=self.TOP_K,
-            verbose=False,
-        )
+            from parser.netlist import NetlistParser
+            from model.factory import create_model_from_pdn
+            from analysis.adjoint_sensitivity import AdjointSensitivitySolver
 
-        from parser.netlist import NetlistParser
-        from model.factory import create_model_from_pdn
-        from analysis.adjoint_sensitivity import AdjointSensitivitySolver
+            flat_parser = NetlistParser(str(_SAMPLED_DIR))
+            flat_graph = flat_parser.parse()
+            flat_model = create_model_from_pdn(flat_graph, "VDD_XLV")
+            flat_adj = AdjointSensitivitySolver(flat_model, flat_graph, vectorize_threshold=0)
+            flat_attr = flat_adj.analyze_victim_static(
+                victim_node=victim, observation_time=5e-9, top_k=self.TOP_K,
+            )
 
-        flat_parser = NetlistParser(str(_SAMPLED_DIR))
-        flat_graph = flat_parser.parse()
-        flat_model = create_model_from_pdn(flat_graph, "VDD_XLV")
-        flat_adj = AdjointSensitivitySolver(flat_model, flat_graph, vectorize_threshold=0)
-        flat_attr = flat_adj.analyze_victim_static(
-            victim_node=victim, observation_time=5e-9, top_k=self.TOP_K,
-        )
+            dist_contribs = {ac.node: ac.contribution_mV for ac in dist_attr.top_aggressors}
+            flat_contribs = {ac.node: ac.contribution_mV for ac in flat_attr.top_aggressors}
+            common = set(dist_contribs.keys()) & set(flat_contribs.keys())
+            assert len(common) >= 3, f"Too few common aggressors ({len(common)})"
 
-        dist_contribs = {ac.node: ac.contribution_mV for ac in dist_attr.top_aggressors}
-        flat_contribs = {ac.node: ac.contribution_mV for ac in flat_attr.top_aggressors}
-        common = set(dist_contribs.keys()) & set(flat_contribs.keys())
-        assert len(common) >= 3, f"Too few common aggressors ({len(common)})"
+            failures = []
+            for name in sorted(common):
+                d = dist_contribs[name]
+                f = flat_contribs[name]
+                rel = abs(d - f) / max(abs(f), 1e-9)
+                if rel > ADJOINT_SPEC_REL_TOL:
+                    failures.append(f"  {name}: dist={d:.4e} flat={f:.4e} rel={rel:.2e}")
 
-        failures = []
-        for name in sorted(common):
-            d = dist_contribs[name]
-            f = flat_contribs[name]
-            rel = abs(d - f) / max(abs(f), 1e-9)
-            if rel > ADJOINT_SPEC_REL_TOL:
-                failures.append(f"  {name}: dist={d:.4e} flat={f:.4e} rel={rel:.2e}")
-
-        dc_ctx.release()
-        dist_model.shutdown()
-        logging.disable(logging.NOTSET)
-
-        assert not failures, (
-            f"Adjoint static at spec {ADJOINT_SPEC_REL_TOL:.0e}: "
-            f"{len(failures)}/{len(common)} exceeded:\n" + "\n".join(failures)
-        )
+            assert not failures, (
+                f"Adjoint static at spec {ADJOINT_SPEC_REL_TOL:.0e}: "
+                f"{len(failures)}/{len(common)} exceeded:\n" + "\n".join(failures)
+            )
+        finally:
+            if dc_ctx is not None:
+                try:
+                    dc_ctx.release()
+                except Exception:
+                    pass
+            if dist_model is not None:
+                try:
+                    dist_model.shutdown()
+                except Exception:
+                    pass
+            logging.disable(logging.NOTSET)
 
     @pytest.mark.integration
     @pytest.mark.skipif(not PKL_DIR_EXISTS, reason="distributed_pkl not available")
@@ -1803,24 +1863,29 @@ class TestAdjointSampledPkl:
             smooth=False, verbose=False,
         )
         trans_ctx = s.dist_solver.prepare_transient(dt=s.dt, method="be", verbose=False)
-        trans_result = s.dist_solver.solve_transient(
-            trans_ctx,
-            dc_context=s.dc_ctx,
-            t_start=s.t_start,
-            t_end=s.t_end,
-            smoothed_sources=dist_sources,
-            verbose=False,
-        )
-        dist_attr = s.dist_solver.analyze_adjoint(
-            victim_nodes=victim,
-            observation_time=obs_time,
-            trans_context=trans_ctx,
-            transient_result=trans_result,
-            dc_context=s.dc_ctx,
-            top_k=self.TOP_K,
-            verbose=False,
-        )
-        trans_ctx.release()
+        try:
+            trans_result = s.dist_solver.solve_transient(
+                trans_ctx,
+                dc_context=s.dc_ctx,
+                t_start=s.t_start,
+                t_end=s.t_end,
+                smoothed_sources=dist_sources,
+                verbose=False,
+            )
+            dist_attr = s.dist_solver.analyze_adjoint(
+                victim_nodes=victim,
+                observation_time=obs_time,
+                trans_context=trans_ctx,
+                transient_result=trans_result,
+                dc_context=s.dc_ctx,
+                top_k=self.TOP_K,
+                verbose=False,
+            )
+        finally:
+            try:
+                trans_ctx.release()
+            except Exception:
+                pass
 
         # ── Flat dynamic adjoint — raw VCS (no smoothed_sources) ─────────
         from analysis.adjoint_sensitivity import AdjointSensitivitySolver
@@ -1899,24 +1964,29 @@ class TestAdjointSampledPkl:
             smooth=False, verbose=False,
         )
         trans_ctx = s.dist_solver.prepare_transient(dt=s.dt, method="be", verbose=False)
-        trans_result = s.dist_solver.solve_transient(
-            trans_ctx,
-            dc_context=s.dc_ctx,
-            t_start=s.t_start,
-            t_end=s.t_end,
-            smoothed_sources=dist_sources,
-            verbose=False,
-        )
-        dist_attr = s.dist_solver.analyze_adjoint(
-            victim_nodes=victim,
-            observation_time=obs_time,
-            trans_context=trans_ctx,
-            transient_result=trans_result,
-            dc_context=s.dc_ctx,
-            top_k=self.TOP_K,
-            verbose=False,
-        )
-        trans_ctx.release()
+        try:
+            trans_result = s.dist_solver.solve_transient(
+                trans_ctx,
+                dc_context=s.dc_ctx,
+                t_start=s.t_start,
+                t_end=s.t_end,
+                smoothed_sources=dist_sources,
+                verbose=False,
+            )
+            dist_attr = s.dist_solver.analyze_adjoint(
+                victim_nodes=victim,
+                observation_time=obs_time,
+                trans_context=trans_ctx,
+                transient_result=trans_result,
+                dc_context=s.dc_ctx,
+                top_k=self.TOP_K,
+                verbose=False,
+            )
+        finally:
+            try:
+                trans_ctx.release()
+            except Exception:
+                pass
 
         from analysis.adjoint_sensitivity import AdjointSensitivitySolver
         flat_adj = AdjointSensitivitySolver(s.flat_model, s.flat_graph, vectorize_threshold=0)

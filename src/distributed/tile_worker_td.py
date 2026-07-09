@@ -425,6 +425,26 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         # Changing active sources invalidates the step-column table.
         self._step_col_table = None
 
+    def use_raw_sources(self) -> None:
+        """Reset _active_sources to the raw VCS, discarding any smoothing.
+
+        Called by the coordinator when ``smooth=False`` is resolved so that
+        a worker previously smoothed by an earlier ``preprocess_sources(smooth=True)``
+        call is explicitly reverted — the returned handle then truthfully
+        reflects ``smoothed=False``.
+
+        Invalidates the A2 step-column table (same as ``use_smoothed_sources``).
+        """
+        if self._vec_sources is None:
+            # No raw sources yet: init_vectorized_sources hasn't run.
+            # Leave _active_sources as-is (None); the coordinator will see
+            # n_sources=0 from the init stats and the worker won't serve
+            # stale smoothed data once raw sources are eventually loaded.
+            return
+        self._active_sources = self._vec_sources
+        # A2: active source changed → invalidate step-column table
+        self._step_col_table = None
+
     # --- A2: Step-column table methods ---------------------------------
 
     def get_period_info(self) -> Dict[str, Any]:
@@ -500,7 +520,17 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             is_int, m_candidate = integral_fn(dt)
             if is_int and m_candidate > 0:
                 est_mb_fn = pinfo['est_table_mb']
-                if est_mb_fn(m_candidate) <= max_mb:
+                # Finding 3: a PWL with nonzero delay TD is only *eventually*
+                # periodic — it holds row_values[0] for t < TD, then becomes
+                # periodic.  The phase table would bake the pre-delay hold into
+                # every period and replay it, which is wrong.  Disqualify the
+                # phase tier when any PWL has nonzero delay.  Pulses are NOT
+                # affected: pulse eval applies t % P *before* subtracting the
+                # delay (see _evaluate_pulses), making them exactly
+                # periodic-with-offset and phase-foldable even with nonzero
+                # delay — so this check only gates on PWL delay.
+                pwl_delay_ok = pinfo['all_zero_pwl_delay'] or vcs.n_pwls == 0
+                if est_mb_fn(m_candidate) <= max_mb and pwl_delay_ok:
                     tier = 'phase'
                     m = m_candidate
                     # Phase offset: which column corresponds to step_idx=0?
@@ -509,10 +539,26 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                     # Column k corresponds to t = k*dt (one-indexed from dt).
                     # For t_start=0: column for step_idx s is s % m.
                     # For general t_start: phase0 = round(t_start/dt) % m
-                    if P > 0:
-                        phase0 = int(round(t_start / dt)) % m
-                    else:
+                    #
+                    # Finding 1: only fold to a phase column when t_start lands
+                    # on the dt grid.  The phase table's column→time mapping
+                    # (col k → (k+1)*dt from origin) assumes t_start is an
+                    # integral number of dt steps.  A non-grid-aligned t_start
+                    # would be silently snapped by round(), introducing up to a
+                    # dt/2 time shift.  The chunked tier handles arbitrary
+                    # t_start exactly (t_grid = t_start + arange(1,W+1)*dt), so
+                    # fall through to it when t_start/dt is not integral.
+                    if t_start == 0.0:
                         phase0 = 0
+                    else:
+                        ts_ratio = t_start / dt
+                        ts_m = int(round(ts_ratio))
+                        if ts_m <= 0 or abs(ts_ratio - ts_m) > 1e-9 * max(1, ts_m):
+                            # t_start off-grid → chunked (exact)
+                            tier = 'chunked'
+                            m = 0
+                        else:
+                            phase0 = ts_m % m
 
         if tier == 'phase':
             info = self._build_phase_table(t_start, dt, m, phase0, n_steps)
@@ -806,9 +852,23 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         # After smoothing, pwl_times starts near t=0 (the t_start offset is
         # "baked into" the waveform shape — pwl_times[off + i] ≈ i * actual_step).
         # The phase table is built at ORIGIN (same as the batch and scalar paths):
-        # column k stores the value at time (k+1)*dt from t=0, i.e. sample index
-        # (k+1) % cnt.  phase0 is NOT applied here; it is applied at lookup time
-        # in _get_current_array_for_step via col = (step_idx + phase0) % m.
+        # column k stores the value at time (k+1)*dt from t=0.  phase0 is NOT
+        # applied here; it is applied at lookup time in
+        # _get_current_array_for_step via col = (step_idx + phase0) % m.
+        #
+        # Finding 5: the sample index for column k wraps at m, NOT cnt.
+        # evaluate_at_time(t) for a periodic PWL folds t via t % P, so at
+        # t = m*dt = P we get t % P = 0 → row_values[0].  Column m-1 must
+        # therefore map to sample index m % m = 0, not m % cnt (= m when
+        # cnt == m+1, the last sample).  These only agree when
+        # values[m] == values[0], which is not guaranteed for valid inputs
+        # (e.g. a sawtooth).  Wrapping at m is correct for cnt >= m+1 because
+        # evaluate_at_time never accesses index m or beyond.
+        #
+        # Finding 15: the per-row column fill is fully vectorized — a single
+        # numpy gather + add per PWL row replaces the O(m) Python scalar loop.
+        # col_indices is period-invariant (same m for all rows), computed once.
+        col_indices = np.arange(1, m + 1, dtype=np.int64) % m  # shape (m,)
         try:
             for pwl_i in range(vcs.n_pwls):
                 off = int(vcs.pwl_offset[pwl_i])
@@ -823,10 +883,8 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                 if cnt < m + 1:
                     # Not enough samples — fall back
                     raise ValueError("PWL has fewer samples than m+1")
-                # Columns 0..m-1 use samples at indices 1..m (origin-based).
-                for k in range(m):
-                    sample_idx = (k + 1) % cnt
-                    C[row, k] += wsc * float(vcs.pwl_values[off + sample_idx])
+                # Columns 0..m-1 use samples at indices (1..m) % m (origin-based).
+                C[row, :] += wsc * vcs.pwl_values[off + col_indices]
         except (ValueError, IndexError):
             # Fall back to evaluate_at_times_for_rows — row-sparse, builds at
             # ORIGIN so that col = (step_idx + phase0) % m remains valid.

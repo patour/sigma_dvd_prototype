@@ -970,11 +970,17 @@ class VectorizedCurrentSources:
                 return False, 0
             return bool(abs(ratio - m) <= 1e-9 * m), m
 
-        # Estimated table memory (source-carrying node rows × m columns)
-        # n_src_nodes ≈ n_active (may be less due to multiple sources per node)
-        n_src_nodes = n_active  # upper bound; exact value known at build time
+        # Estimated table memory (source-carrying node rows × m columns).
+        # Finding 7: use the ACTUAL source-carrying row count that
+        # precompute_step_columns will allocate (get_src_node_indices), not
+        # just the pulse/PWL waveform count (n_active).  On DC-heavy netlists
+        # get_src_node_indices includes constant-current (DC) nodes too, so
+        # n_active can severely under-count the real table rows and let an
+        # oversized table slip past the max_table_mb gate.  This is O(n_sources
+        # + n_pulses + n_pwls) and runs once per solve at tier-selection time.
+        n_src_rows_est = len(self.get_src_node_indices())
         def est_mb(m: int) -> float:
-            return n_src_nodes * m * 8 / 1e6  # float64
+            return n_src_rows_est * m * 8 / 1e6  # float64
 
         return {
             'unique_pulse_periods': up,

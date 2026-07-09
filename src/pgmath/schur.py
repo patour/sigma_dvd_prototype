@@ -748,8 +748,18 @@ def find_interface_islands(
     adj: Dict[str, Set[str]] = {node: set() for node in interface_nodes}
 
     S_coo = S_global.tocoo()
-    for r, c in zip(S_coo.row, S_coo.col):
-        if r != c:
+    # Skip entries with value == 0.0.  The A4 "keep-all" COO assembly
+    # (no nonzero filter) stores explicit structural zeros when a tile has
+    # an all-zero port row/col (e.g., a port node with no resistive path in
+    # this tile).  A structural zero is NOT a real edge; including it here
+    # would create a fake adjacency that connects a true island port to the
+    # rest of the graph, defeating island detection and leaving S_global
+    # singular.  The correct fix is here (value-aware BFS) rather than in
+    # assembly, because the assembly must keep all structural positions for
+    # pattern-cache uniformity (entries zero in DC may be nonzero in
+    # transient due to C_coeff scaling).
+    for r, c, val in zip(S_coo.row, S_coo.col, S_coo.data):
+        if r != c and val != 0.0:
             u_name = interface_nodes[r]
             v_name = interface_nodes[c]
             adj[u_name].add(v_name)

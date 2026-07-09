@@ -142,6 +142,13 @@ class _SolverTimeDomainMixin:
         # 3. Optionally smooth sources on all workers (parallel)
         per_tile_smooth_time_s: Dict[Tuple[int, int], float] = {}
         smooth_cache_hits = 0
+        if not smooth_actual:
+            # Explicitly reset workers to raw sources so that a worker
+            # previously smoothed by an earlier preprocess_sources(smooth=True)
+            # call does not keep serving stale smoothed data.  This also
+            # invalidates any A2 step-column table on each worker.
+            model.backend.call_all(model.workers, 'use_raw_sources')
+
         if smooth_actual:
             t0 = time.perf_counter()
             smooth_args = [

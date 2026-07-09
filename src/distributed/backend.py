@@ -118,6 +118,12 @@ class PackedTileWorkerActor:
 class ComputeBackend(ABC):
     """Abstract compute backend for local vs distributed execution."""
 
+    #: Override to False on backends whose actors are remote (e.g. Ray, task).
+    #: _pack_workers wraps workers in in-process PackedTileWorker objects; doing
+    #: so for remote-actor backends causes AttributeError because remote handles
+    #: are not TileWorker instances and cannot be passed to PackedTileWorker.
+    supports_inprocess_packing: bool = False
+
     @abstractmethod
     def initialize(self, **kwargs) -> None:
         """Initialize the backend."""
@@ -221,8 +227,10 @@ class LocalBackend(ComputeBackend):
     parallel multi-worker execution with per-actor thread budgets.
     """
 
+    supports_inprocess_packing: bool = True
+
     def initialize(self, **kwargs) -> None:
-        pass
+        self._initialized = True
 
     def create_actors(self, actor_class: Type, configs: List[Any]) -> List[Any]:
         return [actor_class() for _ in configs]

@@ -99,7 +99,7 @@ The non-`_prepared` `solve*()` methods also accept `context=`; they build a temp
 ## CHOLMOD backend (module-level)
 
 ```python
-from solver.coupled_system import (
+from pgmath.factor import (   # canonical home; also re-exported by solver.unified_solver
     set_use_cholmod, set_cholmod_mode,
     set_cholmod_ordering, set_cholmod_use_long,
     get_active_backend,

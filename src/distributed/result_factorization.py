@@ -645,12 +645,24 @@ def _stream_assemble_schur(
     #   After scatter-add the array is freed; next tile's data arrives.
     # -------------------------------------------------------------------------
     _scatter_pattern = assembly_cache.get('_csr_scatter_pattern') if assembly_cache else None
+    # The extra-edge set MUST be part of the pattern validity check.
+    # The single _csr_scatter_pattern cache slot is shared between the DC
+    # prepare (extra_edges = resistive package edges only) and the transient
+    # prepare (extra_edges = resistive + C_coeff-scaled cap edges).  If a
+    # model has package cap edges and streaming_assembly=True, the transient
+    # prepare will see a cached DC pattern whose sparsity structure does NOT
+    # include the cap columns — scatter-adding N_transient values into an
+    # N_dc-sized pattern causes an index-out-of-bounds crash or, worse, silent
+    # corruption.  We guard against this by hashing the extra-edge (row, col)
+    # index arrays and including the hash + entry count in the validity check.
+    _extra_edge_fingerprint = (len(extra_rows_arr), int(np.sum(extra_rows_arr.astype(np.int64)) + np.sum(extra_cols_arr.astype(np.int64))))
     _pattern_valid = (
         _scatter_pattern is not None
         and _cache_valid
         and _use_cached_idx
         and _scatter_pattern.get('n_full') == n_full
         and set(_scatter_pattern.get('tile_scatter_idxs', {}).keys()) == set(tile_index_maps.keys())
+        and _scatter_pattern.get('extra_edge_fingerprint') == _extra_edge_fingerprint
     )
 
     if _pattern_valid:
@@ -753,6 +765,11 @@ def _stream_assemble_schur(
         )
         del G_full_pattern_csr  # free pattern CSR (indptr/indices kept in _new_pattern)
 
+        # Stamp the extra-edge fingerprint into the pattern so _pattern_valid
+        # can reject a stale DC pattern when transient prepare arrives with
+        # a different extra-edge set (e.g., + cap edges).
+        _new_pattern['extra_edge_fingerprint'] = _extra_edge_fingerprint
+
         if assembly_cache is not None and _cache_valid:
             assembly_cache['_csr_scatter_pattern'] = _new_pattern
             logger.debug(
@@ -803,6 +820,28 @@ def _stream_assemble_schur(
 
     unknown_to_idx = {n: i for i, n in enumerate(unknown_list)}
 
+    # Build interface-only tile_index_maps for callers (S_extra, CG solver, etc.).
+    #
+    # The tile_index_maps built above (Step 2) use full_node_to_idx indices
+    # (0..n_full-1), where Dirichlet/pad nodes are placed at n_unknown..n_full-1.
+    # These are correct for the ASSEMBLY pass (get_schur_coo_indices_only places
+    # entries in the right block of G_full).  However, callers that receive the
+    # returned tile_index_maps expect *interface-unknown* indices (0..n_unknown-1),
+    # consistent with what the bulk path builds at result_factorization.py ~:1058
+    # using `if n in interface_node_to_idx`.  A pad node on a tile boundary has
+    # full_node_to_idx[pad] >= n_unknown, so passing it downstream causes:
+    #   - S_extra scatter: indices >= n_iface → out-of-bounds or wrong entry
+    #   - CG tilewise matvec: same corruption
+    #   - Tile index map stored on the context: corrupted for save/load paths
+    # The fix mirrors the bulk path exactly: filter to unknowns only, remap to
+    # unknown_to_idx (which IS interface_node_to_idx after assembly).
+    interface_tile_index_maps: Dict[Any, np.ndarray] = {}
+    for tid, node_list in tile_port_node_lists.items():
+        interface_tile_index_maps[tid] = np.array(
+            [unknown_to_idx[n] for n in node_list if n in unknown_to_idx],
+            dtype=np.int32,
+        )
+
     # Update assembly cache (same as assemble_schur_complement_system)
     if assembly_cache is not None and _cache_valid:
         assembly_cache['tile_local_to_global'] = _new_l2g
@@ -812,7 +851,7 @@ def _stream_assemble_schur(
         assembly_cache['n_unknown'] = n_unknown
         assembly_cache['n_full'] = n_full
 
-    return S_global, rhs_dirichlet, unknown_list, unknown_to_idx, tile_index_maps
+    return S_global, rhs_dirichlet, unknown_list, unknown_to_idx, interface_tile_index_maps
 
 
 # ---------------------------------------------------------------------------

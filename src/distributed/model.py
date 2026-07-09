@@ -204,7 +204,7 @@ def _init_backend(
     # Accept ComputeBackend instances directly (B4 task backend and future backends)
     if isinstance(backend, ComputeBackend):
         be = backend
-        if not be._initialized:
+        if not getattr(be, '_initialized', False):
             be.initialize(**backend_kwargs)
         return be
     if backend == 'ray':
@@ -472,10 +472,11 @@ def _pack_workers(workers: List[Any], tiles_per_worker: Any, be: ComputeBackend)
     """
     import math
 
-    if isinstance(be, RayBackend):
+    if not getattr(be, 'supports_inprocess_packing', False):
         logger.warning(
-            "tiles_per_worker is a no-op for RayBackend at this stage; "
-            "Ray packing should be applied before setup_from_pkl.",
+            "tiles_per_worker is a no-op for %s (remote-actor backend); "
+            "packing should be applied before setup_from_pkl or is not supported.",
+            type(be).__name__,
         )
         return workers
 

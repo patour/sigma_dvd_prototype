@@ -681,5 +681,133 @@ class TestEvaluateAtTimesForRows(unittest.TestCase):
         np.testing.assert_array_equal(sparse, full[src_rows, :])
 
 
+# ---------------------------------------------------------------------------
+# Finding 7: est_table_mb must count actual source-carrying rows (incl. DC)
+# ---------------------------------------------------------------------------
+
+class TestFinding7EstTableMb(unittest.TestCase):
+    """est_table_mb must use get_src_node_indices() row count, not just waveforms.
+
+    Finding 7 (vectorized_sources.py:get_period_info): the est_mb closure
+    counted only n_active = n_pulses + n_pwls rows, but precompute_step_columns
+    allocates one row per node returned by get_src_node_indices() — which
+    includes DC-carrying nodes.  On DC-heavy netlists the real table can have
+    far more rows than n_active, letting an oversized table slip past the
+    max_table_mb gate.  The fix counts len(get_src_node_indices()).
+    """
+
+    def _dc_heavy_vcs(self, n_dc=100):
+        """100 DC-only sources on distinct nodes + 2 periodic pulses."""
+        sources = {}
+        node_names = []
+        for j in range(n_dc):
+            name = f'D{j}'
+            node_names.append(name)
+            sources[f'I_dc_{j}'] = {
+                'node1': name, 'dc_value': 1.0 + 0.01 * j,
+                'pulses': [], 'pwls': [],
+            }
+        # Two periodic pulses on separate (non-DC) nodes
+        for j in range(2):
+            name = f'P{j}'
+            node_names.append(name)
+            sources[f'I_pulse_{j}'] = _make_pulse_source(name, period=50e-9)
+        # Plus a spare node with no source
+        node_names.append('SPARE')
+        return _build_vcs(sources, node_names), n_dc
+
+    def test_n_active_source_rows_counts_only_waveforms(self):
+        """n_active_source_rows stays at the waveform count (2 pulses)."""
+        vcs, _ = self._dc_heavy_vcs(n_dc=100)
+        info = vcs.get_period_info()
+        self.assertEqual(
+            info['n_active_source_rows'], 2,
+            msg='n_active_source_rows must remain the pulse/PWL waveform count',
+        )
+
+    def test_est_table_mb_reflects_dc_rows(self):
+        """est_table_mb(500) must reflect 102 rows (100 DC + 2 pulse), not 2."""
+        vcs, n_dc = self._dc_heavy_vcs(n_dc=100)
+        info = vcs.get_period_info()
+        est = info['est_table_mb']
+
+        n_expected_rows = n_dc + 2  # 100 DC-carrying nodes + 2 pulse nodes
+        expected_mb = n_expected_rows * 500 * 8 / 1e6
+        old_buggy_mb = 2 * 500 * 8 / 1e6  # 0.008 MB (pulse count only)
+
+        got = est(500)
+        self.assertAlmostEqual(
+            got, expected_mb, places=9,
+            msg=(
+                f'Finding 7: est_table_mb(500) should be {expected_mb:.6f} MB '
+                f'({n_expected_rows} rows), not {old_buggy_mb:.6f} MB (2 rows).'
+            ),
+        )
+        # The value that 0.008 fails but 0.408 passes
+        self.assertGreater(
+            got, 0.1,
+            msg='Finding 7: est_table_mb must exceed 0.1 MB for 102 DC-heavy rows',
+        )
+        # And must exactly match len(get_src_node_indices())
+        self.assertEqual(
+            len(vcs.get_src_node_indices()), n_expected_rows,
+            msg='get_src_node_indices must count 102 source-carrying nodes',
+        )
+
+    def test_tier_selection_respects_dc_row_budget(self):
+        """A max_table_mb between the 2-row and 102-row estimates forces chunked.
+
+        Before the fix the 2-row estimate (0.008 MB) passed any reasonable
+        budget and the phase table was built anyway; after the fix the 102-row
+        estimate (0.408 MB) exceeds a 0.1 MB budget → chunked tier.
+        """
+        from distributed.tile_worker import TileWorker, TileData
+
+        vcs, n_dc = self._dc_heavy_vcs(n_dc=100)
+
+        # Build a minimal worker and attach the DC-heavy VCS directly.
+        # The tile only needs a solvable block system; node identity of the
+        # VCS is independent (indices refer to the VCS node space).
+        tile_data = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[('p', 'a', 1.0), ('a', '0', 1.0)],
+            all_nodes={'p', 'a'},
+            boundary_nodes={'p'},
+            current_injections={},
+            capacitive_edges=[],
+        )
+        w = TileWorker()
+        w.setup_from_tile_data(tile_data, {'p'})
+        w._vec_sources = vcs
+        w._active_sources = vcs
+        w._current_buf = np.zeros(vcs.n_nodes, dtype=np.float64)
+
+        # Budget between 0.008 MB (2 rows) and 0.408 MB (102 rows).
+        # dt=100ps, P=50ns → m=500 (integral) → phase eligible on memory alone.
+        info = w.precompute_step_columns(
+            t_start=0.0, dt=100e-12, n_steps=1000, max_table_mb=0.1,
+        )
+        self.assertEqual(
+            info['tier'], 'chunked',
+            msg=(
+                'Finding 7: with a 0.1 MB budget the 102-row (0.408 MB) table '
+                f"must exceed it and select chunked, got tier='{info['tier']}'."
+            ),
+        )
+
+    def test_dc_only_no_periodic_est_still_counts_dc(self):
+        """DC-only VCS: est_table_mb counts the DC rows even with no waveforms."""
+        sources = {
+            f'I{j}': {'node1': f'N{j}', 'dc_value': 1.0, 'pulses': [], 'pwls': []}
+            for j in range(50)
+        }
+        vcs = _build_vcs(sources, [f'N{j}' for j in range(50)] + ['SPARE'])
+        info = vcs.get_period_info()
+        est = info['est_table_mb']
+        # 50 DC rows; n_active would be 0
+        self.assertEqual(info['n_active_source_rows'], 0)
+        self.assertAlmostEqual(est(100), 50 * 100 * 8 / 1e6, places=9)
+
+
 if __name__ == '__main__':
     unittest.main()
