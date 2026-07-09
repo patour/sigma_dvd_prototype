@@ -121,6 +121,11 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         self._symbolic_ii: Optional[Dict] = None
         self._use_symbolic_reuse: bool = True
 
+        # --- B3: Worker-side Schur cache for streaming assembly --------------
+        # Set by factor_and_cache_schur(); consumed and cleared by
+        # get_schur_coo_shards().  None when not in streaming mode.
+        self._cached_schur: Optional[np.ndarray] = None
+
         # --- Adjoint sensitivity state ---
         self._init_adjoint_state()
 
@@ -611,6 +616,312 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
             }
 
         return result
+
+    def get_schur_coo_shards(
+        self,
+        n_shards: int,
+        tile_index_map: Optional[np.ndarray],
+    ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Return the tile's S_i contribution as COO shards with global indices.
+
+        B3: Streaming Schur assembly — first-call (COO accumulation) path only.
+        Used when the CSR scatter pattern has not yet been computed.  The
+        coordinator needs global (rows, cols) to build the first-call COO matrix
+        and infer the CSR sparsity pattern.
+
+        IMPORTANT — wire-cost note:
+        Each shard contains ``int32 global_rows + int32 global_cols + float64 data``
+        which is 16 bytes per entry, i.e. *2× the 8 bytes/entry* of the dense S_i.
+        All ``n_shards`` shards are built eagerly into a single list worker-side
+        and returned in one call, so the Ray boundary is crossed once per tile
+        (not once per shard).  ``n_shards`` therefore controls ONLY the
+        coordinator's scatter granularity — it does NOT bound worker-side peak
+        or per-shard transfer size.
+
+        For the fast path (CSR scatter pattern already cached), call
+        ``get_schur_data_flat`` instead: it returns only the float64 data
+        (8 bytes/entry, no rows/cols), since the scatter pattern already encodes
+        where each entry goes.
+
+        Callers first invoke ``factor_and_cache_schur`` (which factors interior
+        and caches S_i worker-side without sending it to the coordinator), then
+        call this method so the coordinator can stream the COO data.
+
+        Args:
+            n_shards: Number of row-shards to split S_i into (>=1).
+                Each shard covers ``ceil(n_ports / n_shards)`` rows.
+                The last shard may be smaller.
+                Controls scatter granularity on the coordinator; does NOT reduce
+                the total bytes transferred across the Ray boundary.
+            tile_index_map: int32 array of shape ``(n_ports,)`` mapping local
+                port index ``i`` to global interface index ``tile_index_map[i]``.
+                Must be consistent with the local port ordering in
+                ``self._block_system.port_nodes``.
+
+        Returns:
+            List of (global_rows, global_cols, data) tuples — one per shard.
+            global_rows and global_cols are int32; data is float64.
+            All shards are materialized worker-side before return.
+
+        Raises:
+            RuntimeError: if the block system is not yet built / factored.
+        """
+        if self._block_system is None:
+            raise RuntimeError(
+                "get_schur_coo_shards() called before block system is built. "
+                "Call setup() or setup_from_pkl() first."
+            )
+
+        # Use cached S_i from factor_and_cache_schur() if available; otherwise compute fresh.
+        _cached = getattr(self, '_cached_schur', None)
+        if _cached is not None:
+            S_i = _cached
+            # Free the cache after use — the coordinator reads shards and discards them.
+            self._cached_schur = None
+        else:
+            from pgmath.schur import compute_explicit_schur
+            sym_cache = self._symbolic_ii if self._use_symbolic_reuse else None
+            S_i, schur_stats = compute_explicit_schur(self._block_system, symbolic_cache=sym_cache)
+            # Persist symbolic cache if the full analyze path ran
+            if '_new_symbolic_cache' in schur_stats:
+                self._symbolic_ii = schur_stats.pop('_new_symbolic_cache')
+
+        # Build global index map
+        if tile_index_map is None:
+            # Build from block_system port_nodes order
+            # This is a fallback; callers should always pass tile_index_map.
+            raise ValueError(
+                "tile_index_map must be provided to get_schur_coo_shards(). "
+                "It must map local port index -> global interface index and "
+                "be consistent with block_system.port_nodes ordering."
+            )
+
+        idx = np.asarray(tile_index_map, dtype=np.int32)
+        n_ports = S_i.shape[0]
+        assert len(idx) == n_ports, (
+            f"tile_index_map length {len(idx)} != n_ports {n_ports}"
+        )
+
+        n_shards = max(1, n_shards)
+        shard_size = max(1, (n_ports + n_shards - 1) // n_shards)
+
+        shards: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        for shard_start in range(0, n_ports, shard_size):
+            shard_end = min(shard_start + shard_size, n_ports)
+            # Row-slice of S_i: shape (shard_rows, n_ports)
+            S_slice = S_i[shard_start:shard_end, :]  # (shard_rows, n_ports)
+            shard_rows_local = np.arange(shard_start, shard_end, dtype=np.int32)
+
+            # COO global indices
+            # For each row r in shard, column c in [0, n_ports):
+            #   global_row = idx[r],  global_col = idx[c]
+            n_shard_rows = shard_end - shard_start
+            global_rows = np.repeat(idx[shard_rows_local], n_ports)
+            global_cols = np.tile(idx, n_shard_rows)
+            data = S_slice.ravel().astype(np.float64)
+
+            shards.append((global_rows, global_cols, data))
+
+        return shards
+
+    def get_schur_coo_indices_only(
+        self,
+        tile_index_map: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return the tile's S_i COO global indices WITHOUT float64 data.
+
+        B3 two-pass first-call path: used by the coordinator's index-only pre-pass
+        to build the CSR sparsity pattern (indptr/indices) without transferring any
+        float64 values.  The per-tile float64 data is later streamed separately via
+        ``get_schur_data_flat`` once the scatter pattern is known.
+
+        Wire cost: ``n_ports^2 * 8 bytes`` (two int32 arrays) vs 16 bytes/entry for
+        ``get_schur_coo_shards`` (rows + cols + float64 data).  Since the data is NOT
+        sent, this call halves first-call wire cost and — critically — the coordinator
+        accumulates only index arrays (int32, 4 B/entry each) during the pre-pass,
+        NOT float64 values (8 B/entry).  After the pre-pass builds the CSR pattern,
+        the accumulated index arrays are freed and data is streamed via the fast path.
+
+        First-call coordinator peak with two-pass approach:
+          Pre-pass:   sum_tiles(n_ports_i^2) * 8 bytes (two int32 arrays, no float64)
+          Data pass:  one tile's n_ports^2 * 8 bytes (float64) + preallocated CSR buffer
+          Overall:    O(nnz * 8 B) rather than O(nnz * 16 B) with old single-pass COO.
+          (nnz here refers to the sum of all tile S_i entries = sum n_ports_i^2.)
+
+        IMPORTANT: does NOT consume ``_cached_schur`` — the cached S_i remains after
+        this call so ``get_schur_data_flat`` can use it in the data pass.
+
+        Args:
+            tile_index_map: int32 array of shape ``(n_ports,)`` mapping local port
+                index ``i`` to global interface index ``tile_index_map[i]``.
+
+        Returns:
+            (global_rows, global_cols) both int32 of length ``n_ports^2``, in
+            row-major order consistent with ``S_i.ravel()``.
+
+        Raises:
+            RuntimeError: if ``factor_and_cache_schur`` has not been called yet
+                          (``_cached_schur`` is None).
+        """
+        if self._block_system is None:
+            raise RuntimeError(
+                "get_schur_coo_indices_only() called before block system is built. "
+                "Call setup() or setup_from_pkl() first."
+            )
+
+        _cached = getattr(self, '_cached_schur', None)
+        if _cached is None:
+            raise RuntimeError(
+                "get_schur_coo_indices_only() called before factor_and_cache_schur(). "
+                "S_i is not cached on this worker.  Call factor_and_cache_schur() "
+                "first, then get_schur_coo_indices_only() for the index pre-pass "
+                "followed by get_schur_data_flat() for the data pass."
+            )
+
+        idx = np.asarray(tile_index_map, dtype=np.int32)
+        n_ports = _cached.shape[0]
+        if len(idx) != n_ports:
+            raise ValueError(
+                f"tile_index_map length {len(idx)} != n_ports {n_ports}"
+            )
+
+        # Build (global_rows, global_cols) in row-major order (same as S_i.ravel()).
+        # global_rows[k] = idx[row(k)], global_cols[k] = idx[col(k)]
+        # where k = row * n_ports + col.
+        global_rows = np.repeat(idx, n_ports)   # shape (n_ports^2,), int32
+        global_cols = np.tile(idx, n_ports)     # shape (n_ports^2,), int32
+        # NOTE: _cached_schur is NOT cleared here — it will be consumed by
+        # get_schur_data_flat() in the subsequent data pass.
+        return global_rows, global_cols
+
+    def get_schur_data_flat(self) -> np.ndarray:
+        """Return S_i as a flat float64 array (row-major) WITHOUT global indices.
+
+        B3 fast-path: used by the coordinator when the CSR scatter pattern is
+        already cached from a prior streaming call.  The scatter pattern encodes
+        exactly where each entry of ``S_i.ravel()`` lands in the preallocated
+        ``G_full_data`` buffer, so the coordinator needs only the *values* — not
+        the (rows, cols) indices that ``get_schur_coo_shards`` also sends.
+
+        Wire cost: exactly ``n_ports * n_ports * 8`` bytes (float64 only), which
+        is **half** the 16 bytes/entry that ``get_schur_coo_shards`` transfers
+        (int32 rows + int32 cols + float64 data).
+
+        Memory note:
+          - Worker peak: S_i is in ``_cached_schur``; ``ravel()`` on a C-contiguous
+            array returns a view (no extra copy), so worker peak = S_i size only.
+          - Coordinator peak: one tile's float64 array is live, then immediately
+            scatter-added and freed before the next tile's result arrives.
+
+        Returns:
+            1-D float64 array of length ``n_ports * n_ports`` in row-major order
+            (same as ``S_i.ravel(order='C')``).  The cached S_i is freed after
+            this call to release worker-side memory.
+
+        Raises:
+            RuntimeError: if ``factor_and_cache_schur`` has not been called yet.
+        """
+        if self._block_system is None:
+            raise RuntimeError(
+                "get_schur_data_flat() called before block system is built. "
+                "Call setup() or setup_from_pkl() first."
+            )
+
+        _cached = getattr(self, '_cached_schur', None)
+        if _cached is None:
+            raise RuntimeError(
+                "get_schur_data_flat() called before factor_and_cache_schur(). "
+                "S_i is not cached on this worker.  Call factor_and_cache_schur() "
+                "first, then get_schur_data_flat() to retrieve the flat data."
+            )
+
+        # ravel on a C-contiguous array is a no-copy view; ensure float64.
+        data_flat = _cached.ravel(order='C').astype(np.float64, copy=False)
+
+        # Free the cached S_i — caller is done with it.
+        self._cached_schur = None
+
+        return data_flat
+
+    def factor_and_cache_schur(self) -> Tuple[List[str], Dict[str, Any]]:
+        """Factor interior AND compute S_i, caching it worker-side without returning it.
+
+        B3: Used in the streaming assembly path.  The coordinator calls this
+        first (factors all tiles in parallel), then calls
+        ``get_schur_coo_shards()`` tile-by-tile to stream the COO data.
+        S_i lives in worker-process memory only — it never crosses the
+        coordinator boundary as a dense matrix.
+
+        Returns:
+            Tuple of (boundary_node_list, stats dict) — same layout as
+            ``factor_and_compute_schur`` minus the dense S_i.
+        """
+        from pgmath.schur import compute_explicit_schur
+        from pgmath.block_system import _format_bytes, _sparse_mem_bytes
+        import time as _time_inner
+
+        bs = self._block_system
+        sym_cache = self._symbolic_ii if self._use_symbolic_reuse else None
+
+        t0 = _time_inner.perf_counter()
+        S, schur_stats = compute_explicit_schur(bs, symbolic_cache=sym_cache)
+        elapsed = _time_inner.perf_counter() - t0
+
+        # Persist symbolic cache
+        if '_new_symbolic_cache' in schur_stats:
+            self._symbolic_ii = schur_stats.pop('_new_symbolic_cache')
+
+        # Cache S_i worker-side for subsequent get_schur_coo_shards calls
+        self._cached_schur: np.ndarray = S
+
+        factor_time = schur_stats.get('factor_s', 0) + schur_stats.get('analyze_s', 0)
+
+        stats = dict(bs.stats())
+        stats.update({
+            'factor_interior_s': factor_time,
+            'compute_schur_s': elapsed - factor_time,
+            'total_s': elapsed,
+            'schur_shape': S.shape,
+            'schur_mem_bytes': schur_stats['schur_mem_bytes'],
+            'schur_path': schur_stats['path'],
+        })
+        fa = bs.factor_adapter
+        if fa is not None:
+            stats['factorization_backend'] = fa.backend
+            stats['factorization_backend_info'] = fa.backend_info
+        else:
+            stats['factorization_backend'] = 'n/a'
+            stats['factorization_backend_info'] = 'n/a'
+
+        return list(bs.port_nodes), stats
+
+    def get_schur_size_stats(self) -> Dict[str, Any]:
+        """Return lightweight per-tile size stats without computing S_i.
+
+        B3: Used by the 'auto' streaming decision in ``_factor_dc_context``
+        so the coordinator can estimate peak S_i memory BEFORE factoring
+        interior.  This avoids the catch-22 where 'auto' previously had to
+        run ``factor_and_compute_schur`` (gathering all dense S_i) just to
+        decide whether streaming would have been beneficial.
+
+        The ``schur_mem_bytes`` estimate is ``n_ports^2 * 8`` (float64),
+        which equals the actual S_i memory when it is a dense n_ports×n_ports
+        array.  This is exact for the default (non-sparse) Schur path.
+
+        Returns a dict with:
+          'n_interior'       int
+          'n_ports'          int
+          'schur_mem_bytes'  int  -- estimate: n_ports^2 * 8
+        """
+        if self._block_system is None:
+            return {'n_interior': 0, 'n_ports': 0, 'schur_mem_bytes': 0}
+        bs = self._block_system
+        n_p = bs.n_ports
+        return {
+            'n_interior': bs.n_interior,
+            'n_ports': n_p,
+            'schur_mem_bytes': n_p * n_p * 8,
+        }
 
     def get_current_injections(self) -> Dict[str, float]:
         """Return per-tile current injection dict ``{node: mA}``."""

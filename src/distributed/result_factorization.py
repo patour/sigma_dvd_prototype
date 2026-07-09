@@ -27,6 +27,38 @@ adjoint because CG provides the same solve-callable interface.  Tilewise
 CG adjoint would need per-tile S_i blocks at adjoint time; that is not
 implemented in v1 -- the assembled CG mode works fine.  The context stores
 ``_interface_solver_mode`` so the adjoint code can check if needed.
+
+Streaming assembly (B3) vs CG tilewise matvec: non-composition
+---------------------------------------------------------------
+``streaming_assembly=True`` and ``interface_matvec_mode='tilewise'`` are
+**mutually exclusive** in the current implementation.
+
+  - ``tilewise`` CG matvec requires the per-tile dense S_i blocks at
+    coordinator side to form ``matvec(x) = sum_i P_i^T (S_i (P_i x))``.
+    Building ``S_extra`` (the package-edge contribution) also needs S_i.
+  - Streaming assembly intentionally never gathers S_i to the coordinator —
+    that is its entire purpose (coordinator memory peak reduction).
+
+When both are requested, the code automatically falls back to
+``interface_matvec_mode='assembled'`` and logs a WARNING.  ``assembled``
+mode assembles S_global (which streaming did produce) and applies it as a
+sparse matvec, so CG still avoids the CHOLMOD factor but retains S_global
+in coordinator memory.
+
+The ideal composition — S_i kept worker-resident, matvec implemented as
+remote RPC calls to workers — is deferred to B4 (multi-node Ray task-
+dataflow).  Workers already hold S_i in their factored state (accessible via
+``get_schur_data_flat``), so a B4 remote-matvec extension would not require
+re-factoring.
+
+Setting combinations and their coordinator memory footprint:
+
+  streaming=False, solver=direct   -- baseline: all S_i gathered + CHOLMOD factor
+  streaming=False, solver=cg/assembled -- all S_i gathered + S_global (no factor)
+  streaming=False, solver=cg/tilewise  -- all S_i kept coordinator-side for matvec
+  streaming=True,  solver=direct   -- S_global only (no S_i, no factor)   [RECOMMENDED]
+  streaming=True,  solver=cg/assembled -- S_global only (no S_i, no factor) [SAME AS ABOVE]
+  streaming=True,  solver=cg/tilewise  -- falls back to 'assembled' (see above)
 """
 
 from __future__ import annotations
@@ -49,6 +81,21 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Streaming assembly budget (B3)
+# ---------------------------------------------------------------------------
+#
+# When streaming_assembly='auto', streaming is enabled when the estimated peak
+# memory for bulk assembly (sum of all dense S_i bytes) exceeds this threshold.
+# Default: 512 MB.  Overridable via monkeypatch in tests or via model settings.
+STREAMING_ASSEMBLY_AUTO_BYTES: int = 512 * 1024 * 1024  # 512 MB
+
+# Number of row-shards per tile for streaming assembly.  Larger values = more
+# round-trips to workers but smaller per-shard memory.  Default 4 is a
+# conservative choice: splits each tile's S_i into at most 4 row slices so the
+# coordinator never holds more than 1/4 of a single tile's S_i at once.
+STREAMING_ASSEMBLY_N_SHARDS: int = 4
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +180,642 @@ def _default_checkpoint_path(
 
 
 # ---------------------------------------------------------------------------
+# B3: Streaming Schur assembly helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_streaming_assembly_setting(model: Optional[Any]) -> Any:
+    """Read the streaming_assembly setting from model.settings (default False).
+
+    Values:
+      False   -- off (default): use bulk assemble_schur_complement_system.
+      True    -- always stream, regardless of memory estimate.
+      'auto'  -- stream when estimated S_i memory sum > STREAMING_ASSEMBLY_AUTO_BYTES.
+    """
+    if model is None:
+        return False
+    settings = getattr(model, 'settings', None)
+    if settings is None:
+        return False
+    return settings.get('streaming_assembly', False)
+
+
+def _estimate_schur_peak_bytes(per_tile_stats: List[Dict[str, Any]]) -> int:
+    """Estimate peak coordinator memory if all S_i are gathered at once.
+
+    Uses the schur_mem_bytes reported by each tile's stats dict.  Returns 0
+    when stats are unavailable (safe: won't trigger auto-streaming).
+    """
+    return sum(int(s.get('schur_mem_bytes', 0)) for s in per_tile_stats)
+
+
+def _should_stream(model: Optional[Any], per_tile_stats: List[Dict[str, Any]]) -> bool:
+    """Decide whether to use streaming assembly for this prepare() call.
+
+    Returns True when streaming_assembly is True (forced) or 'auto' and the
+    estimated peak S_i memory exceeds STREAMING_ASSEMBLY_AUTO_BYTES.
+    """
+    setting = _get_streaming_assembly_setting(model)
+    if setting is False:
+        return False
+    if setting is True:
+        return True
+    # 'auto'
+    auto_budget = int(
+        getattr(model, 'settings', {}).get(
+            'streaming_assembly_auto_bytes', STREAMING_ASSEMBLY_AUTO_BYTES
+        )
+        if model is not None else STREAMING_ASSEMBLY_AUTO_BYTES
+    )
+    est = _estimate_schur_peak_bytes(per_tile_stats)
+    if est > auto_budget:
+        logger.info(
+            "streaming_assembly='auto': estimated S_i memory %.1f MB > "
+            "budget %.1f MB — enabling streaming assembly.",
+            est / 1024 ** 2, auto_budget / 1024 ** 2,
+        )
+        return True
+    logger.debug(
+        "streaming_assembly='auto': estimated S_i memory %.1f MB <= "
+        "budget %.1f MB — using bulk assembly.",
+        est / 1024 ** 2, auto_budget / 1024 ** 2,
+    )
+    return False
+
+
+def _compute_rhs_dirichlet_from_edges(
+    extra_edges: Optional[List],
+    unknown_list: List[str],
+    unknown_to_idx: Dict[str, int],
+    dirichlet_nodes: Optional[Set[str]],
+    dirichlet_voltage: float,
+) -> np.ndarray:
+    """Compute Dirichlet RHS from extra (package) edges WITHOUT tile S_i.
+
+    B3: Used in the streaming transient path to compute rhs_dirichlet_G
+    (G-only Dirichlet contribution) after streaming assembly has already
+    determined the interface node ordering.  Since tile Schur complements
+    only contribute to the unknown-unknown block and NOT to the
+    unknown-Dirichlet coupling (G_ud), this function provides an exact
+    rhs_dirichlet from package edges alone.
+
+    Args:
+        extra_edges: List of (u, v, g) package-edge triples.
+        unknown_list: Ordered list of unknown interface node names.
+        unknown_to_idx: {node: index} for unknown nodes.
+        dirichlet_nodes: Set of Dirichlet (pad) node names.
+        dirichlet_voltage: Voltage applied to all Dirichlet nodes (Vdd).
+
+    Returns:
+        rhs_dirichlet (shape n_unknown,) = -(G_ud @ V_d) from extra edges.
+    """
+    n_unknown = len(unknown_list)
+    rhs = np.zeros(n_unknown, dtype=np.float64)
+
+    if not extra_edges or n_unknown == 0:
+        return rhs
+
+    ground_node = '0'
+    dirichlet_set = set(dirichlet_nodes) if dirichlet_nodes else set()
+
+    for u, v, g in extra_edges:
+        if g <= 0:
+            continue
+        # Only edges that couple an unknown to a Dirichlet node contribute.
+        u_is_d = u in dirichlet_set
+        v_is_d = v in dirichlet_set
+        u_in_u = u in unknown_to_idx
+        v_in_u = v in unknown_to_idx
+
+        if u_is_d and v_in_u:
+            # Edge (Dirichlet u) -- [g] -- (unknown v):
+            # G_ud[v, u] = -g  (off-diagonal), so rhs = -(G_ud @ V_d) = -(-g * V_d) = +g*V_d
+            iv = unknown_to_idx[v]
+            rhs[iv] += g * dirichlet_voltage
+        if v_is_d and u_in_u:
+            # Edge (unknown u) -- [g] -- (Dirichlet v):
+            # G_ud[u, v] = -g  (off-diagonal), so rhs = -(G_ud @ V_d) = -(-g * V_d) = +g*V_d
+            iu = unknown_to_idx[u]
+            rhs[iu] += g * dirichlet_voltage
+
+    return rhs
+
+
+def _build_s_extra_coo(
+    S_global_csr: sp.csr_matrix,
+    tile_schur_complements: Dict[Any, np.ndarray],
+    tile_index_maps: Dict[Any, np.ndarray],
+    n_iface: int,
+) -> sp.csr_matrix:
+    """Vectorized S_extra = S_global - sum_i P_i^T S_i P_i (B2 follow-up).
+
+    Replaces the O(n_ports^2)-per-tile nested Python loop (LIL construction)
+    with a single vectorized COO scatter-add.  The result is the package-edge
+    contribution that is NOT captured by per-tile Schur complements and needs
+    to be added as S_extra in the tilewise CG matvec.
+
+    Args:
+        S_global_csr: Assembled global Schur matrix (CSR).
+        tile_schur_complements: {tile_id: S_i dense array}.
+        tile_index_maps: {tile_id: int32 global-index array}.
+        n_iface: Number of interface unknowns.
+
+    Returns:
+        Sparse CSR matrix S_extra (entries below 1e-15 eliminated).
+    """
+    # Vectorized COO assembly of sum_i P_i^T S_i P_i
+    coo_rows_parts: List[np.ndarray] = []
+    coo_cols_parts: List[np.ndarray] = []
+    coo_data_parts: List[np.ndarray] = []
+
+    for tid, S_i in tile_schur_complements.items():
+        idx = tile_index_maps[tid]
+        n_local = len(idx)
+        global_rows = np.repeat(idx, n_local)
+        global_cols = np.tile(idx, n_local)
+        coo_rows_parts.append(global_rows)
+        coo_cols_parts.append(global_cols)
+        coo_data_parts.append(np.asarray(S_i, dtype=np.float64).ravel())
+
+    if coo_rows_parts:
+        all_rows = np.concatenate(coo_rows_parts).astype(np.int32)
+        all_cols = np.concatenate(coo_cols_parts).astype(np.int32)
+        all_data = np.concatenate(coo_data_parts).astype(np.float64)
+        S_tile_sum = sp.coo_matrix(
+            (all_data, (all_rows, all_cols)), shape=(n_iface, n_iface)
+        ).tocsr()
+    else:
+        S_tile_sum = sp.csr_matrix((n_iface, n_iface), dtype=np.float64)
+
+    S_extra = (S_global_csr - S_tile_sum).tocsr()
+    S_extra.eliminate_zeros()
+    return S_extra
+
+
+def _build_csr_scatter_pattern(
+    G_full_csr: 'sp.csr_matrix',
+    tile_index_maps: Dict[Any, np.ndarray],
+    extra_rows: np.ndarray,
+    extra_cols: np.ndarray,
+) -> Dict[str, Any]:
+    """Precompute scatter indices mapping each COO entry to its CSR data position.
+
+    B3: After the first (COO-path) streaming call, this helper records where in
+    the G_full CSR data array each per-tile row×col entry and each extra-edge
+    entry lands.  Subsequent streaming calls use these precomputed indices to
+    scatter-add directly into a preallocated float64 array — peak coordinator
+    memory is then exactly one tile's shard at a time (plus the O(nnz)
+    preallocated buffer, which is the same size as the final G_full.data).
+
+    The CSR data array is sorted by row and within each row by column
+    (guaranteed by scipy's tocsr()).  The position of entry (r, c) is:
+        indptr[r] + searchsorted(indices[indptr[r]:indptr[r+1]], c)
+
+    For each tile, every entry in the tile's S_i contributes a
+    (global_row, global_col) pair.  We compute all of them at once using
+    vectorised searchsorted.
+
+    Args:
+        G_full_csr: The assembled full G matrix (CSR, sorted column indices).
+        tile_index_maps: {tile_id: int32 local→global index array}.
+        extra_rows: int32 COO row indices for the extra-edge entries.
+        extra_cols: int32 COO col indices for the extra-edge entries.
+
+    Returns:
+        Pattern dict with keys:
+          'indptr'            : G_full_csr.indptr copy (int32/int64)
+          'indices'           : G_full_csr.indices copy (int32/int64)
+          'n_full'            : G_full_csr.shape[0]
+          'nnz'               : G_full_csr.nnz
+          'tile_scatter_idxs' : {tile_id: int64 flat position array}
+          'extra_scatter_idx' : int64 flat position array for extra entries
+    """
+    indptr = G_full_csr.indptr
+    indices = G_full_csr.indices
+
+    def _coo_to_csr_positions(
+        rows: np.ndarray, cols: np.ndarray,
+    ) -> np.ndarray:
+        """Return the flat CSR data positions for a set of (row, col) pairs."""
+        positions = np.empty(len(rows), dtype=np.int64)
+        # Group by row for vectorised searchsorted
+        # (rows may repeat, so we iterate over unique rows)
+        if len(rows) == 0:
+            return positions
+        # Sort by row for grouped processing
+        order = np.argsort(rows, kind='stable')
+        rows_s = rows[order]
+        cols_s = cols[order]
+        # Use searchsorted within each row's column slice
+        # Most tiles have all entries in a small number of rows — batch.
+        unique_rows, row_starts = np.unique(rows_s, return_index=True)
+        row_ends = np.append(row_starts[1:], len(rows_s))
+        for i, r in enumerate(unique_rows):
+            r = int(r)
+            lo = int(row_starts[i])
+            hi = int(row_ends[i])
+            row_cols = cols_s[lo:hi]
+            csr_lo = int(indptr[r])
+            csr_hi = int(indptr[r + 1])
+            row_idx_slice = indices[csr_lo:csr_hi]
+            offsets = np.searchsorted(row_idx_slice, row_cols)
+            positions[order[lo:hi]] = csr_lo + offsets
+        return positions
+
+    # Per-tile scatter indices
+    tile_scatter_idxs: Dict[Any, np.ndarray] = {}
+    for tid, idx in tile_index_maps.items():
+        n_local = len(idx)
+        global_rows = np.repeat(idx, n_local).astype(np.int32)
+        global_cols = np.tile(idx, n_local).astype(np.int32)
+        tile_scatter_idxs[tid] = _coo_to_csr_positions(global_rows, global_cols)
+
+    # Extra-edge scatter indices
+    if len(extra_rows) > 0:
+        extra_scatter_idx = _coo_to_csr_positions(
+            extra_rows.astype(np.int32), extra_cols.astype(np.int32)
+        )
+    else:
+        extra_scatter_idx = np.empty(0, dtype=np.int64)
+
+    return {
+        'indptr': indptr.copy(),
+        'indices': indices.copy(),
+        'n_full': G_full_csr.shape[0],
+        'nnz': G_full_csr.nnz,
+        'tile_scatter_idxs': tile_scatter_idxs,
+        'extra_scatter_idx': extra_scatter_idx,
+    }
+
+
+def _stream_assemble_schur(
+    model: Any,
+    tile_port_node_lists: Dict[Any, List[str]],
+    per_tile_stats: List[Dict[str, Any]],
+    extra_edges: Optional[List],
+    dirichlet_nodes: Optional[Set[str]],
+    dirichlet_voltage: float,
+    assembly_cache: Dict[str, Any],
+) -> Tuple[
+    sp.csr_matrix,
+    np.ndarray,
+    List[str],
+    Dict[str, int],
+    Dict[Any, np.ndarray],  # tile_schur_complements (None — not held)
+]:
+    """Stream-assemble S_global by fetching COO shards one tile at a time.
+
+    B3: Avoids holding all dense S_i simultaneously in coordinator memory.
+
+    Three internal paths:
+
+    FAST PATH (CSR scatter pattern cached from a prior call):
+      - Preallocate G_full_data = np.zeros(pattern.nnz).
+      - Call ``get_schur_data_flat`` on each tile via ``call_all_streaming``:
+        yields (tile_idx, flat_float64_array) one at a time.
+      - Scatter-add each tile's float64 flat array directly into G_full_data
+        using the cached scatter positions; free the flat array immediately.
+      - Scatter-add extra-edge values.
+      - Reconstruct G_full as CSR from (G_full_data, pattern.indptr, pattern.indices).
+      Peak extra coordinator memory: one tile's float64 flat array
+      (n_ports^2 * 8 bytes) + preallocated G_full_data (nnz * 8 bytes).
+
+    FIRST CALL — two-pass (no scatter pattern yet):
+      Pass 1 — index-only pre-pass (no float64 on the wire):
+        - Call ``get_schur_coo_indices_only`` on each tile via ``call_all_streaming``:
+          yields (tile_idx, (global_rows, global_cols)) one at a time.
+        - Accumulate int32 rows/cols across all tiles (no float64 values).
+        - After all tiles are collected, add extra-edge rows/cols.
+        - Build COO→CSR with dummy (all-ones) data to obtain indptr/indices.
+        - Compute CSR scatter positions via ``_build_csr_scatter_pattern``.
+        - Free accumulated rows/cols arrays.
+      Pass 2 — data-only (fast path after pattern is cached):
+        - Preallocate G_full_data = np.zeros(pattern.nnz).
+        - Call ``get_schur_data_flat`` on each tile via ``call_all_streaming``
+          (scatter pattern now known; see fast path above).
+      Peak extra coordinator memory (two-pass first call):
+        - Pre-pass accumulation: O(sum_i n_ports_i^2 * 8 bytes) int32 rows+cols
+          = O(nnz * 8 bytes).  No float64 during this phase.
+        - After pre-pass: scatter pattern (nnz * ~12 bytes) + preallocated buffer
+          (nnz * 8 bytes).  Row/col accumulations freed before data pass starts.
+        - Data pass: one tile's float64 flat array at a time.
+        Combined first-call peak ≈ O(nnz * 20 bytes):
+          preallocated buffer (8 B/entry) + scatter pattern (~12 B/entry).
+          Compared with old single-pass COO: O(nnz * 16 bytes) float+indices held
+          simultaneously PLUS tocsr output simultaneously = O(nnz * 28+ bytes).
+        This bounds first-call peak to the same asymptotic class as subsequent calls.
+
+    Returns:
+        (S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
+         tile_index_maps)
+    where tile_index_maps are the per-tile local->global index arrays built
+    during Step 2 (stored for downstream use: S_extra, CG solver setup, etc.).
+
+    NOTE: tile_schur_complements are NOT returned — they were never gathered.
+    Callers that need them for CG tilewise mode must call factor_and_compute_schur
+    via the normal (bulk) path instead.
+    """
+    workers = model.workers
+    tile_configs = model.metadata.tile_configs
+    backend = model.backend
+
+    n_shards_setting = (
+        getattr(model, 'settings', {}).get(
+            'streaming_assembly_n_shards', STREAMING_ASSEMBLY_N_SHARDS
+        )
+        if model is not None else STREAMING_ASSEMBLY_N_SHARDS
+    )
+    n_shards = max(1, int(n_shards_setting))
+
+    # Step 1: Build node index universe (same logic as assemble_schur_complement_system)
+    all_interface_nodes: Set[str] = set()
+    ground_node = '0'
+    if dirichlet_nodes is None:
+        dirichlet_nodes = set()
+
+    for node_list in tile_port_node_lists.values():
+        all_interface_nodes.update(node_list)
+    if extra_edges:
+        for u, v, g in extra_edges:
+            if u != ground_node:
+                all_interface_nodes.add(u)
+            if v != ground_node:
+                all_interface_nodes.add(v)
+
+    dirichlet_set = dirichlet_nodes & all_interface_nodes
+    unknown_nodes = all_interface_nodes - dirichlet_set
+
+    # --- A4 cache reuse (same logic as assemble_schur_complement_system) ----
+    _use_cached_idx = False
+    if assembly_cache and 'full_node_to_idx' in assembly_cache:
+        if (assembly_cache.get('n_unknown') == len(unknown_nodes)
+                and assembly_cache.get('n_full') == len(unknown_nodes) + len(dirichlet_set)):
+            _use_cached_idx = True
+
+    if _use_cached_idx:
+        full_node_to_idx = assembly_cache['full_node_to_idx']
+        unknown_list = assembly_cache['unknown_list']
+        dirichlet_list = assembly_cache['dirichlet_list']
+        n_unknown = assembly_cache['n_unknown']
+        n_dirichlet = len(dirichlet_set)
+        n_full = assembly_cache['n_full']
+    else:
+        unknown_list = sorted(unknown_nodes)
+        dirichlet_list = sorted(dirichlet_set)
+        all_ordered = unknown_list + dirichlet_list
+        full_node_to_idx = {n: i for i, n in enumerate(all_ordered)}
+        n_unknown = len(unknown_list)
+        n_dirichlet = len(dirichlet_list)
+        n_full = n_unknown + n_dirichlet
+
+    if n_full == 0:
+        empty_S = sp.csr_matrix((0, 0))
+        empty_rhs = np.zeros(0, dtype=np.float64)
+        return empty_S, empty_rhs, [], {}, {}
+
+    # Step 2: Build tile index maps (local port -> global full-matrix index)
+    _cached_l2g = assembly_cache.get('tile_local_to_global', {}) if (assembly_cache and _use_cached_idx) else {}
+    tile_index_maps: Dict[Any, np.ndarray] = {}
+    _new_l2g: Dict[Any, np.ndarray] = {}
+    _cache_valid = True
+
+    for tid, node_list in tile_port_node_lists.items():
+        n_local = len(node_list)
+        if tid in _cached_l2g:
+            l2g = _cached_l2g[tid]
+            if len(l2g) == n_local:
+                local_to_global = l2g
+            else:
+                _cache_valid = False
+                local_to_global = np.array(
+                    [full_node_to_idx[n] for n in node_list], dtype=np.int32
+                )
+        else:
+            local_to_global = np.array(
+                [full_node_to_idx[n] for n in node_list], dtype=np.int32
+            )
+        tile_index_maps[tid] = local_to_global
+        _new_l2g[tid] = local_to_global
+
+    # Step 3a: Precompute extra-edge COO entries (always recomputed; small).
+    extra_rows_l: List[int] = []
+    extra_cols_l: List[int] = []
+    extra_data_l: List[float] = []
+
+    if extra_edges:
+        for u, v, g in extra_edges:
+            if g <= 0:
+                continue
+            if u == ground_node:
+                if v in full_node_to_idx:
+                    iv = full_node_to_idx[v]
+                    extra_rows_l.append(iv)
+                    extra_cols_l.append(iv)
+                    extra_data_l.append(g)
+                continue
+            if v == ground_node:
+                if u in full_node_to_idx:
+                    iu = full_node_to_idx[u]
+                    extra_rows_l.append(iu)
+                    extra_cols_l.append(iu)
+                    extra_data_l.append(g)
+                continue
+            if u not in full_node_to_idx or v not in full_node_to_idx:
+                continue
+            iu, iv = full_node_to_idx[u], full_node_to_idx[v]
+            extra_rows_l += [iu, iv, iu, iv]
+            extra_cols_l += [iv, iu, iu, iv]
+            extra_data_l += [-g, -g, g, g]
+
+    extra_rows_arr = np.array(extra_rows_l, dtype=np.int32) if extra_rows_l else np.empty(0, dtype=np.int32)
+    extra_cols_arr = np.array(extra_cols_l, dtype=np.int32) if extra_cols_l else np.empty(0, dtype=np.int32)
+    extra_data_arr = np.array(extra_data_l, dtype=np.float64) if extra_data_l else np.empty(0, dtype=np.float64)
+
+    # -------------------------------------------------------------------------
+    # FAST PATH: CSR scatter pattern cached from a previous call.
+    #
+    # Uses get_schur_data_flat() — sends ONLY float64 values (8 B/entry)
+    # instead of get_schur_coo_shards() which also sends int32 rows + int32
+    # cols (16 B/entry total, 2x the dense S_i size).  The scatter pattern
+    # already encodes the (row, col) → G_full_data position mapping, so
+    # global indices are not needed on the wire.
+    #
+    # Peak coordinator extra memory per tile:
+    #   one float64 flat array (n_ports^2 * 8 bytes) + no rows/cols overhead.
+    #   After scatter-add the array is freed; next tile's data arrives.
+    # -------------------------------------------------------------------------
+    _scatter_pattern = assembly_cache.get('_csr_scatter_pattern') if assembly_cache else None
+    _pattern_valid = (
+        _scatter_pattern is not None
+        and _cache_valid
+        and _use_cached_idx
+        and _scatter_pattern.get('n_full') == n_full
+        and set(_scatter_pattern.get('tile_scatter_idxs', {}).keys()) == set(tile_index_maps.keys())
+    )
+
+    if _pattern_valid:
+        # Preallocate G_full data array; indptr/indices come from pattern.
+        pat = _scatter_pattern
+        G_full_data = np.zeros(pat['nnz'], dtype=np.float64)
+        tile_scatter_idxs = pat['tile_scatter_idxs']
+        extra_scatter_idx = pat['extra_scatter_idx']
+
+        # Stream flat data tile-by-tile (no rows/cols on the wire).
+        # Each result is a 1-D float64 array of length n_ports^2 in row-major
+        # order.  scatter_idx[tid] maps each entry to its G_full_data position.
+        for i, tile_data_flat in backend.call_all_streaming(
+            workers, 'get_schur_data_flat'
+        ):
+            tid = tile_configs[i].tile_id
+            scatter_idx = tile_scatter_idxs[tid]
+            np.add.at(G_full_data, scatter_idx, tile_data_flat)
+            del tile_data_flat
+
+        # Scatter-add extra-edge values.
+        if len(extra_scatter_idx) > 0:
+            np.add.at(G_full_data, extra_scatter_idx, extra_data_arr)
+
+        # Reconstruct G_full as CSR from (data, indptr, indices).
+        G_full = sp.csr_matrix(
+            (G_full_data, pat['indices'], pat['indptr']),
+            shape=(n_full, n_full),
+        )
+        logger.debug(
+            "B3 streaming (fast-path, data-only): scatter-add into preallocated CSR "
+            "(%d nnz, n_full=%d) — 8 B/entry (no rows/cols wire overhead)",
+            pat['nnz'], n_full,
+        )
+
+    else:
+        # -------------------------------------------------------------------------
+        # FIRST CALL (or pattern invalidated): Two-pass bounded-peak path.
+        #
+        # Pass 1 (index-only, no float64 on the wire):
+        #   Stream get_schur_coo_indices_only() one tile at a time to accumulate
+        #   only int32 rows/cols (8 B/entry, no float64 values).  After collecting
+        #   all tiles, build the CSR sparsity pattern via COO→CSR with dummy data.
+        #   Compute and cache scatter positions.  Free all accumulated index arrays.
+        #
+        # Pass 2 (data-only, scatter into preallocated buffer):
+        #   Once the scatter pattern is in assembly_cache, take the same fast path
+        #   as subsequent calls: stream get_schur_data_flat() one tile at a time
+        #   and scatter-add into a preallocated G_full_data buffer.
+        #
+        # Peak extra coordinator memory:
+        #   Pre-pass accumulation: O(nnz * 8 bytes) for int32 rows+cols (no float64).
+        #   After pre-pass: pattern (~12 B/nnz) + preallocated buffer (8 B/nnz).
+        #   Data pass: one tile's float64 flat (n_ports^2 * 8 B) at a time.
+        #   Combined: O(nnz * 20 bytes) vs old single-pass O(nnz * 28+ bytes).
+        # -------------------------------------------------------------------------
+
+        # Build index args: one per tile with the tile_index_map.
+        idx_args = [
+            (tile_index_maps[tc.tile_id],)
+            for tc in tile_configs
+        ]
+
+        # --- Pass 1: index-only pre-pass (accumulate int32 rows/cols, NO float64) ---
+        coo_rows_parts: List[np.ndarray] = []
+        coo_cols_parts: List[np.ndarray] = []
+
+        for i, (idx_rows, idx_cols) in backend.call_all_streaming(
+            workers, 'get_schur_coo_indices_only', idx_args
+        ):
+            coo_rows_parts.append(idx_rows)
+            coo_cols_parts.append(idx_cols)
+            del idx_rows, idx_cols
+
+        # Add extra-edge indices
+        if len(extra_rows_arr) > 0:
+            coo_rows_parts.append(extra_rows_arr)
+            coo_cols_parts.append(extra_cols_arr)
+
+        # Build CSR sparsity pattern from index-only COO (dummy all-ones data).
+        if coo_rows_parts:
+            all_rows = np.concatenate(coo_rows_parts).astype(np.int32)
+            all_cols = np.concatenate(coo_cols_parts).astype(np.int32)
+            # Free the per-part lists now that they're concatenated.
+            del coo_rows_parts, coo_cols_parts
+            dummy_data = np.ones(len(all_rows), dtype=np.float64)
+            G_full_pattern_csr = sp.coo_matrix(
+                (dummy_data, (all_rows, all_cols)), shape=(n_full, n_full)
+            ).tocsr()
+            del all_rows, all_cols, dummy_data
+        else:
+            G_full_pattern_csr = sp.csr_matrix((n_full, n_full), dtype=np.float64)
+
+        # Compute and cache scatter positions from the index-only CSR pattern.
+        _new_pattern = _build_csr_scatter_pattern(
+            G_full_csr=G_full_pattern_csr,
+            tile_index_maps=tile_index_maps,
+            extra_rows=extra_rows_arr,
+            extra_cols=extra_cols_arr,
+        )
+        del G_full_pattern_csr  # free pattern CSR (indptr/indices kept in _new_pattern)
+
+        if assembly_cache is not None and _cache_valid:
+            assembly_cache['_csr_scatter_pattern'] = _new_pattern
+            logger.debug(
+                "B3 streaming (first-call two-pass): built scatter pattern "
+                "via index-only pre-pass (%d nnz, %d tiles).",
+                _new_pattern['nnz'], len(tile_index_maps),
+            )
+
+        # --- Pass 2: data-only (fast path now that scatter pattern is cached) ---
+        _scatter_pattern = _new_pattern
+        G_full_data = np.zeros(_scatter_pattern['nnz'], dtype=np.float64)
+        tile_scatter_idxs = _scatter_pattern['tile_scatter_idxs']
+        extra_scatter_idx = _scatter_pattern['extra_scatter_idx']
+
+        for i, tile_data_flat in backend.call_all_streaming(
+            workers, 'get_schur_data_flat'
+        ):
+            tid = tile_configs[i].tile_id
+            scatter_idx = tile_scatter_idxs[tid]
+            np.add.at(G_full_data, scatter_idx, tile_data_flat)
+            del tile_data_flat
+
+        # Scatter-add extra-edge values.
+        if len(extra_scatter_idx) > 0:
+            np.add.at(G_full_data, extra_scatter_idx, extra_data_arr)
+
+        # Build G_full CSR from (data, indptr, indices).
+        G_full = sp.csr_matrix(
+            (G_full_data, _scatter_pattern['indices'], _scatter_pattern['indptr']),
+            shape=(n_full, n_full),
+        )
+        logger.debug(
+            "B3 streaming (first-call two-pass): assembled G_full "
+            "(%d nnz, n_full=%d) — index pre-pass + data scatter.",
+            G_full.nnz, n_full,
+        )
+
+    u_idx = np.arange(n_unknown)
+    S_global = G_full[np.ix_(u_idx, u_idx)].tocsr()
+
+    if n_dirichlet > 0:
+        d_idx = np.arange(n_unknown, n_full)
+        G_ud = G_full[np.ix_(u_idx, d_idx)].tocsr()
+        V_d = np.full(n_dirichlet, dirichlet_voltage, dtype=np.float64)
+        rhs_dirichlet = -(G_ud @ V_d)
+    else:
+        rhs_dirichlet = np.zeros(n_unknown, dtype=np.float64)
+
+    unknown_to_idx = {n: i for i, n in enumerate(unknown_list)}
+
+    # Update assembly cache (same as assemble_schur_complement_system)
+    if assembly_cache is not None and _cache_valid:
+        assembly_cache['tile_local_to_global'] = _new_l2g
+        assembly_cache['full_node_to_idx'] = full_node_to_idx
+        assembly_cache['unknown_list'] = unknown_list
+        assembly_cache['dirichlet_list'] = dirichlet_list
+        assembly_cache['n_unknown'] = n_unknown
+        assembly_cache['n_full'] = n_full
+
+    return S_global, rhs_dirichlet, unknown_list, unknown_to_idx, tile_index_maps
+
+
+# ---------------------------------------------------------------------------
 # DC context: factor / save / load / refactor
 # ---------------------------------------------------------------------------
 
@@ -149,23 +832,70 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
     timings: Dict[str, Any] = {}
     model = ctx.model
 
-    # 1. Factor tiles and compute Schur complements (parallel on workers)
+    # 1. Factor tiles and compute Schur complements (parallel on workers).
+    #
+    # B3: When streaming_assembly is enabled, use factor_and_cache_schur() to
+    # factor tiles and cache S_i on workers WITHOUT returning S_i to the
+    # coordinator.  S_global is then assembled by streaming COO shards
+    # tile-by-tile.  When streaming_assembly is False (default), use the
+    # existing factor_and_compute_schur() path which gathers all dense S_i
+    # at once.  This path remains byte-identical to pre-B3 behaviour.
+    #
+    # B3 'auto' fix: get lightweight size stats BEFORE factoring interior
+    # (via get_schur_size_stats()) so the streaming decision is made without
+    # first gathering any S_i.  This eliminates the blocker where 'auto' used
+    # to run factor_and_compute_schur first (hitting the memory peak), then
+    # logged a note that streaming would be used "next time".
     t0 = _time.perf_counter()
-    schur_results = model.backend.call_all(
-        model.workers, 'factor_and_compute_schur'
-    )
-    timings['factor_tiles'] = _time.perf_counter() - t0
 
-    # Organize results by tile
+    _streaming_setting = _get_streaming_assembly_setting(model)
+
+    if _streaming_setting == 'auto':
+        # Cheap stats round-trip (no factoring, no S_i) to decide streaming.
+        size_stats_raw = model.backend.call_all(
+            model.workers, 'get_schur_size_stats'
+        )
+        _use_streaming_dc = _should_stream(model, size_stats_raw)
+        if verbose or _use_streaming_dc:
+            _est = _estimate_schur_peak_bytes(size_stats_raw)
+            logger.info(
+                "streaming_assembly='auto': estimated S_i peak %.1f MB -> "
+                "streaming=%s", _est / 1024 ** 2, _use_streaming_dc,
+            )
+    else:
+        _use_streaming_dc = bool(_streaming_setting)
+
     tile_schur_complements: Dict[Any, np.ndarray] = {}
     tile_port_node_lists: Dict[Any, List[str]] = {}
     per_tile_stats: List[Dict[str, Any]] = []
 
-    for i, (S_i, boundary_list, tile_stats) in enumerate(schur_results):
-        tid = model.metadata.tile_configs[i].tile_id
-        tile_schur_complements[tid] = S_i
-        tile_port_node_lists[tid] = boundary_list
-        per_tile_stats.append(tile_stats)
+    if _use_streaming_dc:
+        # streaming_assembly=True (or 'auto' resolved to True):
+        # factor_and_cache_schur — S_i stays on workers, not sent to coordinator.
+        cache_results = model.backend.call_all(
+            model.workers, 'factor_and_cache_schur'
+        )
+        timings['factor_tiles'] = _time.perf_counter() - t0
+
+        for i, (boundary_list, tile_stats) in enumerate(cache_results):
+            tid = model.metadata.tile_configs[i].tile_id
+            tile_port_node_lists[tid] = boundary_list
+            per_tile_stats.append(tile_stats)
+
+    else:
+        # Bulk path (streaming_assembly=False or 'auto' resolved to False):
+        # factor_and_compute_schur — gathers all dense S_i to coordinator.
+        # This is byte-identical to pre-B3 behaviour.
+        schur_results = model.backend.call_all(
+            model.workers, 'factor_and_compute_schur'
+        )
+        timings['factor_tiles'] = _time.perf_counter() - t0
+
+        for i, (S_i, boundary_list, tile_stats) in enumerate(schur_results):
+            tid = model.metadata.tile_configs[i].tile_id
+            tile_schur_complements[tid] = S_i
+            tile_port_node_lists[tid] = boundary_list
+            per_tile_stats.append(tile_stats)
 
     # Coordinator-side DEBUG: per-tile factor/schur details
     from pgmath.block_system import _format_bytes
@@ -199,7 +929,6 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
 
     # 2. Assemble global interface system
     t0 = _time.perf_counter()
-    from pgmath.schur import assemble_schur_complement_system
 
     # A4: Determine assembly cache.
     # When topology already exists (repeated DC prepare or post-transient-first):
@@ -217,16 +946,39 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
         # Will be attached to the topology object created at step 5 below.
         _asm_cache = {}
 
-    S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx = (
-        assemble_schur_complement_system(
-            tile_schur_complements=tile_schur_complements,
+    if _use_streaming_dc:
+        # B3 streaming path: COO shards streamed tile-by-tile.
+        # tile_schur_complements is empty; S_i lives on workers.
+        (
+            S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
+            _streaming_tile_index_maps,
+        ) = _stream_assemble_schur(
+            model=model,
             tile_port_node_lists=tile_port_node_lists,
+            per_tile_stats=per_tile_stats,
             extra_edges=model.package_data.package_edges,
             dirichlet_nodes=model.pad_nodes,
             dirichlet_voltage=model.vdd,
             assembly_cache=_asm_cache,
         )
-    )
+        logger.debug(
+            "DC streaming assembly complete: S_global %dx%d, nnz=%d",
+            S_global.shape[0], S_global.shape[1], S_global.nnz,
+        )
+    else:
+        from pgmath.schur import assemble_schur_complement_system
+        S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx = (
+            assemble_schur_complement_system(
+                tile_schur_complements=tile_schur_complements,
+                tile_port_node_lists=tile_port_node_lists,
+                extra_edges=model.package_data.package_edges,
+                dirichlet_nodes=model.pad_nodes,
+                dirichlet_voltage=model.vdd,
+                assembly_cache=_asm_cache,
+            )
+        )
+        _streaming_tile_index_maps = None  # not used in bulk path
+
     timings['assemble_interface'] = _time.perf_counter() - t0
 
     # 2b. Global interface island detection (DC mode — resistive-only extra_edges).
@@ -294,13 +1046,19 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
     # 3. Build tile index maps (local port indices -> global interface indices).
     # Must be built BEFORE step 4 (interface solver setup) so that CG tilewise
     # mode can reference tile_index_maps when constructing InterfaceCGSolver.
-    tile_index_maps: Dict[Tuple[int, int], np.ndarray] = {}
-    for tid, boundary_list in tile_port_node_lists.items():
-        local_to_global = np.array(
-            [interface_node_to_idx[n] for n in boundary_list if n in interface_node_to_idx],
-            dtype=np.int32,
-        )
-        tile_index_maps[tid] = local_to_global
+    # B3: When streaming was used, tile_index_maps were already built during
+    # _stream_assemble_schur (stored in _streaming_tile_index_maps).  Reuse
+    # them directly to avoid rebuilding.  For the bulk path, build as before.
+    if _streaming_tile_index_maps is not None:
+        tile_index_maps: Dict[Tuple[int, int], np.ndarray] = _streaming_tile_index_maps
+    else:
+        tile_index_maps = {}
+        for tid, boundary_list in tile_port_node_lists.items():
+            local_to_global = np.array(
+                [interface_node_to_idx[n] for n in boundary_list if n in interface_node_to_idx],
+                dtype=np.int32,
+            )
+            tile_index_maps[tid] = local_to_global
 
     # 4. Factor (or set up iterative solver for) interface system.
     #
@@ -339,25 +1097,42 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
 
         # For tilewise mode, compute the package-edge contribution not included
         # in per-tile Schur complements.  S_extra = S_global - sum_i(P_i^T S_i P_i).
+        # B2 follow-up: replaced nested Python loop (LIL) with vectorized COO.
+        # B3: When streaming was used, tile_schur_complements is empty; tilewise
+        # CG mode is not available (can't build S_extra without S_i).  Fall back
+        # to 'assembled' mode and log a warning.
         _S_extra: Optional[sp.spmatrix] = None
         if _matvec_mode == 'tilewise':
-            n_iface = len(interface_nodes)
-            S_tile_sum = sp.lil_matrix((n_iface, n_iface), dtype=np.float64)
-            for tid, S_i_dense in tile_schur_complements.items():
-                idx = tile_index_maps[tid]
-                for li, gi in enumerate(idx):
-                    for lj, gj in enumerate(idx):
-                        S_tile_sum[gi, gj] += S_i_dense[li, lj]
-            S_tile_sum_csr = S_tile_sum.tocsr()
-            _S_extra = (S_global.tocsr() - S_tile_sum_csr).tocsr()
-            # Zero out negligible entries to keep it sparse
-            _S_extra.eliminate_zeros()
+            if _use_streaming_dc or not tile_schur_complements:
+                # Non-composition: streaming_assembly=True did not gather S_i to the
+                # coordinator, so tilewise matvec (which needs per-tile S_i blocks) is
+                # not possible.  Fall back to 'assembled' mode: CG still avoids the
+                # CHOLMOD factor, but S_global remains in coordinator memory.
+                # The ideal composition (S_i worker-resident RPC matvec) is deferred
+                # to B4.  See module docstring for the full compatibility matrix.
+                logger.warning(
+                    "streaming_assembly=True is incompatible with "
+                    "interface_matvec_mode='tilewise': S_i blocks were not gathered "
+                    "to the coordinator (streaming intentionally avoids this). "
+                    "Falling back to matvec_mode='assembled' — CG still avoids the "
+                    "CHOLMOD factor; only the ~50GB S_global itself is held. "
+                    "For a fully worker-resident matvec, see B4 (future work)."
+                )
+                _matvec_mode = 'assembled'
+            else:
+                # B2 follow-up: vectorized COO S_extra construction
+                _S_extra = _build_s_extra_coo(
+                    S_global_csr=S_global.tocsr(),
+                    tile_schur_complements=tile_schur_complements,
+                    tile_index_maps=tile_index_maps,
+                    n_iface=len(interface_nodes),
+                )
 
         _cg_solver = InterfaceCGSolver(
             n_interface=len(interface_nodes),
             matvec_mode=_matvec_mode,
             S_global=S_global,
-            tile_schur_complements=tile_schur_complements,
+            tile_schur_complements=tile_schur_complements if not _use_streaming_dc else None,
             tile_index_maps=tile_index_maps,
             S_extra=_S_extra,
             preconditioner=_preconditioner,
@@ -670,28 +1445,66 @@ def _factor_transient_context(
     tile_configs = model.metadata.tile_configs
     method = ctx.integration_method
 
-    # 1. Factor transient system on all workers (parallel)
+    # 1. Factor transient system on all workers (parallel).
+    #
+    # B3: Same auto/streaming logic as DC.  When streaming_assembly is True
+    # or 'auto' resolves to True (via lightweight get_schur_size_stats()),
+    # use factor_transient_and_cache_schur() which keeps S_A on the worker.
+    # Assembly then streams COO shards via _stream_assemble_schur().
     dt_scaled = ctx.dt_scaled
     C_coeff = ctx.C_coeff
 
+    _streaming_setting_td = _get_streaming_assembly_setting(model)
+
+    if _streaming_setting_td == 'auto':
+        # Lightweight round-trip to decide streaming WITHOUT factoring.
+        size_stats_raw = model.backend.call_all(
+            model.workers, 'get_schur_size_stats'
+        )
+        _use_streaming_td = _should_stream(model, size_stats_raw)
+        if verbose or _use_streaming_td:
+            _est = _estimate_schur_peak_bytes(size_stats_raw)
+            logger.info(
+                "Transient streaming_assembly='auto': estimated S_A peak "
+                "%.1f MB -> streaming=%s", _est / 1024 ** 2, _use_streaming_td,
+            )
+    else:
+        _use_streaming_td = bool(_streaming_setting_td)
+
     t0 = _time.perf_counter()
     trans_args = [(dt_scaled, method)] * len(tile_configs)
-    schur_results = model.backend.call_all(
-        model.workers, 'factor_transient_system', trans_args,
-    )
-    timings['factor_transient_tiles'] = _time.perf_counter() - t0
 
-    # Organize results by tile
     tile_schur_complements: Dict[Any, np.ndarray] = {}
     tile_port_node_lists: Dict[Any, List[str]] = {}
     total_tile_cap = 0.0
     per_tile_stats: List[Dict[str, Any]] = []
-    for i, (S_A_i, port_list, tile_cap, tile_stats) in enumerate(schur_results):
-        tid = tile_configs[i].tile_id
-        tile_schur_complements[tid] = S_A_i
-        tile_port_node_lists[tid] = port_list
-        total_tile_cap += tile_cap
-        per_tile_stats.append(tile_stats)
+
+    if _use_streaming_td:
+        # Streaming path: S_A stays on workers.
+        cache_results = model.backend.call_all(
+            model.workers, 'factor_transient_and_cache_schur', trans_args,
+        )
+        timings['factor_transient_tiles'] = _time.perf_counter() - t0
+
+        for i, (port_list, tile_cap, tile_stats) in enumerate(cache_results):
+            tid = tile_configs[i].tile_id
+            tile_port_node_lists[tid] = port_list
+            total_tile_cap += tile_cap
+            per_tile_stats.append(tile_stats)
+
+    else:
+        # Bulk path: gathers all dense S_A_i to coordinator.
+        schur_results = model.backend.call_all(
+            model.workers, 'factor_transient_system', trans_args,
+        )
+        timings['factor_transient_tiles'] = _time.perf_counter() - t0
+
+        for i, (S_A_i, port_list, tile_cap, tile_stats) in enumerate(schur_results):
+            tid = tile_configs[i].tile_id
+            tile_schur_complements[tid] = S_A_i
+            tile_port_node_lists[tid] = port_list
+            total_tile_cap += tile_cap
+            per_tile_stats.append(tile_stats)
 
     # Coordinator-side DEBUG: per-tile transient factor details
     from pgmath.block_system import _format_bytes
@@ -753,28 +1566,62 @@ def _factor_transient_context(
         # Will be attached to the topology object created below.
         _asm_cache = {}
 
-    S_global, rhs_dirichlet_A, interface_nodes, interface_node_to_idx = (
-        assemble_schur_complement_system(
-            tile_schur_complements=tile_schur_complements,
+    _streaming_tile_index_maps_td = None
+
+    if _use_streaming_td:
+        # B3 streaming transient: COO shards of S_A streamed tile-by-tile.
+        # combined_edges includes the effective cap contribution (C_coeff * C).
+        (
+            S_global, rhs_dirichlet_A, interface_nodes, interface_node_to_idx,
+            _streaming_tile_index_maps_td,
+        ) = _stream_assemble_schur(
+            model=model,
             tile_port_node_lists=tile_port_node_lists,
+            per_tile_stats=per_tile_stats,
             extra_edges=combined_edges,
             dirichlet_nodes=model.pad_nodes,
             dirichlet_voltage=model.vdd,
             assembly_cache=_asm_cache,
         )
-    )
+        # Compute G-only Dirichlet RHS from package resistive edges alone
+        # (tile S_A_i only contribute to the unknown-unknown block, not G_ud).
+        unknown_to_idx_td = {n: i for i, n in enumerate(interface_nodes)
+                             if n not in (model.pad_nodes or set())}
+        # Build sorted unknown list (interface_nodes is already unknowns only)
+        rhs_dirichlet_G = _compute_rhs_dirichlet_from_edges(
+            extra_edges=list(pkg_res_edges),
+            unknown_list=list(interface_nodes),
+            unknown_to_idx={n: i for i, n in enumerate(interface_nodes)},
+            dirichlet_nodes=model.pad_nodes,
+            dirichlet_voltage=model.vdd,
+        )
+        logger.debug(
+            "Transient streaming assembly complete: S_global %dx%d, nnz=%d",
+            S_global.shape[0], S_global.shape[1], S_global.nnz,
+        )
+    else:
+        S_global, rhs_dirichlet_A, interface_nodes, interface_node_to_idx = (
+            assemble_schur_complement_system(
+                tile_schur_complements=tile_schur_complements,
+                tile_port_node_lists=tile_port_node_lists,
+                extra_edges=combined_edges,
+                dirichlet_nodes=model.pad_nodes,
+                dirichlet_voltage=model.vdd,
+                assembly_cache=_asm_cache,
+            )
+        )
 
-    # Also compute G-only Dirichlet RHS (without cap contributions)
-    # needed for correct transient RHS formulation.
-    # Reuse the same cache — the node ordering from the first call is consistent.
-    _, rhs_dirichlet_G, _, _ = assemble_schur_complement_system(
-        tile_schur_complements=tile_schur_complements,
-        tile_port_node_lists=tile_port_node_lists,
-        extra_edges=list(pkg_res_edges),
-        dirichlet_nodes=model.pad_nodes,
-        dirichlet_voltage=model.vdd,
-        assembly_cache=_asm_cache,
-    )
+        # Also compute G-only Dirichlet RHS (without cap contributions)
+        # needed for correct transient RHS formulation.
+        # Reuse the same cache — the node ordering from the first call is consistent.
+        _, rhs_dirichlet_G, _, _ = assemble_schur_complement_system(
+            tile_schur_complements=tile_schur_complements,
+            tile_port_node_lists=tile_port_node_lists,
+            extra_edges=list(pkg_res_edges),
+            dirichlet_nodes=model.pad_nodes,
+            dirichlet_voltage=model.vdd,
+            assembly_cache=_asm_cache,
+        )
 
     # Island detection on transient system (resistive + cap extra_edges).
     # Cache lookup order:
@@ -840,14 +1687,18 @@ def _factor_transient_context(
     )
 
     # 5. Build tile index maps (must be before step 6 so CG tilewise can use them).
-    tile_index_maps: Dict[Tuple[int, int], np.ndarray] = {}
-    for tid, port_list in tile_port_node_lists.items():
-        local_to_global = np.array(
-            [interface_node_to_idx[n] for n in port_list
-             if n in interface_node_to_idx],
-            dtype=np.int32,
-        )
-        tile_index_maps[tid] = local_to_global
+    # B3: Reuse streaming-built maps when available.
+    if _streaming_tile_index_maps_td is not None:
+        tile_index_maps: Dict[Tuple[int, int], np.ndarray] = _streaming_tile_index_maps_td
+    else:
+        tile_index_maps = {}
+        for tid, port_list in tile_port_node_lists.items():
+            local_to_global = np.array(
+                [interface_node_to_idx[n] for n in port_list
+                 if n in interface_node_to_idx],
+                dtype=np.int32,
+            )
+            tile_index_maps[tid] = local_to_global
 
     # 6. Factor (or set up iterative solver for) transient interface system.
     # B2: Same auto-select logic as DC context (same model settings apply).
@@ -878,24 +1729,37 @@ def _factor_transient_context(
         _preconditioner_td = _model_settings_td.get('interface_preconditioner', 'block_jacobi')
         _cg_rtol_td = float(_model_settings_td.get('interface_cg_rtol', 1e-12))
 
-        # For tilewise mode: compute S_extra (package-edge contribution)
+        # For tilewise mode: compute S_extra (package-edge contribution).
+        # B2 follow-up: replaced nested Python loop (LIL) with vectorized COO.
+        # B3: When streaming was used, tile_schur_complements is empty; fall back.
+        # See module docstring for the streaming vs CG-tilewise compatibility matrix.
         _S_extra_td: Optional[sp.spmatrix] = None
         if _matvec_mode_td == 'tilewise':
-            n_iface_td = len(interface_nodes)
-            S_tile_sum_td = sp.lil_matrix((n_iface_td, n_iface_td), dtype=np.float64)
-            for tid, S_i_d in tile_schur_complements.items():
-                idx = tile_index_maps[tid]
-                for li, gi in enumerate(idx):
-                    for lj, gj in enumerate(idx):
-                        S_tile_sum_td[gi, gj] += S_i_d[li, lj]
-            _S_extra_td = (S_global.tocsr() - S_tile_sum_td.tocsr()).tocsr()
-            _S_extra_td.eliminate_zeros()
+            if _use_streaming_td or not tile_schur_complements:
+                # Non-composition: streaming_assembly=True did not gather S_i to the
+                # coordinator, so tilewise matvec (which needs per-tile S_i) is not
+                # possible.  Fall back to 'assembled'; CG still avoids the CHOLMOD
+                # factor.  Worker-resident RPC matvec is deferred to B4.
+                logger.warning(
+                    "Transient streaming_assembly=True is incompatible with "
+                    "interface_matvec_mode='tilewise': S_i blocks were not gathered. "
+                    "Falling back to matvec_mode='assembled'. "
+                    "See module docstring for the compatibility matrix."
+                )
+                _matvec_mode_td = 'assembled'
+            else:
+                _S_extra_td = _build_s_extra_coo(
+                    S_global_csr=S_global.tocsr(),
+                    tile_schur_complements=tile_schur_complements,
+                    tile_index_maps=tile_index_maps,
+                    n_iface=len(interface_nodes),
+                )
 
         _cg_solver_td = InterfaceCGSolver(
             n_interface=len(interface_nodes),
             matvec_mode=_matvec_mode_td,
             S_global=S_global,
-            tile_schur_complements=tile_schur_complements,
+            tile_schur_complements=tile_schur_complements if not _use_streaming_td else None,
             tile_index_maps=tile_index_maps,
             S_extra=_S_extra_td,
             preconditioner=_preconditioner_td,

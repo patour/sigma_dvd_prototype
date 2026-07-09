@@ -177,6 +177,35 @@ class ComputeBackend(ABC):
     def gather(self, futures: List[Any]) -> List[Any]:
         """Wait for and collect results from futures."""
 
+    def call_all_streaming(
+        self,
+        actors: List[Any],
+        method: str,
+        args_per_actor: Optional[List] = None,
+    ):
+        """Iterate over per-actor results one at a time (generator).
+
+        B3: Used for streaming Schur assembly.  Unlike ``call_all`` which
+        waits for ALL results then returns them as a list (peak memory =
+        sum of all results), this generator yields one result per actor in
+        order, allowing the coordinator to process and discard each result
+        before fetching the next.
+
+        Args:
+            actors: List of actor handles.
+            method: Method name to call.
+            args_per_actor: Optional per-actor argument list (same convention
+                as ``call_all``).
+
+        Yields:
+            (actor_index, result) pairs in order (0, r0), (1, r1), ...
+        """
+        # Default implementation: sequential (subclasses may override for
+        # pipelined execution — Ray subclass fetches futures eagerly in
+        # submission order to overlap compute and transfer).
+        results = self.call_all(actors, method, args_per_actor)
+        yield from enumerate(results)
+
     @abstractmethod
     def shutdown(self) -> None:
         """Release backend resources."""
@@ -217,6 +246,36 @@ class LocalBackend(ComputeBackend):
                 result = getattr(actor, method)(args)
             results.append(result)
         return results
+
+    def call_all_streaming(
+        self,
+        actors: List[Any],
+        method: str,
+        args_per_actor: Optional[List] = None,
+    ):
+        """Truly sequential per-actor iteration.
+
+        B3: Unlike the base-class default (which calls ``self.call_all()`` and
+        materialises ALL results before yielding the first), this override
+        calls each actor serially and yields immediately, so the coordinator
+        can process and free each result before the next actor is invoked.
+
+        Peak coordinator memory for the streaming path is therefore
+        O(one actor's result) rather than O(sum of all actors' results).
+        """
+        for i, actor in enumerate(actors):
+            args = args_per_actor[i] if args_per_actor is not None else None
+            if isinstance(actor, VirtualWorkerHandle):
+                result = actor.physical_actor.call_worker(actor.local_idx, method, args)
+            elif args is None:
+                result = getattr(actor, method)()
+            elif isinstance(args, dict):
+                result = getattr(actor, method)(**args)
+            elif isinstance(args, (tuple, list)):
+                result = getattr(actor, method)(*args)
+            else:
+                result = getattr(actor, method)(args)
+            yield i, result
 
     def map_func(self, func: Callable, args_list: List[Tuple]) -> List[Any]:
         return [func(*args) for args in args_list]
@@ -340,6 +399,42 @@ class RayBackend(ComputeBackend):
                 future = getattr(actor, method).remote(args)
             futures.append(future)
         return ray.get(futures)
+
+    def call_all_streaming(
+        self,
+        actors: List[Any],
+        method: str,
+        args_per_actor: Optional[List] = None,
+    ):
+        """Submit all actor calls eagerly, then yield results one at a time.
+
+        B3: Submits all ``method.remote(...)`` calls upfront (so workers
+        compute in parallel), then yields (index, result) pairs by calling
+        ``ray.get(future)`` one at a time in submission order.  This lets the
+        coordinator process / free each result before the next ``ray.get``
+        returns, keeping only one result live at a time while still running
+        all workers concurrently.
+        """
+        ray = self._ray
+        futures = []
+        for i, actor in enumerate(actors):
+            args = args_per_actor[i] if args_per_actor is not None else None
+            if isinstance(actor, VirtualWorkerHandle):
+                future = actor.physical_actor.call_worker.remote(
+                    actor.local_idx, method, args
+                )
+            elif args is None:
+                future = getattr(actor, method).remote()
+            elif isinstance(args, dict):
+                future = getattr(actor, method).remote(**args)
+            elif isinstance(args, (tuple, list)):
+                future = getattr(actor, method).remote(*args)
+            else:
+                future = getattr(actor, method).remote(args)
+            futures.append(future)
+
+        for i, future in enumerate(futures):
+            yield i, ray.get(future)
 
     def map_func(self, func: Callable, args_list: List[Tuple]) -> List[Any]:
         ray = self._ray
