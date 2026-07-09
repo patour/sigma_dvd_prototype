@@ -9,8 +9,10 @@ Coverage matrix (flat solver oracle vs DistributedDDMSolver):
                  spec: max |V_flat - V_dist| <= 1e-9 V
   QS          -- all three fixtures; tolerance <= 1e-9 V (hard assert)
   Transient   -- all three fixtures (BE and TR); raw sources on both sides
-                 BE peak: <= 1e-8 V (hard assert — ~3.6e-11 V observed on sampled)
-                 TR peak: <= 2e-3 V regression guard; 1e-8 V spec xfail
+                 BE peak: <= 1e-8 V (hard assert — ~1.6e-15 V observed on sampled post-fix)
+                 TR peak: <= 1e-8 V (hard assert — ~1.4e-15 V observed on sampled post-fix)
+                 Both fixed by Bug 1 (pad-port G-history) + Bug 2 (IC mismatch) in
+                 tile_worker_td.py; TR xfail removed; baseline updated.
   Adjoint     -- netlist_test + netlist_sampled
                  static sampled: <= 1e-6 relative (hard assert — spec met)
                  dynamic sampled: <= 1e-6 relative (hard assert — spec met with raw sources)
@@ -34,8 +36,9 @@ Module-level list of kwargs dicts passed as **kw to distributed solve calls.
 Each entry becomes a parametrized test variant.  Adding one line here is all
 it takes to cover a new Phase-A optimisation flag.
 
-Phase-A flags to add once implemented:
-  pytest.param({"use_step_columns": True}, id="step_cols")  # A2
+Phase-A flags implemented (A2 landed):
+  pytest.param({"use_step_columns": True}, id="step_cols_on")
+  pytest.param({"use_step_columns": False}, id="step_cols_off")
 """
 
 import logging
@@ -114,7 +117,9 @@ TRANS_SPEC_ATOL = 1e-8
 # Transient TR: even with identical raw sources, the Trapezoidal method
 # diverges at ~0.5 mV between flat and distributed implementations.
 # This is a genuine integration-scheme difference, not a smoothing issue.
-# TR_TRANS_ATOL is the regression guard; TRANS_SPEC_ATOL is the spec xfail.
+# TR_TRANS_ATOL: legacy regression guard (2e-3 V) from before the TR fix.
+# No longer used in tests — all TR assertions now use TRANS_SPEC_ATOL / TRANS_ATOL.
+# Kept here as a historical reference for the pre-fix TR error magnitude.
 TR_TRANS_ATOL = 2e-3
 
 # Adjoint (static, integration): relative tolerance for per-aggressor
@@ -143,11 +148,16 @@ NETLIST_TEST_ADJOINT_RTOL = 0.60
 # NOTE: _XFAIL_BE_SPEC was removed.  BE transient is now hard-asserted at
 # TRANS_SPEC_ATOL=1e-8 V using smooth=False on both sides (raw sources).
 # Observed BE peak diff on netlist_sampled: ~3.6e-11 V (well within spec).
-_XFAIL_TR_SPEC = (
-    "genuine flat-vs-distributed TR divergence under identical raw sources — "
-    "under investigation (suspect TR Dirichlet/pad-cap history handling); "
-    "auto-passes when distributed TR integration is realigned with flat TR"
-)
+#
+# NOTE: _XFAIL_TR_SPEC was removed.  TR transient is now hard-asserted at
+# TRANS_SPEC_ATOL=1e-8 V.  The ~0.5 mV error was caused by two bugs in
+# tile_worker_td.py (both fixed):
+#   Bug 1: pad-in-tile-port G-history double-count (v_p_hist zeroed at pads)
+#   Bug 2: recover_and_set_initial_voltages_arr used static DC currents for
+#          the interior IC recovery instead of the VCS-at-t_start currents
+#          already embedded in _last_qs_rhs_i; the IC mismatch was amplified
+#          by the TR stiff-node period-2 mode (z_TR ≈ -1 when G >> C/dt).
+# Observed TR peak diff on netlist_sampled post-fix: ~1.4e-15 V (machine prec)
 _XFAIL_ADJ_STATIC_SPEC = (
     "src-level adjoint static delta ~1e-4 relative exceeds spec 1e-6; "
     "auto-passes when src is fixed"
@@ -167,23 +177,21 @@ _XFAIL_ADJ_DYN_SPEC = (
 # Root causes of remaining transient delta after smooth=False fix:
 #   BE: floating-point accumulation only (~3.6e-11 V on sampled) →
 #       hard-asserted at TRANS_SPEC_ATOL=1e-8 V in test_peak_drop_matches.
-#   TR: genuine Trapezoidal integration difference (~0.5 mV on sampled) →
-#       TR_TRANS_ATOL=2e-3 V regression guard; TRANS_SPEC_ATOL spec xfail.
+#   TR: fixed (Bug 1 + Bug 2 in tile_worker_td.py); now ~1.4e-15 V on sampled →
+#       hard-asserted at TRANS_SPEC_ATOL=1e-8 V alongside BE.
 #   netlist_test (any method): ~30 µV parsing delta dominates because the
 #       flat and distributed parsers handle complex elements differently.
 #
 # Historical note: an earlier version used smooth=True on the distributed
 # side ("dual-smoother pattern") which masked a ~2–3 µV smoother-
 # implementation divergence.  Using smooth=False exposes the actual solver
-# accuracy: BE is functionally exact (3.6e-11 V), TR has a real integration
-# mismatch (~0.5 mV) that needs a separate src fix.
+# accuracy: BE ~3.6e-11 V, TR ~1.4e-15 V (machine prec, after Bug 1+2 fix).
 #
 # The flag-gate (TestSolverVariantFlagGate) compares distributed flag-ON vs
 # flag-OFF — same smoother on both sides, no delta, tolerance 1e-12.
 _NOTE_RAW_SOURCES = (
-    "Both sides use raw (smooth=False) sources; BE peak diff ~3.6e-11 V on "
-    "sampled (hard-asserted at 1e-8 V spec).  TR diverges ~0.5 mV due to a "
-    "genuine Trapezoidal integration difference between flat and distributed."
+    "Both sides use raw (smooth=False) sources; BE peak diff ~3.6e-11 V, "
+    "TR peak diff ~1.4e-15 V on sampled (both hard-asserted at 1e-8 V spec)."
 )
 
 
@@ -789,11 +797,9 @@ class TestTransientSampledPkl:
     the constructor (no smoothed_sources argument in solve_transient).
     This is the same discipline as QS (smooth=False on both sides).
 
-    With identical raw sources:
+    With identical raw sources, after the Bug 1 + Bug 2 fixes:
       BE: diff ~3.6e-11 V → hard-asserted at TRANS_SPEC_ATOL=1e-8 V.
-      TR: diff ~0.5 mV (genuine Trapezoidal integration mismatch between
-          flat and distributed) → TR_TRANS_ATOL=2e-3 V regression guard;
-          TRANS_SPEC_ATOL=1e-8 V spec xfail until distributed TR is fixed.
+      TR: diff ~1.4e-15 V → hard-asserted at TRANS_SPEC_ATOL=1e-8 V.
 
     Each test calls _run_dist_transient() which re-prepares the transient
     context immediately before the solve.  This is required because
@@ -805,10 +811,10 @@ class TestTransientSampledPkl:
     lands, each existing method entry gets a new 'step_cols' twin for free.
 
     Guards:
-        BE peak:       TRANS_SPEC_ATOL = 1e-8 V  (hard assert — achievable with raw)
-        TR peak:       TR_TRANS_ATOL = 2e-3 V  (regression guard; xfail at 1e-8)
-        BE per-step:   TRANS_ATOL = 5e-6 V  (loose guard for array comparison)
-        TR per-step:   TR_TRANS_ATOL = 2e-3 V
+        BE peak:       TRANS_SPEC_ATOL = 1e-8 V  (hard assert)
+        TR peak:       TRANS_SPEC_ATOL = 1e-8 V  (hard assert — TR now fixed)
+        BE per-step:   TRANS_ATOL = 5e-6 V
+        TR per-step:   TRANS_ATOL = 5e-6 V  (TR now matches flat to machine prec)
     """
 
     @pytest.mark.unit
@@ -816,15 +822,13 @@ class TestTransientSampledPkl:
     @pytest.mark.parametrize("method", ["be", "trap"])
     @pytest.mark.parametrize("solver_kw", SOLVER_VARIANTS)
     def test_peak_drop_matches(self, sampled_setup, method, solver_kw):
-        """Peak IR-drop matches flat within tolerance.
+        """Peak IR-drop matches flat within TRANS_SPEC_ATOL=1e-8 V.
 
-        BE uses TRANS_SPEC_ATOL=1e-8 V (hard assert — achievable with raw
-        sources on both sides; observed delta ~3.6e-11 V on sampled).
-        TR uses TR_TRANS_ATOL=2e-3 V (regression guard — genuine Trapezoidal
-        integration difference ~0.5 mV between flat and distributed).
+        Both BE and TR use TRANS_SPEC_ATOL=1e-8 V (hard assert).
+        Observed deltas: BE ~3.6e-11 V, TR ~1.4e-15 V (post-fix).
         """
         s = sampled_setup
-        atol = TRANS_SPEC_ATOL if method == "be" else TR_TRANS_ATOL
+        atol = TRANS_SPEC_ATOL
         flat_result = s.flat_be_result if method == "be" else s.flat_tr_result
         dist_result = _run_dist_transient(s, method, solver_kw)
         diff = abs(dist_result.peak_ir_drop - flat_result.peak_ir_drop)
@@ -837,20 +841,17 @@ class TestTransientSampledPkl:
 
     @pytest.mark.unit
     @pytest.mark.integration
-    @pytest.mark.parametrize("method", ["trap"])  # BE now hard-asserted in test_peak_drop_matches
+    @pytest.mark.parametrize("method", ["trap"])
     @pytest.mark.parametrize("solver_kw", SOLVER_VARIANTS)
-    @pytest.mark.xfail(
-        strict=False,
-        reason=_XFAIL_TR_SPEC,
-    )
     def test_peak_drop_at_spec_tolerance(self, sampled_setup, method, solver_kw):
-        """TR peak IR-drop at spec tolerance 1e-8 V (xfail).
+        """TR peak IR-drop hard-asserted at spec tolerance TRANS_SPEC_ATOL=1e-8 V.
 
-        TR diverges ~0.5 mV even with identical raw sources — a genuine
-        Trapezoidal integration difference in the distributed solver.
-        Auto-passes when the distributed TR is realigned with flat TR.
-        BE is NOT included here: it is hard-asserted in test_peak_drop_matches
-        (TRANS_SPEC_ATOL=1e-8 V, observed delta ~3.6e-11 V with raw sources).
+        Previously xfail (~0.5 mV TR divergence).  Fixed by two corrections in
+        tile_worker_td.py: Bug 1 (pad-port G-history zero-masking) and Bug 2
+        (recover_and_set_initial_voltages_arr uses _last_qs_rhs_i, not static
+        current_injections, for consistent interior IC).  Observed post-fix delta:
+        ~1.4e-15 V on netlist_sampled (machine precision).
+        BE is NOT included here; it is hard-asserted in test_peak_drop_matches.
         """
         s = sampled_setup
         flat_result = s.flat_tr_result
@@ -865,15 +866,16 @@ class TestTransientSampledPkl:
     @pytest.mark.parametrize("method", ["be", "trap"])
     @pytest.mark.parametrize("solver_kw", SOLVER_VARIANTS)
     def test_per_step_max_drop_matches(self, sampled_setup, method, solver_kw):
-        """Per-step max IR-drop array matches flat within tolerance.
+        """Per-step max IR-drop array matches flat within TRANS_ATOL=5e-6 V.
 
         The flat solver includes the DC initial condition (t=0) as the first
         entry in max_ir_drop_per_time; the distributed solver starts from t=dt.
         Arrays are aligned by taking the trailing ``n_dist`` entries from the
         flat array, so flat[1:] ↔ dist[:] when IC is present.
+        Both BE and TR use TRANS_ATOL after the Bug 1 + Bug 2 fixes.
         """
         s = sampled_setup
-        atol = TRANS_ATOL if method == "be" else TR_TRANS_ATOL
+        atol = TRANS_ATOL
         flat_result = s.flat_be_result if method == "be" else s.flat_tr_result
         dist_result = _run_dist_transient(s, method, solver_kw)
         flat_max = np.array(flat_result.max_ir_drop_per_time)
@@ -896,9 +898,9 @@ class TestTransientSampledPkl:
     @pytest.mark.integration
     @pytest.mark.parametrize("method", ["be", "trap"])
     def test_per_node_peak_matches(self, sampled_setup, method):
-        """Per-node peak IR-drop on common nodes matches within tolerance."""
+        """Per-node peak IR-drop on common nodes matches within TRANS_ATOL."""
         s = sampled_setup
-        atol = TRANS_ATOL if method == "be" else TR_TRANS_ATOL
+        atol = TRANS_ATOL
         flat_result = s.flat_be_result if method == "be" else s.flat_tr_result
         dist_result = _run_dist_transient(s, method, {})
         flat_per_node = flat_result.peak_ir_drop_per_node

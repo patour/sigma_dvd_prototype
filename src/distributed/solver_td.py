@@ -91,10 +91,21 @@ class _SolverTimeDomainMixin:
         model = self.model
         tile_configs = model.metadata.tile_configs
 
-        # Derive pkl_dir for VCS cache from tile ckt path if not given
+        # Derive pkl_dir for VCS cache.  Priority:
+        #   1. Explicit caller argument (highest priority).
+        #   2. model.pkl_dir — the output directory that contains tile_*.pkl files.
+        #      This is set from bundle.pkl_dir during create_distributed_model() so
+        #      that sub-tile VCS caches land in the PKL output dir, NOT in the source
+        #      netlist directory (which would pollute read-only netlists and collide
+        #      across different splits that share parent tile_id tuples).
+        #   3. os.path.dirname(first_ckt) — legacy fallback for models created from
+        #      PowerGridMetaData without a bundle (deprecated path).
         if pkl_dir is None:
-            first_ckt = tile_configs[0].ckt_path
-            pkl_dir = os.path.dirname(first_ckt)
+            if getattr(model, 'pkl_dir', None):
+                pkl_dir = model.pkl_dir
+            else:
+                first_ckt = tile_configs[0].ckt_path
+                pkl_dir = os.path.dirname(first_ckt)
 
         # Derive net_filter from the first tile config
         net_filter = tile_configs[0].net_filter
@@ -708,6 +719,13 @@ class _SolverTimeDomainMixin:
         port_gathers_trans, pad_masks_trans = _precompute_port_gathers(
             tile_configs, trans_ctx.interface_node_to_idx, model.tile_boundary_nodes,
         )
+
+        # Bug 1 fix: push the authoritative pad-port masks to workers so the TR
+        # G-history terms (-G_ip@v_p_old, -G_pp@v_p_old) can zero pad entries.
+        # This must happen AFTER factor_transient_system (which resets the mask)
+        # and BEFORE the first call to get_transient_reduced_rhs_arr.
+        set_mask_args = [(mask,) for mask in pad_masks_trans]
+        model.backend.call_all(model.workers, 'set_pad_port_mask', set_mask_args)
 
         # 6. Compute initial bv_old arrays from initial interface voltages.
         # np.where(pad_mask, vdd, v_gamma_old[port_gather]) fills pads with vdd.
