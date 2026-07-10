@@ -102,7 +102,8 @@ class TestTierSelection(unittest.TestCase):
     def test_non_integral_dt_selects_chunked_tier(self):
         """P=50ns, dt=33ps → not integral → tier='chunked'."""
         w = self._worker_with_pulse(period=50e-9)
-        info = w.precompute_step_columns(t_start=0.0, dt=33e-12, n_steps=100)
+        # n_steps > 512 so Change-C amortization guard does not fire
+        info = w.precompute_step_columns(t_start=0.0, dt=33e-12, n_steps=600)
         self.assertEqual(info['tier'], 'chunked')
 
     def test_no_vcs_returns_disabled(self):
@@ -148,8 +149,9 @@ class TestTierSelection(unittest.TestCase):
     def test_chunked_table_info_fields(self):
         """Info dict for chunked tier has required fields."""
         w = self._worker_with_pulse(period=50e-9)
+        # n_steps > 512 so Change-C amortization guard does not fire
         info = w.precompute_step_columns(
-            t_start=0.0, dt=33e-12, n_steps=100,
+            t_start=0.0, dt=33e-12, n_steps=600,
         )
         self.assertEqual(info['tier'], 'chunked')
         self.assertIn('n_src_nodes', info)
@@ -224,7 +226,8 @@ class TestTierSelection(unittest.TestCase):
         the full combination of periodic + aperiodic sources.
         """
         dt = 1e-9
-        n_steps = 50
+        # n_steps > 512 so Change-C amortization guard does not fire
+        n_steps = 600
         t_start = 0.0
 
         w, vcs = self._worker_with_mixed_sources(pulse_period=10e-9)
@@ -234,7 +237,9 @@ class TestTierSelection(unittest.TestCase):
 
         tbl = w._step_col_table
         max_err = 0.0
-        for k in range(n_steps):
+        # Only verify the first 50 steps for speed (PWL is 0→30ns, dt=1ns)
+        verify_steps = 50
+        for k in range(verify_steps):
             t_k = t_start + (k + 1) * dt
             ref = vcs.evaluate_at_time(t_k)
             col = w._get_current_array_for_step(k, t_k).copy()
@@ -688,7 +693,8 @@ class TestChunkedTableColumns(unittest.TestCase):
         """Each step column matches evaluate_at_time for aperiodic source."""
         dt = 1e-9
         t_start = 0.0
-        n_steps = 50
+        # n_steps > 512 so Change-C amortization guard does not fire
+        n_steps = 600
 
         w, vcs = self._worker_aperiodic()
         info = w.precompute_step_columns(t_start=t_start, dt=dt, n_steps=n_steps)
@@ -697,7 +703,9 @@ class TestChunkedTableColumns(unittest.TestCase):
         tbl = w._step_col_table
         src_rows = tbl['src_rows']
 
-        for k in range(n_steps):
+        # Verify the first 50 steps for speed (PWL spans 0→30ns, dt=1ns)
+        verify_steps = 50
+        for k in range(verify_steps):
             t_k = t_start + (k + 1) * dt
             ref = vcs.evaluate_at_time(t_k)
             col = w._get_current_array_for_step(k, t_k).copy()
@@ -1286,7 +1294,8 @@ class TestEndToEndSmoothFalse(unittest.TestCase):
         w._current_buf = np.zeros(n_nodes, dtype=np.float64)
 
         # dt=100ps is integral with any period, but the source has period=0
-        info = w.precompute_step_columns(t_start=0.0, dt=100e-12, n_steps=300)
+        # n_steps > 512 so Change-C amortization guard does not fire
+        info = w.precompute_step_columns(t_start=0.0, dt=100e-12, n_steps=600)
         self.assertEqual(
             info['tier'], 'chunked',
             msg=(
@@ -1443,8 +1452,8 @@ class TestPeakBuildMbInInfoDict(unittest.TestCase):
     def test_chunked_tier_reports_peak_build_mb(self):
         """Chunked tier info dict contains 'peak_build_mb' key."""
         w = self._worker_with_pulse(period=50e-9)
-        # Non-integral dt → chunked tier
-        info = w.precompute_step_columns(t_start=0.0, dt=33e-12, n_steps=100)
+        # Non-integral dt → chunked tier; n_steps > 512 so Change-C guard does not fire
+        info = w.precompute_step_columns(t_start=0.0, dt=33e-12, n_steps=600)
         self.assertEqual(info.get('tier'), 'chunked',
                          msg="Expected chunked tier for non-integral dt")
         self.assertIn('peak_build_mb', info,
@@ -1837,7 +1846,8 @@ class TestFinding1MisalignedTStart(unittest.TestCase):
         """Chunked columns with misaligned t_start match evaluate_at_time exactly."""
         dt = 100e-12
         t_start = 3.333333e-9
-        n_steps = 50
+        # n_steps > 512 so Change-C amortization guard does not fire
+        n_steps = 600
 
         w = self._worker_with_pulse(period=50e-9)
         info = w.precompute_step_columns(t_start=t_start, dt=dt, n_steps=n_steps)
@@ -1846,7 +1856,9 @@ class TestFinding1MisalignedTStart(unittest.TestCase):
         tbl = w._step_col_table
         src_rows = tbl['src_rows']
         max_err = 0.0
-        for k in range(n_steps):
+        # Only verify the first 50 steps for speed
+        verify_steps = 50
+        for k in range(verify_steps):
             t_k = t_start + (k + 1) * dt
             ref = vcs = w._active_sources.evaluate_at_time(t_k)
             col = w._get_current_array_for_step(k, t_k).copy()
@@ -1926,7 +1938,8 @@ class TestFinding3PWLDelayBlocksPhase(unittest.TestCase):
         """P=4ns, TD=2ns, dt=1ns (m=4): nonzero PWL delay → chunked tier."""
         dt = 1e-9
         w, vcs = self._worker_with_delayed_pwl(period=4e-9, delay=2e-9)
-        info = w.precompute_step_columns(t_start=0.0, dt=dt, n_steps=50)
+        # n_steps > 512 so Change-C amortization guard does not fire
+        info = w.precompute_step_columns(t_start=0.0, dt=dt, n_steps=600)
         self.assertEqual(
             info['tier'], 'chunked',
             msg=(
@@ -1938,7 +1951,8 @@ class TestFinding3PWLDelayBlocksPhase(unittest.TestCase):
     def test_delayed_pwl_columns_match_reference(self):
         """Chunked columns for the delayed PWL match evaluate_at_time exactly."""
         dt = 1e-9
-        n_steps = 50
+        # n_steps > 512 so Change-C amortization guard does not fire
+        n_steps = 600
         t_start = 0.0
         w, vcs = self._worker_with_delayed_pwl(period=4e-9, delay=2e-9)
         info = w.precompute_step_columns(t_start=t_start, dt=dt, n_steps=n_steps)
@@ -1947,7 +1961,9 @@ class TestFinding3PWLDelayBlocksPhase(unittest.TestCase):
         tbl = w._step_col_table
         src_rows = tbl['src_rows']
         max_err = 0.0
-        for k in range(n_steps):
+        # Only verify the first 50 steps for speed
+        verify_steps = 50
+        for k in range(verify_steps):
             t_k = t_start + (k + 1) * dt
             ref = vcs.evaluate_at_time(t_k)
             col = w._get_current_array_for_step(k, t_k).copy()

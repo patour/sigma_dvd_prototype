@@ -112,6 +112,18 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         # Allocated lazily on first use.
         self._current_buf: Optional[np.ndarray] = None
 
+        # --- A2 Change A: Step-column table cross-transient reuse cache -----
+        # _sources_version is bumped on every source-mutating call so that
+        # the cache key is invalidated automatically without having to inspect
+        # source identity.
+        self._sources_version: int = 0
+        # Tuple key from the most recent successful precompute_step_columns
+        # build.  Format depends on tier; None = no valid cached table.
+        self._step_col_cache_key: Optional[tuple] = None
+        # The info dict returned by the most recent build (stored so callers
+        # can retrieve it without a round-trip on a cache hit).
+        self._step_col_info: Optional[Dict] = None
+
         # --- A4: Symbolic-reuse cache for factor_and_compute_schur ----------
         # Holds {'P_ii', 'factor', 'ref_indptr', 'ref_indices'} from the
         # most recent _compute_schur_partial call.  Passed to subsequent

@@ -761,11 +761,17 @@ class _SolverTimeDomainMixin:
             )
             timings['precompute_step_columns'] = time.perf_counter() - t0
             if verbose:
-                tiers = [info.get('tier', '?') for info in _step_col_table_infos]
+                tiers = [
+                    (info.get('tier', '?') + '(reused)')
+                    if info.get('reused') else info.get('tier', '?')
+                    for info in _step_col_table_infos
+                ]
+                n_reused = sum(1 for info in _step_col_table_infos if info.get('reused'))
                 logger.info(
-                    "A2 step columns: %d tiles, tiers=%s, %.3fs",
+                    "A2 step columns: %d tiles, tiers=%s, %.3fs%s",
                     len(tile_configs), tiers,
                     timings['precompute_step_columns'],
+                    f" ({n_reused} reused)" if n_reused else "",
                 )
         max_drops = np.zeros(len(t_array), dtype=np.float64)
         total_currents = np.zeros(len(t_array), dtype=np.float64)

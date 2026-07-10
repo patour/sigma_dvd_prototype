@@ -169,8 +169,12 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             sources_dict, node_to_idx, n_nodes,
         )
         self._active_sources = self._vec_sources
-        # A2: new raw sources invalidate any existing step-column table
+        # A2: new raw sources invalidate any existing step-column table and
+        # the cross-transient reuse cache (Change A).
         self._step_col_table = None
+        self._sources_version += 1
+        self._step_col_cache_key = None
+        self._step_col_info = None
 
         # Save to disk cache using wrapper dict that includes the node signature.
         # The smoothed VCS cache (vcs_tile_X_Y_smoothed_<hash>.pkl) validates the
@@ -329,7 +333,11 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                         self._smoothed_sources = payload['smoothed_vcs']
                         self._active_sources = self._smoothed_sources
                         # A2: active sources changed → invalidate step-column table
+                        # and cross-transient reuse cache (Change A).
                         self._step_col_table = None
+                        self._sources_version += 1
+                        self._step_col_cache_key = None
+                        self._step_col_info = None
                         logger.debug(
                             "Tile %s: smoothed VCS cache HIT %s",
                             tile_str, smoothed_cache_path,
@@ -364,7 +372,11 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         smooth_time = time.perf_counter() - t0
         self._active_sources = self._smoothed_sources
         # A2: smoothing changes active sources → invalidate step-column table
+        # and cross-transient reuse cache (Change A).
         self._step_col_table = None
+        self._sources_version += 1
+        self._step_col_cache_key = None
+        self._step_col_info = None
 
         logger.debug(
             "Tile %s: smooth_sources computed in %.3fs",
@@ -422,8 +434,12 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                     "No raw sources; call init_vectorized_sources() first"
                 )
             self._active_sources = self._vec_sources
-        # Changing active sources invalidates the step-column table.
+        # Changing active sources invalidates the step-column table and the
+        # cross-transient reuse cache (Change A).
         self._step_col_table = None
+        self._sources_version += 1
+        self._step_col_cache_key = None
+        self._step_col_info = None
 
     def use_raw_sources(self) -> None:
         """Reset _active_sources to the raw VCS, discarding any smoothing.
@@ -442,8 +458,12 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             # stale smoothed data once raw sources are eventually loaded.
             return
         self._active_sources = self._vec_sources
-        # A2: active source changed → invalidate step-column table
+        # A2: active source changed → invalidate step-column table and the
+        # cross-transient reuse cache (Change A).
         self._step_col_table = None
+        self._sources_version += 1
+        self._step_col_cache_key = None
+        self._step_col_info = None
 
     # --- A2: Step-column table methods ---------------------------------
 
@@ -560,12 +580,118 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                         else:
                             phase0 = ts_m % m
 
+        # --- Change A: attempt cross-transient table reuse ------------------
+        # The table is a pure function of (sources, dt, m/tier, max_mb).
+        # The near/far mask is applied post-gather, so the same table serves
+        # all decomposition victims.  If the cache key matches, skip the build.
+        if tier == 'phase':
+            # Phase reuse key: (version, dt, m, max_mb).
+            # t_start is NOT in the key because phase0 can be recomputed for
+            # any dt-grid-aligned t_start without rebuilding the table.
+            new_key: tuple = ('phase', self._sources_version, dt, m, max_mb)
+        else:
+            # Chunked reuse key: (version, t_start, dt, max_mb).
+            # t_start IS in the key because the window is anchored at t_start.
+            new_key = ('chunked', self._sources_version, t_start, dt, max_mb)
+
+        if (
+            self._step_col_table is not None
+            and self._step_col_cache_key is not None
+            and self._step_col_cache_key == new_key
+        ):
+            # Cache hit: return stored info with reuse flag.
+            tbl = self._step_col_table
+            if tier == 'phase':
+                # Phase reuse: recompute phase0 for the new t_start using the
+                # same guard logic as the build path.  Returns on success or
+                # falls through to rebuild when t_start is off-grid.
+                if t_start == 0.0:
+                    new_phase0 = 0
+                else:
+                    ts_ratio = t_start / dt
+                    ts_m = int(round(ts_ratio))
+                    if ts_m <= 0 or abs(ts_ratio - ts_m) > 1e-9 * max(1, ts_m):
+                        # This t_start is off-grid — phase table cannot serve it.
+                        # Fall through to normal rebuild path below.
+                        new_phase0 = None
+                    else:
+                        new_phase0 = ts_m % m
+                if new_phase0 is not None:
+                    # Update the stored table in-place so that
+                    # _get_current_array_for_step uses the correct phase0.
+                    tbl['phase0'] = new_phase0
+                    info = dict(self._step_col_info)
+                    info['phase0'] = new_phase0
+                    info['reused'] = True
+                    self._step_col_info = info
+                    logger.debug(
+                        "Tile %s precompute_step_columns: REUSED phase table "
+                        "(m=%d phase0=%d n_src=%d)",
+                        self._tile_data.tile_id if self._tile_data else '?',
+                        m, new_phase0, len(tbl.get('src_rows', [])),
+                    )
+                    return info
+                # new_phase0 is None: t_start is off-grid, fall through to rebuild.
+            else:
+                # Chunked reuse: extend n_steps so on-demand rebuilds reach
+                # the new run's end without clamping.
+                if tbl['n_steps'] < n_steps:
+                    tbl['n_steps'] = n_steps
+                info = dict(self._step_col_info)
+                info['reused'] = True
+                self._step_col_info = info
+                logger.debug(
+                    "Tile %s precompute_step_columns: REUSED chunked table "
+                    "(W=%d t_start=%.3g dt=%.3g n_steps=%d→%d n_src=%d)",
+                    self._tile_data.tile_id if self._tile_data else '?',
+                    tbl['W'], tbl['t_start'], tbl['dt'],
+                    tbl['n_steps'], n_steps, len(tbl.get('src_rows', [])),
+                )
+                return info
+
+        # --- Change C: amortization guard for single-window chunked builds --
+        # When tier is chunked AND the entire run fits in one window AND no
+        # cached table is available, skip the precompute and fall back to the
+        # per-step evaluate_at_time path (_get_current_array_for_step handles
+        # tbl=None).  A single-window chunked build costs the same evaluate
+        # work as per-step evaluate_at_time (0.97x) while allocating a
+        # multi-GB intermediate under Ray memory pressure.
+        # NOTE: this guard is written as a clearly-delineated condition so
+        # that a future direct-scatter fast path can add an "and not
+        # fast-path-available" clause here.
+        if tier == 'chunked':
+            W = min(512, n_steps)
+            if n_steps <= W:
+                # Single window, no amortization benefit → skip build.
+                self._step_col_table = None
+                self._step_col_cache_key = None
+                self._step_col_info = None
+                logger.debug(
+                    "Tile %s precompute_step_columns: SKIPPED (Change C) "
+                    "n_steps=%d <= W=%d, using per-step fallback",
+                    self._tile_data.tile_id if self._tile_data else '?',
+                    n_steps, W,
+                )
+                return {
+                    'tier': 'skipped',
+                    'reason': 'single_window_no_amortization',
+                    'n_src_nodes': 0,
+                    'memory_mb': 0.0,
+                    'reused': False,
+                }
+
+        # --- Normal build path ----------------------------------------------
         if tier == 'phase':
             info = self._build_phase_table(t_start, dt, m, phase0, n_steps)
         else:
-            # Tier c: chunked window
+            # Tier c: chunked window (n_steps > W, so multi-window)
             W = min(512, n_steps)
             info = self._build_chunked_window(t_start, dt, n_steps, W)
+
+        # Store cache key and info for cross-transient reuse (Change A).
+        info['reused'] = False
+        self._step_col_cache_key = new_key
+        self._step_col_info = info
 
         return info
 
