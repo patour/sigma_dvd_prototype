@@ -323,6 +323,7 @@ fold near/far decomposition into a single forward solve, instead of re-running t
 | 9 | Iterative interface CG + block-Jacobi preconditioner (B2) | `e66f65a` | distributed-10x | auto selects direct for n_interface < 200K on netlist_sampled | removes ~200 GB coordinator memory wall at 1 M+ interface nodes | **Landed** |
 | 10 | Streaming Schur shard assembly (B3) | `9818280` + `10695f5` | distributed-10x | peak 3.5 MB vs 15.6 MB bulk on netlist_sampled; auto at 512 MB+ estimated S_i peak | caps coordinator peak memory; enables 100M+ node PDNs | **Landed** |
 | 11 | Multi-node task-dataflow design + `TaskDataflowBackend` prototype (B4) | `f25d209` | distributed-10x | DC actor 0.858 s vs task 0.797 s, max \|ΔV\| = 0.0 V (exact) | enables k-machine deployment (see §7.1); actor mode remains single-node default | **Landed (prototype)** |
+| 12 | Step-column table reuse across transients + chunked direct-scatter windows (minion plan, see §7.2) | `11478ce` + `5e8182e` + `3d7abcc` | distributed-10x | loop_total –25% vs checked-in baseline; results exact (peak diff 0.0000 mV) | netlist_minion: kills the 314 s/solve rebuild ×6 solve_transient calls per decompose → `initial_transient` 394.6 s → ~85–90 s, total 1,117 s → ~700–750 s projected | **Landed** |
 
 ### 7.1 B4 findings — multi-node task dataflow (full analysis: `docs/multinode_task_dataflow_design.md`)
 
@@ -348,6 +349,35 @@ optimistic for network transfer, documented as such):
   160 K interface nodes under CG).
 - **Prototype validation**: `TaskDataflowBackend` DC prepare+solve on netlist_sampled is
   algebraically exact vs actor mode (max |ΔV| = 0.0 V) at parity wall time (0.797 s vs 0.858 s).
+
+### 7.2 Minion decompose findings — A2 rebuild regression (plan: `logs/ir-decomposition-speed-up-plan.md`)
+
+The `netlist_minion` decompose run (`logs/decompose_20260710_110053.log` vs pre-refactor
+`logs/decompose_20260512_182310.log`) regressed **857 s → 1,117 s** despite the transient loop
+getting 2.3× faster (0.449 → 0.198 s/step). Root causes and dispositions:
+
+- **A2 step-column rebuild per `solve_transient` call (fixed, Fix 12)**: a decompose run calls
+  `solve_transient` ~6× on the *same* smoothed sources; each call paid a full chunked-tier build
+  (314 s under Ray — thread-capped actor + multi-GB `evaluate_at_times_for_rows` intermediates;
+  75 s isolated). The phase tier (1.7 ms/step gather) was disqualified purely by memory:
+  `est_table_mb(m=1000) = 1,488 MB > max_table_mb = 512`. Three additive fixes landed:
+  **Change A** — worker-side table cache keyed on a sources-version counter + `(dt, t_start,
+  max_table_mb)`; phase tables additionally reusable across any dt-grid-aligned `t_start`
+  (phase0 recomputed cheaply). **Change B** — direct-scatter fast path for chunked *window*
+  builds (index gather from the smoothed uniform-grid PWL arrays, wrap-at-m convention); the
+  memory-safe version of the phase-tier win, keeps `max_table_mb` at 512. **Change C** — skip
+  the precompute when a single-window chunked build cannot amortize and no fast path applies
+  (per-step `evaluate_at_time` is 0.97× of a single-window build without the multi-GB
+  intermediate).
+- **Vectorizing `_evaluate_pwls_batch` (Option 1) was benchmarked and REJECTED**: 0.54×
+  (slower) — smoothed PWLs are compacted to ~5.5 knots, so the per-row loop is near-optimal and
+  the 3-D broadcast's memory traffic dominates.
+- **Out of scope, tracked**: QS victim pre-selection mispredicted → +44.7 s QS + 139 s targeted
+  transient (Phase 2 decomposition follow-up); cold smoothed-VCS cache +55 s (one-time,
+  recovers on re-run).
+
+Projected minion re-run: `initial_transient` 394.6 s → ~85–90 s (one cheap build + 79 s loop);
+the 5 subsequent transients no longer pay builds; total ~700–750 s vs 1,117 s.
 
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 

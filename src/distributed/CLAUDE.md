@@ -43,9 +43,12 @@ ctx.refactor()    # rebuilds coordinator LU from saved S_global
 **Tiers (auto-selected by `get_period_info` probe):**
 1. **Single period** — one table of `m = round(P/dt)` columns. Build via smoothed-grid direct scatter when sources are already smoothed (build ≈ free); else vectorized `evaluate_at_times(t_grid)`; else scalar loop fallback.
 2. **Multi-period** — per-group tables, summed per step.
-3. **Aperiodic or table exceeds `max_table_mb`** — chunked window (`W ≈ 512` steps), streamed; still hoists segment search from inner loop.
+3. **Aperiodic or table exceeds `max_table_mb`** — chunked window (`W ≈ 512` steps), streamed; still hoists segment search from inner loop. When sources are smoothed-grid-aligned (`_smoothed_grid_alignment`), windows are built via `_gather_window_direct` (index gather, wrap-at-m; requires per-row `cnt >= m+1`, else falls back to `evaluate_at_times_for_rows`). Fast-path metadata (`_fast_path`, `_ts_m`, `_m_fold`) is stored in the table dict so on-demand window rebuilds never re-probe.
+4. **Skipped** — chunked tier + single window (`n_steps <= W`) + no fast path + no reusable cache: `precompute_step_columns` returns `{'tier': 'skipped'}` and the loop uses per-step `evaluate_at_time` (exact by construction; a single-window build costs the same evaluate work while allocating a multi-GB intermediate).
 
-**Invalidation rule**: `_step_cols` is cleared by `init_vectorized_sources`, `smooth_sources`, and `use_smoothed_sources`. Call `precompute_step_columns` after any of these, not before.
+**Cross-transient reuse (worker-side cache)**: the table is a pure function of (active sources, dt, tier grid) — the near/far mask is post-gather, so one table serves all decomposition victims and all ~6 `solve_transient` calls in a decompose run. `precompute_step_columns` caches key = sources-version counter + `(dt, max_table_mb)` (+ `t_start` for chunked); on a hit it returns `{'reused': True}` without rebuilding. Phase tables are reused across *any* dt-grid-aligned `t_start` (phase0 recomputed); chunked reuse extends `n_steps` monotonically so window rebuilds never clamp.
+
+**Invalidation rule**: `_step_cols` and the reuse cache key are cleared (and `_sources_version` bumped) by `init_vectorized_sources`, `smooth_sources`, `use_smoothed_sources`, and `use_raw_sources`. Call `precompute_step_columns` after any of these, not before.
 
 **Equivalence tolerance**: column gather vs direct `evaluate_at_time` ≤ 1e-9 mA (fp-modulo roundoff from `t % P`). End-to-end transient results equal to flag-off ≤ 1e-12 V.
 

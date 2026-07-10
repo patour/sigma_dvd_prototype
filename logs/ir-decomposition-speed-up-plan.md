@@ -1,5 +1,13 @@
 # Speed up A2 step-column build in distributed IR-drop decomposition
 
+> **Status (2026-07-10): IMPLEMENTED** — Changes A + B + C landed on `distributed-10x` as
+> `11478ce` (A+C reuse cache + amortization guard), `5e8182e` (VCS-backed end-to-end tests),
+> `3d7abcc` (B chunked direct-scatter windows). Gates: 34+24 new unit tests, full distributed
+> unit suite, equivalence suite (68 passed, 6 expected xfails), netlist_sampled perf compare
+> (loop_total −25%, results exact) and four-notebook regression. See
+> `docs/brcm_distributed_runtime_optimization.md` §7.2. End-to-end minion re-run pending
+> (netlist_minion not on this host).
+
 ## Context
 
 The `20260710` decompose run on `netlist_minion` regressed to **1117s vs 857s** (old
