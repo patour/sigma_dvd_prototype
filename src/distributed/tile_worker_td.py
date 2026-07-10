@@ -656,12 +656,27 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         # tbl=None).  A single-window chunked build costs the same evaluate
         # work as per-step evaluate_at_time (0.97x) while allocating a
         # multi-GB intermediate under Ray memory pressure.
-        # NOTE: this guard is written as a clearly-delineated condition so
-        # that a future direct-scatter fast path can add an "and not
-        # fast-path-available" clause here.
+        #
+        # Change B exception: do NOT skip when the direct-scatter fast path is
+        # available.  Building a single window via index gather is nearly free
+        # (no evaluate_at_times_for_rows call), so the no-amortization
+        # rationale does not apply.  The 1.7 ms/step gather still beats the
+        # 193 ms/step evaluate path even for small runs.
         if tier == 'chunked':
             W = min(512, n_steps)
-            if n_steps <= W:
+            # Check whether Change B fast path is available for this (dt, t_start).
+            alignment = self._smoothed_grid_alignment(dt)
+            chunked_fast_path_available = False
+            if alignment is not None:
+                if t_start == 0.0:
+                    chunked_fast_path_available = True
+                else:
+                    ts_ratio = t_start / dt
+                    ts_m_cand = int(round(ts_ratio))
+                    if (ts_m_cand > 0
+                            and abs(ts_ratio - ts_m_cand) <= 1e-9 * max(1, ts_m_cand)):
+                        chunked_fast_path_available = True
+            if n_steps <= W and not chunked_fast_path_available:
                 # Single window, no amortization benefit → skip build.
                 self._step_col_table = None
                 self._step_col_cache_key = None
@@ -821,6 +836,14 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         intermediate: only ``src_rows_candidate`` rows are allocated.
         Peak build memory is ``O(max(n_pulses, n_pwls) * W + n_src * W)``
         rather than ``O(n_nodes * W)``.
+
+        **Change B — direct-scatter fast path**: when :meth:`_smoothed_grid_alignment`
+        detects that sources lie on the smoothed dt grid AND t_start is dt-grid-aligned,
+        the first window (and all subsequent on-demand rebuilds in
+        :meth:`_get_current_array_for_step`) are built via
+        :meth:`_gather_window_direct` instead of ``evaluate_at_times_for_rows``.
+        Alignment metadata (``_ts_m``, ``_m_fold``, ``_fast_path``) is stored in
+        the table dict so the on-demand rebuild does NOT re-run the probe.
         """
         import time as _time
         t0 = _time.perf_counter()
@@ -833,19 +856,51 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         # Pre-compute candidate source rows (cheap, metadata-only)
         src_rows_candidate = vcs.get_src_node_indices()
 
-        # Build first window row-sparse to avoid n_nodes × W allocation
-        t_grid = t_start + np.arange(1, W + 1, dtype=np.float64) * dt
-        # (n_candidate, W) — much smaller than (n_nodes, W)
-        C_pre = vcs.evaluate_at_times_for_rows(t_grid, src_rows_candidate)
+        # --- Change B: attempt direct-scatter fast path ----------------------
+        # Check alignment once; store result in table for on-demand rebuilds.
+        alignment = self._smoothed_grid_alignment(dt)
+        fast_path = False
+        ts_m = 0
+        m_fold = 0
 
-        row_max = np.abs(C_pre).max(axis=1)
-        nonzero = row_max > 0
-        src_rows = src_rows_candidate[nonzero]
+        if alignment is not None:
+            # t_start must land on the dt grid (same guard style as phase tier
+            # Finding-1: ts_ratio integral within 1e-9 rel).
+            if t_start == 0.0:
+                fast_path = True
+                ts_m = 0
+                m_fold = alignment['m']
+            else:
+                ts_ratio = t_start / dt
+                ts_m_cand = int(round(ts_ratio))
+                if ts_m_cand > 0 and abs(ts_ratio - ts_m_cand) <= 1e-9 * max(1, ts_m_cand):
+                    fast_path = True
+                    ts_m = ts_m_cand
+                    m_fold = alignment['m']
 
-        if len(src_rows) == 0:
-            C_sparse = np.empty((0, W), dtype=np.float64, order='F')
-        else:
-            C_sparse = np.asfortranarray(C_pre[nonzero, :])
+        if fast_path:
+            try:
+                C_sparse, src_rows = self._gather_window_direct(
+                    new_start=0, W_actual=W,
+                    ts_m=ts_m, m=m_fold,
+                    src_rows_candidate=src_rows_candidate,
+                )
+                build_path = 'direct_scatter'
+            except (ValueError, IndexError):
+                fast_path = False  # fall through to evaluate_at_times_for_rows
+
+        if not fast_path:
+            # Fallback: row-sparse batch evaluate
+            t_grid = t_start + np.arange(1, W + 1, dtype=np.float64) * dt
+            C_pre = vcs.evaluate_at_times_for_rows(t_grid, src_rows_candidate)
+            row_max = np.abs(C_pre).max(axis=1)
+            nonzero = row_max > 0
+            src_rows = src_rows_candidate[nonzero]
+            if len(src_rows) == 0:
+                C_sparse = np.empty((0, W), dtype=np.float64, order='F')
+            else:
+                C_sparse = np.asfortranarray(C_pre[nonzero, :])
+            build_path = 'evaluate_at_times_for_rows'
 
         self._step_col_table = {
             'tier': 'chunked',
@@ -860,6 +915,10 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             'src_rows': src_rows,
             'C_dense': C_sparse,
             '_chunk_start': 0,   # step_idx of first column in current chunk
+            # Change B metadata — stored once so on-demand rebuilds need no re-probe.
+            '_fast_path': fast_path,
+            '_ts_m': ts_m,
+            '_m_fold': m_fold,
         }
 
         if self._current_buf is None or len(self._current_buf) != n_nodes:
@@ -872,9 +931,11 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         peak_build_mb_full = n_nodes * W * 8 / 1e6
         logger.debug(
             "Tile %s precompute_step_columns: tier=chunked W=%d "
-            "n_src_nodes=%d mem=%.2fMB peak_build=%.2fMB (full=%.2fMB) build=%.3fs",
+            "n_src_nodes=%d mem=%.2fMB peak_build=%.2fMB (full=%.2fMB) "
+            "path=%s build=%.3fs",
             self._tile_data.tile_id if self._tile_data else '?',
-            W, n_src, mem_mb, peak_build_mb, peak_build_mb_full, build_time,
+            W, n_src, mem_mb, peak_build_mb, peak_build_mb_full,
+            build_path, build_time,
         )
         return {
             'tier': 'chunked',
@@ -882,9 +943,61 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             'n_src_nodes': n_src,
             'memory_mb': mem_mb,
             'peak_build_mb': peak_build_mb,
-            'build_path': 'evaluate_at_times_for_rows',
+            'build_path': build_path,
             'build_time_s': build_time,
         }
+
+    def _smoothed_grid_alignment(self, dt: float) -> Optional[Dict]:
+        """Check whether active sources are aligned to the smoothed dt grid.
+
+        Returns a dict ``{'m': int, 'actual_step': float}`` when ALL of the
+        following hold:
+
+        1. ``n_pulses == 0`` (all pulses converted to PWL after smoothing).
+        2. ``n_pwls > 0``.
+        3. ``all_zero_pwl_delay`` — no pre-delay hold segments that would
+           break periodicity.
+        4. ``has_single_period P`` — exactly one common period.
+        5. ``P / dt`` is integral (within 1e-9 relative), giving ``m``.
+        6. Row-0 sample step ≈ P/m within 1e-9 relative.
+        7. First sample time |t0| ≤ 0.5 * actual_step — origin at ~0 so that
+           sample index i+1 maps to (i+1)*dt from the origin.
+
+        Returns ``None`` when any condition fails.
+
+        This is a shared helper used by both :meth:`_select_build_path` (phase
+        tier) and :meth:`_build_chunked_window` (chunked fast path, Change B).
+        """
+        vcs = self._active_sources
+        if vcs is None or vcs.n_pwls == 0 or vcs.n_pulses != 0:
+            return None
+
+        pinfo = vcs.get_period_info()
+        if not pinfo['all_zero_pwl_delay'] or not pinfo['has_single_period']:
+            return None
+
+        P = pinfo['single_period']
+        is_int, m = pinfo['p_over_dt_is_integral'](dt)
+        if not is_int or m <= 0:
+            return None
+
+        if vcs.n_pwl_points == 0:
+            return None
+
+        off0 = int(vcs.pwl_offset[0])
+        cnt0 = int(vcs.pwl_count[0])
+        if cnt0 < 2:
+            return None
+
+        actual_step = P / m
+        sample_step = float(vcs.pwl_times[off0 + 1] - vcs.pwl_times[off0])
+        first_time = float(vcs.pwl_times[off0])
+
+        if (abs(sample_step - actual_step) > 1e-9 * actual_step
+                or abs(first_time) > 0.5 * actual_step):
+            return None
+
+        return {'m': m, 'actual_step': actual_step}
 
     def _select_build_path(self, dt: float, m: int) -> str:
         """Select build path for phase table: 'direct_scatter', 'batch', or 'scalar'."""
@@ -893,37 +1006,105 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         vcs = self._active_sources
         if vcs is None:
             return 'scalar'
-        # Path i: smoothed-grid direct scatter
-        # Conditions: n_pulses==0 (all converted to PWL after smoothing),
-        # all_zero_delay, single period, and PWL times align to dt grid.
-        if vcs.n_pulses == 0 and vcs.n_pwls > 0:
-            # Check delay and period
-            pinfo = vcs.get_period_info()
-            if pinfo['all_zero_pwl_delay'] and pinfo['has_single_period']:
-                P = pinfo['single_period']
-                # Check integrality
-                is_int, m_check = pinfo['p_over_dt_is_integral'](dt)
-                if is_int and m_check == m:
-                    # Check grid alignment: first PWL time ≈ 0 (t_start offset baked in)
-                    # Actually we check if the step between consecutive samples ≈ dt
-                    if vcs.n_pwl_points > 0 and vcs.n_pwls > 0:
-                        # Sample the first PWL row's times
-                        off0 = int(vcs.pwl_offset[0])
-                        cnt0 = int(vcs.pwl_count[0])
-                        if cnt0 >= 2:
-                            sample_step = float(vcs.pwl_times[off0 + 1] - vcs.pwl_times[off0])
-                            actual_step = P / m
-                            # Also require that the first sample is at t≈0 so
-                            # that sample index k+1 maps to time (k+1)*dt from
-                            # origin (matching the batch/scalar build convention).
-                            # If smooth_sources was called with t_start!=0 the
-                            # first sample would be at t_start and this guard
-                            # would fall through to the batch path.
-                            first_time = float(vcs.pwl_times[off0])
-                            if (abs(sample_step - actual_step) <= 1e-9 * actual_step
-                                    and abs(first_time) <= 0.5 * actual_step):
-                                return 'direct_scatter'
+        # Path i: smoothed-grid direct scatter.
+        # Uses _smoothed_grid_alignment; additionally requires m_check == m
+        # (the phase tier checks this exact match; the chunked fast path
+        # does not need it since it uses modulo-m index gather per window).
+        alignment = self._smoothed_grid_alignment(dt)
+        if alignment is not None and alignment['m'] == m:
+            return 'direct_scatter'
         return 'batch'
+
+    def _gather_window_direct(
+        self,
+        new_start: int,
+        W_actual: int,
+        ts_m: int,
+        m: int,
+        src_rows_candidate: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Build one chunked window via index gather (Change B fast path).
+
+        For smoothed periodic sources where sample index i maps to time i*dt
+        from origin, the periodic sample index for global step s is::
+
+            idx = (ts_m + s + 1) % m
+
+        where ``ts_m = round(t_start / dt)`` (0 when t_start == 0).
+        For a window ``[new_start, new_start + W_actual)`` the indices are::
+
+            idx = (ts_m + new_start + 1 + arange(W_actual)) % m
+
+        This matches the phase-tier Finding-5 wrap convention (at m, not cnt)
+        and requires ``cnt >= m + 1`` for every PWL row.
+
+        Returns ``(C_sparse, src_rows)`` — ``(n_src, W_actual)`` Fortran-order
+        array and int32 row indices — or raises ``ValueError`` / ``IndexError``
+        so callers can fall back to ``evaluate_at_times_for_rows``.
+
+        Args:
+            new_start: First step index in the window (0-based global).
+            W_actual: Number of steps in this window (≤ W).
+            ts_m: ``round(t_start / dt)`` (≥ 0); 0 when t_start == 0.
+            m: Number of samples per period (from alignment probe).
+            src_rows_candidate: Candidate node indices to evaluate.
+        """
+        try:
+            from parser.current_sources import get_apply_wscale
+            apply_wscale = get_apply_wscale()
+        except ImportError:
+            apply_wscale = True
+
+        vcs = self._active_sources
+        n_nodes = vcs.n_nodes
+        n_candidate = len(src_rows_candidate)
+
+        # node → position in src_rows_candidate (-1 if absent)
+        row_positions = -np.ones(n_nodes, dtype=np.int32)
+        if n_candidate > 0:
+            row_positions[src_rows_candidate] = np.arange(n_candidate, dtype=np.int32)
+
+        # DC base for candidate rows only
+        dc_per_node = np.zeros(n_nodes, dtype=np.float64)
+        if vcs.n_sources > 0:
+            np.add.at(dc_per_node, vcs.source_node_idx, vcs.dc_values)
+
+        # Allocate (n_candidate, W_actual)
+        C = np.empty((n_candidate, W_actual), dtype=np.float64)
+        if n_candidate > 0:
+            C[:] = dc_per_node[src_rows_candidate, np.newaxis]
+        else:
+            C[:] = 0.0
+
+        # Periodic sample index for each column of this window.
+        # Global step s evaluates at t = t_start + (s+1)*dt.
+        # Smoothed sample index i = (ts_m + s + 1) % m (matches phase-tier
+        # origin convention: sample 0 → t≈0, sample 1 → t≈dt, ...).
+        step_range = np.arange(new_start, new_start + W_actual, dtype=np.int64)
+        col_indices = (ts_m + step_range + 1) % m  # shape (W_actual,)
+
+        for pwl_i in range(vcs.n_pwls):
+            off = int(vcs.pwl_offset[pwl_i])
+            cnt = int(vcs.pwl_count[pwl_i])
+            node = int(vcs.pwl_node_idx[pwl_i])
+            row = int(row_positions[node])
+            if row < 0:
+                continue
+            wsc = (float(vcs.pwl_wscale[pwl_i])
+                   if (apply_wscale and len(vcs.pwl_wscale) == vcs.n_pwls)
+                   else 1.0)
+            if cnt < m + 1:
+                # Not enough samples — fail so caller falls back
+                raise ValueError(
+                    f"PWL row {pwl_i} has cnt={cnt} < m+1={m + 1}"
+                )
+            C[row, :] += wsc * vcs.pwl_values[off + col_indices]
+
+        # Trim to actually-nonzero rows
+        row_max = np.abs(C).max(axis=1)
+        nonzero = row_max > 0
+        final_rows = src_rows_candidate[nonzero]
+        return np.asfortranarray(C[nonzero, :]), final_rows
 
     def _build_via_direct_scatter(
         self,
@@ -1095,29 +1276,51 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                 new_start = step_idx
                 new_end = min(new_start + W, n_steps)
                 W_actual = new_end - new_start
-                t_grid = t_start + np.arange(
-                    new_start + 1, new_end + 1, dtype=np.float64
-                ) * dt
                 vcs = self._active_sources
-                if src_rows_candidate is not None and len(src_rows_candidate) > 0:
-                    # Row-sparse rebuild: only evaluate candidate rows
-                    C_pre = vcs.evaluate_at_times_for_rows(t_grid, src_rows_candidate)
-                    new_row_max = np.abs(C_pre).max(axis=1)
-                    nonzero = new_row_max > 0
-                    src_rows = src_rows_candidate[nonzero]
-                    if len(src_rows) > 0:
-                        tbl['C_dense'] = np.asfortranarray(C_pre[nonzero, :W_actual])
+
+                # --- Change B: use stored fast-path metadata if available ----
+                # _fast_path/_ts_m/_m_fold were stored at build time; no re-probe.
+                rebuilt_fast = False
+                if (tbl.get('_fast_path', False)
+                        and src_rows_candidate is not None
+                        and len(src_rows_candidate) > 0):
+                    try:
+                        new_C, src_rows = self._gather_window_direct(
+                            new_start=new_start,
+                            W_actual=W_actual,
+                            ts_m=tbl['_ts_m'],
+                            m=tbl['_m_fold'],
+                            src_rows_candidate=src_rows_candidate,
+                        )
+                        tbl['C_dense'] = new_C
+                        rebuilt_fast = True
+                    except (ValueError, IndexError):
+                        pass  # fall through to evaluate_at_times_for_rows
+
+                if not rebuilt_fast:
+                    t_grid = t_start + np.arange(
+                        new_start + 1, new_end + 1, dtype=np.float64
+                    ) * dt
+                    if src_rows_candidate is not None and len(src_rows_candidate) > 0:
+                        # Row-sparse rebuild: only evaluate candidate rows
+                        C_pre = vcs.evaluate_at_times_for_rows(t_grid, src_rows_candidate)
+                        new_row_max = np.abs(C_pre).max(axis=1)
+                        nonzero = new_row_max > 0
+                        src_rows = src_rows_candidate[nonzero]
+                        if len(src_rows) > 0:
+                            tbl['C_dense'] = np.asfortranarray(C_pre[nonzero, :W_actual])
+                        else:
+                            tbl['C_dense'] = np.empty((0, W_actual), dtype=np.float64, order='F')
                     else:
-                        tbl['C_dense'] = np.empty((0, W_actual), dtype=np.float64, order='F')
-                else:
-                    # Fallback: full evaluation (no candidate set stored)
-                    C_win = vcs.evaluate_at_times(t_grid)
-                    new_row_max = np.abs(C_win).max(axis=1)
-                    src_rows = np.where(new_row_max > 0)[0].astype(np.int32)
-                    if len(src_rows) > 0:
-                        tbl['C_dense'] = np.asfortranarray(C_win[src_rows, :W_actual])
-                    else:
-                        tbl['C_dense'] = np.empty((0, W_actual), dtype=np.float64, order='F')
+                        # Fallback: full evaluation (no candidate set stored)
+                        C_win = vcs.evaluate_at_times(t_grid)
+                        new_row_max = np.abs(C_win).max(axis=1)
+                        src_rows = np.where(new_row_max > 0)[0].astype(np.int32)
+                        if len(src_rows) > 0:
+                            tbl['C_dense'] = np.asfortranarray(C_win[src_rows, :W_actual])
+                        else:
+                            tbl['C_dense'] = np.empty((0, W_actual), dtype=np.float64, order='F')
+
                 tbl['src_rows'] = src_rows
                 tbl['_chunk_start'] = new_start
                 chunk_start = new_start
