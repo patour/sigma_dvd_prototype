@@ -550,6 +550,105 @@ class TestAmortizationGuard:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Shared helper: attach periodic pulse VCS to all workers in a model
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _attach_pulse_vcs_to_workers(workers, period=1e-8):
+    """Attach a single-period pulse VCS to every worker (bypasses file I/O).
+
+    Sets ``_active_sources``, ``_vec_sources``, ``_current_buf``, and the
+    Change-A cache state so that ``precompute_step_columns`` starts cold.
+
+    Args:
+        workers: List of TileWorker objects (LocalBackend, in-process).
+        period: Waveform period in seconds (default 10 ns).  dt=1e-10 gives
+            m = period/dt = 100, well within the phase-tier memory budget.
+    """
+    from analysis.vectorized_sources import VectorizedCurrentSources
+    from parser.current_sources import CurrentSource, Pulse
+
+    for i, worker in enumerate(workers):
+        bs = worker._block_system
+        n_ports = bs.n_ports
+        n_nodes = n_ports + bs.n_interior
+        node_to_idx = dict(bs.port_to_idx)
+        for nd, idx in bs.interior_to_idx.items():
+            node_to_idx[nd] = idx + n_ports
+        interior_nodes = list(bs.interior_to_idx.keys())
+        if not interior_nodes:
+            continue
+        target = interior_nodes[0]
+        pulse = Pulse(
+            v1=0.0, v2=1.0, delay=0.0, rt=0.0, ft=0.0,
+            width=period / 2, period=period,
+        )
+        src = CurrentSource(
+            name=f'i_p{i}', node1=target, node2='0',
+            dc_value=0.3, pulses=[pulse],
+        )
+        vcs = VectorizedCurrentSources.from_current_sources(
+            {f'i_p{i}': src}, node_to_idx, n_nodes,
+        )
+        worker._vec_sources = vcs
+        worker._active_sources = vcs
+        worker._current_buf = np.zeros(n_nodes, dtype=np.float64)
+        # Reset Change-A cache so precompute starts cold on first solve.
+        worker._sources_version = 1
+        worker._step_col_cache_key = None
+        worker._step_col_info = None
+        worker._step_col_table = None
+
+
+def _attach_aperiodic_vcs_to_workers(workers, dt, n_steps):
+    """Attach an aperiodic PWL VCS to every worker (bypasses file I/O).
+
+    The PWL has a distinct random value at each dt step, forcing the
+    chunked tier.  n_steps is the length of the waveform table to build.
+
+    Args:
+        workers: List of TileWorker objects.
+        dt: Simulation time step in seconds.
+        n_steps: Length of the random PWL (number of dt-spaced breakpoints).
+    """
+    from analysis.vectorized_sources import VectorizedCurrentSources
+    from parser.current_sources import CurrentSource, PWL
+
+    rng = np.random.default_rng(42)
+    for i, worker in enumerate(workers):
+        bs = worker._block_system
+        n_ports = bs.n_ports
+        n_nodes = n_ports + bs.n_interior
+        node_to_idx = dict(bs.port_to_idx)
+        for nd, idx in bs.interior_to_idx.items():
+            node_to_idx[nd] = idx + n_ports
+        interior_nodes = list(bs.interior_to_idx.keys())
+        if not interior_nodes:
+            continue
+        target = interior_nodes[0]
+        times = np.arange(0, (n_steps + 2) * dt, dt)
+        values = rng.uniform(0.0, 1.0, size=len(times))
+        pwl = PWL(
+            points=list(zip(times.tolist(), values.tolist())),
+            period=0.0, delay=0.0,
+        )
+        src = CurrentSource(
+            name=f'i_ap{i}', node1=target, node2='0',
+            dc_value=0.0, pwls=[pwl],
+        )
+        vcs = VectorizedCurrentSources.from_current_sources(
+            {f'i_ap{i}': src}, node_to_idx, n_nodes,
+        )
+        worker._vec_sources = vcs
+        worker._active_sources = vcs
+        worker._current_buf = np.zeros(n_nodes, dtype=np.float64)
+        worker._sources_version = 1
+        worker._step_col_cache_key = None
+        worker._step_col_info = None
+        worker._step_col_table = None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 5. End-to-end: solve_transient reuse (2-tile model)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -772,3 +871,298 @@ class TestChangeCEndToEnd:
                 "use_step_columns=False to <= 1e-12 V"
             ),
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7. VCS-backed end-to-end: Change A reuse through solve_transient
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# These tests use real periodic/aperiodic VCS attached directly to workers
+# (bypassing preprocess_sources, which would reset sources from disk).
+# The smoothed_sources handle is passed explicitly to solve_transient so the
+# coordinator does NOT call preprocess_sources internally.
+#
+# Pattern:
+#   1. Build model + prepare solver + contexts (no VCS yet).
+#   2. Attach VCS directly to each worker after factor_and_compute_schur().
+#   3. Call solve_transient(smoothed_sources=dummy_handle) twice.
+#   4. Probe worker._step_col_info after each call to verify reuse.
+
+
+class TestVCSBackedEndToEndReuse:
+    """Two consecutive solve_transient calls with real VCS reuse the table.
+
+    The first call builds the phase/chunked table; the second call hits the
+    Change-A cache (worker._step_col_info['reused'] is True) and returns
+    bit-identical results.
+    """
+
+    def _dummy_smoothed_sources(self, model, dt, t_end):
+        from distributed.result import DistributedSmoothedSources
+
+        return DistributedSmoothedSources(
+            time_step=dt, t_start=0.0, t_end=t_end,
+            smoothed=False, n_tiles=len(model.workers), per_tile_stats={},
+        )
+
+    def test_phase_tier_reused_on_second_solve(self):
+        """With periodic pulse VCS, second solve_transient reuses the phase table.
+
+        After the first solve, every worker's _step_col_info has 'tier'='phase'
+        and 'reused'=False.  After the second solve the same workers report
+        'reused'=True (the C_dense array was not rebuilt).
+        """
+        from distributed.solver import DistributedDDMSolver
+
+        dt = 1e-10        # 100 ps
+        t_end = 5e-9      # 50 steps; period=10 ns → m=100 (phase tier)
+
+        model, workers = _build_two_tile_model()
+        _attach_pulse_vcs_to_workers(workers, period=1e-8)
+
+        solver = DistributedDDMSolver(model)
+        dc_ctx = solver.prepare()
+        trans_ctx = solver.prepare_transient(dt=dt, method='be')
+        dummy = self._dummy_smoothed_sources(model, dt, t_end)
+
+        # ---- First solve: table must be built (reused=False) ----
+        result1 = solver.solve_transient(
+            trans_ctx, dc_context=dc_ctx, smoothed_sources=dummy,
+            t_start=0.0, t_end=t_end, use_step_columns=True,
+        )
+        for w in workers:
+            info = w._step_col_info
+            assert info is not None, "First solve must build and store _step_col_info"
+            assert info.get('tier') == 'phase', (
+                f"Expected phase tier, got {info.get('tier')!r}"
+            )
+            assert info.get('reused') is False, (
+                "First solve must not be a cache hit"
+            )
+
+        # Record C_dense identity so we can verify no rebuild on second call.
+        c_dense_ids_first = [id(w._step_col_table['C_dense']) for w in workers]
+
+        # ---- Second solve: table must be reused (reused=True) ----
+        result2 = solver.solve_transient(
+            trans_ctx, dc_context=dc_ctx, smoothed_sources=dummy,
+            t_start=0.0, t_end=t_end, use_step_columns=True,
+        )
+        for i, w in enumerate(workers):
+            info = w._step_col_info
+            assert info is not None
+            assert info.get('reused') is True, (
+                f"Worker {i}: second solve must be a cache hit (reused=True)"
+            )
+            assert id(w._step_col_table['C_dense']) == c_dense_ids_first[i], (
+                f"Worker {i}: C_dense must be the SAME object on reuse (no rebuild)"
+            )
+
+        # Results must be bit-identical.
+        np.testing.assert_allclose(
+            result1.max_ir_drop_per_time, result2.max_ir_drop_per_time,
+            atol=1e-12,
+            err_msg="Two consecutive solve_transient calls must be bit-identical",
+        )
+
+    def test_chunked_tier_reused_on_second_solve(self):
+        """With aperiodic PWL VCS (n_steps > 512), second solve reuses chunked table."""
+        from distributed.solver import DistributedDDMSolver
+
+        dt = 1e-10
+        n_steps = 600          # > 512 → multi-window, builds chunked table
+        t_end = n_steps * dt
+
+        model, workers = _build_two_tile_model()
+        _attach_aperiodic_vcs_to_workers(workers, dt=dt, n_steps=n_steps + 20)
+
+        solver = DistributedDDMSolver(model)
+        dc_ctx = solver.prepare()
+        trans_ctx = solver.prepare_transient(dt=dt, method='be')
+        dummy = self._dummy_smoothed_sources(model, dt, t_end)
+
+        # ---- First solve ----
+        result1 = solver.solve_transient(
+            trans_ctx, dc_context=dc_ctx, smoothed_sources=dummy,
+            t_start=0.0, t_end=t_end, use_step_columns=True,
+        )
+        for w in workers:
+            info = w._step_col_info
+            assert info is not None
+            assert info.get('tier') == 'chunked', (
+                f"Expected chunked tier, got {info.get('tier')!r}"
+            )
+            assert info.get('reused') is False
+
+        # ---- Second solve ----
+        result2 = solver.solve_transient(
+            trans_ctx, dc_context=dc_ctx, smoothed_sources=dummy,
+            t_start=0.0, t_end=t_end, use_step_columns=True,
+        )
+        for i, w in enumerate(workers):
+            info = w._step_col_info
+            assert info is not None
+            assert info.get('reused') is True, (
+                f"Worker {i}: second chunked solve must be a cache hit"
+            )
+
+        np.testing.assert_allclose(
+            result1.max_ir_drop_per_time, result2.max_ir_drop_per_time,
+            atol=1e-12,
+            err_msg="Chunked reuse: two consecutive solves must be bit-identical",
+        )
+
+    def test_phase_reuse_matches_use_step_columns_false(self):
+        """Phase-tier (reused) results match use_step_columns=False baseline."""
+        from distributed.solver import DistributedDDMSolver
+
+        dt = 1e-10
+        t_end = 5e-9
+
+        model, workers = _build_two_tile_model()
+        _attach_pulse_vcs_to_workers(workers, period=1e-8)
+
+        solver = DistributedDDMSolver(model)
+        dc_ctx = solver.prepare()
+        trans_ctx = solver.prepare_transient(dt=dt, method='be')
+        dummy = self._dummy_smoothed_sources(model, dt, t_end)
+
+        # First solve (builds table).
+        solver.solve_transient(
+            trans_ctx, dc_context=dc_ctx, smoothed_sources=dummy,
+            t_start=0.0, t_end=t_end, use_step_columns=True,
+        )
+        # Second solve (reuses table).
+        result_reused = solver.solve_transient(
+            trans_ctx, dc_context=dc_ctx, smoothed_sources=dummy,
+            t_start=0.0, t_end=t_end, use_step_columns=True,
+        )
+        assert all(w._step_col_info.get('reused') for w in workers), (
+            "All workers must report reused=True on second call"
+        )
+
+        # Fresh model with same VCS for the no-step-cols baseline.
+        model_ref, workers_ref = _build_two_tile_model()
+        _attach_pulse_vcs_to_workers(workers_ref, period=1e-8)
+        solver_ref = DistributedDDMSolver(model_ref)
+        dc_ref = solver_ref.prepare()
+        trans_ref = solver_ref.prepare_transient(dt=dt, method='be')
+        dummy_ref = self._dummy_smoothed_sources(model_ref, dt, t_end)
+
+        result_ref = solver_ref.solve_transient(
+            trans_ref, dc_context=dc_ref, smoothed_sources=dummy_ref,
+            t_start=0.0, t_end=t_end, use_step_columns=False,
+        )
+
+        np.testing.assert_allclose(
+            result_reused.max_ir_drop_per_time, result_ref.max_ir_drop_per_time,
+            atol=1e-12,
+            err_msg=(
+                "Phase-tier reused solve must match use_step_columns=False "
+                "to <= 1e-12 V"
+            ),
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8. VCS-backed end-to-end: Change C skip through solve_transient
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestVCSBackedChangeCEndToEnd:
+    """Change C: with aperiodic VCS and n_steps <= 512, solve_transient
+    triggers the amortization guard (tier='skipped', table stays None) and
+    results are identical to use_step_columns=False.
+
+    The test probes worker._step_col_table (must be None) and
+    worker._step_col_info (must be None, cleared by the skip) after each
+    solve call, confirming the per-step fallback path was exercised.
+    """
+
+    def _dummy_smoothed_sources(self, model, dt, t_end):
+        from distributed.result import DistributedSmoothedSources
+
+        return DistributedSmoothedSources(
+            time_step=dt, t_start=0.0, t_end=t_end,
+            smoothed=False, n_tiles=len(model.workers), per_tile_stats={},
+        )
+
+    def test_small_n_steps_aperiodic_tier_skipped_and_correct(self):
+        """Aperiodic VCS + n_steps=50 (<= W=512): tier='skipped', results correct.
+
+        After solve_transient(use_step_columns=True), every worker must have
+        _step_col_table=None (no table allocated), confirming that the
+        Change-C guard fired and the per-step evaluate_at_time fallback was
+        used throughout.  Results must match use_step_columns=False to 1e-12 V.
+        """
+        from distributed.solver import DistributedDDMSolver
+
+        dt = 1e-10
+        n_steps = 50       # well below W=512 → Change C skip
+        t_end = n_steps * dt
+
+        model, workers = _build_two_tile_model()
+        # VCS has 70 breakpoints (n_steps+20), aperiodic → chunked tier
+        _attach_aperiodic_vcs_to_workers(workers, dt=dt, n_steps=n_steps + 20)
+
+        solver = DistributedDDMSolver(model)
+        dc_ctx = solver.prepare()
+        trans_ctx = solver.prepare_transient(dt=dt, method='be')
+        dummy = self._dummy_smoothed_sources(model, dt, t_end)
+
+        # use_step_columns=True → precompute is called → Change C skips build
+        result_sc = solver.solve_transient(
+            trans_ctx, dc_context=dc_ctx, smoothed_sources=dummy,
+            t_start=0.0, t_end=t_end, use_step_columns=True,
+        )
+        for i, w in enumerate(workers):
+            assert w._step_col_table is None, (
+                f"Worker {i}: Change C must leave _step_col_table=None "
+                "(table not built for single-window chunked run)"
+            )
+            # _step_col_info is cleared to None by the skip path
+            assert w._step_col_info is None, (
+                f"Worker {i}: _step_col_info must be None after Change C skip"
+            )
+
+        # Baseline: use_step_columns=False (per-step evaluate_at_time, same model)
+        # Re-attach VCS since precompute was called but skipped (cache key cleared).
+        _attach_aperiodic_vcs_to_workers(workers, dt=dt, n_steps=n_steps + 20)
+        result_ref = solver.solve_transient(
+            trans_ctx, dc_context=dc_ctx, smoothed_sources=dummy,
+            t_start=0.0, t_end=t_end, use_step_columns=False,
+        )
+
+        np.testing.assert_allclose(
+            result_sc.max_ir_drop_per_time, result_ref.max_ir_drop_per_time,
+            atol=1e-12,
+            err_msg=(
+                "Change C skipped solve must match use_step_columns=False "
+                "to <= 1e-12 V"
+            ),
+        )
+
+    def test_boundary_n_steps_512_skipped(self):
+        """n_steps exactly 512 (== W): Change C fires, table stays None."""
+        from distributed.solver import DistributedDDMSolver
+
+        dt = 1e-10
+        n_steps = 512
+        t_end = n_steps * dt
+
+        model, workers = _build_two_tile_model()
+        _attach_aperiodic_vcs_to_workers(workers, dt=dt, n_steps=n_steps + 20)
+
+        solver = DistributedDDMSolver(model)
+        dc_ctx = solver.prepare()
+        trans_ctx = solver.prepare_transient(dt=dt, method='be')
+        dummy = self._dummy_smoothed_sources(model, dt, t_end)
+
+        solver.solve_transient(
+            trans_ctx, dc_context=dc_ctx, smoothed_sources=dummy,
+            t_start=0.0, t_end=t_end, use_step_columns=True,
+        )
+        for i, w in enumerate(workers):
+            assert w._step_col_table is None, (
+                f"Worker {i}: n_steps=512 == W must trigger Change C skip"
+            )
