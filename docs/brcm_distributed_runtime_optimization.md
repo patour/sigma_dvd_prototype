@@ -322,6 +322,32 @@ fold near/far decomposition into a single forward solve, instead of re-running t
 | 8 | Balanced retiling via parser-side tile splitting (B1) | `80fae0c` | distributed-10x | not yet measured separately on netlist_sampled | ~1,240 s tile factor wall → ~300 s; straggler backsolve –70% | **Landed** |
 | 9 | Iterative interface CG + block-Jacobi preconditioner (B2) | `e66f65a` | distributed-10x | auto selects direct for n_interface < 200K on netlist_sampled | removes ~200 GB coordinator memory wall at 1 M+ interface nodes | **Landed** |
 | 10 | Streaming Schur shard assembly (B3) | `9818280` + `10695f5` | distributed-10x | peak 3.5 MB vs 15.6 MB bulk on netlist_sampled; auto at 512 MB+ estimated S_i peak | caps coordinator peak memory; enables 100M+ node PDNs | **Landed** |
+| 11 | Multi-node task-dataflow design + `TaskDataflowBackend` prototype (B4) | `f25d209` | distributed-10x | DC actor 0.858 s vs task 0.797 s, max \|ΔV\| = 0.0 V (exact) | enables k-machine deployment (see §7.1); actor mode remains single-node default | **Landed (prototype)** |
+
+### 7.1 B4 findings — multi-node task dataflow (full analysis: `docs/multinode_task_dataflow_design.md`)
+
+Measured on this host (48-CPU, single machine; 2-node runs use resource-labeled virtual nodes —
+optimistic for network transfer, documented as such):
+
+- **CHOLMOD/SuperLU factors are NOT picklable** (experimentally confirmed) — the central constraint.
+  Factors must stay pinned in the worker process. Serializing triangular factor arrays instead
+  degrades per-step solves 3–10× (**~+21,000 s on the BRCM transient**) — rejected. Refactor-on-
+  session-start with process-resident factors is the only viable multi-node persistence strategy.
+- **Tile-pkl distribution via the Ray object store works and is cheap**: 12.3 ms/tile `ray.put`
+  (~108 ms for 36 BRCM-scale tiles) — removes the shared-NFS assumption. Recommended
+  **unconditionally**, independent of solve mode.
+- **Per-step task-submission overhead bounds task-mode transients**: 6.1 ms/step (task) vs
+  4.0 ms/step (actor) at 9 tiles; at 250 tiles × 2 barriers ≈ 95 ms/step → **~950 s of pure
+  scheduling over 10 K steps** (~13 % of the ~7,400 s end-to-end target). Actor mode therefore
+  remains the default for single-node transient loops.
+- **Task mode wins**: (a) multi-node DC prepare (factor tasks placed by
+  `NodeAffinitySchedulingStrategy` where their tile pkl lives), (b) stateless CG tilewise-matvec
+  tasks once `n_interface` > ~500 K (per-tile `S_i` IS picklable and object-store cacheable).
+- **100M-node / 4-machine arithmetic**: ~250 tiles at `max_interior=400 K` → ~36 GB of CHOLMOD
+  factors per machine (needs 64–96 GB nodes); the interface system itself is small (~26 MB at
+  160 K interface nodes under CG).
+- **Prototype validation**: `TaskDataflowBackend` DC prepare+solve on netlist_sampled is
+  algebraically exact vs actor mode (max |ΔV| = 0.0 V) at parity wall time (0.797 s vs 0.858 s).
 
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
