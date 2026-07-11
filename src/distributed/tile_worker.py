@@ -123,6 +123,10 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         # The info dict returned by the most recent build (stored so callers
         # can retrieve it without a round-trip on a cache hit).
         self._step_col_info: Optional[Dict] = None
+        # F1/F5: memoised per-row grid-alignment probe result.
+        # Keyed on (sources_version, dt); cleared by _invalidate_step_columns().
+        # None = no cached result yet.
+        self._grid_alignment_cache = None
 
         # --- A4: Symbolic-reuse cache for factor_and_compute_schur ----------
         # Holds {'P_ii', 'factor', 'ref_indptr', 'ref_indices'} from the

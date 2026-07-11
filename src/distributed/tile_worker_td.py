@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 # existing smoothed-VCS caches are automatically invalidated.
 SMOOTHING_CODE_VERSION: int = 1
 
+# F14: single module constant used by both the Change-C guard and build calls
+# so they stay in sync without per-site magic numbers.
+CHUNK_WINDOW_STEPS: int = 512
+
 
 class _TimeDomainMixin(_PeakTrackingMixin):
     """Mixin providing time-domain methods for TileWorker.
@@ -41,6 +45,70 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         _peak_tracking_active, _tracked_nodes, _tracked_waveforms,
         get_reduced_rhs()
     """
+
+    # --- A2 structural helpers -----------------------------------------
+
+    def _invalidate_step_columns(self) -> None:
+        """Invalidate the A2 step-column table and all related caches.
+
+        F12: single authoritative method for the 4-statement invalidation
+        block that previously appeared verbatim at five sites:
+          - init_vectorized_sources (raw-build path)
+          - smooth_sources (cache-hit and cache-miss paths)
+          - use_smoothed_sources
+          - use_raw_sources
+
+        Clears:
+          - _step_col_table: the computed per-tile column matrix
+          - _sources_version: bumped so cross-transient cache keys are stale
+          - _step_col_cache_key: prevents false reuse on the next build
+          - _step_col_info: the coordinator-visible info dict
+          - _grid_alignment_cache: memoised per-row probe result (F1/F5)
+
+        Task-2 note: if a cached-table slot is later added (e.g.,
+        ``_cached_col_table``), clear it here.
+        """
+        self._step_col_table = None
+        self._sources_version += 1
+        self._step_col_cache_key = None
+        self._step_col_info = None
+        # F1/F5: clear the memoised full-eligibility probe result so the
+        # next _smoothed_grid_alignment call re-runs the per-row check.
+        self._grid_alignment_cache = None
+
+    @staticmethod
+    def _dt_grid_step_index(t_start: float, dt: float) -> Optional[int]:
+        """Return the signed integer step index for t_start on the dt grid.
+
+        F11: single implementation of the dt-grid-alignment probe that was
+        previously duplicated at four sites:
+          - phase-tier build guard (~line 576)
+          - phase-tier reuse guard (~line 613)
+          - Change-C probe (~line 676)
+          - _build_chunked_window (~line 876)
+
+        Returns:
+            The integer ts_m such that ``ts_m * dt ≈ t_start`` within
+            ``1e-9 * max(1, |ts_m|)`` relative tolerance, or ``None``
+            when t_start is off-grid.
+
+            Special case: t_start == 0.0 always returns 0 (no division).
+
+            Negative on-grid values are valid returns (Task 2 relies on
+            this for negative t_start / pre-DC offset).
+
+        Note:
+            Call sites that previously rejected ts_m <= 0 MUST add their
+            own explicit check after calling this method.  This function
+            only asserts grid alignment, not positivity.
+        """
+        if t_start == 0.0:
+            return 0
+        ts_ratio = t_start / dt
+        ts_m = int(round(ts_ratio))
+        if abs(ts_ratio - ts_m) > 1e-9 * max(1, abs(ts_m)):
+            return None
+        return ts_m
 
     # --- 4a. Vectorized current source creation + disk caching ---------
 
@@ -133,6 +201,10 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                     else:
                         self._vec_sources = cached_vcs
                         self._active_sources = self._vec_sources
+                        # F4: disk-cache-hit swaps _active_sources — must
+                        # invalidate the step-column table exactly as the
+                        # rebuild path does (root CLAUDE.md pitfall ~:188).
+                        self._invalidate_step_columns()
                         stats = self._vec_sources.get_statistics()
                         stats['n_nodes'] = n_nodes
                         stats['cached'] = True
@@ -170,11 +242,8 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         )
         self._active_sources = self._vec_sources
         # A2: new raw sources invalidate any existing step-column table and
-        # the cross-transient reuse cache (Change A).
-        self._step_col_table = None
-        self._sources_version += 1
-        self._step_col_cache_key = None
-        self._step_col_info = None
+        # the cross-transient reuse cache (Change A).  F12: use shared helper.
+        self._invalidate_step_columns()
 
         # Save to disk cache using wrapper dict that includes the node signature.
         # The smoothed VCS cache (vcs_tile_X_Y_smoothed_<hash>.pkl) validates the
@@ -334,10 +403,8 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                         self._active_sources = self._smoothed_sources
                         # A2: active sources changed → invalidate step-column table
                         # and cross-transient reuse cache (Change A).
-                        self._step_col_table = None
-                        self._sources_version += 1
-                        self._step_col_cache_key = None
-                        self._step_col_info = None
+                        # F12: use shared helper.
+                        self._invalidate_step_columns()
                         logger.debug(
                             "Tile %s: smoothed VCS cache HIT %s",
                             tile_str, smoothed_cache_path,
@@ -372,11 +439,8 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         smooth_time = time.perf_counter() - t0
         self._active_sources = self._smoothed_sources
         # A2: smoothing changes active sources → invalidate step-column table
-        # and cross-transient reuse cache (Change A).
-        self._step_col_table = None
-        self._sources_version += 1
-        self._step_col_cache_key = None
-        self._step_col_info = None
+        # and cross-transient reuse cache (Change A).  F12: use shared helper.
+        self._invalidate_step_columns()
 
         logger.debug(
             "Tile %s: smooth_sources computed in %.3fs",
@@ -435,11 +499,8 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                 )
             self._active_sources = self._vec_sources
         # Changing active sources invalidates the step-column table and the
-        # cross-transient reuse cache (Change A).
-        self._step_col_table = None
-        self._sources_version += 1
-        self._step_col_cache_key = None
-        self._step_col_info = None
+        # cross-transient reuse cache (Change A).  F12: use shared helper.
+        self._invalidate_step_columns()
 
     def use_raw_sources(self) -> None:
         """Reset _active_sources to the raw VCS, discarding any smoothing.
@@ -459,11 +520,8 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             return
         self._active_sources = self._vec_sources
         # A2: active source changed → invalidate step-column table and the
-        # cross-transient reuse cache (Change A).
-        self._step_col_table = None
-        self._sources_version += 1
-        self._step_col_cache_key = None
-        self._step_col_info = None
+        # cross-transient reuse cache (Change A).  F12: use shared helper.
+        self._invalidate_step_columns()
 
     # --- A2: Step-column table methods ---------------------------------
 
@@ -568,31 +626,47 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                     # dt/2 time shift.  The chunked tier handles arbitrary
                     # t_start exactly (t_grid = t_start + arange(1,W+1)*dt), so
                     # fall through to it when t_start/dt is not integral.
-                    if t_start == 0.0:
-                        phase0 = 0
+                    # F11: delegate grid-alignment check to _dt_grid_step_index.
+                    # Returns 0 for t_start==0.0 (always valid), None for off-grid.
+                    # Reject negative ts_m (negative t_start not supported by phase
+                    # tier; Task 2 may revisit).  ts_m == 0 is valid (t_start=0).
+                    ts_m = self._dt_grid_step_index(t_start, dt)
+                    if ts_m is None or ts_m < 0:
+                        # t_start off-grid or negative → chunked (exact)
+                        tier = 'chunked'
+                        m = 0
                     else:
-                        ts_ratio = t_start / dt
-                        ts_m = int(round(ts_ratio))
-                        if ts_m <= 0 or abs(ts_ratio - ts_m) > 1e-9 * max(1, ts_m):
-                            # t_start off-grid → chunked (exact)
-                            tier = 'chunked'
-                            m = 0
-                        else:
-                            phase0 = ts_m % m
+                        phase0 = ts_m % m
 
         # --- Change A: attempt cross-transient table reuse ------------------
-        # The table is a pure function of (sources, dt, m/tier, max_mb).
+        # The table is a pure function of (sources, dt, m/tier, max_mb, apply_wscale).
         # The near/far mask is applied post-gather, so the same table serves
         # all decomposition victims.  If the cache key matches, skip the build.
+        #
+        # F3: include apply_wscale in the key because it scales every PWL value
+        # baked into the table.  Toggling it after a build would silently serve
+        # stale values if the key omitted it.  Use the same try/except ImportError
+        # guard as _gather_window_direct / _build_via_direct_scatter so that
+        # the key is consistent regardless of import availability.
+        try:
+            from parser.current_sources import get_apply_wscale as _get_aws
+            _apply_wscale_for_key = _get_aws()
+        except ImportError:
+            _apply_wscale_for_key = True
+
         if tier == 'phase':
-            # Phase reuse key: (version, dt, m, max_mb).
+            # Phase reuse key: (version, dt, m, max_mb, apply_wscale).
             # t_start is NOT in the key because phase0 can be recomputed for
             # any dt-grid-aligned t_start without rebuilding the table.
-            new_key: tuple = ('phase', self._sources_version, dt, m, max_mb)
+            new_key: tuple = (
+                'phase', self._sources_version, dt, m, max_mb, _apply_wscale_for_key,
+            )
         else:
-            # Chunked reuse key: (version, t_start, dt, max_mb).
+            # Chunked reuse key: (version, t_start, dt, max_mb, apply_wscale).
             # t_start IS in the key because the window is anchored at t_start.
-            new_key = ('chunked', self._sources_version, t_start, dt, max_mb)
+            new_key = (
+                'chunked', self._sources_version, t_start, dt, max_mb, _apply_wscale_for_key,
+            )
 
         if (
             self._step_col_table is not None
@@ -605,17 +679,15 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                 # Phase reuse: recompute phase0 for the new t_start using the
                 # same guard logic as the build path.  Returns on success or
                 # falls through to rebuild when t_start is off-grid.
-                if t_start == 0.0:
-                    new_phase0 = 0
+                # F11: delegate to _dt_grid_step_index.
+                # ts_m == 0 is valid (t_start=0.0); ts_m < 0 is rejected.
+                ts_m = self._dt_grid_step_index(t_start, dt)
+                if ts_m is None or ts_m < 0:
+                    # This t_start is off-grid or negative — phase table
+                    # cannot serve it.  Fall through to normal rebuild path below.
+                    new_phase0 = None
                 else:
-                    ts_ratio = t_start / dt
-                    ts_m = int(round(ts_ratio))
-                    if ts_m <= 0 or abs(ts_ratio - ts_m) > 1e-9 * max(1, ts_m):
-                        # This t_start is off-grid — phase table cannot serve it.
-                        # Fall through to normal rebuild path below.
-                        new_phase0 = None
-                    else:
-                        new_phase0 = ts_m % m
+                    new_phase0 = ts_m % m
                 if new_phase0 is not None:
                     # Update the stored table in-place so that
                     # _get_current_array_for_step uses the correct phase0.
@@ -663,19 +735,18 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         # rationale does not apply.  The 1.7 ms/step gather still beats the
         # 193 ms/step evaluate path even for small runs.
         if tier == 'chunked':
-            W = min(512, n_steps)
+            W = min(CHUNK_WINDOW_STEPS, n_steps)
             # Check whether Change B fast path is available for this (dt, t_start).
+            # F11: delegate grid-alignment to _dt_grid_step_index.
+            # F1/F5: _smoothed_grid_alignment now runs the full per-row eligibility
+            # probe (memoised), so this check is exact — no mixed-tile false positives.
             alignment = self._smoothed_grid_alignment(dt)
             chunked_fast_path_available = False
             if alignment is not None:
-                if t_start == 0.0:
+                # ts_m_cand == 0 is valid (t_start=0.0); None is off-grid.
+                ts_m_cand = self._dt_grid_step_index(t_start, dt)
+                if ts_m_cand is not None and ts_m_cand >= 0:
                     chunked_fast_path_available = True
-                else:
-                    ts_ratio = t_start / dt
-                    ts_m_cand = int(round(ts_ratio))
-                    if (ts_m_cand > 0
-                            and abs(ts_ratio - ts_m_cand) <= 1e-9 * max(1, ts_m_cand)):
-                        chunked_fast_path_available = True
             if n_steps <= W and not chunked_fast_path_available:
                 # Single window, no amortization benefit → skip build.
                 self._step_col_table = None
@@ -700,7 +771,7 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             info = self._build_phase_table(t_start, dt, m, phase0, n_steps)
         else:
             # Tier c: chunked window (n_steps > W, so multi-window)
-            W = min(512, n_steps)
+            W = min(CHUNK_WINDOW_STEPS, n_steps)
             info = self._build_chunked_window(t_start, dt, n_steps, W)
 
         # Store cache key and info for cross-transient reuse (Change A).
@@ -858,25 +929,23 @@ class _TimeDomainMixin(_PeakTrackingMixin):
 
         # --- Change B: attempt direct-scatter fast path ----------------------
         # Check alignment once; store result in table for on-demand rebuilds.
+        # F11: delegate grid-alignment to _dt_grid_step_index.
+        # F1/F5: _smoothed_grid_alignment now returns non-None only when ALL rows
+        # pass the full per-row eligibility probe (memoised), so the fast path is
+        # exact — no mixed-tile index-gather errors.
         alignment = self._smoothed_grid_alignment(dt)
         fast_path = False
         ts_m = 0
         m_fold = 0
 
         if alignment is not None:
-            # t_start must land on the dt grid (same guard style as phase tier
-            # Finding-1: ts_ratio integral within 1e-9 rel).
-            if t_start == 0.0:
+            # t_start must land on the dt grid.  _dt_grid_step_index returns 0
+            # when t_start == 0.0 (valid); None for off-grid; negative rejected.
+            ts_m_cand = self._dt_grid_step_index(t_start, dt)
+            if ts_m_cand is not None and ts_m_cand >= 0:
                 fast_path = True
-                ts_m = 0
+                ts_m = ts_m_cand
                 m_fold = alignment['m']
-            else:
-                ts_ratio = t_start / dt
-                ts_m_cand = int(round(ts_ratio))
-                if ts_m_cand > 0 and abs(ts_ratio - ts_m_cand) <= 1e-9 * max(1, ts_m_cand):
-                    fast_path = True
-                    ts_m = ts_m_cand
-                    m_fold = alignment['m']
 
         if fast_path:
             try:
@@ -948,7 +1017,23 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         }
 
     def _smoothed_grid_alignment(self, dt: float) -> Optional[Dict]:
-        """Check whether active sources are aligned to the smoothed dt grid.
+        """Check whether ALL active PWL rows are aligned to the smoothed dt grid.
+
+        F1+F5: Extended from a row-0-only probe to a full per-row eligibility
+        check.  The fast path (_gather_window_direct) performs an index gather
+        that is valid ONLY when every PWL row satisfies:
+          (a) cnt >= m + 1            (enough samples for one full period + wrap)
+          (b) knots are uniform on the actual_step grid anchored at ~0
+
+        The previous row-0-only probe missed rows that had cnt >= m+1 but
+        non-uniform knots (e.g., after partial compaction), causing index-gather
+        to return wrong values (confirmed: 4.0 mA vs evaluate's 0.0 mA).
+
+        Memoisation: the result is cached on ``(self._sources_version, dt)``
+        via ``self._grid_alignment_cache``.  ``_invalidate_step_columns`` clears
+        the cache whenever sources change.  The probe therefore runs at most once
+        per (sources, dt) pair — called by the Change-C guard,
+        ``_build_chunked_window``, and ``_select_build_path``.
 
         Returns a dict ``{'m': int, 'actual_step': float}`` when ALL of the
         following hold:
@@ -959,19 +1044,38 @@ class _TimeDomainMixin(_PeakTrackingMixin):
            break periodicity.
         4. ``has_single_period P`` — exactly one common period.
         5. ``P / dt`` is integral (within 1e-9 relative), giving ``m``.
-        6. Row-0 sample step ≈ P/m within 1e-9 relative.
-        7. First sample time |t0| ≤ 0.5 * actual_step — origin at ~0 so that
-           sample index i+1 maps to (i+1)*dt from the origin.
+        6. **Every** PWL row has ``cnt >= m + 1``.
+        7. **Every** PWL row has knots uniformly spaced at ``actual_step``
+           anchored at t ≈ 0 (|knot_i - i * actual_step| ≤ 1e-9 * actual_step
+           for all i; vectorised via np.diff across all rows simultaneously).
 
         Returns ``None`` when any condition fails.
 
-        This is a shared helper used by both :meth:`_select_build_path` (phase
-        tier) and :meth:`_build_chunked_window` (chunked fast path, Change B).
+        NOTE on heavily compacted VCS: after aggressive PWL compaction, many rows
+        have only ~5 knots (cnt << m+1).  The fast path is intentionally
+        unavailable for these tiles — they fall through to evaluate_at_times_for_rows
+        which handles arbitrary breakpoint spacing correctly.
         """
         vcs = self._active_sources
         if vcs is None or vcs.n_pwls == 0 or vcs.n_pulses != 0:
             return None
 
+        # F1/F5: check the memo cache first (keyed on sources version + dt).
+        cache_key = (self._sources_version, dt)
+        cached = getattr(self, '_grid_alignment_cache', None)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+
+        result = self._smoothed_grid_alignment_uncached(dt, vcs)
+
+        # Store memo (use object attribute so it persists across calls).
+        self._grid_alignment_cache = (cache_key, result)
+        return result
+
+    def _smoothed_grid_alignment_uncached(
+        self, dt: float, vcs: Any,
+    ) -> Optional[Dict]:
+        """Inner (un-memoised) implementation of the per-row eligibility probe."""
         pinfo = vcs.get_period_info()
         if not pinfo['all_zero_pwl_delay'] or not pinfo['has_single_period']:
             return None
@@ -984,17 +1088,70 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         if vcs.n_pwl_points == 0:
             return None
 
-        off0 = int(vcs.pwl_offset[0])
-        cnt0 = int(vcs.pwl_count[0])
-        if cnt0 < 2:
+        actual_step = P / m
+        tol = 1e-9 * actual_step
+
+        # ---- Per-row vectorised eligibility check (F1/F5) ----
+        # We need every row i to satisfy:
+        #   cnt_i >= m + 1                      (enough samples)
+        #   |pwl_times[off_i + j] - j * actual_step| <= tol  for all j in [0, cnt_i)
+        #
+        # Approach: build expected_times for the entire flat pwl_times array in
+        # one numpy pass, then compare with the actual times using a row-boundary
+        # mask derived from pwl_offset / pwl_count.
+        #
+        # Step 1: check cnt >= m+1 for ALL rows (cheap vectorised check).
+        counts = vcs.pwl_count  # shape (n_pwls,), int32 or similar
+        if np.any(counts < m + 1):
             return None
 
-        actual_step = P / m
-        sample_step = float(vcs.pwl_times[off0 + 1] - vcs.pwl_times[off0])
-        first_time = float(vcs.pwl_times[off0])
+        # Step 2: verify uniform knot spacing across the entire flat time array.
+        # For row i with offset off_i and count cnt_i, the expected time at
+        # index j within that row is j * actual_step.  We only need to verify
+        # the first m+1 entries per row (indices 0..m inclusive) because
+        # _gather_window_direct only accesses indices in [0, m).
+        #
+        # Build index-within-row for every element in [off_i, off_i + m+1):
+        # idx_within[k] = k - off_i for all k in that range.
+        # Vectorise: concatenate arange(m+1) for each row.
+        #
+        # For large n_pwls (e.g., 778K rows) allocating n_pwls*(m+1) entries
+        # is infeasible (e.g., 778K * 101 = 78M entries for m=100).  Instead we
+        # compare pwl_times diffs against actual_step using np.diff on the flat
+        # array, taking care to mask out row-boundary diffs (which are meaningless
+        # across adjacent rows).
+        #
+        # Efficient approach: compute np.diff(pwl_times) across the entire flat
+        # array; then build a boolean mask of which diff positions are within a
+        # single row (not crossing a row boundary); check those diffs are
+        # actual_step within tol.  Also check first-sample offset for each row.
 
-        if (abs(sample_step - actual_step) > 1e-9 * actual_step
-                or abs(first_time) > 0.5 * actual_step):
+        times_flat = vcs.pwl_times      # shape (n_pwl_points,)
+        offsets = vcs.pwl_offset        # shape (n_pwls,)
+        n_pwl_pts = len(times_flat)
+
+        if n_pwl_pts == 0:
+            return None
+
+        # Build a boolean mask: True where diff is WITHIN the same row
+        # (i.e., consecutive positions belong to the same row).
+        # Strategy: mark the START of each row (position off_i for all i), then
+        # intra-row diffs are those NOT at the start of a row (after the first).
+        # diff[k] = times_flat[k+1] - times_flat[k], shape (n_pwl_pts - 1,).
+        # diff[k] is intra-row when k+1 is NOT a row start.
+        row_start_mask = np.zeros(n_pwl_pts, dtype=bool)
+        row_start_mask[offsets] = True
+        # diff[k] crosses a row boundary when position k+1 is a row start.
+        intra_row_mask = ~row_start_mask[1:]  # shape (n_pwl_pts - 1,)
+
+        diffs = np.diff(times_flat)
+        intra_diffs = diffs[intra_row_mask]
+        if len(intra_diffs) > 0 and np.any(np.abs(intra_diffs - actual_step) > tol):
+            return None
+
+        # Check that the first sample of every row is at t ≈ 0.
+        first_times = times_flat[offsets]
+        if np.any(np.abs(first_times) > 0.5 * actual_step):
             return None
 
         return {'m': m, 'actual_step': actual_step}
@@ -1114,99 +1271,40 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         t_start: float,
         src_rows_candidate: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Build phase table via scatter-add of smoothed value arrays.
+        """Build phase table by delegating to _gather_window_direct (F10).
 
-        Row-sparse: only allocates ``(n_candidate, m)`` instead of
-        ``(n_nodes, m)``.  Returns ``(C_sparse, src_rows)`` where
-        ``C_sparse`` is ``(n_src, m)`` Fortran-order and ``src_rows``
-        is the int32 index array into the full node vector.
+        F10: previously this method duplicated the gather logic from
+        ``_gather_window_direct``.  Now it delegates its gather core:
+        the phase table is mathematically identical to a window of ``m``
+        columns starting at ``new_start=0`` with ``ts_m=0`` (origin
+        convention), because::
 
-        Each column k stores the value at time (k+1)*dt from origin (t=0)
-        for each source row.  ``phase0`` is NOT applied here; it is applied
-        at lookup time in ``_get_current_array_for_step`` via
-        ``col = (step_idx + phase0) % m``.
+            (0 + arange(m) + 1) % m == arange(1, m+1) % m
 
-        Falls back to ``evaluate_at_times_for_rows`` on any mismatch.
+        ``phase0`` is NOT applied here; it is applied at lookup time in
+        ``_get_current_array_for_step`` via ``col = (step_idx + phase0) % m``.
+
+        Falls back to ``evaluate_at_times_for_rows`` on any mismatch —
+        the fallback wrapper is owned here (not in _gather_window_direct)
+        so callers that do not need the fallback (chunked fast path) can
+        handle exceptions themselves.
         """
         try:
-            from parser.current_sources import get_apply_wscale
-            apply_wscale = get_apply_wscale()
-        except ImportError:
-            apply_wscale = True
-
-        vcs = self._active_sources
-        n_nodes = vcs.n_nodes
-        n_candidate = len(src_rows_candidate)
-
-        # node → position in src_rows_candidate (-1 if absent)
-        row_positions = -np.ones(n_nodes, dtype=np.int32)
-        if n_candidate > 0:
-            row_positions[src_rows_candidate] = np.arange(n_candidate, dtype=np.int32)
-
-        # DC base for candidate rows only
-        dc_per_node = np.zeros(n_nodes, dtype=np.float64)
-        if vcs.n_sources > 0:
-            np.add.at(dc_per_node, vcs.source_node_idx, vcs.dc_values)
-
-        # Allocate (n_candidate, m) instead of (n_nodes, m)
-        C = np.empty((n_candidate, m), dtype=np.float64)
-        if n_candidate > 0:
-            C[:] = dc_per_node[src_rows_candidate, np.newaxis]  # DC init
-        else:
-            C[:] = 0.0
-
-        # Scatter each PWL row's values into the appropriate column.
-        # After smoothing, pwl_times starts near t=0 (the t_start offset is
-        # "baked into" the waveform shape — pwl_times[off + i] ≈ i * actual_step).
-        # The phase table is built at ORIGIN (same as the batch and scalar paths):
-        # column k stores the value at time (k+1)*dt from t=0.  phase0 is NOT
-        # applied here; it is applied at lookup time in
-        # _get_current_array_for_step via col = (step_idx + phase0) % m.
-        #
-        # Finding 5: the sample index for column k wraps at m, NOT cnt.
-        # evaluate_at_time(t) for a periodic PWL folds t via t % P, so at
-        # t = m*dt = P we get t % P = 0 → row_values[0].  Column m-1 must
-        # therefore map to sample index m % m = 0, not m % cnt (= m when
-        # cnt == m+1, the last sample).  These only agree when
-        # values[m] == values[0], which is not guaranteed for valid inputs
-        # (e.g. a sawtooth).  Wrapping at m is correct for cnt >= m+1 because
-        # evaluate_at_time never accesses index m or beyond.
-        #
-        # Finding 15: the per-row column fill is fully vectorized — a single
-        # numpy gather + add per PWL row replaces the O(m) Python scalar loop.
-        # col_indices is period-invariant (same m for all rows), computed once.
-        col_indices = np.arange(1, m + 1, dtype=np.int64) % m  # shape (m,)
-        try:
-            for pwl_i in range(vcs.n_pwls):
-                off = int(vcs.pwl_offset[pwl_i])
-                cnt = int(vcs.pwl_count[pwl_i])
-                node = int(vcs.pwl_node_idx[pwl_i])
-                row = int(row_positions[node])
-                if row < 0:
-                    continue  # node not in candidate set (guard)
-                wsc = (float(vcs.pwl_wscale[pwl_i])
-                       if (apply_wscale and len(vcs.pwl_wscale) == vcs.n_pwls)
-                       else 1.0)
-                if cnt < m + 1:
-                    # Not enough samples — fall back
-                    raise ValueError("PWL has fewer samples than m+1")
-                # Columns 0..m-1 use samples at indices (1..m) % m (origin-based).
-                C[row, :] += wsc * vcs.pwl_values[off + col_indices]
+            return self._gather_window_direct(
+                new_start=0, W_actual=m,
+                ts_m=0, m=m,
+                src_rows_candidate=src_rows_candidate,
+            )
         except (ValueError, IndexError):
             # Fall back to evaluate_at_times_for_rows — row-sparse, builds at
             # ORIGIN so that col = (step_idx + phase0) % m remains valid.
+            vcs = self._active_sources
             t_grid = np.arange(1, m + 1, dtype=np.float64) * dt
             C_pre = vcs.evaluate_at_times_for_rows(t_grid, src_rows_candidate)
             row_max = np.abs(C_pre).max(axis=1)
             nonzero = row_max > 0
             final_rows = src_rows_candidate[nonzero]
             return np.asfortranarray(C_pre[nonzero, :]), final_rows
-
-        # Trim to actually-nonzero rows
-        row_max = np.abs(C).max(axis=1)
-        nonzero = row_max > 0
-        final_rows = src_rows_candidate[nonzero]
-        return np.asfortranarray(C[nonzero, :]), final_rows
 
     def _build_via_scalar_fallback(
         self, dt: float, m: int,
@@ -1324,6 +1422,15 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                 tbl['src_rows'] = src_rows
                 tbl['_chunk_start'] = new_start
                 chunk_start = new_start
+                # F2: re-read src_rows/n_src from tbl after the rebuild so the
+                # scatter below uses the NEW window's rows, not the stale values
+                # captured before the rebuild branch.  The fast path (rebuilt_fast)
+                # updates tbl['src_rows'] above but the local `src_rows` variable
+                # was NOT reassigned in that branch, so n_src = len(src_rows)
+                # computed at the top of this function was stale (possibly 0).
+                # Zero cost on the non-rebuild hot path (this block is skipped).
+                src_rows = tbl['src_rows']
+                n_src = len(src_rows)
             col = step_idx - chunk_start
 
         # Dense fill into pre-allocated buffer (no np.zeros, no np.add.at)
