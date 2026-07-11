@@ -59,22 +59,27 @@ class _TimeDomainMixin(_PeakTrackingMixin):
           - use_raw_sources
 
         Clears:
-          - _step_col_table: the computed per-tile column matrix
+          - _step_col_table: the ACTIVE per-tile column matrix
+          - _step_col_cached_table: the CACHED per-tile column matrix (F6)
           - _sources_version: bumped so cross-transient cache keys are stale
           - _step_col_cache_key: prevents false reuse on the next build
           - _step_col_info: the coordinator-visible info dict
           - _grid_alignment_cache: memoised per-row probe result (F1/F5)
-
-        Task-2 note: if a cached-table slot is later added (e.g.,
-        ``_cached_col_table``), clear it here.
+          - _smoothed_cache_hash: the smoothed-VCS disk-cache identity (F7)
         """
         self._step_col_table = None
+        # F6: also clear the cached slot so a stale table from a different
+        # sources-version is not served on the next precompute call.
+        self._step_col_cached_table = None
         self._sources_version += 1
         self._step_col_cache_key = None
         self._step_col_info = None
         # F1/F5: clear the memoised full-eligibility probe result so the
         # next _smoothed_grid_alignment call re-runs the per-row check.
         self._grid_alignment_cache = None
+        # F7: clear the smoothed-cache-hit identity so the next smooth_sources
+        # call does not spuriously skip reloading when sources have changed.
+        self._smoothed_cache_hash = None
 
     @staticmethod
     def _dt_grid_step_index(t_start: float, dt: float) -> Optional[int]:
@@ -376,6 +381,32 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         )
         key_hash = hashlib.md5(key_str.encode()).hexdigest()[:12]
 
+        # --- F7: short-circuit when params are identical and sources already active ---
+        # If the requested smoothing parameters produce the same hash AND the worker
+        # is already serving the smoothed sources built from those params, there is
+        # nothing to do — no reload, no _sources_version bump (which would silently
+        # discard the A2 reuse cache).  The disk-cache HIT path below (and the
+        # compute path) both set self._smoothed_cache_hash = key_hash when they
+        # succeed, so this check is only True after a previous successful smooth.
+        existing_hash = getattr(self, '_smoothed_cache_hash', None)
+        if (
+            existing_hash == key_hash
+            and self._smoothed_sources is not None
+            and self._active_sources is self._smoothed_sources
+        ):
+            logger.debug(
+                "Tile %s: smooth_sources IDENTITY HIT (params unchanged, "
+                "sources already active) — skipping reload",
+                tile_str,
+            )
+            return {
+                'time_step': time_step,
+                't_start': t_start,
+                't_end': t_end,
+                'smooth_time_s': 0.0,
+                'cached': True,
+            }
+
         # --- Try loading from disk cache ---
         smoothed_cache_path: Optional[str] = None
         raw_cache_path: Optional[str] = None
@@ -405,6 +436,10 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                         # and cross-transient reuse cache (Change A).
                         # F12: use shared helper.
                         self._invalidate_step_columns()
+                        # F7: record the hash of the smoothed sources now active
+                        # so that a subsequent call with identical params can
+                        # short-circuit without reloading or bumping _sources_version.
+                        self._smoothed_cache_hash = key_hash
                         logger.debug(
                             "Tile %s: smoothed VCS cache HIT %s",
                             tile_str, smoothed_cache_path,
@@ -441,6 +476,9 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         # A2: smoothing changes active sources → invalidate step-column table
         # and cross-transient reuse cache (Change A).  F12: use shared helper.
         self._invalidate_step_columns()
+        # F7: record the hash of the smoothed sources now active so that a
+        # subsequent call with identical params can short-circuit.
+        self._smoothed_cache_hash = key_hash
 
         logger.debug(
             "Tile %s: smooth_sources computed in %.3fs",
@@ -581,6 +619,9 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         max_mb = self._max_table_mb if max_table_mb is None else float(max_table_mb)
 
         if not use_sc or self._active_sources is None:
+            # F6: deactivate the table without evicting the cached slot.
+            # A subsequent precompute with use_step_columns=True can still
+            # reuse the cached table without rebuilding.
             self._step_col_table = None
             return {'tier': 'disabled', 'n_src_nodes': 0, 'memory_mb': 0.0}
 
@@ -628,11 +669,14 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                     # fall through to it when t_start/dt is not integral.
                     # F11: delegate grid-alignment check to _dt_grid_step_index.
                     # Returns 0 for t_start==0.0 (always valid), None for off-grid.
-                    # Reject negative ts_m (negative t_start not supported by phase
-                    # tier; Task 2 may revisit).  ts_m == 0 is valid (t_start=0).
+                    # F8: accept negative on-grid ts_m — Python modulo is non-negative
+                    # so phase0 = ts_m % m is always in [0, m) regardless of sign.
+                    # The QS path calls with t_col_start = t_array[0] - dt = -dt
+                    # when t_array starts at 0, giving ts_m = -1.  That is a valid
+                    # on-grid offset and the phase tier handles it correctly.
                     ts_m = self._dt_grid_step_index(t_start, dt)
-                    if ts_m is None or ts_m < 0:
-                        # t_start off-grid or negative → chunked (exact)
+                    if ts_m is None:
+                        # t_start off-grid → chunked (exact)
                         tier = 'chunked'
                         m = 0
                     else:
@@ -669,22 +713,25 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             )
 
         if (
-            self._step_col_table is not None
+            self._step_col_cached_table is not None
             and self._step_col_cache_key is not None
             and self._step_col_cache_key == new_key
         ):
             # Cache hit: return stored info with reuse flag.
-            tbl = self._step_col_table
+            # F6: read from the CACHED slot (not the active slot), so that a
+            # Change-C skip that cleared _step_col_table still finds the table.
+            tbl = self._step_col_cached_table
             if tier == 'phase':
                 # Phase reuse: recompute phase0 for the new t_start using the
                 # same guard logic as the build path.  Returns on success or
                 # falls through to rebuild when t_start is off-grid.
                 # F11: delegate to _dt_grid_step_index.
-                # ts_m == 0 is valid (t_start=0.0); ts_m < 0 is rejected.
+                # F8: ts_m == 0 is valid (t_start=0.0); negative on-grid values
+                # are also valid for the phase tier (Python % handles negatives).
                 ts_m = self._dt_grid_step_index(t_start, dt)
-                if ts_m is None or ts_m < 0:
-                    # This t_start is off-grid or negative — phase table
-                    # cannot serve it.  Fall through to normal rebuild path below.
+                if ts_m is None:
+                    # t_start is off-grid — phase table cannot serve it.
+                    # Fall through to normal rebuild path below.
                     new_phase0 = None
                 else:
                     new_phase0 = ts_m % m
@@ -692,6 +739,8 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                     # Update the stored table in-place so that
                     # _get_current_array_for_step uses the correct phase0.
                     tbl['phase0'] = new_phase0
+                    # F6: activate the cached table so the hot path uses it.
+                    self._step_col_table = tbl
                     info = dict(self._step_col_info)
                     info['phase0'] = new_phase0
                     info['reused'] = True
@@ -705,21 +754,39 @@ class _TimeDomainMixin(_PeakTrackingMixin):
                     return info
                 # new_phase0 is None: t_start is off-grid, fall through to rebuild.
             else:
-                # Chunked reuse: extend n_steps so on-demand rebuilds reach
-                # the new run's end without clamping.
-                if tbl['n_steps'] < n_steps:
-                    tbl['n_steps'] = n_steps
-                info = dict(self._step_col_info)
-                info['reused'] = True
-                self._step_col_info = info
-                logger.debug(
-                    "Tile %s precompute_step_columns: REUSED chunked table "
-                    "(W=%d t_start=%.3g dt=%.3g n_steps=%d→%d n_src=%d)",
-                    self._tile_data.tile_id if self._tile_data else '?',
-                    tbl['W'], tbl['t_start'], tbl['dt'],
-                    tbl['n_steps'], n_steps, len(tbl.get('src_rows', [])),
-                )
-                return info
+                # Chunked reuse: verify W is wide enough for the new run.
+                # F9: if the new n_steps would need a wider window than the
+                # cached table's W, treat as a MISS so the rebuild uses the
+                # proper W.  A short first build (W = min(512, 5)) would otherwise
+                # force ~2000/5 window rebuilds while logging 'reused'.
+                new_W_needed = min(CHUNK_WINDOW_STEPS, n_steps)
+                if new_W_needed > tbl['W']:
+                    # W too narrow for the new run — fall through to rebuild.
+                    logger.debug(
+                        "Tile %s precompute_step_columns: MISS (F9 W-widening) "
+                        "cached W=%d < required W=%d — rebuilding",
+                        self._tile_data.tile_id if self._tile_data else '?',
+                        tbl['W'], new_W_needed,
+                    )
+                    # Fall through to normal build path below.
+                else:
+                    # Extend n_steps so on-demand rebuilds reach the new run's
+                    # end without clamping.
+                    if tbl['n_steps'] < n_steps:
+                        tbl['n_steps'] = n_steps
+                    # F6: activate the cached table.
+                    self._step_col_table = tbl
+                    info = dict(self._step_col_info)
+                    info['reused'] = True
+                    self._step_col_info = info
+                    logger.debug(
+                        "Tile %s precompute_step_columns: REUSED chunked table "
+                        "(W=%d t_start=%.3g dt=%.3g n_steps=%d→%d n_src=%d)",
+                        self._tile_data.tile_id if self._tile_data else '?',
+                        tbl['W'], tbl['t_start'], tbl['dt'],
+                        tbl['n_steps'], n_steps, len(tbl.get('src_rows', [])),
+                    )
+                    return info
 
         # --- Change C: amortization guard for single-window chunked builds --
         # When tier is chunked AND the entire run fits in one window AND no
@@ -743,15 +810,22 @@ class _TimeDomainMixin(_PeakTrackingMixin):
             alignment = self._smoothed_grid_alignment(dt)
             chunked_fast_path_available = False
             if alignment is not None:
-                # ts_m_cand == 0 is valid (t_start=0.0); None is off-grid.
+                # F8: accept ANY on-grid ts_m (including negative, e.g. the QS
+                # path sets t_col_start = t_array[0] - dt which is -dt when
+                # t_array starts at 0).  Python modulo handles negatives correctly.
+                # Off-grid (None) still rejects.
                 ts_m_cand = self._dt_grid_step_index(t_start, dt)
-                if ts_m_cand is not None and ts_m_cand >= 0:
+                if ts_m_cand is not None:
                     chunked_fast_path_available = True
             if n_steps <= W and not chunked_fast_path_available:
                 # Single window, no amortization benefit → skip build.
+                # F6: only deactivate the ACTIVE table; retain the CACHED slot
+                # so that a subsequent precompute with a matching key (e.g., the
+                # phase table for the main transient dt) is not evicted.
                 self._step_col_table = None
-                self._step_col_cache_key = None
-                self._step_col_info = None
+                # Do NOT touch _step_col_cached_table, _step_col_cache_key, or
+                # _step_col_info — those describe the CACHED slot, which is
+                # independent of what this (skipped) call requested.
                 logger.debug(
                     "Tile %s precompute_step_columns: SKIPPED (Change C) "
                     "n_steps=%d <= W=%d, using per-step fallback",
@@ -778,6 +852,11 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         info['reused'] = False
         self._step_col_cache_key = new_key
         self._step_col_info = info
+        # F6: on a successful build, BOTH the active and cached slots point to
+        # the same dict so they stay in sync.  The active slot is what
+        # _get_current_array_for_step reads; the cached slot is what the next
+        # precompute_step_columns reuse check reads.  No copy is made.
+        self._step_col_cached_table = self._step_col_table
 
         return info
 
@@ -939,10 +1018,12 @@ class _TimeDomainMixin(_PeakTrackingMixin):
         m_fold = 0
 
         if alignment is not None:
-            # t_start must land on the dt grid.  _dt_grid_step_index returns 0
-            # when t_start == 0.0 (valid); None for off-grid; negative rejected.
+            # F8: accept ANY on-grid ts_m (including negative, e.g. QS path
+            # calls with t_col_start = t_array[0] - dt = -dt when t starts at 0).
+            # Python modulo in the index formula handles negatives correctly.
+            # Off-grid (None) still rejects.
             ts_m_cand = self._dt_grid_step_index(t_start, dt)
-            if ts_m_cand is not None and ts_m_cand >= 0:
+            if ts_m_cand is not None:
                 fast_path = True
                 ts_m = ts_m_cand
                 m_fold = alignment['m']

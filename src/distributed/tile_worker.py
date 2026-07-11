@@ -103,8 +103,20 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         self._tracked_node_indices: Dict[str, int] = {}
 
         # --- A2: Phase-folded step-column table (tile_worker_td.py) --------
-        # None until precompute_step_columns() is called.
+        # _step_col_table: the ACTIVE table used by _get_current_array_for_step.
+        # None means per-step evaluate_at_time fallback is used.
+        # F6: separate from the CACHED slot so a Change-C skip or a
+        # use_step_columns=False path can deactivate the table without
+        # evicting a valid cached table built for a different call (e.g. the
+        # phase table from the main transient dt).
         self._step_col_table: Optional[Dict] = None
+        # _step_col_cached_table: the most recently BUILT table (may differ
+        # from _step_col_table when the active table was deactivated by a
+        # Change-C skip or use_step_columns=False path).  precompute reuse
+        # check reads this slot, not _step_col_table.  Both slots point to the
+        # SAME dict object after a successful build; on a reuse hit the active
+        # slot is updated to the cached slot.
+        self._step_col_cached_table: Optional[Dict] = None
         # Settings (propagated via configure() from coordinator settings).
         self._use_step_columns: bool = True
         self._max_table_mb: float = 512.0
@@ -117,8 +129,8 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         # the cache key is invalidated automatically without having to inspect
         # source identity.
         self._sources_version: int = 0
-        # Tuple key from the most recent successful precompute_step_columns
-        # build.  Format depends on tier; None = no valid cached table.
+        # Tuple key describing the CACHED slot (_step_col_cached_table).
+        # None = no valid cached table.
         self._step_col_cache_key: Optional[tuple] = None
         # The info dict returned by the most recent build (stored so callers
         # can retrieve it without a round-trip on a cache hit).
@@ -127,6 +139,15 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         # Keyed on (sources_version, dt); cleared by _invalidate_step_columns().
         # None = no cached result yet.
         self._grid_alignment_cache = None
+
+        # --- F7: Smoothed-VCS disk-cache identity tracking ------------------
+        # The hash string embedded in the smoothed-VCS cache filename for the
+        # currently loaded smoothed sources.  Set on both compute and disk-hit
+        # paths in smooth_sources().  When smooth_sources() is called again with
+        # identical params (same hash) AND _active_sources is already the
+        # smoothed sources, we short-circuit and return cached stats WITHOUT
+        # reloading or bumping _sources_version.
+        self._smoothed_cache_hash: Optional[str] = None
 
         # --- A4: Symbolic-reuse cache for factor_and_compute_schur ----------
         # Holds {'P_ii', 'factor', 'ref_indptr', 'ref_indices'} from the
