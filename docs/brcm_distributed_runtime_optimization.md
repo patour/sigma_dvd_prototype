@@ -323,7 +323,7 @@ fold near/far decomposition into a single forward solve, instead of re-running t
 | 9 | Iterative interface CG + block-Jacobi preconditioner (B2) | `e66f65a` | distributed-10x | auto selects direct for n_interface < 200K on netlist_sampled | removes ~200 GB coordinator memory wall at 1 M+ interface nodes | **Landed** |
 | 10 | Streaming Schur shard assembly (B3) | `9818280` + `10695f5` | distributed-10x | peak 3.5 MB vs 15.6 MB bulk on netlist_sampled; auto at 512 MB+ estimated S_i peak | caps coordinator peak memory; enables 100M+ node PDNs | **Landed** |
 | 11 | Multi-node task-dataflow design + `TaskDataflowBackend` prototype (B4) | `f25d209` | distributed-10x | DC actor 0.858 s vs task 0.797 s, max \|ΔV\| = 0.0 V (exact) | enables k-machine deployment (see §7.1); actor mode remains single-node default | **Landed (prototype)** |
-| 12 | Step-column table reuse across transients + chunked direct-scatter windows (minion plan, see §7.2) | `11478ce` + `5e8182e` + `3d7abcc` | distributed-10x | loop_total –25% vs checked-in baseline; results exact (peak diff 0.0000 mV) | netlist_minion: kills the 314 s/solve rebuild ×6 solve_transient calls per decompose → `initial_transient` 394.6 s → ~85–90 s, total 1,117 s → ~700–750 s projected | **Landed** |
+| 12 | Step-column table reuse across transients + chunked direct-scatter windows (minion plan, see §7.2) | `11478ce` + `5e8182e` + `3d7abcc`; review-hardened by `a147883` + `5319dd1` + `b0c781b` | distributed-10x | loop_total –25 to –31% vs checked-in baseline; results exact (peak diff 0.0000 mV) | netlist_minion: kills the 314 s/solve rebuild ×6 solve_transient calls per decompose → `initial_transient` 394.6 s → ~85–90 s, total 1,117 s → ~700–750 s projected | **Landed** |
 
 ### 7.1 B4 findings — multi-node task dataflow (full analysis: `docs/multinode_task_dataflow_design.md`)
 
@@ -378,6 +378,19 @@ getting 2.3× faster (0.449 → 0.198 s/step). Root causes and dispositions:
 
 Projected minion re-run: `initial_transient` 394.6 s → ~85–90 s (one cheap build + 79 s loop);
 the 5 subsequent transients no longer pay builds; total ~700–750 s vs 1,117 s.
+
+A follow-up xhigh adversarial review of the A/B/C changes confirmed 15 findings (4 silent
+wrong-result bugs on input shapes the fixed netlists never exercise), all fixed in `a147883` +
+`5319dd1` + `b0c781b`: the smoothed-grid probe is now a full vectorized per-row eligibility check
+(non-uniform / partially-compacted rows disable the fast path instead of gathering wrong values —
+on heavily compacted VCS like minion's the fast path correctly self-disables and Change A reuse
+carries the win); the stale-window `n_src` capture on reuse is fixed at root; `apply_wscale` is in
+the cache key; skips no longer evict a valid cached table (active/cached slot split); identical-
+params smoothed-cache re-hits no longer bump the sources version; negative on-grid `t_start`
+(the QS convention `t_col_start = -dt`) is accepted by both tiers; short-then-long reuse rebuilds
+with proper W. A 40-test guard-matrix suite
+(`tests/distributed/test_step_column_guard_matrix.py`) now pins the tier-selection guards and
+cache-validity checks across these input shapes.
 
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
