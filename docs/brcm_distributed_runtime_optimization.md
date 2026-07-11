@@ -392,6 +392,48 @@ with proper W. A 40-test guard-matrix suite
 (`tests/distributed/test_step_column_guard_matrix.py`) now pins the tier-selection guards and
 cache-validity checks across these input shapes.
 
+### 7.3 First BRCM re-measurement (2026-07-10 run, `logs/brcm_transient_20260710_221705.log`)
+
+First post-refactor run on the real BRCM bundle (36 tiles unchanged — **B1 retiling NOT enabled**;
+smoothed-VCS cache cold 0/36; `threads_per_worker` not set). Results **bit-identical** to baseline:
+peak 104.945 mV at t=35.575 ns, same top-10 nodes — exactness holds at 30.67M nodes.
+
+| Phase | Baseline | Re-run | Δ | Notes |
+|---|---|---|---|---|
+| Model load | 47 s | 85 s | +80% | host-side |
+| VCS init | 181 s | 224 s | +24% | host-side |
+| Smoothing | 2,697 s | 3,616 s | +34% | cold cache (0/36); straggler-bound: max tile 3,614 s ≈ wall, mean 549 s |
+| DC prepare | 2,087 s | 1,933 s | −7% | assemble 369→149 s (A4); islands 404→414 s; tile factor wall 1,240→1,286 s (no B1) |
+| Transient prepare | 2,459 s | 1,431 s | **−42%** | A4 pattern reuse (assemble ≈0) + A7 islands 0 s; tile numeric refactor remains ~1,250 s (simplicial ⇒ symbolic reuse saves little) |
+| A2 step-column build | — | 575 s | new | all 36 tiles → **chunked** (m=2000; straggler table ~20 GB ≫ 512 MB cap) |
+| Loop (10K steps) | 61,430 s (6.143/step) | 55,704 s (5.570/step) | −9% | see decomposition below |
+| — RHS | 3.313/step | 1.798/step | −46% | steady ≈0.9/step (straggler interior backsolve) + **19 window-rebuild spikes ≈500 s each ≈9,500 s** (every 512 steps; compacted smoothed rows make the direct-scatter gather ineligible, so rebuilds pay `evaluate_at_times_for_rows`) |
+| — Assemble+solve | 1.688/step | 2.858/step | **+70%** | same factor (supernodal/METIS, 70,734 unknowns, factor 74→83 s); segment actually *shrank* (assembly moved to RHS timer) ⇒ backsolve itself slower — environmental (all host-side phases +24–80%; also A2 tables + 5 GB/window rebuild allocations pressure memory bandwidth). DC-IC solve identical (34.2 vs 34.0 s) |
+| — Recovery | 1.047/step | 0.913/step | −13% | straggler-gated |
+| **End-to-end** | **68,940 s** | **63,605 s** | **1.08×** | |
+
+**Why only 1.08× instead of the projected ~4×:** (1) B1 retiling was not applied — the 1.6M-interior
+straggler still gates RHS steady-state, recovery, tile factor, transient refactor, and smoothing wall
+(the plan's arithmetic REQUIRES B1 for tile-side terms); (2) cold smoothing cache (+3,616 s, one-time);
+(3) A2 chunked rebuild spikes (+9,500 s) — BRCM's m=2000 phase table cannot fit and compacted rows
+disqualify the gather; (4) the coordinator backsolve regression (+11,700 s vs baseline) appears
+environmental, not algorithmic.
+
+**Next actions (ranked):**
+1. **Re-parse with `--max-interior 400000` (B1)** — splits the straggler; expected: RHS steady 0.9→~0.3,
+   recovery 0.9→~0.35, tile factor 1,286→~400 s, transient refactor ~1,250→~400 s, smoothing straggler
+   3,614→<900 s, rebuild spikes shrink and parallelize.
+2. Re-run as-is gets smoothing ≈ free (cache 36/36).
+3. New item — **overlap chunked window prefetch** with the time loop (rebuilds are per-tile independent;
+   ~9,500 s hideable behind the interface solve barrier).
+4. Interface solve remains the post-B1 floor (~17–29 K s/10K steps): threaded/multi-RHS backsolve or
+   warm-started CG (`--interface-solver cg`, block-Jacobi, 70,734 unknowns @ 9.9% density) is the
+   remaining lever the plan always attributed the last ~2× to. Verify host BLAS threads/contention on
+   the next run before concluding anything algorithmic.
+
+With B1 + warm cache + unchanged interface solve at baseline speed, projected ≈19–21 K s (~3.4×);
+reaching ~10× still runs through the interface-solve line, as §7's cumulative table always showed.
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |
