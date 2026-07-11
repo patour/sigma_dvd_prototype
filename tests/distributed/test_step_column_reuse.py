@@ -652,94 +652,41 @@ def _attach_aperiodic_vcs_to_workers(workers, dt, n_steps):
 # 5. End-to-end: solve_transient reuse (2-tile model)
 # ──────────────────────────────────────────────────────────────────────────────
 
+# F13 fix: import the canonical fixture from the shared module instead of
+# maintaining a near-verbatim copy (which had dropped _owns_pkl_dir).
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+from _fixtures import build_two_tile_model as _build_two_tile_model  # noqa: E402
 
-def _build_two_tile_model():
-    """Build a 2-tile model suitable for DC + transient solves (no VCS files).
 
-    Pad node 'pad' is NOT placed in tile boundary_nodes — it lives only in
-    PackageData.  This matches the correct design used by the equivalence
-    suite (_build_synthetic_two_tile_model in test_equivalence.py) and
-    avoids the Dirichlet-port size mismatch in the DC IC bincount.
+# ──────────────────────────────────────────────────────────────────────────────
+# F13 regression: tmpdir ownership handoff
+# ──────────────────────────────────────────────────────────────────────────────
 
-    Topology:
-        Tile A: a1 --[1 mS]-- B  (boundary: B only; cap: a1-0 10 fF)
-        Tile B: B --[3 mS]-- b1 --[1 mS]-- 0  (boundary: B; cap: b1-0 5 fF)
-        Package: pad --[10 mS]-- B;  pad at 1.0 V (Dirichlet)
+
+class TestTmpDirOwnershipHandoff:
+    """F13: build_two_tile_model must pass _owns_pkl_dir so that model.shutdown()
+    cleans up the temp directory (the old local copies omitted this).
     """
-    import tempfile
-    import os
 
-    from distributed.backend import LocalBackend
-    from distributed.model import DistributedPowerGridModel
-    from distributed.parser import PackageData, PowerGridMetaData, TileConfig
-    from distributed.tile_worker import TileData, TileWorker
+    def test_shutdown_removes_tmpdir(self):
+        """After model.shutdown(), the temp directory no longer exists."""
+        import os
 
-    tmp_dir = tempfile.mkdtemp(prefix="test_sc_reuse_")
-
-    tile_a = TileData(
-        tile_id=(0, 0),
-        resistive_edges=[('a1', 'B', 1.0)],
-        all_nodes={'a1', 'B'},
-        boundary_nodes={'B'},  # pad NOT here
-        current_injections={'a1': 0.5},
-        capacitive_edges=[('a1', '0', 10.0)],
-    )
-    tile_b = TileData(
-        tile_id=(0, 1),
-        resistive_edges=[('B', 'b1', 3.0), ('b1', '0', 1.0)],
-        all_nodes={'B', 'b1'},
-        boundary_nodes={'B'},
-        current_injections={'b1': 0.3},
-        capacitive_edges=[('b1', '0', 5.0)],
-    )
-
-    interface_nodes = {'B'}
-
-    be = LocalBackend()
-    be.initialize()
-
-    wa = TileWorker()
-    wa.setup_from_tile_data(tile_a, interface_nodes)
-    wb = TileWorker()
-    wb.setup_from_tile_data(tile_b, interface_nodes)
-
-    workers = [wa, wb]
-
-    pkg = PackageData(
-        vsrc_dict={'V1': {'node_pos': 'pad', 'node_neg': '0', 'net': 'VDD', 'value': 1.0}},
-        package_edges=[('pad', 'B', 10.0)],
-        pad_nodes={'pad'},
-        tap_nodes=set(),
-        die_attachment_nodes=set(),
-        vdd=1.0,
-        net_name='VDD',
-        package_cap_edges=[],
-    )
-    # ckt_path needs a valid parent dir for the adjoint VCS cache path logic
-    dummy_ckt = os.path.join(tmp_dir, 'dummy.ckt')
-    tile_configs = [
-        TileConfig(tile_id=(0, 0), ckt_path=dummy_ckt, nd_path=None,
-                   instance_path=None, net_filter=None),
-        TileConfig(tile_id=(0, 1), ckt_path=dummy_ckt, nd_path=None,
-                   instance_path=None, net_filter=None),
-    ]
-    metadata = PowerGridMetaData(
-        tile_grid=(1, 2),
-        parameters={},
-        tile_configs=tile_configs,
-        package_data=pkg,
-        net_name='VDD',
-        vdd=1.0,
-    )
-    return DistributedPowerGridModel(
-        backend=be,
-        workers=workers,
-        interface_nodes=interface_nodes,
-        tile_boundary_nodes={(0, 0): ['B'], (0, 1): ['B']},
-        tile_interior_counts={(0, 0): wa.n_interior, (0, 1): wb.n_interior},
-        package_data=pkg,
-        metadata=metadata,
-    ), workers
+        model, _ = _build_two_tile_model()
+        tmp_dir = model._owns_pkl_dir
+        assert tmp_dir is not None, (
+            "F13: model._owns_pkl_dir must be set so shutdown() can clean up"
+        )
+        assert os.path.isdir(tmp_dir), (
+            "Pre-condition: tmp_dir must exist before shutdown()"
+        )
+        model.shutdown()
+        assert not os.path.exists(tmp_dir), (
+            "F13: model.shutdown() must remove the owned tmp_dir "
+            f"('{tmp_dir}' still exists)"
+        )
 
 
 class TestEndToEndTransientReuse:

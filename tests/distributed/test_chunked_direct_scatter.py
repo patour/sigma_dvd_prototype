@@ -420,7 +420,7 @@ class TestGatherWindowDirect:
 class TestChunkedDirectScatterBuildPath:
     """_build_chunked_window picks 'direct_scatter' when alignment holds."""
 
-    def _make_aligned_chunked_worker(self, period=1e-8, dt=1e-10, n_steps=600):
+    def _make_aligned_chunked_worker(self, period=1e-8, dt=1e-10):
         """Worker with smoothed periodic PWL forced into chunked tier."""
         worker = _make_worker()
         m = _attach_smoothed_pwl_vcs(worker, period=period, dt=dt)
@@ -432,10 +432,12 @@ class TestChunkedDirectScatterBuildPath:
     def test_build_path_is_direct_scatter(self):
         """With aligned smoothed sources and tiny max_mb, build_path='direct_scatter'."""
         dt = 1e-10
+        # F15 fix: replace dead 'period=m * dt if False else 100 * dt' (which
+        # referenced 'm' before binding, a NameError landmine) with the literal
+        # intent. n_steps argument also removed (it was accepted but unused).
         worker, m, max_mb = self._make_aligned_chunked_worker(
-            period=m * dt if False else 100 * dt,
+            period=100 * dt,
             dt=dt,
-            n_steps=600,
         )
         info = worker.precompute_step_columns(
             t_start=0.0, dt=dt, n_steps=600, max_table_mb=max_mb,
@@ -854,83 +856,12 @@ class TestChangeCFastPathInterplay:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _build_two_tile_model_with_caps():
-    """Build the standard 2-tile model (with capacitive edges for transient).
-
-    Topology:
-        Tile A: a1 --[1 mS]-- B  (cap: a1-0 10 fF)
-        Tile B: B --[3 mS]-- b1 --[1 mS]-- 0  (cap: b1-0 5 fF)
-        Package: pad --[10 mS]-- B;  pad at 1.0 V
-    """
-    import os
-    import tempfile
-
-    from distributed.backend import LocalBackend
-    from distributed.model import DistributedPowerGridModel
-    from distributed.parser import PackageData, PowerGridMetaData, TileConfig
-    from distributed.tile_worker import TileData, TileWorker
-
-    tmp_dir = tempfile.mkdtemp(prefix="test_chb_")
-
-    tile_a = TileData(
-        tile_id=(0, 0),
-        resistive_edges=[('a1', 'B', 1.0)],
-        all_nodes={'a1', 'B'},
-        boundary_nodes={'B'},
-        current_injections={'a1': 0.1},
-        capacitive_edges=[('a1', '0', 10.0)],
-    )
-    tile_b = TileData(
-        tile_id=(0, 1),
-        resistive_edges=[('B', 'b1', 3.0), ('b1', '0', 1.0)],
-        all_nodes={'B', 'b1'},
-        boundary_nodes={'B'},
-        current_injections={'b1': 0.1},
-        capacitive_edges=[('b1', '0', 5.0)],
-    )
-    interface_nodes = {'B'}
-    be = LocalBackend()
-    be.initialize()
-    wa = TileWorker()
-    wa.setup_from_tile_data(tile_a, interface_nodes)
-    wb = TileWorker()
-    wb.setup_from_tile_data(tile_b, interface_nodes)
-    workers = [wa, wb]
-
-    pkg = PackageData(
-        vsrc_dict={'V1': {'node_pos': 'pad', 'node_neg': '0', 'net': 'VDD', 'value': 1.0}},
-        package_edges=[('pad', 'B', 10.0)],
-        pad_nodes={'pad'},
-        tap_nodes=set(),
-        die_attachment_nodes=set(),
-        vdd=1.0,
-        net_name='VDD',
-        package_cap_edges=[],
-    )
-    dummy_ckt = os.path.join(tmp_dir, 'dummy.ckt')
-    tile_configs = [
-        TileConfig(tile_id=(0, 0), ckt_path=dummy_ckt, nd_path=None,
-                   instance_path=None, net_filter=None),
-        TileConfig(tile_id=(0, 1), ckt_path=dummy_ckt, nd_path=None,
-                   instance_path=None, net_filter=None),
-    ]
-    metadata = PowerGridMetaData(
-        tile_grid=(1, 2),
-        parameters={},
-        tile_configs=tile_configs,
-        package_data=pkg,
-        net_name='VDD',
-        vdd=1.0,
-    )
-    return DistributedPowerGridModel(
-        backend=be,
-        workers=workers,
-        interface_nodes=interface_nodes,
-        tile_boundary_nodes={(0, 0): ['B'], (0, 1): ['B']},
-        tile_interior_counts={(0, 0): wa.n_interior, (0, 1): wb.n_interior},
-        package_data=pkg,
-        metadata=metadata,
-    ), workers
+# F13 fix: import canonical fixture (restores _owns_pkl_dir handoff that was
+# dropped in the old near-verbatim copy).
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+from _fixtures import build_two_tile_model as _build_two_tile_model_with_caps  # noqa: E402
 
 
 def _attach_smoothed_pwl_vcs_to_workers(workers, period=1e-8, dt=1e-10):
