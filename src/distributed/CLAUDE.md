@@ -137,11 +137,17 @@ sigma-dvd solve <pkl_dir> \
     --backend {local,ray} \
     --mode {dc,quasi-static,transient} \
     --t-end 10ns --dt 100ps --n-points 11 \
-    --max-interior 400000 \
     --tiles-per-worker auto \
     --plot [--plot-layers M0,M1] [--max-stripes 2000] \
     --config solver.yaml \
     --verbose
+```
+
+`--max-interior` (B1 retiling) is a **parse-time** flag — it lives on `parse` and `run` only, because splitting happens inside `parse_and_dump()` and is baked into the pkl bundle. `solve` loads whatever tiling the bundle contains:
+
+```bash
+sigma-dvd parse <netlist_dir> --net VDD --backend ray \
+    --max-interior 400000 -o <netlist_dir>/distributed_pkl_split
 ```
 
 YAML config supports per-role solver settings (coordinator vs tile workers) — see `_apply_yaml_role_configs`. `interface_solver`, `streaming_assembly`, `use_step_columns`, `max_table_mb`, CHOLMOD knobs are all settable via YAML. CLI also supports file logging (`_setup_logging`, `_add_file_logging`) and writes a top-K worst IR-drop report via the shared `reports.topk_irdrop.generate_topk_report`.
