@@ -1,0 +1,1476 @@
+18:17:19 distributed.cli INFO: Logging to file: /wv/bwdev1/patrasej/dev/sigma_dvd/mpower_testcases/BRCM/analysis/dynamic_ir/distributed/transient_20260712_181719.log
+18:17:19 distributed.model INFO: Loaded metadata from netlist/netlist_brcm/distributed_pkl_split_400K: 107 tiles, 269799 shared boundary nodes
+18:17:33 distributed.model INFO: Interface: 269801 nodes (269799 boundary + 309 die attachment)
+18:17:56 distributed.model INFO: Model created in 36.834s: 107 tile-worker handles, 30552740 interior nodes, 384010 boundary entries, 269801 interface nodes
+18:17:56 distributed.cli INFO: Interface solver: auto (matvec=assembled, precond=block_jacobi, rtol=1.00e-12)
+18:22:14 distributed.solver_td INFO: Smoothing: 107 tiles, cache hits=0/107, per-tile wall: max=253.382s mean=47.650s
+18:22:14 distributed.solver_td INFO: VCS init: 12385192 total sources across 107 tiles (107 from cache)
+18:22:14 distributed.solver_td INFO:   init_vcs: 4.3606s
+18:22:14 distributed.solver_td INFO:   smooth_sources: 253.6960s
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 0, 0) factor_and_compute_schur:
+  G_ii: 273,813 x 273,813, nnz=1,273,073 (density 0.00170%), 16.7 MB
+  G_pp: 1,820 x 1,820, nnz=2,878
+  G_pi: 1,820 x 273,813, nnz=1,612  |  G_ip: 273,813 x 1,820, nnz=1,612
+  Block system memory: 16.7 MB
+  factor_interior: 211.644s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 213.947s  |  Schur: 1,820 x 1,820 dense (25.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 0, 1) factor_and_compute_schur:
+  G_ii: 267,660 x 267,660, nnz=1,244,704 (density 0.00174%), 16.5 MB
+  G_pp: 2,805 x 2,805, nnz=2,857
+  G_pi: 2,805 x 267,660, nnz=6,801  |  G_ip: 267,660 x 2,805, nnz=6,801
+  Block system memory: 16.5 MB
+  factor_interior: 243.407s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 245.298s  |  Schur: 2,805 x 2,805 dense (60.0 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 1, 0) factor_and_compute_schur:
+  G_ii: 259,516 x 259,516, nnz=1,216,386 (density 0.00181%), 16.1 MB
+  G_pp: 4,156 x 4,156, nnz=5,230
+  G_pi: 4,156 x 259,516, nnz=5,633  |  G_ip: 259,516 x 4,156, nnz=5,633
+  Block system memory: 16.1 MB
+  factor_interior: 289.322s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 291.546s  |  Schur: 4,156 x 4,156 dense (131.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 1, 1) factor_and_compute_schur:
+  G_ii: 260,018 x 260,018, nnz=1,212,188 (density 0.00179%), 16.1 MB
+  G_pp: 3,637 x 3,637, nnz=4,979
+  G_pi: 3,637 x 260,018, nnz=5,762  |  G_ip: 260,018 x 3,637, nnz=5,762
+  Block system memory: 16.1 MB
+  factor_interior: 216.749s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 219.387s  |  Schur: 3,637 x 3,637 dense (100.9 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 1, 2) factor_and_compute_schur:
+  G_ii: 254,367 x 254,367, nnz=1,219,813 (density 0.00189%), 16.2 MB
+  G_pp: 3,995 x 3,995, nnz=5,807
+  G_pi: 3,995 x 254,367, nnz=7,435  |  G_ip: 254,367 x 3,995, nnz=7,435
+  Block system memory: 16.2 MB
+  factor_interior: 261.250s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 264.764s  |  Schur: 3,995 x 3,995 dense (121.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 1, 3) factor_and_compute_schur:
+  G_ii: 253,798 x 253,798, nnz=1,213,734 (density 0.00188%), 16.0 MB
+  G_pp: 2,672 x 2,672, nnz=2,996
+  G_pi: 2,672 x 253,798, nnz=6,328  |  G_ip: 253,798 x 2,672, nnz=6,328
+  Block system memory: 16.0 MB
+  factor_interior: 212.972s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 214.491s  |  Schur: 2,672 x 2,672 dense (54.5 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 2, 0) factor_and_compute_schur:
+  G_ii: 370,853 x 370,853, nnz=1,716,949 (density 0.00125%), 22.9 MB
+  G_pp: 7,053 x 7,053, nnz=8,795
+  G_pi: 7,053 x 370,853, nnz=9,612  |  G_ip: 370,853 x 7,053, nnz=9,612
+  Block system memory: 22.9 MB
+  factor_interior: 392.659s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 400.961s  |  Schur: 7,053 x 7,053 dense (379.5 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 2, 1) factor_and_compute_schur:
+  G_ii: 356,279 x 356,279, nnz=1,692,289 (density 0.00133%), 22.5 MB
+  G_pp: 6,430 x 6,430, nnz=9,348
+  G_pi: 6,430 x 356,279, nnz=11,702  |  G_ip: 356,279 x 6,430, nnz=11,702
+  Block system memory: 22.5 MB
+  factor_interior: 215.964s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 231.625s  |  Schur: 6,430 x 6,430 dense (315.4 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 3, 0) factor_and_compute_schur:
+  G_ii: 292,589 x 292,589, nnz=1,355,183 (density 0.00158%), 17.9 MB
+  G_pp: 2,716 x 2,716, nnz=3,606
+  G_pi: 2,716 x 292,589, nnz=3,511  |  G_ip: 292,589 x 2,716, nnz=3,511
+  Block system memory: 17.9 MB
+  factor_interior: 283.022s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 284.370s  |  Schur: 2,716 x 2,716 dense (56.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 3, 1) factor_and_compute_schur:
+  G_ii: 286,310 x 286,310, nnz=1,339,208 (density 0.00163%), 17.7 MB
+  G_pp: 2,721 x 2,721, nnz=2,735
+  G_pi: 2,721 x 286,310, nnz=6,003  |  G_ip: 286,310 x 2,721, nnz=6,003
+  Block system memory: 17.7 MB
+  factor_interior: 176.689s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 178.428s  |  Schur: 2,721 x 2,721 dense (56.5 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 4, 0) factor_and_compute_schur:
+  G_ii: 314,639 x 314,639, nnz=1,457,603 (density 0.00147%), 19.2 MB
+  G_pp: 2,931 x 2,931, nnz=4,545
+  G_pi: 2,931 x 314,639, nnz=3,455  |  G_ip: 314,639 x 2,931, nnz=3,455
+  Block system memory: 19.2 MB
+  factor_interior: 283.966s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 285.056s  |  Schur: 2,931 x 2,931 dense (65.5 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 4, 1) factor_and_compute_schur:
+  G_ii: 303,472 x 303,472, nnz=1,432,972 (density 0.00156%), 18.9 MB
+  G_pp: 2,290 x 2,290, nnz=2,304
+  G_pi: 2,290 x 303,472, nnz=5,178  |  G_ip: 303,472 x 2,290, nnz=5,178
+  Block system memory: 18.9 MB
+  factor_interior: 187.850s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 190.098s  |  Schur: 2,290 x 2,290 dense (40.0 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 5, 0) factor_and_compute_schur:
+  G_ii: 256,459 x 256,459, nnz=1,189,449 (density 0.00181%), 15.7 MB
+  G_pp: 1,886 x 1,886, nnz=2,588
+  G_pi: 1,886 x 256,459, nnz=2,431  |  G_ip: 256,459 x 1,886, nnz=2,431
+  Block system memory: 15.7 MB
+  factor_interior: 220.285s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 221.505s  |  Schur: 1,886 x 1,886 dense (27.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (0, 5, 1) factor_and_compute_schur:
+  G_ii: 249,863 x 249,863, nnz=1,176,233 (density 0.00188%), 15.5 MB
+  G_pp: 1,268 x 1,268, nnz=1,286
+  G_pi: 1,268 x 249,863, nnz=2,923  |  G_ip: 249,863 x 1,268, nnz=2,923
+  Block system memory: 15.5 MB
+  factor_interior: 87.178s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 88.185s  |  Schur: 1,268 x 1,268 dense (12.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 0, 0) factor_and_compute_schur:
+  G_ii: 263,881 x 263,881, nnz=1,229,103 (density 0.00177%), 16.2 MB
+  G_pp: 3,209 x 3,209, nnz=4,251
+  G_pi: 3,209 x 263,881, nnz=3,561  |  G_ip: 263,881 x 3,209, nnz=3,561
+  Block system memory: 16.2 MB
+  factor_interior: 199.582s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 203.005s  |  Schur: 3,209 x 3,209 dense (78.6 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 0, 1) factor_and_compute_schur:
+  G_ii: 262,788 x 262,788, nnz=1,221,908 (density 0.00177%), 16.1 MB
+  G_pp: 1,584 x 1,584, nnz=1,636
+  G_pi: 1,584 x 262,788, nnz=2,760  |  G_ip: 262,788 x 1,584, nnz=2,760
+  Block system memory: 16.1 MB
+  factor_interior: 189.328s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 191.160s  |  Schur: 1,584 x 1,584 dense (19.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 1, 0) factor_and_compute_schur:
+  G_ii: 256,910 x 256,910, nnz=1,235,536 (density 0.00187%), 16.3 MB
+  G_pp: 4,710 x 4,710, nnz=5,926
+  G_pi: 4,710 x 256,910, nnz=5,677  |  G_ip: 256,910 x 4,710, nnz=5,677
+  Block system memory: 16.3 MB
+  factor_interior: 280.223s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 283.012s  |  Schur: 4,710 x 4,710 dense (169.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 1, 1) factor_and_compute_schur:
+  G_ii: 256,115 x 256,115, nnz=1,230,773 (density 0.00188%), 16.2 MB
+  G_pp: 2,823 x 2,823, nnz=3,467
+  G_pi: 2,823 x 256,115, nnz=4,623  |  G_ip: 256,115 x 2,823, nnz=4,623
+  Block system memory: 16.2 MB
+  factor_interior: 227.498s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 228.559s  |  Schur: 2,823 x 2,823 dense (60.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 1, 2) factor_and_compute_schur:
+  G_ii: 258,103 x 258,103, nnz=1,211,701 (density 0.00182%), 16.1 MB
+  G_pp: 4,113 x 4,113, nnz=5,785
+  G_pi: 4,113 x 258,103, nnz=6,130  |  G_ip: 258,103 x 4,113, nnz=6,130
+  Block system memory: 16.1 MB
+  factor_interior: 161.182s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 165.936s  |  Schur: 4,113 x 4,113 dense (129.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 1, 3) factor_and_compute_schur:
+  G_ii: 258,931 x 258,931, nnz=1,208,347 (density 0.00180%), 16.0 MB
+  G_pp: 3,411 x 3,411, nnz=4,163
+  G_pi: 3,411 x 258,931, nnz=6,426  |  G_ip: 258,931 x 3,411, nnz=6,426
+  Block system memory: 16.0 MB
+  factor_interior: 200.154s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 203.762s  |  Schur: 3,411 x 3,411 dense (88.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 2, 0) factor_and_compute_schur:
+  G_ii: 298,329 x 298,329, nnz=1,430,205 (density 0.00161%), 18.8 MB
+  G_pp: 4,011 x 4,011, nnz=5,773
+  G_pi: 4,011 x 298,329, nnz=4,667  |  G_ip: 298,329 x 4,011, nnz=4,667
+  Block system memory: 18.8 MB
+  factor_interior: 206.867s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 210.481s  |  Schur: 4,011 x 4,011 dense (122.7 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 2, 1) factor_and_compute_schur:
+  G_ii: 298,581 x 298,581, nnz=1,428,897 (density 0.00160%), 18.8 MB
+  G_pp: 3,427 x 3,427, nnz=4,277
+  G_pi: 3,427 x 298,581, nnz=4,624  |  G_ip: 298,581 x 3,427, nnz=4,624
+  Block system memory: 18.8 MB
+  factor_interior: 210.119s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 211.693s  |  Schur: 3,427 x 3,427 dense (89.6 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 2, 2) factor_and_compute_schur:
+  G_ii: 301,438 x 301,438, nnz=1,423,126 (density 0.00157%), 18.8 MB
+  G_pp: 4,358 x 4,358, nnz=5,270
+  G_pi: 4,358 x 301,438, nnz=6,995  |  G_ip: 301,438 x 4,358, nnz=6,995
+  Block system memory: 18.8 MB
+  factor_interior: 239.418s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 242.113s  |  Schur: 4,358 x 4,358 dense (144.9 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 2, 3) factor_and_compute_schur:
+  G_ii: 297,410 x 297,410, nnz=1,417,876 (density 0.00160%), 18.8 MB
+  G_pp: 4,070 x 4,070, nnz=4,874
+  G_pi: 4,070 x 297,410, nnz=7,925  |  G_ip: 297,410 x 4,070, nnz=7,925
+  Block system memory: 18.8 MB
+  factor_interior: 198.320s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 200.822s  |  Schur: 4,070 x 4,070 dense (126.4 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 3, 0) factor_and_compute_schur:
+  G_ii: 326,557 x 326,557, nnz=1,515,085 (density 0.00142%), 20.2 MB
+  G_pp: 7,000 x 7,000, nnz=7,918
+  G_pi: 7,000 x 326,557, nnz=10,256  |  G_ip: 326,557 x 7,000, nnz=10,256
+  Block system memory: 20.2 MB
+  factor_interior: 304.865s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 313.362s  |  Schur: 7,000 x 7,000 dense (373.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 3, 1) factor_and_compute_schur:
+  G_ii: 317,395 x 317,395, nnz=1,487,469 (density 0.00148%), 19.8 MB
+  G_pp: 6,619 x 6,619, nnz=7,443
+  G_pi: 6,619 x 317,395, nnz=11,410  |  G_ip: 317,395 x 6,619, nnz=11,410
+  Block system memory: 19.8 MB
+  factor_interior: 318.992s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 325.804s  |  Schur: 6,619 x 6,619 dense (334.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 4, 0) factor_and_compute_schur:
+  G_ii: 206,833 x 206,833, nnz=965,255 (density 0.00226%), 12.8 MB
+  G_pp: 3,305 x 3,305, nnz=4,249
+  G_pi: 3,305 x 206,833, nnz=4,504  |  G_ip: 206,833 x 3,305, nnz=4,504
+  Block system memory: 12.8 MB
+  factor_interior: 178.158s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 183.508s  |  Schur: 3,305 x 3,305 dense (83.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 4, 1) factor_and_compute_schur:
+  G_ii: 201,907 x 201,907, nnz=964,289 (density 0.00237%), 12.7 MB
+  G_pp: 1,432 x 1,432, nnz=1,914
+  G_pi: 1,432 x 201,907, nnz=2,551  |  G_ip: 201,907 x 1,432, nnz=2,551
+  Block system memory: 12.7 MB
+  factor_interior: 90.130s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 91.165s  |  Schur: 1,432 x 1,432 dense (15.6 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 4, 2) factor_and_compute_schur:
+  G_ii: 203,499 x 203,499, nnz=956,811 (density 0.00231%), 12.7 MB
+  G_pp: 3,116 x 3,116, nnz=3,930
+  G_pi: 3,116 x 203,499, nnz=5,099  |  G_ip: 203,499 x 3,116, nnz=5,099
+  Block system memory: 12.7 MB
+  factor_interior: 168.424s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 171.879s  |  Schur: 3,116 x 3,116 dense (74.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 4, 3) factor_and_compute_schur:
+  G_ii: 200,392 x 200,392, nnz=956,328 (density 0.00238%), 12.6 MB
+  G_pp: 1,699 x 1,699, nnz=2,453
+  G_pi: 1,699 x 200,392, nnz=3,118  |  G_ip: 200,392 x 1,699, nnz=3,118
+  Block system memory: 12.6 MB
+  factor_interior: 80.229s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 81.157s  |  Schur: 1,699 x 1,699 dense (22.0 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (1, 5) factor_and_compute_schur:
+  G_ii: 201,199 x 201,199, nnz=953,835 (density 0.00236%), 12.5 MB
+  G_pp: 1,330 x 1,330, nnz=1,410
+  G_pi: 1,330 x 201,199, nnz=2,284  |  G_ip: 201,199 x 1,330, nnz=2,284
+  Block system memory: 12.5 MB
+  factor_interior: 22.657s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 23.291s  |  Schur: 1,330 x 1,330 dense (13.5 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 0, 0) factor_and_compute_schur:
+  G_ii: 264,684 x 264,684, nnz=1,232,522 (density 0.00176%), 16.2 MB
+  G_pp: 1,964 x 1,964, nnz=3,012
+  G_pi: 1,964 x 264,684, nnz=1,849  |  G_ip: 264,684 x 1,964, nnz=1,849
+  Block system memory: 16.2 MB
+  factor_interior: 224.014s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 226.046s  |  Schur: 1,964 x 1,964 dense (29.4 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 0, 1) factor_and_compute_schur:
+  G_ii: 261,372 x 261,372, nnz=1,216,966 (density 0.00178%), 16.1 MB
+  G_pp: 2,804 x 2,804, nnz=2,864
+  G_pi: 2,804 x 261,372, nnz=4,059  |  G_ip: 261,372 x 2,804, nnz=4,059
+  Block system memory: 16.1 MB
+  factor_interior: 252.463s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 254.406s  |  Schur: 2,804 x 2,804 dense (60.0 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 1, 0) factor_and_compute_schur:
+  G_ii: 259,553 x 259,553, nnz=1,218,761 (density 0.00181%), 16.1 MB
+  G_pp: 3,645 x 3,645, nnz=4,857
+  G_pi: 3,645 x 259,553, nnz=5,570  |  G_ip: 259,553 x 3,645, nnz=5,570
+  Block system memory: 16.1 MB
+  factor_interior: 244.180s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 246.300s  |  Schur: 3,645 x 3,645 dense (101.4 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 1, 1) factor_and_compute_schur:
+  G_ii: 260,528 x 260,528, nnz=1,216,360 (density 0.00179%), 16.1 MB
+  G_pp: 3,274 x 3,274, nnz=3,904
+  G_pi: 3,274 x 260,528, nnz=5,735  |  G_ip: 260,528 x 3,274, nnz=5,735
+  Block system memory: 16.1 MB
+  factor_interior: 251.975s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 254.840s  |  Schur: 3,274 x 3,274 dense (81.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 1, 2) factor_and_compute_schur:
+  G_ii: 255,774 x 255,774, nnz=1,230,690 (density 0.00188%), 16.2 MB
+  G_pp: 3,659 x 3,659, nnz=6,059
+  G_pi: 3,659 x 255,774, nnz=4,637  |  G_ip: 255,774 x 3,659, nnz=4,637
+  Block system memory: 16.2 MB
+  factor_interior: 271.185s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 273.215s  |  Schur: 3,659 x 3,659 dense (102.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 1, 3) factor_and_compute_schur:
+  G_ii: 254,887 x 254,887, nnz=1,224,771 (density 0.00189%), 16.1 MB
+  G_pp: 2,297 x 2,297, nnz=2,731
+  G_pi: 2,297 x 254,887, nnz=4,564  |  G_ip: 254,887 x 2,297, nnz=4,564
+  Block system memory: 16.1 MB
+  factor_interior: 252.178s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 253.554s  |  Schur: 2,297 x 2,297 dense (40.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 2, 0) factor_and_compute_schur:
+  G_ii: 343,728 x 343,728, nnz=1,626,136 (density 0.00138%), 21.5 MB
+  G_pp: 5,610 x 5,610, nnz=7,946
+  G_pi: 5,610 x 343,728, nnz=7,422  |  G_ip: 343,728 x 5,610, nnz=7,422
+  Block system memory: 21.5 MB
+  factor_interior: 298.813s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 303.366s  |  Schur: 5,610 x 5,610 dense (240.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 2, 1) factor_and_compute_schur:
+  G_ii: 340,319 x 340,319, nnz=1,628,315 (density 0.00141%), 21.5 MB
+  G_pp: 4,866 x 4,866, nnz=5,694
+  G_pi: 4,866 x 340,319, nnz=8,856  |  G_ip: 340,319 x 4,866, nnz=8,856
+  Block system memory: 21.5 MB
+  factor_interior: 286.454s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 290.965s  |  Schur: 4,866 x 4,866 dense (180.6 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 2, 2) factor_and_compute_schur:
+  G_ii: 335,935 x 335,935, nnz=1,609,373 (density 0.00143%), 21.2 MB
+  G_pp: 4,052 x 4,052, nnz=5,806
+  G_pi: 4,052 x 335,935, nnz=5,397  |  G_ip: 335,935 x 4,052, nnz=5,397
+  Block system memory: 21.2 MB
+  factor_interior: 227.022s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 231.079s  |  Schur: 4,052 x 4,052 dense (125.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 2, 3) factor_and_compute_schur:
+  G_ii: 337,739 x 337,739, nnz=1,623,327 (density 0.00142%), 21.4 MB
+  G_pp: 4,099 x 4,099, nnz=4,873
+  G_pi: 4,099 x 337,739, nnz=7,981  |  G_ip: 337,739 x 4,099, nnz=7,981
+  Block system memory: 21.4 MB
+  factor_interior: 266.941s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 269.318s  |  Schur: 4,099 x 4,099 dense (128.2 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 3, 0) factor_and_compute_schur:
+  G_ii: 205,154 x 205,154, nnz=970,638 (density 0.00231%), 12.9 MB
+  G_pp: 3,888 x 3,888, nnz=5,672
+  G_pi: 3,888 x 205,154, nnz=5,127  |  G_ip: 205,154 x 3,888, nnz=5,127
+  Block system memory: 12.9 MB
+  factor_interior: 167.558s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 176.017s  |  Schur: 3,888 x 3,888 dense (115.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 3, 1) factor_and_compute_schur:
+  G_ii: 202,828 x 202,828, nnz=974,140 (density 0.00237%), 12.9 MB
+  G_pp: 2,727 x 2,727, nnz=2,739
+  G_pi: 2,727 x 202,828, nnz=5,491  |  G_ip: 202,828 x 2,727, nnz=5,491
+  Block system memory: 12.9 MB
+  factor_interior: 143.644s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 147.330s  |  Schur: 2,727 x 2,727 dense (56.7 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 3, 2) factor_and_compute_schur:
+  G_ii: 205,472 x 205,472, nnz=968,278 (density 0.00229%), 12.9 MB
+  G_pp: 5,224 x 5,224, nnz=6,650
+  G_pi: 5,224 x 205,472, nnz=7,385  |  G_ip: 205,472 x 5,224, nnz=7,385
+  Block system memory: 12.9 MB
+  factor_interior: 303.048s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 306.640s  |  Schur: 5,224 x 5,224 dense (208.2 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 3, 3) factor_and_compute_schur:
+  G_ii: 197,977 x 197,977, nnz=948,725 (density 0.00242%), 12.6 MB
+  G_pp: 4,277 x 4,277, nnz=6,405
+  G_pi: 4,277 x 197,977, nnz=7,493  |  G_ip: 197,977 x 4,277, nnz=7,493
+  Block system memory: 12.6 MB
+  factor_interior: 151.459s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 156.608s  |  Schur: 4,277 x 4,277 dense (139.6 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 3, 4) factor_and_compute_schur:
+  G_ii: 204,346 x 204,346, nnz=982,134 (density 0.00235%), 13.0 MB
+  G_pp: 2,895 x 2,895, nnz=3,881
+  G_pi: 2,895 x 204,346, nnz=4,492  |  G_ip: 204,346 x 2,895, nnz=4,492
+  Block system memory: 13.0 MB
+  factor_interior: 134.795s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 138.235s  |  Schur: 2,895 x 2,895 dense (63.9 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 3, 5) factor_and_compute_schur:
+  G_ii: 200,492 x 200,492, nnz=962,582 (density 0.00239%), 12.7 MB
+  G_pp: 2,451 x 2,451, nnz=2,779
+  G_pi: 2,451 x 200,492, nnz=5,366  |  G_ip: 200,492 x 2,451, nnz=5,366
+  Block system memory: 12.7 MB
+  factor_interior: 107.885s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 109.771s  |  Schur: 2,451 x 2,451 dense (45.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 3, 6) factor_and_compute_schur:
+  G_ii: 200,541 x 200,541, nnz=963,537 (density 0.00240%), 12.7 MB
+  G_pp: 2,440 x 2,440, nnz=2,922
+  G_pi: 2,440 x 200,541, nnz=4,491  |  G_ip: 200,541 x 2,440, nnz=4,491
+  Block system memory: 12.7 MB
+  factor_interior: 121.461s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 123.839s  |  Schur: 2,440 x 2,440 dense (45.4 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 3, 7) factor_and_compute_schur:
+  G_ii: 199,430 x 199,430, nnz=956,352 (density 0.00240%), 12.7 MB
+  G_pp: 2,515 x 2,515, nnz=3,293
+  G_pi: 2,515 x 199,430, nnz=5,831  |  G_ip: 199,430 x 2,515, nnz=5,831
+  Block system memory: 12.7 MB
+  factor_interior: 143.787s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 146.070s  |  Schur: 2,515 x 2,515 dense (48.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 4, 0) factor_and_compute_schur:
+  G_ii: 358,126 x 358,126, nnz=1,707,624 (density 0.00133%), 22.6 MB
+  G_pp: 5,973 x 5,973, nnz=8,029
+  G_pi: 5,973 x 358,126, nnz=8,474  |  G_ip: 358,126 x 5,973, nnz=8,474
+  Block system memory: 22.6 MB
+  factor_interior: 325.209s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 331.534s  |  Schur: 5,973 x 5,973 dense (272.2 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 4, 1) factor_and_compute_schur:
+  G_ii: 359,116 x 359,116, nnz=1,700,696 (density 0.00132%), 22.5 MB
+  G_pp: 4,477 x 4,477, nnz=5,155
+  G_pi: 4,477 x 359,116, nnz=7,901  |  G_ip: 359,116 x 4,477, nnz=7,901
+  Block system memory: 22.5 MB
+  factor_interior: 328.734s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 331.246s  |  Schur: 4,477 x 4,477 dense (152.9 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 4, 2) factor_and_compute_schur:
+  G_ii: 350,279 x 350,279, nnz=1,683,655 (density 0.00137%), 22.2 MB
+  G_pp: 4,853 x 4,853, nnz=6,993
+  G_pi: 4,853 x 350,279, nnz=8,018  |  G_ip: 350,279 x 4,853, nnz=8,018
+  Block system memory: 22.2 MB
+  factor_interior: 263.092s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 267.086s  |  Schur: 4,853 x 4,853 dense (179.7 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 4, 3) factor_and_compute_schur:
+  G_ii: 349,802 x 349,802, nnz=1,675,470 (density 0.00137%), 22.1 MB
+  G_pp: 3,590 x 3,590, nnz=4,502
+  G_pi: 3,590 x 349,802, nnz=6,794  |  G_ip: 349,802 x 3,590, nnz=6,794
+  Block system memory: 22.1 MB
+  factor_interior: 265.580s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 267.773s  |  Schur: 3,590 x 3,590 dense (98.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 5, 0) factor_and_compute_schur:
+  G_ii: 233,172 x 233,172, nnz=1,090,326 (density 0.00201%), 14.4 MB
+  G_pp: 3,353 x 3,353, nnz=4,265
+  G_pi: 3,353 x 233,172, nnz=5,004  |  G_ip: 233,172 x 3,353, nnz=5,004
+  Block system memory: 14.4 MB
+  factor_interior: 171.775s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 175.473s  |  Schur: 3,353 x 3,353 dense (85.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 5, 1) factor_and_compute_schur:
+  G_ii: 231,580 x 231,580, nnz=1,086,466 (density 0.00203%), 14.4 MB
+  G_pp: 2,393 x 2,393, nnz=2,985
+  G_pi: 2,393 x 231,580, nnz=4,308  |  G_ip: 231,580 x 2,393, nnz=4,308
+  Block system memory: 14.4 MB
+  factor_interior: 179.463s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 181.849s  |  Schur: 2,393 x 2,393 dense (43.7 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 5, 2) factor_and_compute_schur:
+  G_ii: 225,514 x 225,514, nnz=1,075,898 (density 0.00212%), 14.2 MB
+  G_pp: 2,312 x 2,312, nnz=2,664
+  G_pi: 2,312 x 225,514, nnz=4,232  |  G_ip: 225,514 x 2,312, nnz=4,232
+  Block system memory: 14.2 MB
+  factor_interior: 145.758s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 148.394s  |  Schur: 2,312 x 2,312 dense (40.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (2, 5, 3) factor_and_compute_schur:
+  G_ii: 224,603 x 224,603, nnz=1,071,971 (density 0.00212%), 14.1 MB
+  G_pp: 1,729 x 1,729, nnz=2,265
+  G_pi: 1,729 x 224,603, nnz=3,584  |  G_ip: 224,603 x 1,729, nnz=3,584
+  Block system memory: 14.1 MB
+  factor_interior: 112.873s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 114.459s  |  Schur: 1,729 x 1,729 dense (22.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 0, 0) factor_and_compute_schur:
+  G_ii: 270,120 x 270,120, nnz=1,256,948 (density 0.00172%), 16.7 MB
+  G_pp: 3,216 x 3,216, nnz=4,274
+  G_pi: 3,216 x 270,120, nnz=6,163  |  G_ip: 270,120 x 3,216, nnz=6,163
+  Block system memory: 16.7 MB
+  factor_interior: 232.559s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 235.512s  |  Schur: 3,216 x 3,216 dense (78.9 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 0, 1) factor_and_compute_schur:
+  G_ii: 271,459 x 271,459, nnz=1,261,073 (density 0.00171%), 16.6 MB
+  G_pp: 1,585 x 1,585, nnz=1,637
+  G_pi: 1,585 x 271,459, nnz=2,696  |  G_ip: 271,459 x 1,585, nnz=2,696
+  Block system memory: 16.6 MB
+  factor_interior: 210.506s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 212.187s  |  Schur: 1,585 x 1,585 dense (19.2 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 1, 0) factor_and_compute_schur:
+  G_ii: 256,459 x 256,459, nnz=1,231,599 (density 0.00187%), 16.3 MB
+  G_pp: 4,397 x 4,397, nnz=5,483
+  G_pi: 4,397 x 256,459, nnz=6,351  |  G_ip: 256,459 x 4,397, nnz=6,351
+  Block system memory: 16.3 MB
+  factor_interior: 316.626s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 318.943s  |  Schur: 4,397 x 4,397 dense (147.5 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 1, 1) factor_and_compute_schur:
+  G_ii: 256,082 x 256,082, nnz=1,226,118 (density 0.00187%), 16.2 MB
+  G_pp: 2,754 x 2,754, nnz=3,138
+  G_pi: 2,754 x 256,082, nnz=5,450  |  G_ip: 256,082 x 2,754, nnz=5,450
+  Block system memory: 16.2 MB
+  factor_interior: 223.004s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 225.268s  |  Schur: 2,754 x 2,754 dense (57.9 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 1, 2) factor_and_compute_schur:
+  G_ii: 257,020 x 257,020, nnz=1,203,438 (density 0.00182%), 16.0 MB
+  G_pp: 4,159 x 4,159, nnz=5,963
+  G_pi: 4,159 x 257,020, nnz=6,646  |  G_ip: 257,020 x 4,159, nnz=6,646
+  Block system memory: 16.0 MB
+  factor_interior: 185.507s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 194.306s  |  Schur: 4,159 x 4,159 dense (132.0 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 1, 3) factor_and_compute_schur:
+  G_ii: 257,878 x 257,878, nnz=1,201,714 (density 0.00181%), 15.9 MB
+  G_pp: 3,424 x 3,424, nnz=4,568
+  G_pi: 3,424 x 257,878, nnz=6,211  |  G_ip: 257,878 x 3,424, nnz=6,211
+  Block system memory: 15.9 MB
+  factor_interior: 244.424s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 246.384s  |  Schur: 3,424 x 3,424 dense (89.4 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 2, 0) factor_and_compute_schur:
+  G_ii: 311,173 x 311,173, nnz=1,473,459 (density 0.00152%), 19.5 MB
+  G_pp: 5,063 x 5,063, nnz=7,273
+  G_pi: 5,063 x 311,173, nnz=7,403  |  G_ip: 311,173 x 5,063, nnz=7,403
+  Block system memory: 19.5 MB
+  factor_interior: 213.932s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 218.958s  |  Schur: 5,063 x 5,063 dense (195.6 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 2, 1) factor_and_compute_schur:
+  G_ii: 311,417 x 311,417, nnz=1,493,245 (density 0.00154%), 19.8 MB
+  G_pp: 4,473 x 4,473, nnz=5,467
+  G_pi: 4,473 x 311,417, nnz=8,321  |  G_ip: 311,417 x 4,473, nnz=8,321
+  Block system memory: 19.8 MB
+  factor_interior: 281.342s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 284.412s  |  Schur: 4,473 x 4,473 dense (152.6 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 2, 2) factor_and_compute_schur:
+  G_ii: 313,153 x 313,153, nnz=1,478,545 (density 0.00151%), 19.6 MB
+  G_pp: 4,501 x 4,501, nnz=6,731
+  G_pi: 4,501 x 313,153, nnz=6,097  |  G_ip: 313,153 x 4,501, nnz=6,097
+  Block system memory: 19.6 MB
+  factor_interior: 264.018s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 268.173s  |  Schur: 4,501 x 4,501 dense (154.6 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 2, 3) factor_and_compute_schur:
+  G_ii: 311,466 x 311,466, nnz=1,484,520 (density 0.00153%), 19.6 MB
+  G_pp: 3,978 x 3,978, nnz=4,516
+  G_pi: 3,978 x 311,466, nnz=8,748  |  G_ip: 311,466 x 3,978, nnz=8,748
+  Block system memory: 19.6 MB
+  factor_interior: 239.359s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 243.176s  |  Schur: 3,978 x 3,978 dense (120.7 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 3, 0) factor_and_compute_schur:
+  G_ii: 374,193 x 374,193, nnz=1,797,669 (density 0.00128%), 23.7 MB
+  G_pp: 4,030 x 4,030, nnz=5,864
+  G_pi: 4,030 x 374,193, nnz=6,301  |  G_ip: 374,193 x 4,030, nnz=6,301
+  Block system memory: 23.7 MB
+  factor_interior: 294.589s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 297.130s  |  Schur: 4,030 x 4,030 dense (123.9 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 3, 1) factor_and_compute_schur:
+  G_ii: 369,691 x 369,691, nnz=1,775,337 (density 0.00130%), 23.4 MB
+  G_pp: 3,123 x 3,123, nnz=3,569
+  G_pi: 3,123 x 369,691, nnz=6,660  |  G_ip: 369,691 x 3,123, nnz=6,660
+  Block system memory: 23.4 MB
+  factor_interior: 279.302s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 280.828s  |  Schur: 3,123 x 3,123 dense (74.4 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 3, 2) factor_and_compute_schur:
+  G_ii: 376,298 x 376,298, nnz=1,787,406 (density 0.00126%), 23.6 MB
+  G_pp: 4,457 x 4,457, nnz=5,443
+  G_pi: 4,457 x 376,298, nnz=7,770  |  G_ip: 376,298 x 4,457, nnz=7,770
+  Block system memory: 23.6 MB
+  factor_interior: 327.854s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 330.348s  |  Schur: 4,457 x 4,457 dense (151.6 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 3, 3) factor_and_compute_schur:
+  G_ii: 373,329 x 373,329, nnz=1,765,111 (density 0.00127%), 23.3 MB
+  G_pp: 3,917 x 3,917, nnz=4,489
+  G_pi: 3,917 x 373,329, nnz=8,646  |  G_ip: 373,329 x 3,917, nnz=8,646
+  Block system memory: 23.3 MB
+  factor_interior: 304.507s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 306.314s  |  Schur: 3,917 x 3,917 dense (117.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 4, 0) factor_and_compute_schur:
+  G_ii: 331,982 x 331,982, nnz=1,592,942 (density 0.00145%), 21.1 MB
+  G_pp: 5,146 x 5,146, nnz=6,972
+  G_pi: 5,146 x 331,982, nnz=8,111  |  G_ip: 331,982 x 5,146, nnz=8,111
+  Block system memory: 21.1 MB
+  factor_interior: 304.475s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 307.886s  |  Schur: 5,146 x 5,146 dense (202.0 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 4, 1) factor_and_compute_schur:
+  G_ii: 333,049 x 333,049, nnz=1,587,241 (density 0.00143%), 21.0 MB
+  G_pp: 3,716 x 3,716, nnz=4,076
+  G_pi: 3,716 x 333,049, nnz=8,294  |  G_ip: 333,049 x 3,716, nnz=8,294
+  Block system memory: 21.0 MB
+  factor_interior: 291.343s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 292.933s  |  Schur: 3,716 x 3,716 dense (105.4 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 4, 2) factor_and_compute_schur:
+  G_ii: 332,730 x 332,730, nnz=1,581,814 (density 0.00143%), 20.9 MB
+  G_pp: 5,157 x 5,157, nnz=7,303
+  G_pi: 5,157 x 332,730, nnz=7,323  |  G_ip: 332,730 x 5,157, nnz=7,323
+  Block system memory: 20.9 MB
+  factor_interior: 259.420s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 263.020s  |  Schur: 5,157 x 5,157 dense (202.9 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 4, 3) factor_and_compute_schur:
+  G_ii: 333,401 x 333,401, nnz=1,575,703 (density 0.00142%), 20.8 MB
+  G_pp: 3,652 x 3,652, nnz=4,970
+  G_pi: 3,652 x 333,401, nnz=6,154  |  G_ip: 333,401 x 3,652, nnz=6,154
+  Block system memory: 20.8 MB
+  factor_interior: 268.191s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 269.781s  |  Schur: 3,652 x 3,652 dense (101.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 5, 0) factor_and_compute_schur:
+  G_ii: 340,561 x 340,561, nnz=1,594,331 (density 0.00137%), 21.0 MB
+  G_pp: 3,059 x 3,059, nnz=3,949
+  G_pi: 3,059 x 340,561, nnz=5,123  |  G_ip: 340,561 x 3,059, nnz=5,123
+  Block system memory: 21.0 MB
+  factor_interior: 270.523s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 271.721s  |  Schur: 3,059 x 3,059 dense (71.4 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (3, 5, 1) factor_and_compute_schur:
+  G_ii: 340,392 x 340,392, nnz=1,593,386 (density 0.00138%), 21.0 MB
+  G_pp: 2,913 x 2,913, nnz=3,271
+  G_pi: 2,913 x 340,392, nnz=5,390  |  G_ip: 340,392 x 2,913, nnz=5,390
+  Block system memory: 21.0 MB
+  factor_interior: 286.291s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 287.457s  |  Schur: 2,913 x 2,913 dense (64.7 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 0, 0) factor_and_compute_schur:
+  G_ii: 264,684 x 264,684, nnz=1,232,522 (density 0.00176%), 16.2 MB
+  G_pp: 1,960 x 1,960, nnz=3,004
+  G_pi: 1,960 x 264,684, nnz=1,849  |  G_ip: 264,684 x 1,960, nnz=1,849
+  Block system memory: 16.2 MB
+  factor_interior: 205.863s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 207.455s  |  Schur: 1,960 x 1,960 dense (29.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 0, 1) factor_and_compute_schur:
+  G_ii: 261,364 x 261,364, nnz=1,216,938 (density 0.00178%), 16.1 MB
+  G_pp: 2,802 x 2,802, nnz=2,862
+  G_pi: 2,802 x 261,364, nnz=4,055  |  G_ip: 261,364 x 2,802, nnz=4,055
+  Block system memory: 16.1 MB
+  factor_interior: 202.881s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 204.978s  |  Schur: 2,802 x 2,802 dense (59.9 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 1, 0) factor_and_compute_schur:
+  G_ii: 259,553 x 259,553, nnz=1,218,761 (density 0.00181%), 16.1 MB
+  G_pp: 3,641 x 3,641, nnz=4,849
+  G_pi: 3,641 x 259,553, nnz=5,570  |  G_ip: 259,553 x 3,641, nnz=5,570
+  Block system memory: 16.1 MB
+  factor_interior: 235.708s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 238.063s  |  Schur: 3,641 x 3,641 dense (101.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 1, 1) factor_and_compute_schur:
+  G_ii: 260,528 x 260,528, nnz=1,216,360 (density 0.00179%), 16.1 MB
+  G_pp: 3,274 x 3,274, nnz=3,904
+  G_pi: 3,274 x 260,528, nnz=5,735  |  G_ip: 260,528 x 3,274, nnz=5,735
+  Block system memory: 16.1 MB
+  factor_interior: 213.416s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 215.644s  |  Schur: 3,274 x 3,274 dense (81.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 1, 2) factor_and_compute_schur:
+  G_ii: 255,771 x 255,771, nnz=1,230,679 (density 0.00188%), 16.2 MB
+  G_pp: 3,658 x 3,658, nnz=6,058
+  G_pi: 3,658 x 255,771, nnz=4,635  |  G_ip: 255,771 x 3,658, nnz=4,635
+  Block system memory: 16.2 MB
+  factor_interior: 249.352s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 251.228s  |  Schur: 3,658 x 3,658 dense (102.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 1, 3) factor_and_compute_schur:
+  G_ii: 254,883 x 254,883, nnz=1,224,757 (density 0.00189%), 16.1 MB
+  G_pp: 2,296 x 2,296, nnz=2,730
+  G_pi: 2,296 x 254,883, nnz=4,562  |  G_ip: 254,883 x 2,296, nnz=4,562
+  Block system memory: 16.1 MB
+  factor_interior: 185.619s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 186.373s  |  Schur: 2,296 x 2,296 dense (40.2 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 2, 0) factor_and_compute_schur:
+  G_ii: 302,864 x 302,864, nnz=1,431,254 (density 0.00156%), 18.9 MB
+  G_pp: 4,148 x 4,148, nnz=5,898
+  G_pi: 4,148 x 302,864, nnz=5,413  |  G_ip: 302,864 x 4,148, nnz=5,413
+  Block system memory: 18.9 MB
+  factor_interior: 264.267s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 266.532s  |  Schur: 4,148 x 4,148 dense (131.3 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 2, 1) factor_and_compute_schur:
+  G_ii: 298,773 x 298,773, nnz=1,426,359 (density 0.00160%), 18.8 MB
+  G_pp: 3,032 x 3,032, nnz=3,566
+  G_pi: 3,032 x 298,773, nnz=5,857  |  G_ip: 298,773 x 3,032, nnz=5,857
+  Block system memory: 18.8 MB
+  factor_interior: 213.202s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 215.428s  |  Schur: 3,032 x 3,032 dense (70.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 2, 2) factor_and_compute_schur:
+  G_ii: 297,923 x 297,923, nnz=1,427,947 (density 0.00161%), 18.8 MB
+  G_pp: 3,054 x 3,054, nnz=3,350
+  G_pi: 3,054 x 297,923, nnz=5,073  |  G_ip: 297,923 x 3,054, nnz=5,073
+  Block system memory: 18.8 MB
+  factor_interior: 198.825s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 200.365s  |  Schur: 3,054 x 3,054 dense (71.2 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 2, 3) factor_and_compute_schur:
+  G_ii: 299,031 x 299,031, nnz=1,431,387 (density 0.00160%), 18.8 MB
+  G_pp: 2,553 x 2,553, nnz=3,409
+  G_pi: 2,553 x 299,031, nnz=4,511  |  G_ip: 299,031 x 2,553, nnz=4,511
+  Block system memory: 18.8 MB
+  factor_interior: 144.755s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 147.033s  |  Schur: 2,553 x 2,553 dense (49.7 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 3, 0) factor_and_compute_schur:
+  G_ii: 323,264 x 323,264, nnz=1,515,706 (density 0.00145%), 20.1 MB
+  G_pp: 4,737 x 4,737, nnz=5,645
+  G_pi: 4,737 x 323,264, nnz=7,092  |  G_ip: 323,264 x 4,737, nnz=7,092
+  Block system memory: 20.1 MB
+  factor_interior: 293.811s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 296.684s  |  Schur: 4,737 x 4,737 dense (171.2 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 3, 1) factor_and_compute_schur:
+  G_ii: 323,087 x 323,087, nnz=1,506,705 (density 0.00144%), 20.0 MB
+  G_pp: 4,571 x 4,571, nnz=6,527
+  G_pi: 4,571 x 323,087, nnz=7,271  |  G_ip: 323,087 x 4,571, nnz=7,271
+  Block system memory: 20.0 MB
+  factor_interior: 302.702s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 305.380s  |  Schur: 4,571 x 4,571 dense (159.4 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 4, 0) factor_and_compute_schur:
+  G_ii: 366,864 x 366,864, nnz=1,726,686 (density 0.00128%), 22.9 MB
+  G_pp: 7,185 x 7,185, nnz=8,997
+  G_pi: 7,185 x 366,864, nnz=8,240  |  G_ip: 366,864 x 7,185, nnz=8,240
+  Block system memory: 22.9 MB
+  factor_interior: 367.435s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 375.932s  |  Schur: 7,185 x 7,185 dense (393.9 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 4, 1) factor_and_compute_schur:
+  G_ii: 363,274 x 363,274, nnz=1,703,982 (density 0.00129%), 22.6 MB
+  G_pp: 5,743 x 5,743, nnz=8,685
+  G_pi: 5,743 x 363,274, nnz=8,189  |  G_ip: 363,274 x 5,743, nnz=8,189
+  Block system memory: 22.6 MB
+  factor_interior: 295.969s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 300.714s  |  Schur: 5,743 x 5,743 dense (251.6 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 5, 0) factor_and_compute_schur:
+  G_ii: 375,352 x 375,352, nnz=1,767,462 (density 0.00125%), 23.4 MB
+  G_pp: 5,759 x 5,759, nnz=6,619
+  G_pi: 5,759 x 375,352, nnz=8,336  |  G_ip: 375,352 x 5,759, nnz=8,336
+  Block system memory: 23.4 MB
+  factor_interior: 360.441s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 365.131s  |  Schur: 5,759 x 5,759 dense (253.0 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (4, 5, 1) factor_and_compute_schur:
+  G_ii: 372,959 x 372,959, nnz=1,754,133 (density 0.00126%), 23.2 MB
+  G_pp: 4,658 x 4,658, nnz=9,630
+  G_pi: 4,658 x 372,959, nnz=3,905  |  G_ip: 372,959 x 4,658, nnz=3,905
+  Block system memory: 23.2 MB
+  factor_interior: 254.020s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 257.059s  |  Schur: 4,658 x 4,658 dense (165.5 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 0, 0) factor_and_compute_schur:
+  G_ii: 270,132 x 270,132, nnz=1,257,004 (density 0.00172%), 16.7 MB
+  G_pp: 3,210 x 3,210, nnz=4,264
+  G_pi: 3,210 x 270,132, nnz=6,159  |  G_ip: 270,132 x 3,210, nnz=6,159
+  Block system memory: 16.7 MB
+  factor_interior: 235.279s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 238.223s  |  Schur: 3,210 x 3,210 dense (78.6 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 0, 1) factor_and_compute_schur:
+  G_ii: 271,451 x 271,451, nnz=1,261,033 (density 0.00171%), 16.6 MB
+  G_pp: 1,438 x 1,438, nnz=1,490
+  G_pi: 1,438 x 271,451, nnz=2,549  |  G_ip: 271,451 x 1,438, nnz=2,549
+  Block system memory: 16.6 MB
+  factor_interior: 210.172s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 211.433s  |  Schur: 1,438 x 1,438 dense (15.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 1, 0) factor_and_compute_schur:
+  G_ii: 256,459 x 256,459, nnz=1,231,603 (density 0.00187%), 16.3 MB
+  G_pp: 4,392 x 4,392, nnz=5,474
+  G_pi: 4,392 x 256,459, nnz=6,347  |  G_ip: 256,459 x 4,392, nnz=6,347
+  Block system memory: 16.3 MB
+  factor_interior: 321.423s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 323.690s  |  Schur: 4,392 x 4,392 dense (147.2 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 1, 1) factor_and_compute_schur:
+  G_ii: 256,082 x 256,082, nnz=1,226,122 (density 0.00187%), 16.2 MB
+  G_pp: 2,753 x 2,753, nnz=3,137
+  G_pi: 2,753 x 256,082, nnz=5,446  |  G_ip: 256,082 x 2,753, nnz=5,446
+  Block system memory: 16.2 MB
+  factor_interior: 238.992s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 240.106s  |  Schur: 2,753 x 2,753 dense (57.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 1, 2) factor_and_compute_schur:
+  G_ii: 257,021 x 257,021, nnz=1,203,437 (density 0.00182%), 16.0 MB
+  G_pp: 4,092 x 4,092, nnz=5,892
+  G_pi: 4,092 x 257,021, nnz=6,586  |  G_ip: 257,021 x 4,092, nnz=6,586
+  Block system memory: 16.0 MB
+  factor_interior: 191.630s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 197.635s  |  Schur: 4,092 x 4,092 dense (127.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 1, 3) factor_and_compute_schur:
+  G_ii: 257,880 x 257,880, nnz=1,201,716 (density 0.00181%), 15.9 MB
+  G_pp: 3,339 x 3,339, nnz=4,483
+  G_pi: 3,339 x 257,880, nnz=6,130  |  G_ip: 257,880 x 3,339, nnz=6,130
+  Block system memory: 15.9 MB
+  factor_interior: 233.365s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 236.950s  |  Schur: 3,339 x 3,339 dense (85.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 2, 0) factor_and_compute_schur:
+  G_ii: 362,318 x 362,318, nnz=1,722,420 (density 0.00131%), 22.8 MB
+  G_pp: 5,883 x 5,883, nnz=7,625
+  G_pi: 5,883 x 362,318, nnz=8,344  |  G_ip: 362,318 x 5,883, nnz=8,344
+  Block system memory: 22.8 MB
+  factor_interior: 306.778s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 311.820s  |  Schur: 5,883 x 5,883 dense (264.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 2, 1) factor_and_compute_schur:
+  G_ii: 367,250 x 367,250, nnz=1,700,890 (density 0.00126%), 22.6 MB
+  G_pp: 5,196 x 5,196, nnz=8,072
+  G_pi: 5,196 x 367,250, nnz=7,303  |  G_ip: 367,250 x 5,196, nnz=7,303
+  Block system memory: 22.6 MB
+  factor_interior: 257.098s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 261.876s  |  Schur: 5,196 x 5,196 dense (206.0 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 3, 0) factor_and_compute_schur:
+  G_ii: 289,358 x 289,358, nnz=1,352,526 (density 0.00162%), 17.9 MB
+  G_pp: 3,110 x 3,110, nnz=4,014
+  G_pi: 3,110 x 289,358, nnz=4,278  |  G_ip: 289,358 x 3,110, nnz=4,278
+  Block system memory: 17.9 MB
+  factor_interior: 174.173s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 176.158s  |  Schur: 3,110 x 3,110 dense (73.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 3, 1) factor_and_compute_schur:
+  G_ii: 291,625 x 291,625, nnz=1,347,043 (density 0.00158%), 17.8 MB
+  G_pp: 2,432 x 2,432, nnz=2,452
+  G_pi: 2,432 x 291,625, nnz=4,848  |  G_ip: 291,625 x 2,432, nnz=4,848
+  Block system memory: 17.8 MB
+  factor_interior: 295.622s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 296.596s  |  Schur: 2,432 x 2,432 dense (45.1 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 4, 0) factor_and_compute_schur:
+  G_ii: 296,152 x 296,152, nnz=1,387,560 (density 0.00158%), 18.3 MB
+  G_pp: 3,438 x 3,438, nnz=5,206
+  G_pi: 3,438 x 296,152, nnz=4,374  |  G_ip: 296,152 x 3,438, nnz=4,374
+  Block system memory: 18.3 MB
+  factor_interior: 206.034s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 211.152s  |  Schur: 3,438 x 3,438 dense (90.2 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 4, 1) factor_and_compute_schur:
+  G_ii: 301,816 x 301,816, nnz=1,395,020 (density 0.00153%), 18.4 MB
+  G_pp: 2,487 x 2,487, nnz=2,509
+  G_pi: 2,487 x 301,816, nnz=4,311  |  G_ip: 301,816 x 2,487, nnz=4,311
+  Block system memory: 18.4 MB
+  factor_interior: 315.590s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 316.561s  |  Schur: 2,487 x 2,487 dense (47.2 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 5, 0) factor_and_compute_schur:
+  G_ii: 298,800 x 298,800, nnz=1,401,462 (density 0.00157%), 18.5 MB
+  G_pp: 2,656 x 2,656, nnz=3,532
+  G_pi: 2,656 x 298,800, nnz=3,651  |  G_ip: 298,800 x 2,656, nnz=3,651
+  Block system memory: 18.5 MB
+  factor_interior: 218.979s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 220.021s  |  Schur: 2,656 x 2,656 dense (53.8 MB)
+18:28:55 distributed.result_factorization DEBUG: Tile (5, 5, 1) factor_and_compute_schur:
+  G_ii: 301,514 x 301,514, nnz=1,393,408 (density 0.00153%), 18.4 MB
+  G_pp: 1,829 x 1,829, nnz=1,851
+  G_pi: 1,829 x 301,514, nnz=4,023  |  G_ip: 301,514 x 1,829, nnz=4,023
+  Block system memory: 18.4 MB
+  factor_interior: 242.085s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+  compute_schur: 242.717s  |  Schur: 1,829 x 1,829 dense (25.5 MB)
+18:45:01 distributed.interface_iterative INFO: auto_select: n_interface=190867 < threshold but estimated factor memory 47.8 GB > budget 32.0 GB; using CG.
+18:45:01 distributed.interface_iterative DEBUG: Block-Jacobi: estimated factor memory 3486.4 MB (n=190867, T=107 tiles, max_block=6097).
+18:45:13 distributed.result_factorization INFO: Interface CG solver: mode=assembled, precond=block_jacobi, rtol=1.00e-12, n=190867
+18:45:13 distributed.result_factorization INFO: === Distributed DDM Prepare Statistics ===
+18:45:13 distributed.result_factorization INFO: Tiles: 107
+18:45:13 distributed.result_factorization INFO:   Interior nodes:  197,977 / 285,540 / 376,298  (min/mean/max)
+18:45:13 distributed.result_factorization INFO:   Port nodes:      1,268 / 3,589 / 7,185
+18:45:13 distributed.result_factorization INFO:   G_ii nnz:        948,725 / 1.3M / 1.8M
+18:45:13 distributed.result_factorization INFO:   G_ii memory:     12.5 MB / 17.8 MB / 23.7 MB  (total: 1.9 GB)
+18:45:13 distributed.result_factorization INFO:   Schur memory:    12.3 MB / 111.3 MB / 393.9 MB  (total: 11.6 GB)
+18:45:13 distributed.result_factorization INFO:   Factor time:     22.657s / 233.025s / 392.659s
+18:45:13 distributed.result_factorization INFO:   Factor backend:  cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit)
+18:45:13 distributed.result_factorization INFO:   Factor + Schur wall time: 401.183s
+18:45:13 distributed.result_factorization INFO: Interface system: 190,867 unknowns, 1282.1M nnz (density 3.519%), 14.3 GB
+18:45:13 distributed.result_factorization INFO:   Backend: CG/assembled/precond=block_jacobi
+18:45:13 distributed.result_factorization INFO:   Factor time: 12.196s
+18:45:13 distributed.result_factorization INFO:   Islands penalized: 0
+18:45:13 distributed.result_factorization INFO:   Assemble time: 83.041s
+18:45:13 distributed.result_factorization INFO:   Detect islands time: 882.195s
+18:45:13 distributed.result_factorization INFO: === Total Prepare: 1378.615s ===
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 0, 0) factor_transient_system:
+  A_ii: nnz=1.3M  |  A_pp: nnz=2,878
+  C_ii cap nodes: 273811 / 273813  |  C_pp cap nodes: 1018 / 1820
+  Total tile cap: 77949.1 fF  |  C_coeff: 0.2000
+  factor_interior: 197.873s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 199.695s  |  Schur: 1,820 x 1,820 dense (25.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 0, 1) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=2,857
+  C_ii cap nodes: 267652 / 267660  |  C_pp cap nodes: 2467 / 2805
+  Total tile cap: 172587.3 fF  |  C_coeff: 0.2000
+  factor_interior: 231.503s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 232.625s  |  Schur: 2,805 x 2,805 dense (60.0 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 1, 0) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=5,230
+  C_ii cap nodes: 259471 / 259516  |  C_pp cap nodes: 1212 / 4156
+  Total tile cap: 275983.7 fF  |  C_coeff: 0.2000
+  factor_interior: 277.255s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 279.517s  |  Schur: 4,156 x 4,156 dense (131.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 1, 1) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=4,979
+  C_ii cap nodes: 260009 / 260018  |  C_pp cap nodes: 2426 / 3637
+  Total tile cap: 199824.4 fF  |  C_coeff: 0.2000
+  factor_interior: 262.702s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 264.525s  |  Schur: 3,637 x 3,637 dense (100.9 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 1, 2) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=5,807
+  C_ii cap nodes: 254343 / 254367  |  C_pp cap nodes: 3226 / 3995
+  Total tile cap: 481665.5 fF  |  C_coeff: 0.2000
+  factor_interior: 252.775s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 255.384s  |  Schur: 3,995 x 3,995 dense (121.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 1, 3) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=2,996
+  C_ii cap nodes: 253773 / 253798  |  C_pp cap nodes: 2456 / 2672
+  Total tile cap: 466075.7 fF  |  C_coeff: 0.2000
+  factor_interior: 192.559s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 194.388s  |  Schur: 2,672 x 2,672 dense (54.5 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 2, 0) factor_transient_system:
+  A_ii: nnz=1.7M  |  A_pp: nnz=8,795
+  C_ii cap nodes: 370849 / 370853  |  C_pp cap nodes: 2688 / 7053
+  Total tile cap: 95667.9 fF  |  C_coeff: 0.2000
+  factor_interior: 427.821s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 436.665s  |  Schur: 7,053 x 7,053 dense (379.5 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 2, 1) factor_transient_system:
+  A_ii: nnz=1.7M  |  A_pp: nnz=9,348
+  C_ii cap nodes: 356251 / 356279  |  C_pp cap nodes: 6106 / 6430
+  Total tile cap: 377405.2 fF  |  C_coeff: 0.2000
+  factor_interior: 205.726s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 220.700s  |  Schur: 6,430 x 6,430 dense (315.4 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 3, 0) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=3,606
+  C_ii cap nodes: 292589 / 292589  |  C_pp cap nodes: 1965 / 2716
+  Total tile cap: 46472.7 fF  |  C_coeff: 0.2000
+  factor_interior: 252.372s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 253.339s  |  Schur: 2,716 x 2,716 dense (56.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 3, 1) factor_transient_system:
+  A_ii: nnz=1.3M  |  A_pp: nnz=2,735
+  C_ii cap nodes: 286307 / 286310  |  C_pp cap nodes: 2449 / 2721
+  Total tile cap: 124904.9 fF  |  C_coeff: 0.2000
+  factor_interior: 212.588s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 214.686s  |  Schur: 2,721 x 2,721 dense (56.5 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 4, 0) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=4,545
+  C_ii cap nodes: 314639 / 314639  |  C_pp cap nodes: 2182 / 2931
+  Total tile cap: 48676.5 fF  |  C_coeff: 0.2000
+  factor_interior: 282.846s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 283.836s  |  Schur: 2,931 x 2,931 dense (65.5 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 4, 1) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=2,304
+  C_ii cap nodes: 303457 / 303472  |  C_pp cap nodes: 1931 / 2290
+  Total tile cap: 191490.8 fF  |  C_coeff: 0.2000
+  factor_interior: 183.603s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 184.703s  |  Schur: 2,290 x 2,290 dense (40.0 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 5, 0) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=2,588
+  C_ii cap nodes: 256459 / 256459  |  C_pp cap nodes: 1138 / 1886
+  Total tile cap: 40920.2 fF  |  C_coeff: 0.2000
+  factor_interior: 214.750s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 215.726s  |  Schur: 1,886 x 1,886 dense (27.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (0, 5, 1) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=1,286
+  C_ii cap nodes: 249863 / 249863  |  C_pp cap nodes: 1085 / 1268
+  Total tile cap: 127132.4 fF  |  C_coeff: 0.2000
+  factor_interior: 99.360s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 100.178s  |  Schur: 1,268 x 1,268 dense (12.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 0, 0) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=4,251
+  C_ii cap nodes: 263881 / 263881  |  C_pp cap nodes: 2407 / 3209
+  Total tile cap: 167760.7 fF  |  C_coeff: 0.2000
+  factor_interior: 248.135s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 250.070s  |  Schur: 3,209 x 3,209 dense (78.6 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 0, 1) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=1,636
+  C_ii cap nodes: 262784 / 262788  |  C_pp cap nodes: 1226 / 1584
+  Total tile cap: 76752.5 fF  |  C_coeff: 0.2000
+  factor_interior: 179.847s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 181.214s  |  Schur: 1,584 x 1,584 dense (19.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 1, 0) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=5,926
+  C_ii cap nodes: 256909 / 256910  |  C_pp cap nodes: 1835 / 4710
+  Total tile cap: 485274.5 fF  |  C_coeff: 0.2000
+  factor_interior: 285.282s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 287.946s  |  Schur: 4,710 x 4,710 dense (169.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 1, 1) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=3,467
+  C_ii cap nodes: 256114 / 256115  |  C_pp cap nodes: 1880 / 2823
+  Total tile cap: 482320.8 fF  |  C_coeff: 0.2000
+  factor_interior: 248.145s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 249.602s  |  Schur: 2,823 x 2,823 dense (60.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 1, 2) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=5,785
+  C_ii cap nodes: 258016 / 258103  |  C_pp cap nodes: 2658 / 4113
+  Total tile cap: 284036.0 fF  |  C_coeff: 0.2000
+  factor_interior: 168.334s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 176.023s  |  Schur: 4,113 x 4,113 dense (129.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 1, 3) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=4,163
+  C_ii cap nodes: 258810 / 258931  |  C_pp cap nodes: 3177 / 3411
+  Total tile cap: 203539.7 fF  |  C_coeff: 0.2000
+  factor_interior: 214.572s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 217.449s  |  Schur: 3,411 x 3,411 dense (88.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 2, 0) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=5,773
+  C_ii cap nodes: 298326 / 298329  |  C_pp cap nodes: 2637 / 4011
+  Total tile cap: 471944.1 fF  |  C_coeff: 0.2000
+  factor_interior: 204.188s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 208.185s  |  Schur: 4,011 x 4,011 dense (122.7 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 2, 1) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=4,277
+  C_ii cap nodes: 298578 / 298581  |  C_pp cap nodes: 1761 / 3427
+  Total tile cap: 288207.0 fF  |  C_coeff: 0.2000
+  factor_interior: 217.099s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 218.679s  |  Schur: 3,427 x 3,427 dense (89.6 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 2, 2) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=5,270
+  C_ii cap nodes: 301308 / 301438  |  C_pp cap nodes: 2332 / 4358
+  Total tile cap: 189484.4 fF  |  C_coeff: 0.2000
+  factor_interior: 263.885s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 266.304s  |  Schur: 4,358 x 4,358 dense (144.9 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 2, 3) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=4,874
+  C_ii cap nodes: 297374 / 297410  |  C_pp cap nodes: 3495 / 4070
+  Total tile cap: 246657.1 fF  |  C_coeff: 0.2000
+  factor_interior: 231.207s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 235.179s  |  Schur: 4,070 x 4,070 dense (126.4 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 3, 0) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=7,918
+  C_ii cap nodes: 326557 / 326557  |  C_pp cap nodes: 2490 / 7000
+  Total tile cap: 112843.7 fF  |  C_coeff: 0.2000
+  factor_interior: 319.951s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 331.535s  |  Schur: 7,000 x 7,000 dense (373.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 3, 1) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=7,443
+  C_ii cap nodes: 317387 / 317395  |  C_pp cap nodes: 6301 / 6619
+  Total tile cap: 175964.7 fF  |  C_coeff: 0.2000
+  factor_interior: 300.982s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 307.738s  |  Schur: 6,619 x 6,619 dense (334.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 4, 0) factor_transient_system:
+  A_ii: nnz=965,255  |  A_pp: nnz=4,249
+  C_ii cap nodes: 206833 / 206833  |  C_pp cap nodes: 1514 / 3305
+  Total tile cap: 77758.4 fF  |  C_coeff: 0.2000
+  factor_interior: 174.527s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 179.593s  |  Schur: 3,305 x 3,305 dense (83.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 4, 1) factor_transient_system:
+  A_ii: nnz=964,289  |  A_pp: nnz=1,914
+  C_ii cap nodes: 201905 / 201907  |  C_pp cap nodes: 968 / 1432
+  Total tile cap: 146751.2 fF  |  C_coeff: 0.2000
+  factor_interior: 95.101s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 95.994s  |  Schur: 1,432 x 1,432 dense (15.6 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 4, 2) factor_transient_system:
+  A_ii: nnz=956,811  |  A_pp: nnz=3,930
+  C_ii cap nodes: 203491 / 203499  |  C_pp cap nodes: 2148 / 3116
+  Total tile cap: 118412.9 fF  |  C_coeff: 0.2000
+  factor_interior: 159.399s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 162.048s  |  Schur: 3,116 x 3,116 dense (74.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 4, 3) factor_transient_system:
+  A_ii: nnz=956,328  |  A_pp: nnz=2,453
+  C_ii cap nodes: 200361 / 200392  |  C_pp cap nodes: 1624 / 1699
+  Total tile cap: 151953.9 fF  |  C_coeff: 0.2000
+  factor_interior: 88.761s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 89.900s  |  Schur: 1,699 x 1,699 dense (22.0 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (1, 5) factor_transient_system:
+  A_ii: nnz=953,835  |  A_pp: nnz=1,410
+  C_ii cap nodes: 201199 / 201199  |  C_pp cap nodes: 1330 / 1330
+  Total tile cap: 122196.1 fF  |  C_coeff: 0.2000
+  factor_interior: 25.231s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 25.926s  |  Schur: 1,330 x 1,330 dense (13.5 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 0, 0) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=3,012
+  C_ii cap nodes: 264680 / 264684  |  C_pp cap nodes: 1162 / 1964
+  Total tile cap: 77242.8 fF  |  C_coeff: 0.2000
+  factor_interior: 214.317s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 215.612s  |  Schur: 1,964 x 1,964 dense (29.4 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 0, 1) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=2,864
+  C_ii cap nodes: 261372 / 261372  |  C_pp cap nodes: 2468 / 2804
+  Total tile cap: 165254.3 fF  |  C_coeff: 0.2000
+  factor_interior: 240.979s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 242.095s  |  Schur: 2,804 x 2,804 dense (60.0 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 1, 0) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=4,857
+  C_ii cap nodes: 259466 / 259553  |  C_pp cap nodes: 1340 / 3645
+  Total tile cap: 281806.1 fF  |  C_coeff: 0.2000
+  factor_interior: 238.296s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 239.875s  |  Schur: 3,645 x 3,645 dense (101.4 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 1, 1) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=3,904
+  C_ii cap nodes: 260407 / 260528  |  C_pp cap nodes: 2314 / 3274
+  Total tile cap: 203443.9 fF  |  C_coeff: 0.2000
+  factor_interior: 249.194s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 250.405s  |  Schur: 3,274 x 3,274 dense (81.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 1, 2) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=6,059
+  C_ii cap nodes: 255773 / 255774  |  C_pp cap nodes: 2887 / 3659
+  Total tile cap: 488308.5 fF  |  C_coeff: 0.2000
+  factor_interior: 253.081s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 255.153s  |  Schur: 3,659 x 3,659 dense (102.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 1, 3) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=2,731
+  C_ii cap nodes: 254886 / 254887  |  C_pp cap nodes: 2188 / 2297
+  Total tile cap: 479201.6 fF  |  C_coeff: 0.2000
+  factor_interior: 244.789s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 245.568s  |  Schur: 2,297 x 2,297 dense (40.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 2, 0) factor_transient_system:
+  A_ii: nnz=1.6M  |  A_pp: nnz=7,946
+  C_ii cap nodes: 343577 / 343728  |  C_pp cap nodes: 2930 / 5610
+  Total tile cap: 200619.8 fF  |  C_coeff: 0.2000
+  factor_interior: 286.814s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 291.234s  |  Schur: 5,610 x 5,610 dense (240.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 2, 1) factor_transient_system:
+  A_ii: nnz=1.6M  |  A_pp: nnz=5,694
+  C_ii cap nodes: 340249 / 340319  |  C_pp cap nodes: 2793 / 4866
+  Total tile cap: 267522.6 fF  |  C_coeff: 0.2000
+  factor_interior: 278.481s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 281.581s  |  Schur: 4,866 x 4,866 dense (180.6 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 2, 2) factor_transient_system:
+  A_ii: nnz=1.6M  |  A_pp: nnz=5,806
+  C_ii cap nodes: 335931 / 335935  |  C_pp cap nodes: 2807 / 4052
+  Total tile cap: 552081.0 fF  |  C_coeff: 0.2000
+  factor_interior: 224.583s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 229.090s  |  Schur: 4,052 x 4,052 dense (125.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 2, 3) factor_transient_system:
+  A_ii: nnz=1.6M  |  A_pp: nnz=4,873
+  C_ii cap nodes: 337738 / 337739  |  C_pp cap nodes: 3305 / 4099
+  Total tile cap: 307474.1 fF  |  C_coeff: 0.2000
+  factor_interior: 282.349s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 284.529s  |  Schur: 4,099 x 4,099 dense (128.2 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 3, 0) factor_transient_system:
+  A_ii: nnz=970,638  |  A_pp: nnz=5,672
+  C_ii cap nodes: 205070 / 205154  |  C_pp cap nodes: 2390 / 3888
+  Total tile cap: 176289.9 fF  |  C_coeff: 0.2000
+  factor_interior: 172.349s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 177.326s  |  Schur: 3,888 x 3,888 dense (115.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 3, 1) factor_transient_system:
+  A_ii: nnz=974,140  |  A_pp: nnz=2,739
+  C_ii cap nodes: 202828 / 202828  |  C_pp cap nodes: 992 / 2727
+  Total tile cap: 230882.4 fF  |  C_coeff: 0.2000
+  factor_interior: 193.840s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 196.173s  |  Schur: 2,727 x 2,727 dense (56.7 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 3, 2) factor_transient_system:
+  A_ii: nnz=968,278  |  A_pp: nnz=6,650
+  C_ii cap nodes: 205393 / 205472  |  C_pp cap nodes: 2746 / 5224
+  Total tile cap: 169101.4 fF  |  C_coeff: 0.2000
+  factor_interior: 272.612s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 276.679s  |  Schur: 5,224 x 5,224 dense (208.2 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 3, 3) factor_transient_system:
+  A_ii: nnz=948,725  |  A_pp: nnz=6,405
+  C_ii cap nodes: 197977 / 197977  |  C_pp cap nodes: 2919 / 4277
+  Total tile cap: 353188.7 fF  |  C_coeff: 0.2000
+  factor_interior: 133.990s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 141.134s  |  Schur: 4,277 x 4,277 dense (139.6 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 3, 4) factor_transient_system:
+  A_ii: nnz=982,134  |  A_pp: nnz=3,881
+  C_ii cap nodes: 204346 / 204346  |  C_pp cap nodes: 1774 / 2895
+  Total tile cap: 147603.2 fF  |  C_coeff: 0.2000
+  factor_interior: 137.977s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 141.448s  |  Schur: 2,895 x 2,895 dense (63.9 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 3, 5) factor_transient_system:
+  A_ii: nnz=962,582  |  A_pp: nnz=2,779
+  C_ii cap nodes: 200491 / 200492  |  C_pp cap nodes: 1546 / 2451
+  Total tile cap: 389504.0 fF  |  C_coeff: 0.2000
+  factor_interior: 128.079s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 130.050s  |  Schur: 2,451 x 2,451 dense (45.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 3, 6) factor_transient_system:
+  A_ii: nnz=963,537  |  A_pp: nnz=2,922
+  C_ii cap nodes: 200541 / 200541  |  C_pp cap nodes: 1460 / 2440
+  Total tile cap: 514118.8 fF  |  C_coeff: 0.2000
+  factor_interior: 117.248s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 119.163s  |  Schur: 2,440 x 2,440 dense (45.4 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 3, 7) factor_transient_system:
+  A_ii: nnz=956,352  |  A_pp: nnz=3,293
+  C_ii cap nodes: 199430 / 199430  |  C_pp cap nodes: 2355 / 2515
+  Total tile cap: 445496.4 fF  |  C_coeff: 0.2000
+  factor_interior: 132.044s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 134.949s  |  Schur: 2,515 x 2,515 dense (48.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 4, 0) factor_transient_system:
+  A_ii: nnz=1.7M  |  A_pp: nnz=8,029
+  C_ii cap nodes: 358053 / 358126  |  C_pp cap nodes: 2955 / 5973
+  Total tile cap: 297345.1 fF  |  C_coeff: 0.2000
+  factor_interior: 317.160s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 322.238s  |  Schur: 5,973 x 5,973 dense (272.2 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 4, 1) factor_transient_system:
+  A_ii: nnz=1.7M  |  A_pp: nnz=5,155
+  C_ii cap nodes: 359046 / 359116  |  C_pp cap nodes: 2451 / 4477
+  Total tile cap: 223648.6 fF  |  C_coeff: 0.2000
+  factor_interior: 317.206s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 319.715s  |  Schur: 4,477 x 4,477 dense (152.9 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 4, 2) factor_transient_system:
+  A_ii: nnz=1.7M  |  A_pp: nnz=6,993
+  C_ii cap nodes: 350278 / 350279  |  C_pp cap nodes: 3572 / 4853
+  Total tile cap: 545945.6 fF  |  C_coeff: 0.2000
+  factor_interior: 270.709s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 273.696s  |  Schur: 4,853 x 4,853 dense (179.7 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 4, 3) factor_transient_system:
+  A_ii: nnz=1.7M  |  A_pp: nnz=4,502
+  C_ii cap nodes: 349795 / 349802  |  C_pp cap nodes: 2999 / 3590
+  Total tile cap: 491355.4 fF  |  C_coeff: 0.2000
+  factor_interior: 224.158s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 225.758s  |  Schur: 3,590 x 3,590 dense (98.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 5, 0) factor_transient_system:
+  A_ii: nnz=1.1M  |  A_pp: nnz=4,265
+  C_ii cap nodes: 233160 / 233172  |  C_pp cap nodes: 1927 / 3353
+  Total tile cap: 97662.6 fF  |  C_coeff: 0.2000
+  factor_interior: 214.102s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 216.421s  |  Schur: 3,353 x 3,353 dense (85.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 5, 1) factor_transient_system:
+  A_ii: nnz=1.1M  |  A_pp: nnz=2,985
+  C_ii cap nodes: 231562 / 231580  |  C_pp cap nodes: 1797 / 2393
+  Total tile cap: 98999.3 fF  |  C_coeff: 0.2000
+  factor_interior: 157.200s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 159.822s  |  Schur: 2,393 x 2,393 dense (43.7 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 5, 2) factor_transient_system:
+  A_ii: nnz=1.1M  |  A_pp: nnz=2,664
+  C_ii cap nodes: 225514 / 225514  |  C_pp cap nodes: 1436 / 2312
+  Total tile cap: 251899.3 fF  |  C_coeff: 0.2000
+  factor_interior: 155.487s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 157.155s  |  Schur: 2,312 x 2,312 dense (40.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (2, 5, 3) factor_transient_system:
+  A_ii: nnz=1.1M  |  A_pp: nnz=2,265
+  C_ii cap nodes: 224603 / 224603  |  C_pp cap nodes: 1661 / 1729
+  Total tile cap: 227864.5 fF  |  C_coeff: 0.2000
+  factor_interior: 115.124s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 116.606s  |  Schur: 1,729 x 1,729 dense (22.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 0, 0) factor_transient_system:
+  A_ii: nnz=1.3M  |  A_pp: nnz=4,274
+  C_ii cap nodes: 270112 / 270120  |  C_pp cap nodes: 2416 / 3216
+  Total tile cap: 175802.8 fF  |  C_coeff: 0.2000
+  factor_interior: 197.514s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 199.613s  |  Schur: 3,216 x 3,216 dense (78.9 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 0, 1) factor_transient_system:
+  A_ii: nnz=1.3M  |  A_pp: nnz=1,637
+  C_ii cap nodes: 271457 / 271459  |  C_pp cap nodes: 1222 / 1585
+  Total tile cap: 77219.4 fF  |  C_coeff: 0.2000
+  factor_interior: 196.443s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 197.611s  |  Schur: 1,585 x 1,585 dense (19.2 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 1, 0) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=5,483
+  C_ii cap nodes: 256434 / 256459  |  C_pp cap nodes: 1733 / 4397
+  Total tile cap: 489124.9 fF  |  C_coeff: 0.2000
+  factor_interior: 294.975s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 297.325s  |  Schur: 4,397 x 4,397 dense (147.5 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 1, 1) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=3,138
+  C_ii cap nodes: 256057 / 256082  |  C_pp cap nodes: 1774 / 2754
+  Total tile cap: 471932.2 fF  |  C_coeff: 0.2000
+  factor_interior: 203.554s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 206.026s  |  Schur: 2,754 x 2,754 dense (57.9 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 1, 2) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=5,963
+  C_ii cap nodes: 256975 / 257020  |  C_pp cap nodes: 2623 / 4159
+  Total tile cap: 269884.5 fF  |  C_coeff: 0.2000
+  factor_interior: 176.414s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 184.716s  |  Schur: 4,159 x 4,159 dense (132.0 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 1, 3) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=4,568
+  C_ii cap nodes: 257869 / 257878  |  C_pp cap nodes: 3196 / 3424
+  Total tile cap: 195378.6 fF  |  C_coeff: 0.2000
+  factor_interior: 231.855s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 233.685s  |  Schur: 3,424 x 3,424 dense (89.4 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 2, 0) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=7,273
+  C_ii cap nodes: 311166 / 311173  |  C_pp cap nodes: 3022 / 5063
+  Total tile cap: 377770.0 fF  |  C_coeff: 0.2000
+  factor_interior: 230.047s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 237.002s  |  Schur: 5,063 x 5,063 dense (195.6 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 2, 1) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=5,467
+  C_ii cap nodes: 311417 / 311417  |  C_pp cap nodes: 2184 / 4473
+  Total tile cap: 234324.2 fF  |  C_coeff: 0.2000
+  factor_interior: 261.265s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 265.205s  |  Schur: 4,473 x 4,473 dense (152.6 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 2, 2) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=6,731
+  C_ii cap nodes: 313125 / 313153  |  C_pp cap nodes: 2711 / 4501
+  Total tile cap: 175999.9 fF  |  C_coeff: 0.2000
+  factor_interior: 241.481s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 244.257s  |  Schur: 4,501 x 4,501 dense (154.6 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 2, 3) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=4,516
+  C_ii cap nodes: 311400 / 311466  |  C_pp cap nodes: 3131 / 3978
+  Total tile cap: 212712.8 fF  |  C_coeff: 0.2000
+  factor_interior: 236.377s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 238.476s  |  Schur: 3,978 x 3,978 dense (120.7 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 3, 0) factor_transient_system:
+  A_ii: nnz=1.8M  |  A_pp: nnz=5,864
+  C_ii cap nodes: 374193 / 374193  |  C_pp cap nodes: 2375 / 4030
+  Total tile cap: 329629.0 fF  |  C_coeff: 0.2000
+  factor_interior: 254.133s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 256.125s  |  Schur: 4,030 x 4,030 dense (123.9 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 3, 1) factor_transient_system:
+  A_ii: nnz=1.8M  |  A_pp: nnz=3,569
+  C_ii cap nodes: 369688 / 369691  |  C_pp cap nodes: 2021 / 3123
+  Total tile cap: 628422.4 fF  |  C_coeff: 0.2000
+  factor_interior: 262.569s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 263.738s  |  Schur: 3,123 x 3,123 dense (74.4 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 3, 2) factor_transient_system:
+  A_ii: nnz=1.8M  |  A_pp: nnz=5,443
+  C_ii cap nodes: 376202 / 376298  |  C_pp cap nodes: 2513 / 4457
+  Total tile cap: 277600.6 fF  |  C_coeff: 0.2000
+  factor_interior: 315.927s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 318.251s  |  Schur: 4,457 x 4,457 dense (151.6 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 3, 3) factor_transient_system:
+  A_ii: nnz=1.8M  |  A_pp: nnz=4,489
+  C_ii cap nodes: 373218 / 373329  |  C_pp cap nodes: 3775 / 3917
+  Total tile cap: 370356.7 fF  |  C_coeff: 0.2000
+  factor_interior: 281.075s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 283.616s  |  Schur: 3,917 x 3,917 dense (117.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 4, 0) factor_transient_system:
+  A_ii: nnz=1.6M  |  A_pp: nnz=6,972
+  C_ii cap nodes: 331982 / 331982  |  C_pp cap nodes: 2547 / 5146
+  Total tile cap: 332930.5 fF  |  C_coeff: 0.2000
+  factor_interior: 314.967s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 318.286s  |  Schur: 5,146 x 5,146 dense (202.0 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 4, 1) factor_transient_system:
+  A_ii: nnz=1.6M  |  A_pp: nnz=4,076
+  C_ii cap nodes: 333049 / 333049  |  C_pp cap nodes: 1764 / 3716
+  Total tile cap: 256611.7 fF  |  C_coeff: 0.2000
+  factor_interior: 289.156s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 290.710s  |  Schur: 3,716 x 3,716 dense (105.4 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 4, 2) factor_transient_system:
+  A_ii: nnz=1.6M  |  A_pp: nnz=7,303
+  C_ii cap nodes: 332644 / 332730  |  C_pp cap nodes: 3415 / 5157
+  Total tile cap: 287868.5 fF  |  C_coeff: 0.2000
+  factor_interior: 283.311s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 287.304s  |  Schur: 5,157 x 5,157 dense (202.9 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 4, 3) factor_transient_system:
+  A_ii: nnz=1.6M  |  A_pp: nnz=4,970
+  C_ii cap nodes: 333337 / 333401  |  C_pp cap nodes: 3210 / 3652
+  Total tile cap: 219826.1 fF  |  C_coeff: 0.2000
+  factor_interior: 283.925s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 285.445s  |  Schur: 3,652 x 3,652 dense (101.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 5, 0) factor_transient_system:
+  A_ii: nnz=1.6M  |  A_pp: nnz=3,949
+  C_ii cap nodes: 340542 / 340561  |  C_pp cap nodes: 1878 / 3059
+  Total tile cap: 223700.6 fF  |  C_coeff: 0.2000
+  factor_interior: 271.333s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 272.540s  |  Schur: 3,059 x 3,059 dense (71.4 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (3, 5, 1) factor_transient_system:
+  A_ii: nnz=1.6M  |  A_pp: nnz=3,271
+  C_ii cap nodes: 340392 / 340392  |  C_pp cap nodes: 2570 / 2913
+  Total tile cap: 125465.0 fF  |  C_coeff: 0.2000
+  factor_interior: 264.007s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 265.187s  |  Schur: 2,913 x 2,913 dense (64.7 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 0, 0) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=3,004
+  C_ii cap nodes: 264680 / 264684  |  C_pp cap nodes: 1158 / 1960
+  Total tile cap: 77140.3 fF  |  C_coeff: 0.2000
+  factor_interior: 207.043s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 208.597s  |  Schur: 1,960 x 1,960 dense (29.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 0, 1) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=2,862
+  C_ii cap nodes: 261364 / 261364  |  C_pp cap nodes: 2468 / 2802
+  Total tile cap: 165375.1 fF  |  C_coeff: 0.2000
+  factor_interior: 231.333s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 232.804s  |  Schur: 2,802 x 2,802 dense (59.9 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 1, 0) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=4,849
+  C_ii cap nodes: 259466 / 259553  |  C_pp cap nodes: 1336 / 3641
+  Total tile cap: 281706.5 fF  |  C_coeff: 0.2000
+  factor_interior: 233.616s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 236.317s  |  Schur: 3,641 x 3,641 dense (101.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 1, 1) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=3,904
+  C_ii cap nodes: 260407 / 260528  |  C_pp cap nodes: 2314 / 3274
+  Total tile cap: 203446.9 fF  |  C_coeff: 0.2000
+  factor_interior: 235.808s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 237.242s  |  Schur: 3,274 x 3,274 dense (81.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 1, 2) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=6,058
+  C_ii cap nodes: 255770 / 255771  |  C_pp cap nodes: 2887 / 3658
+  Total tile cap: 488366.0 fF  |  C_coeff: 0.2000
+  factor_interior: 271.442s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 272.923s  |  Schur: 3,658 x 3,658 dense (102.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 1, 3) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=2,730
+  C_ii cap nodes: 254882 / 254883  |  C_pp cap nodes: 2188 / 2296
+  Total tile cap: 479259.0 fF  |  C_coeff: 0.2000
+  factor_interior: 225.056s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 226.218s  |  Schur: 2,296 x 2,296 dense (40.2 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 2, 0) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=5,898
+  C_ii cap nodes: 302753 / 302864  |  C_pp cap nodes: 2129 / 4148
+  Total tile cap: 184461.3 fF  |  C_coeff: 0.2000
+  factor_interior: 262.870s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 265.643s  |  Schur: 4,148 x 4,148 dense (131.3 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 2, 1) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=3,566
+  C_ii cap nodes: 298773 / 298773  |  C_pp cap nodes: 2173 / 3032
+  Total tile cap: 249892.6 fF  |  C_coeff: 0.2000
+  factor_interior: 209.617s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 211.357s  |  Schur: 3,032 x 3,032 dense (70.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 2, 2) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=3,350
+  C_ii cap nodes: 297920 / 297923  |  C_pp cap nodes: 1855 / 3054
+  Total tile cap: 470532.1 fF  |  C_coeff: 0.2000
+  factor_interior: 234.790s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 236.036s  |  Schur: 3,054 x 3,054 dense (71.2 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 2, 3) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=3,409
+  C_ii cap nodes: 299029 / 299031  |  C_pp cap nodes: 2311 / 2553
+  Total tile cap: 276529.5 fF  |  C_coeff: 0.2000
+  factor_interior: 145.016s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 146.718s  |  Schur: 2,553 x 2,553 dense (49.7 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 3, 0) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=5,645
+  C_ii cap nodes: 323264 / 323264  |  C_pp cap nodes: 2340 / 4737
+  Total tile cap: 179776.1 fF  |  C_coeff: 0.2000
+  factor_interior: 323.325s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 325.974s  |  Schur: 4,737 x 4,737 dense (171.2 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 3, 1) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=6,527
+  C_ii cap nodes: 323087 / 323087  |  C_pp cap nodes: 4210 / 4571
+  Total tile cap: 122341.3 fF  |  C_coeff: 0.2000
+  factor_interior: 292.177s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 294.639s  |  Schur: 4,571 x 4,571 dense (159.4 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 4, 0) factor_transient_system:
+  A_ii: nnz=1.7M  |  A_pp: nnz=8,997
+  C_ii cap nodes: 366864 / 366864  |  C_pp cap nodes: 2771 / 7185
+  Total tile cap: 231112.0 fF  |  C_coeff: 0.2000
+  factor_interior: 387.018s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 395.650s  |  Schur: 7,185 x 7,185 dense (393.9 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 4, 1) factor_transient_system:
+  A_ii: nnz=1.7M  |  A_pp: nnz=8,685
+  C_ii cap nodes: 363274 / 363274  |  C_pp cap nodes: 5007 / 5743
+  Total tile cap: 157240.1 fF  |  C_coeff: 0.2000
+  factor_interior: 288.889s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 294.322s  |  Schur: 5,743 x 5,743 dense (251.6 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 5, 0) factor_transient_system:
+  A_ii: nnz=1.8M  |  A_pp: nnz=6,619
+  C_ii cap nodes: 375352 / 375352  |  C_pp cap nodes: 1863 / 5759
+  Total tile cap: 193885.3 fF  |  C_coeff: 0.2000
+  factor_interior: 377.382s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 381.952s  |  Schur: 5,759 x 5,759 dense (253.0 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (4, 5, 1) factor_transient_system:
+  A_ii: nnz=1.8M  |  A_pp: nnz=9,630
+  C_ii cap nodes: 372959 / 372959  |  C_pp cap nodes: 4302 / 4658
+  Total tile cap: 139297.8 fF  |  C_coeff: 0.2000
+  factor_interior: 259.909s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 262.776s  |  Schur: 4,658 x 4,658 dense (165.5 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 0, 0) factor_transient_system:
+  A_ii: nnz=1.3M  |  A_pp: nnz=4,264
+  C_ii cap nodes: 270124 / 270132  |  C_pp cap nodes: 2408 / 3210
+  Total tile cap: 175748.9 fF  |  C_coeff: 0.2000
+  factor_interior: 204.140s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 205.384s  |  Schur: 3,210 x 3,210 dense (78.6 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 0, 1) factor_transient_system:
+  A_ii: nnz=1.3M  |  A_pp: nnz=1,490
+  C_ii cap nodes: 271449 / 271451  |  C_pp cap nodes: 1075 / 1438
+  Total tile cap: 77196.9 fF  |  C_coeff: 0.2000
+  factor_interior: 189.109s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 190.048s  |  Schur: 1,438 x 1,438 dense (15.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 1, 0) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=5,474
+  C_ii cap nodes: 256434 / 256459  |  C_pp cap nodes: 1727 / 4392
+  Total tile cap: 489046.8 fF  |  C_coeff: 0.2000
+  factor_interior: 319.449s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 321.586s  |  Schur: 4,392 x 4,392 dense (147.2 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 1, 1) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=3,137
+  C_ii cap nodes: 256057 / 256082  |  C_pp cap nodes: 1772 / 2753
+  Total tile cap: 471956.6 fF  |  C_coeff: 0.2000
+  factor_interior: 233.093s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 234.311s  |  Schur: 2,753 x 2,753 dense (57.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 1, 2) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=5,892
+  C_ii cap nodes: 256976 / 257021  |  C_pp cap nodes: 2558 / 4092
+  Total tile cap: 269782.9 fF  |  C_coeff: 0.2000
+  factor_interior: 193.354s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 198.610s  |  Schur: 4,092 x 4,092 dense (127.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 1, 3) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=4,483
+  C_ii cap nodes: 257871 / 257880  |  C_pp cap nodes: 3112 / 3339
+  Total tile cap: 195458.0 fF  |  C_coeff: 0.2000
+  factor_interior: 200.486s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 202.089s  |  Schur: 3,339 x 3,339 dense (85.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 2, 0) factor_transient_system:
+  A_ii: nnz=1.7M  |  A_pp: nnz=7,625
+  C_ii cap nodes: 362311 / 362318  |  C_pp cap nodes: 3035 / 5883
+  Total tile cap: 386841.0 fF  |  C_coeff: 0.2000
+  factor_interior: 298.811s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 304.727s  |  Schur: 5,883 x 5,883 dense (264.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 2, 1) factor_transient_system:
+  A_ii: nnz=1.7M  |  A_pp: nnz=8,072
+  C_ii cap nodes: 367246 / 367250  |  C_pp cap nodes: 4238 / 5196
+  Total tile cap: 88324.2 fF  |  C_coeff: 0.2000
+  factor_interior: 288.688s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 292.184s  |  Schur: 5,196 x 5,196 dense (206.0 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 3, 0) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=4,014
+  C_ii cap nodes: 289358 / 289358  |  C_pp cap nodes: 2361 / 3110
+  Total tile cap: 130285.7 fF  |  C_coeff: 0.2000
+  factor_interior: 227.400s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 229.945s  |  Schur: 3,110 x 3,110 dense (73.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 3, 1) factor_transient_system:
+  A_ii: nnz=1.3M  |  A_pp: nnz=2,452
+  C_ii cap nodes: 291625 / 291625  |  C_pp cap nodes: 2046 / 2432
+  Total tile cap: 45673.6 fF  |  C_coeff: 0.2000
+  factor_interior: 270.599s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 271.370s  |  Schur: 2,432 x 2,432 dense (45.1 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 4, 0) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=5,206
+  C_ii cap nodes: 296152 / 296152  |  C_pp cap nodes: 2690 / 3438
+  Total tile cap: 167452.8 fF  |  C_coeff: 0.2000
+  factor_interior: 199.336s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 202.924s  |  Schur: 3,438 x 3,438 dense (90.2 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 4, 1) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=2,509
+  C_ii cap nodes: 301816 / 301816  |  C_pp cap nodes: 1694 / 2487
+  Total tile cap: 47062.2 fF  |  C_coeff: 0.2000
+  factor_interior: 311.653s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 312.307s  |  Schur: 2,487 x 2,487 dense (47.2 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 5, 0) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=3,532
+  C_ii cap nodes: 298800 / 298800  |  C_pp cap nodes: 1910 / 2656
+  Total tile cap: 146016.0 fF  |  C_coeff: 0.2000
+  factor_interior: 215.494s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 216.410s  |  Schur: 2,656 x 2,656 dense (53.8 MB)
+18:52:30 distributed.result_factorization DEBUG: Tile (5, 5, 1) factor_transient_system:
+  A_ii: nnz=1.4M  |  A_pp: nnz=1,851
+  C_ii cap nodes: 301514 / 301514  |  C_pp cap nodes: 1428 / 1829
+  Total tile cap: 47335.3 fF  |  C_coeff: 0.2000
+  factor_interior: 230.729s  |  backend: cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+  compute_schur: 231.659s  |  Schur: 1,829 x 1,829 dense (25.5 MB)
+18:55:24 distributed.interface_iterative INFO: auto_select: n_interface=190867 < threshold but estimated factor memory 47.8 GB > budget 32.0 GB; using CG.
+18:55:24 distributed.interface_iterative DEBUG: Block-Jacobi: estimated factor memory 3486.4 MB (n=190867, T=107 tiles, max_block=6097).
+18:55:38 distributed.result_factorization INFO: Transient interface CG solver: mode=assembled, precond=block_jacobi, rtol=1.00e-12, n=190867
+18:55:38 distributed.result_factorization INFO: === Distributed DDM Prepare Transient Statistics ===
+18:55:38 distributed.result_factorization INFO: Method: be  |  dt: 5.0 ps  |  C_coeff: 0.2000
+18:55:38 distributed.result_factorization INFO: Tiles: 107
+18:55:38 distributed.result_factorization INFO:   A_ii nnz:         948,725 / 1.3M / 1.8M  (min/mean/max)
+18:55:38 distributed.result_factorization INFO:   A_pp nnz:         1,286 / 4,657 / 9,630
+18:55:38 distributed.result_factorization INFO:   Total cap:        40920 fF / 248445 fF / 628422 fF  (total: 26583577 fF)
+18:55:38 distributed.result_factorization INFO:   Schur memory:     12.3 MB / 111.3 MB / 393.9 MB  (total: 11.6 GB)
+18:55:38 distributed.result_factorization INFO:   Factor time:      25.231s / 233.164s / 427.821s
+18:55:38 distributed.result_factorization INFO:   Factor backend:   cholmod(partial, mode=simplicial, ordering=amd, natural, idx=32-bit, symbolic_reuse=True)
+18:55:38 distributed.result_factorization INFO:   Factor + Schur wall time: 437.531s
+18:55:38 distributed.result_factorization INFO: Transient interface: 190,867 unknowns, 1282.1M nnz (density 3.519%), 14.3 GB
+18:55:38 distributed.result_factorization INFO:   Backend: CG/assembled/precond=block_jacobi
+18:55:38 distributed.result_factorization INFO:   Factor time: 14.073s
+18:55:38 distributed.result_factorization INFO:   Has capacitance: True
+18:55:38 distributed.result_factorization INFO:   Package C_uu nnz: 0  |  Package G_uu nnz: 3090
+18:55:38 distributed.result_factorization INFO:   Assemble time: 173.302s
+18:55:38 distributed.result_factorization INFO:   Detect islands time: 0.000s
+18:55:38 distributed.result_factorization INFO: === Total Prepare: 624.906s ===
+19:06:18 distributed.interface_iterative DEBUG: InterfaceCGSolver: 359 iters, info=0, 629.9862s (warm=False)
+19:06:34 distributed.solver_td INFO: A2 step columns: 107 tiles, tiers=['skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'phase', 'skipped', 'phase', 'skipped', 'phase', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'phase', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'phase', 'phase', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'phase', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped'], 14.880s
+19:16:14 distributed.interface_iterative DEBUG: InterfaceCGSolver: 330 iters, info=0, 578.4919s (warm=False)
+19:16:14 distributed.solver_td INFO: Step 1/20 (t=5.000e-12 s): max_drop=0.0190 V, total_I=820.10 mA
+19:21:21 distributed.interface_iterative DEBUG: InterfaceCGSolver: 175 iters, info=0, 305.1790s (warm=True)
+19:26:35 distributed.interface_iterative DEBUG: InterfaceCGSolver: 180 iters, info=0, 312.5929s (warm=True)
+19:32:00 distributed.interface_iterative DEBUG: InterfaceCGSolver: 186 iters, info=0, 324.3350s (warm=True)
+19:37:29 distributed.interface_iterative DEBUG: InterfaceCGSolver: 190 iters, info=0, 327.4659s (warm=True)
+19:43:01 distributed.interface_iterative DEBUG: InterfaceCGSolver: 190 iters, info=0, 330.2620s (warm=True)
+19:48:26 distributed.interface_iterative DEBUG: InterfaceCGSolver: 190 iters, info=0, 323.4908s (warm=True)
+19:53:37 distributed.interface_iterative DEBUG: InterfaceCGSolver: 183 iters, info=0, 308.8394s (warm=True)
+19:58:50 distributed.interface_iterative DEBUG: InterfaceCGSolver: 179 iters, info=0, 311.6240s (warm=True)
+20:04:05 distributed.interface_iterative DEBUG: InterfaceCGSolver: 179 iters, info=0, 314.1832s (warm=True)
+20:09:27 distributed.interface_iterative DEBUG: InterfaceCGSolver: 186 iters, info=0, 319.9673s (warm=True)
+20:09:28 distributed.solver_td INFO: Step 11/20 (t=5.500e-11 s): max_drop=0.0182 V, total_I=877.48 mA
+20:14:58 distributed.interface_iterative DEBUG: InterfaceCGSolver: 190 iters, info=0, 329.0932s (warm=True)
+20:20:27 distributed.interface_iterative DEBUG: InterfaceCGSolver: 186 iters, info=0, 328.4356s (warm=True)
+20:25:41 distributed.interface_iterative DEBUG: InterfaceCGSolver: 180 iters, info=0, 312.0987s (warm=True)
+20:31:00 distributed.interface_iterative DEBUG: InterfaceCGSolver: 180 iters, info=0, 318.0215s (warm=True)
+20:36:13 distributed.interface_iterative DEBUG: InterfaceCGSolver: 179 iters, info=0, 311.0633s (warm=True)
+20:41:31 distributed.interface_iterative DEBUG: InterfaceCGSolver: 181 iters, info=0, 316.0315s (warm=True)
+20:46:35 distributed.interface_iterative DEBUG: InterfaceCGSolver: 177 iters, info=0, 302.4511s (warm=True)
+20:51:45 distributed.interface_iterative DEBUG: InterfaceCGSolver: 176 iters, info=0, 309.2715s (warm=True)
+20:56:46 distributed.interface_iterative DEBUG: InterfaceCGSolver: 176 iters, info=0, 299.1303s (warm=True)
+20:56:47 distributed.solver_td INFO: Step 20/20 (t=1.000e-10 s): max_drop=0.0961 V, total_I=846.58 mA
+20:56:47 distributed.solver_td INFO: === Distributed DDM Transient Solve Statistics ===
+20:56:47 distributed.solver_td INFO: Time steps: 20  |  t: [5ps, 0.1ns]  |  dt: 5ps  |  method: be
+20:56:47 distributed.solver_td INFO: DC initial condition: 641.051s
+20:56:47 distributed.solver_td INFO: Time loop: 6612.80s (20 steps, avg 330.640s/step)
+20:56:47 distributed.solver_td INFO:   Transient RHS:     0.939s/step (per-tile: 0.038 / 0.518 / 1.489)
+20:56:47 distributed.solver_td INFO:   Assemble + solve:  329.103s/step
+20:56:47 distributed.solver_td INFO:   Interior recovery:  0.594s/step
+20:56:47 distributed.solver_td INFO: Peak IR-drop: 0.1049 V at t=0.095ns
+20:56:47 distributed.cli INFO: transient solve completed in 9567.960s: 20 time steps, peak IR-drop = 104.932 mV at t = 9.500e-11 s
+20:57:50 distributed.cli INFO: Results saved to /wv/bwdev1/patrasej/dev/sigma_dvd/mpower_testcases/BRCM/analysis/dynamic_ir/distributed/ddm_transient_result.pkl
