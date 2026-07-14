@@ -434,6 +434,82 @@ environmental, not algorithmic.
 With B1 + warm cache + unchanged interface solve at baseline speed, projected ≈19–21 K s (~3.4×);
 reaching ~10× still runs through the interface-solve line, as §7's cumulative table always showed.
 
+### 7.4 B1 400K-split re-measurement — interface system explodes (2026-07-12/13 runs, 20 steps)
+
+Setup: BRCM re-parsed with `--max-interior 400000` → **107 tiles**, interior 197,977 / 285,540 /
+376,298 (min/mean/max) — balance fully achieved vs the old 201K / 852K / 1.6M. Two 20-step transient
+runs (dt=5ps, t_end=0.1ns): **direct** interface solve (`logs/brcm_transient_20260713_102026.log`,
+forced `--interface-solver direct`) and **CG** (`logs/brcm_transient_20260712_181719.log`, `auto`
+resolved to CG: estimated factor 47.8 GB > the 32 GB `AUTO_CG_FACTOR_MEMORY_BUDGET_BYTES`).
+Both runs bit-identical to each other (peak 104.932 mV @ t=0.095 ns, same max_drop at every logged
+step) — exactness holds through the 107-tile split *and* through CG at rtol 1e-12.
+
+| Metric | 36-tile (§7.3) | 107-tile direct | 107-tile CG |
+|---|---|---|---|
+| Interface unknowns | 70,734 | 190,867 | 190,867 |
+| S_global nnz / density / size | 493.5M / 9.9% | 1,282.1M / 3.5% / 14.3 GB | same |
+| Interface factor | 83 s (supernodal/METIS) | 297 s DC + 313 s transient | n/a (CG setup 12–14 s) |
+| Detect islands (DC) | 414 s | 900 s | 882 s |
+| Tile factor wall | 1,286 s | 433 s | 401 s |
+| Smoothing | 3,616 s cold, straggler 3,614 s | warm (0 s) | **cold 254 s wall** (max tile 253 s) |
+| RHS /step | 1.798 (steady ≈0.9) | 0.885 (per-tile max 1.35) | 0.939 |
+| Assemble+solve /step | 2.858 | **11.537** | **329.1** |
+| Recovery /step | 0.913 | 0.609 | 0.594 |
+| Loop /step | 5.570 | **13.034** | **330.6** |
+| DC initial condition | 34 s | 21 s | 641 s (one cold CG solve) |
+| 10K-step loop extrapolation | 55.7 K s | ~130 K s → **~134 K s total (0.51×)** | ~3.3 M s (non-starter) |
+
+**What B1 delivered, exactly as designed (tile-side):** per-step RHS+recovery
+4.36 (baseline) → 2.71 (36t) → **1.49 s/step**; tile factor wall 1,286 → 433 s; transient tile
+refactor similarly down; cold smoothing wall 3,616 → 254 s (the straggler is gone: per-tile max
+253 s vs 3,614 s). Every tile-side projection in §7.3 action 1 was met or beaten.
+
+**What broke: the interface system, structurally.** Unknowns 70,734 → 190,867 (2.7×); S nnz
+493.5M → 1,282.1M (2.6×). Σ n_ports² over the 107 tiles = 1,561M — the assembled S is essentially
+the union of the *dense per-tile port blocks* (overlap dedupe only 1.22×). Every cut plane adds
+ports, and Schur complements are dense in the ports, so S nnz grows superlinearly with splitting.
+Downstream:
+- **Direct:** factor ≈ 47.8 GB (vs ~12 GB implied at 36 tiles). The backsolve is memory-bandwidth
+  bound: 2.858 → 11.537 s/step = 4.0×, matching the factor-size ratio almost exactly.
+- **CG:** block-Jacobi at rtol 1e-12 needs ~175–190 iters/step even warm-started (330 cold), and
+  each iteration is one single-threaded CSR matvec over the 14.3 GB assembled S ≈ 1.75 s →
+  329 s/step. Warm start helps only 1.8× because the tolerance is validation-grade.
+- Detect islands doubled (414 → 900 s) — scales with interface size; still uncached across runs.
+
+**Interpretation — per-step cost is U-shaped in tile count.** Tile-side terms fall with splitting;
+the interface term (unknowns × density × bandwidth-bound solve) grows faster. At max-interior 400K
+the interface line dominates everything and the end-to-end is **2× worse than baseline**. §7.3's
+conclusion is now a measurement: the interface solve is the floor — even at 36 tiles it is
+2.86 s/step = 28.6 K s of a ~6.9 K s 10× budget. **No max-interior setting reaches 10×; the
+interface solver must change.**
+
+**Next actions (ranked):**
+1. **Re-parse at `--max-interior 1000000`** (splits only the 1.6M straggler + a couple more,
+   ~40 tiles). Expected: RHS ~0.5, recovery ~0.6, interface unknowns +10–20% over 70,734 →
+   backsolve ~3.2–3.5 → loop ~4.3–4.6 s/step ≈ 43–46 K s (~1.5–1.6×), plus most of the B1
+   prepare/smoothing wins. Best available configuration without interface work; also the right
+   baseline for measuring item 2.
+2. **Interface solve engineering — the only path to 10×** (target ≤0.3–0.5 s/step):
+   (a) CG `--interface-matvec-mode tilewise` moved worker-side: the per-tile dense `S_i @ x` is a
+   BLAS GEMV, Ray-parallel across 107 workers (~tens of ms/matvec vs 1.75 s assembled), but the
+   per-iteration round-trip must be batched — likely needs a fused "run k iterations worker-side"
+   or coordinator-side dense blocks; (b) relax `--interface-cg-rtol` to 1e-8/1e-6 with an accuracy
+   study (1e-12 proved bit-identical — there is headroom); (c) **two-level preconditioner** (coarse
+   one-node-per-tile Galerkin space, already sketched in B2): block-Jacobi alone plateaus at ~180
+   iters; a coarse space typically cuts DDM interface CG to tens; (d) for direct: threaded /
+   multi-RHS CHOLMOD backsolve — both the 11.5 s and the 36-tile 2.86 s are single-RHS
+   bandwidth-bound.
+3. **Persist island detection with the pkl bundle** (partition-static; 900 s/run at 107 tiles,
+   invalidate on re-parse only). A7 already makes the transient reuse free; the DC one still pays
+   full price every run.
+4. Make the direct-path factor-memory budget host-aware/configurable
+   (`AUTO_CG_FACTOR_MEMORY_BUDGET_BYTES` = 32 GB hardcoded in `interface_iterative.py`; the host
+   factored 47.8 GB without trouble when forced).
+
+Caveat: 20-step runs skip the A2 table build for most tiles (Change C guard: n_steps ≤ 512 →
+tiers mostly 'skipped', 7 'phase'), so full-run RHS would additionally pay/amortize chunked-window
+builds — second-order next to the interface line.
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |
