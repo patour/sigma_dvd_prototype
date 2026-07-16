@@ -1,0 +1,67 @@
+16:41:50 distributed.cli INFO: Logging to file: netlist/netlist_brcm_sampled/distributed_pkl/parse_20260716_164150.log
+16:41:50 filelock DEBUG: Attempting to acquire lock 140218017489888 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/node_ip_address.json.lock
+16:41:50 filelock DEBUG: Lock 140218017489888 acquired on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/node_ip_address.json.lock
+16:41:50 filelock DEBUG: Attempting to release lock 140218017489888 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/node_ip_address.json.lock
+16:41:50 filelock DEBUG: Lock 140218017489888 released on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/node_ip_address.json.lock
+16:41:50 filelock DEBUG: Attempting to acquire lock 140218017489888 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Lock 140218017489888 acquired on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Attempting to release lock 140218017489888 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Lock 140218017489888 released on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Attempting to acquire lock 140218017489888 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Lock 140218017489888 acquired on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Attempting to release lock 140218017489888 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Lock 140218017489888 released on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Attempting to acquire lock 140218017485136 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Lock 140218017485136 acquired on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Attempting to release lock 140218017485136 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Lock 140218017485136 released on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Attempting to acquire lock 140218017481824 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Lock 140218017481824 acquired on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Attempting to release lock 140218017481824 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Lock 140218017481824 released on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Attempting to acquire lock 140218017487680 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Lock 140218017487680 acquired on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Attempting to release lock 140218017487680 on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+16:41:50 filelock DEBUG: Lock 140218017487680 released on /tmp/ray/session_2026-07-16_16-41-50_346521_49143/ports_by_node.json.lock
+2026-07-16 16:41:51,252	INFO worker.py:2007 -- Started a local Ray instance.
+/home/exx/workspace/sdvd/sigma_dvd_prototype/venv/lib/python3.10/site-packages/ray/_private/worker.py:2046: FutureWarning: Tip: In future versions of Ray, Ray will no longer override accelerator visible devices env var if num_gpus=0 or num_gpus=None (default). To enable this behavior and turn off this error message, set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+  warnings.warn(
+16:42:03 distributed.parser INFO: Boundary node filtering: 82415 total, 69504 shared (2+ tiles), 12911 single-tile-only filtered
+16:42:03 distributed.parser INFO: Tile (0_0): 54501 nodes, 33809 edges, 7746 current sources -> tile_0_0.pkl
+16:42:03 distributed.parser INFO: Tile (0_1): 103704 nodes, 84485 edges, 44187 current sources -> tile_0_1.pkl
+16:42:03 distributed.parser INFO: Tile (0_2): 73594 nodes, 46014 edges, 13779 current sources -> tile_0_2.pkl
+16:42:03 distributed.parser INFO: Tile (0_3): 58329 nodes, 34897 edges, 3880 current sources -> tile_0_3.pkl
+16:42:03 distributed.parser INFO: Tile (0_4): 62227 nodes, 38522 edges, 7096 current sources -> tile_0_4.pkl
+16:42:03 distributed.parser INFO: Tile (0_5): 50847 nodes, 29391 edges, 4209 current sources -> tile_0_5.pkl
+16:42:03 distributed.parser INFO: Tile (1_0): 53033 nodes, 34033 edges, 7657 current sources -> tile_1_0.pkl
+16:42:03 distributed.parser INFO: Tile (1_1): 103964 nodes, 86867 edges, 45410 current sources -> tile_1_1.pkl
+16:42:03 distributed.parser INFO: Tile (1_2): 120621 nodes, 97462 edges, 41376 current sources -> tile_1_2.pkl
+16:42:03 distributed.parser INFO: Tile (1_3): 65330 nodes, 41085 edges, 10093 current sources -> tile_1_3.pkl
+16:42:03 distributed.parser INFO: Tile (1_4): 81943 nodes, 55676 edges, 16631 current sources -> tile_1_4.pkl
+16:42:03 distributed.parser INFO: Tile (1_5): 20315 nodes, 11602 edges, 2086 current sources -> tile_1_5.pkl
+16:42:03 distributed.parser INFO: Tile (2_0): 52973 nodes, 33996 edges, 7598 current sources -> tile_2_0.pkl
+16:42:03 distributed.parser INFO: Tile (2_1): 103951 nodes, 86792 edges, 45495 current sources -> tile_2_1.pkl
+16:42:03 distributed.parser INFO: Tile (2_2): 136977 nodes, 101229 edges, 37783 current sources -> tile_2_2.pkl
+16:42:03 distributed.parser INFO: Tile (2_3): 163252 nodes, 135197 edges, 69659 current sources -> tile_2_3.pkl
+16:42:03 distributed.parser INFO: Tile (2_4): 142931 nodes, 113908 edges, 52573 current sources -> tile_2_4.pkl
+16:42:03 distributed.parser INFO: Tile (2_5): 92166 nodes, 65408 edges, 21755 current sources -> tile_2_5.pkl
+16:42:03 distributed.parser INFO: Tile (3_0): 54534 nodes, 34054 edges, 7712 current sources -> tile_3_0.pkl
+16:42:03 distributed.parser INFO: Tile (3_1): 103684 nodes, 84547 edges, 44132 current sources -> tile_3_1.pkl
+16:42:03 distributed.parser INFO: Tile (3_2): 125823 nodes, 87711 edges, 28371 current sources -> tile_3_2.pkl
+16:42:03 distributed.parser INFO: Tile (3_3): 150427 nodes, 118506 edges, 52850 current sources -> tile_3_3.pkl
+16:42:03 distributed.parser INFO: Tile (3_4): 134206 nodes, 98696 edges, 36469 current sources -> tile_3_4.pkl
+16:42:03 distributed.parser INFO: Tile (3_5): 68534 nodes, 40877 edges, 7656 current sources -> tile_3_5.pkl
+16:42:03 distributed.parser INFO: Tile (4_0): 52976 nodes, 33913 edges, 7647 current sources -> tile_4_0.pkl
+16:42:03 distributed.parser INFO: Tile (4_1): 103938 nodes, 86725 edges, 45613 current sources -> tile_4_1.pkl
+16:42:03 distributed.parser INFO: Tile (4_2): 120706 nodes, 96066 edges, 40359 current sources -> tile_4_2.pkl
+16:42:03 distributed.parser INFO: Tile (4_3): 65290 nodes, 41431 edges, 9951 current sources -> tile_4_3.pkl
+16:42:03 distributed.parser INFO: Tile (4_4): 73875 nodes, 49815 edges, 13845 current sources -> tile_4_4.pkl
+16:42:03 distributed.parser INFO: Tile (4_5): 75534 nodes, 43009 edges, 8339 current sources -> tile_4_5.pkl
+16:42:03 distributed.parser INFO: Tile (5_0): 54519 nodes, 33983 edges, 7759 current sources -> tile_5_0.pkl
+16:42:03 distributed.parser INFO: Tile (5_1): 103662 nodes, 84392 edges, 44313 current sources -> tile_5_1.pkl
+16:42:03 distributed.parser INFO: Tile (5_2): 73681 nodes, 46558 edges, 13909 current sources -> tile_5_2.pkl
+16:42:03 distributed.parser INFO: Tile (5_3): 58545 nodes, 35363 edges, 4329 current sources -> tile_5_3.pkl
+16:42:03 distributed.parser INFO: Tile (5_4): 60236 nodes, 36624 edges, 6428 current sources -> tile_5_4.pkl
+16:42:03 distributed.parser INFO: Tile (5_5): 60362 nodes, 33995 edges, 4326 current sources -> tile_5_5.pkl
+16:42:03 distributed.parser INFO: Metadata: 36 tiles, 69504 shared boundary nodes -> metadata.pkl
+16:42:03 distributed.cli INFO: parse_and_dump completed in 13.034s -> netlist/netlist_brcm_sampled/distributed_pkl

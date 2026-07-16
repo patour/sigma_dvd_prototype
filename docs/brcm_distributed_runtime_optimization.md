@@ -510,6 +510,58 @@ Caveat: 20-step runs skip the A2 table build for most tiles (Change C guard: n_s
 tiers mostly 'skipped', 7 'phase'), so full-run RHS would additionally pay/amortize chunked-window
 builds — second-order next to the interface line.
 
+### 7.5 Sampled-BRCM proxy evaluation (2026-07-16, `netlist/netlist_brcm_sampled/`)
+
+Question: is the 10×-node-sampled BRCM PDN (3.08M nodes, same 36-tile layout, straggler tile (2,3)
+preserved) a valid performance proxy — i.e., does a 10× speedup on it predict a 10× on real BRCM?
+Measured: parse (13 s) + transient solve 2000 steps BE dt=5ps (`logs/brcm_sampled_transient_20260716_164303.log`,
+default solver config, Ray).
+
+**Answer: not in its current form.** The sampler reduced nodes 10× but **resistors 26×**
+(R/node 1.87 → 0.72 — below the ≥1.0 needed for connectivity), so the graph fragments: **83% of
+sampled nodes were dropped as resistively floating** (10,899 global islands, 11,034 penalized),
+leaving 514K interior of the intended 3.08M (an effective 60× reduction, not 10×), 242K of 1.24M
+current sources, and non-physical electrical results (max_drop 1.29 V on a 0.76 V rail;
+total_I ~2% of BRCM's). Fragmentation also destroys the dense port-block structure of the tile
+Schur complements, which is precisely the structure that makes the interface solve the BRCM
+bottleneck.
+
+| Metric | BRCM 36-tile (re-run) | Sampled | Ratio |
+|---|---|---|---|
+| Interior nodes (kept) | 30.67M | 514,151 | 60× |
+| Interface unknowns | 70,734 | 20,695 | 3.4× |
+| S_global nnz / density | 493.5M / 9.9% | 2.2M / 0.51% | **224×** |
+| Interface factor | 83 s | 0.19 s | 437× |
+| Tile factor wall | 1,286 s | 0.16 s | ~8,000× |
+| Smoothing (cold) | 3,616 s | 24.4 s | 148× |
+| DC / transient prepare | 1,933 / 1,431 s | 5.9 / 3.1 s | 330 / 460× |
+| RHS /step | 1.798 (32%) | 0.048 (**51%**) | 37× |
+| Assemble+solve /step | 2.858 (**51%**) | 0.005 (**5%**) | **572×** |
+| Recovery /step | 0.913 (16%) | 0.040 (43%) | 23× |
+| Loop /step | 5.570 | 0.094 | 59× |
+
+**The bottleneck profile is inverted.** On BRCM the interface backsolve is 51% of the step — the
+entire remaining 10× problem (§7.4). On the sample it is 5%; RHS+recovery are 94% — the phases B1
+already fixed. Consequences: an interface-solve optimization (lockstep multi-RHS, CG coarse space,
+threaded backsolve) would measure ≈1.05× on the sample but ~2× on BRCM; the B1 U-shape (§7.4)
+cannot be reproduced at all because splitting fragmented tiles does not densify the interface.
+Nothing tuned on this testcase transfers; nothing that matters on BRCM is measurable on it.
+
+**What a valid proxy requires (sampler fixes, in order):**
+1. **Preserve R/node ≈ 1.9** — reduce nodes by *contraction/coarsening* (merge nodes, combine
+   conductances — the R_eff-preserving analogue of `netlist_sampled`) rather than independent
+   element dropping. Acceptance: ~0 floating nodes after parse (`Islands penalized ≈ 0`),
+   kept-interior ≈ sampled-node count.
+2. **Preserve interface structure** — boundary sampling was actually reasonable (138K → 69.5K
+   pre-island; cut planes are 2-D so ~2–3× is expected); what matters is that ports stay densely
+   coupled through tile interiors so S density returns to ~10% (target S nnz ≈ 50–120M, interface
+   factor seconds-not-milliseconds).
+3. **Acceptance test for the proxy itself**: per-step shares within ~±10 points of BRCM's
+   32/51/16 (RHS/solve/recovery), max_drop < Vdd, total_I ≈ scaled BRCM.
+Until then, the cheap-and-faithful alternatives are what §7.4 already used: short (20-step) runs on
+the real BRCM bundle (~50 min wall, exact per-step structure) plus netlist_sampled for regression
+gating.
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |
