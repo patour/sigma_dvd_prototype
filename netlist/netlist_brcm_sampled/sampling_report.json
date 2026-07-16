@@ -1,0 +1,669 @@
+{
+  "total_pad_anchors_expected": 309,
+  "total_pad_anchors_found": 309,
+  "wall_clock_seconds": 518.929390674457,
+  "totals": {
+    "original_nodes": 30812194,
+    "sampled_nodes": 3081230,
+    "original_resistors": 57556177,
+    "sampled_resistors": 2216638,
+    "original_capacitors": 32458054,
+    "sampled_capacitors": 4729479,
+    "original_current_sources": 12405836,
+    "sampled_current_sources": 1239320,
+    "overall_node_reduction_ratio": 9.999965598153985,
+    "repaired_nodes": 181521,
+    "fallback_used_nodes": 15221,
+    "unrepairable_nodes": 2398
+  },
+  "per_tile": [
+    {
+      "tile_id": [
+        0,
+        0
+      ],
+      "original_nodes": 545036,
+      "sampled_nodes": 54501,
+      "original_resistors": 997152,
+      "sampled_resistors": 33809,
+      "original_capacitors": 566574,
+      "sampled_capacitors": 76048,
+      "original_current_sources": 106038,
+      "sampled_current_sources": 10592,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 7513,
+      "fallback_used_nodes": 122,
+      "unrepairable_nodes": 78
+    },
+    {
+      "tile_id": [
+        0,
+        1
+      ],
+      "original_nodes": 1037019,
+      "sampled_nodes": 103704,
+      "original_resistors": 1944847,
+      "sampled_resistors": 84485,
+      "original_capacitors": 1110643,
+      "sampled_capacitors": 177431,
+      "original_current_sources": 707770,
+      "sampled_current_sources": 70707,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 6343,
+      "fallback_used_nodes": 558,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        0,
+        2
+      ],
+      "original_nodes": 735926,
+      "sampled_nodes": 73595,
+      "original_resistors": 1364817,
+      "sampled_resistors": 46014,
+      "original_capacitors": 765413,
+      "sampled_capacitors": 103112,
+      "original_current_sources": 206969,
+      "sampled_current_sources": 20632,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 5477,
+      "fallback_used_nodes": 350,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        0,
+        3
+      ],
+      "original_nodes": 583318,
+      "sampled_nodes": 58329,
+      "original_resistors": 1067872,
+      "sampled_resistors": 34897,
+      "original_capacitors": 592979,
+      "sampled_capacitors": 67992,
+      "original_current_sources": 51310,
+      "sampled_current_sources": 5127,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 2656,
+      "fallback_used_nodes": 216,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        0,
+        4
+      ],
+      "original_nodes": 622229,
+      "sampled_nodes": 62229,
+      "original_resistors": 1145887,
+      "sampled_resistors": 38522,
+      "original_capacitors": 638257,
+      "sampled_capacitors": 78269,
+      "original_current_sources": 97569,
+      "sampled_current_sources": 9756,
+      "pad_anchor_count": 5,
+      "repaired_nodes": 1682,
+      "fallback_used_nodes": 195,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        0,
+        5
+      ],
+      "original_nodes": 508550,
+      "sampled_nodes": 50847,
+      "original_resistors": 935545,
+      "sampled_resistors": 29391,
+      "original_capacitors": 519540,
+      "sampled_capacitors": 61837,
+      "original_current_sources": 55425,
+      "sampled_current_sources": 5537,
+      "pad_anchor_count": 8,
+      "repaired_nodes": 981,
+      "fallback_used_nodes": 89,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        1,
+        0
+      ],
+      "original_nodes": 530376,
+      "sampled_nodes": 53034,
+      "original_resistors": 969076,
+      "sampled_resistors": 34033,
+      "original_capacitors": 553210,
+      "sampled_capacitors": 75871,
+      "original_current_sources": 101189,
+      "sampled_current_sources": 10107,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 7687,
+      "fallback_used_nodes": 183,
+      "unrepairable_nodes": 74
+    },
+    {
+      "tile_id": [
+        1,
+        1
+      ],
+      "original_nodes": 1039609,
+      "sampled_nodes": 103967,
+      "original_resistors": 1953741,
+      "sampled_resistors": 86867,
+      "original_capacitors": 1116283,
+      "sampled_capacitors": 180848,
+      "original_current_sources": 724293,
+      "sampled_current_sources": 72364,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 6531,
+      "fallback_used_nodes": 589,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        1,
+        2
+      ],
+      "original_nodes": 1206237,
+      "sampled_nodes": 120624,
+      "original_resistors": 2278979,
+      "sampled_resistors": 97462,
+      "original_capacitors": 1290798,
+      "sampled_capacitors": 205354,
+      "original_current_sources": 605434,
+      "sampled_current_sources": 60465,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 6075,
+      "fallback_used_nodes": 1013,
+      "unrepairable_nodes": 253
+    },
+    {
+      "tile_id": [
+        1,
+        3
+      ],
+      "original_nodes": 653309,
+      "sampled_nodes": 65330,
+      "original_resistors": 1201870,
+      "sampled_resistors": 41085,
+      "original_capacitors": 673857,
+      "sampled_capacitors": 85886,
+      "original_current_sources": 142888,
+      "sampled_current_sources": 14265,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 3272,
+      "fallback_used_nodes": 267,
+      "unrepairable_nodes": 561
+    },
+    {
+      "tile_id": [
+        1,
+        4
+      ],
+      "original_nodes": 819452,
+      "sampled_nodes": 81945,
+      "original_resistors": 1531917,
+      "sampled_resistors": 55676,
+      "original_capacitors": 859551,
+      "sampled_capacitors": 122083,
+      "original_current_sources": 224283,
+      "sampled_current_sources": 22412,
+      "pad_anchor_count": 5,
+      "repaired_nodes": 2998,
+      "fallback_used_nodes": 658,
+      "unrepairable_nodes": 564
+    },
+    {
+      "tile_id": [
+        1,
+        5
+      ],
+      "original_nodes": 203097,
+      "sampled_nodes": 20315,
+      "original_resistors": 378651,
+      "sampled_resistors": 11602,
+      "original_capacitors": 210959,
+      "sampled_capacitors": 28177,
+      "original_current_sources": 24564,
+      "sampled_current_sources": 2455,
+      "pad_anchor_count": 2,
+      "repaired_nodes": 3674,
+      "fallback_used_nodes": 604,
+      "unrepairable_nodes": 557
+    },
+    {
+      "tile_id": [
+        2,
+        0
+      ],
+      "original_nodes": 529760,
+      "sampled_nodes": 52973,
+      "original_resistors": 968212,
+      "sampled_resistors": 33996,
+      "original_capacitors": 552687,
+      "sampled_capacitors": 75904,
+      "original_current_sources": 101043,
+      "sampled_current_sources": 10093,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 7718,
+      "fallback_used_nodes": 135,
+      "unrepairable_nodes": 74
+    },
+    {
+      "tile_id": [
+        2,
+        1
+      ],
+      "original_nodes": 1039471,
+      "sampled_nodes": 103953,
+      "original_resistors": 1953352,
+      "sampled_resistors": 86792,
+      "original_capacitors": 1116693,
+      "sampled_capacitors": 181383,
+      "original_current_sources": 724112,
+      "sampled_current_sources": 72346,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 6596,
+      "fallback_used_nodes": 534,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        2,
+        2
+      ],
+      "original_nodes": 1369819,
+      "sampled_nodes": 136982,
+      "original_resistors": 2597853,
+      "sampled_resistors": 101229,
+      "original_capacitors": 1455288,
+      "sampled_capacitors": 222672,
+      "original_current_sources": 554909,
+      "sampled_current_sources": 55411,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 9275,
+      "fallback_used_nodes": 1134,
+      "unrepairable_nodes": 1
+    },
+    {
+      "tile_id": [
+        2,
+        3
+      ],
+      "original_nodes": 1632576,
+      "sampled_nodes": 163253,
+      "original_resistors": 3105479,
+      "sampled_resistors": 135197,
+      "original_capacitors": 1751376,
+      "sampled_capacitors": 282217,
+      "original_current_sources": 1134723,
+      "sampled_current_sources": 113440,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 6171,
+      "fallback_used_nodes": 864,
+      "unrepairable_nodes": 1
+    },
+    {
+      "tile_id": [
+        2,
+        4
+      ],
+      "original_nodes": 1429304,
+      "sampled_nodes": 142933,
+      "original_resistors": 2709851,
+      "sampled_resistors": 113908,
+      "original_capacitors": 1526469,
+      "sampled_capacitors": 240247,
+      "original_current_sources": 809304,
+      "sampled_current_sources": 80857,
+      "pad_anchor_count": 5,
+      "repaired_nodes": 4764,
+      "fallback_used_nodes": 843,
+      "unrepairable_nodes": 4
+    },
+    {
+      "tile_id": [
+        2,
+        5
+      ],
+      "original_nodes": 921691,
+      "sampled_nodes": 92167,
+      "original_resistors": 1723461,
+      "sampled_resistors": 65408,
+      "original_capacitors": 967336,
+      "sampled_capacitors": 137841,
+      "original_current_sources": 303614,
+      "sampled_current_sources": 30345,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 3211,
+      "fallback_used_nodes": 605,
+      "unrepairable_nodes": 1
+    },
+    {
+      "tile_id": [
+        3,
+        0
+      ],
+      "original_nodes": 545295,
+      "sampled_nodes": 54536,
+      "original_resistors": 997667,
+      "sampled_resistors": 34054,
+      "original_capacitors": 567000,
+      "sampled_capacitors": 76249,
+      "original_current_sources": 106178,
+      "sampled_current_sources": 10606,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 7611,
+      "fallback_used_nodes": 170,
+      "unrepairable_nodes": 78
+    },
+    {
+      "tile_id": [
+        3,
+        1
+      ],
+      "original_nodes": 1036819,
+      "sampled_nodes": 103685,
+      "original_resistors": 1944906,
+      "sampled_resistors": 84547,
+      "original_capacitors": 1110699,
+      "sampled_capacitors": 177668,
+      "original_current_sources": 707948,
+      "sampled_current_sources": 70724,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 6483,
+      "fallback_used_nodes": 585,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        3,
+        2
+      ],
+      "original_nodes": 1258257,
+      "sampled_nodes": 125824,
+      "original_resistors": 2374960,
+      "sampled_resistors": 87711,
+      "original_capacitors": 1331008,
+      "sampled_capacitors": 198675,
+      "original_current_sources": 390826,
+      "sampled_current_sources": 39009,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 8376,
+      "fallback_used_nodes": 609,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        3,
+        3
+      ],
+      "original_nodes": 1504200,
+      "sampled_nodes": 150429,
+      "original_resistors": 2847462,
+      "sampled_resistors": 118506,
+      "original_capacitors": 1605425,
+      "sampled_capacitors": 251862,
+      "original_current_sources": 802356,
+      "sampled_current_sources": 80215,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 6063,
+      "fallback_used_nodes": 776,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        3,
+        4
+      ],
+      "original_nodes": 1342103,
+      "sampled_nodes": 134206,
+      "original_resistors": 2536121,
+      "sampled_resistors": 98696,
+      "original_capacitors": 1423252,
+      "sampled_capacitors": 215505,
+      "original_current_sources": 525111,
+      "sampled_current_sources": 52446,
+      "pad_anchor_count": 5,
+      "repaired_nodes": 4383,
+      "fallback_used_nodes": 443,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        3,
+        5
+      ],
+      "original_nodes": 685406,
+      "sampled_nodes": 68536,
+      "original_resistors": 1264555,
+      "sampled_resistors": 40877,
+      "original_capacitors": 703075,
+      "sampled_capacitors": 86222,
+      "original_current_sources": 107138,
+      "sampled_current_sources": 10707,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 2255,
+      "fallback_used_nodes": 172,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        4,
+        0
+      ],
+      "original_nodes": 529748,
+      "sampled_nodes": 52976,
+      "original_resistors": 968196,
+      "sampled_resistors": 33913,
+      "original_capacitors": 552675,
+      "sampled_capacitors": 75907,
+      "original_current_sources": 101043,
+      "sampled_current_sources": 10093,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 7742,
+      "fallback_used_nodes": 137,
+      "unrepairable_nodes": 74
+    },
+    {
+      "tile_id": [
+        4,
+        1
+      ],
+      "original_nodes": 1039460,
+      "sampled_nodes": 103942,
+      "original_resistors": 1953337,
+      "sampled_resistors": 86725,
+      "original_capacitors": 1116682,
+      "sampled_capacitors": 181370,
+      "original_current_sources": 724112,
+      "sampled_current_sources": 72346,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 6613,
+      "fallback_used_nodes": 543,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        4,
+        2
+      ],
+      "original_nodes": 1207059,
+      "sampled_nodes": 120709,
+      "original_resistors": 2282178,
+      "sampled_resistors": 96066,
+      "original_capacitors": 1290832,
+      "sampled_capacitors": 204595,
+      "original_current_sources": 586869,
+      "sampled_current_sources": 58609,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 5553,
+      "fallback_used_nodes": 285,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        4,
+        3
+      ],
+      "original_nodes": 652904,
+      "sampled_nodes": 65290,
+      "original_resistors": 1203857,
+      "sampled_resistors": 41431,
+      "original_capacitors": 673493,
+      "sampled_capacitors": 85879,
+      "original_current_sources": 139899,
+      "sampled_current_sources": 13964,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 3177,
+      "fallback_used_nodes": 205,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        4,
+        4
+      ],
+      "original_nodes": 738786,
+      "sampled_nodes": 73875,
+      "original_resistors": 1369135,
+      "sampled_resistors": 49815,
+      "original_capacitors": 767855,
+      "sampled_capacitors": 102944,
+      "original_current_sources": 192990,
+      "sampled_current_sources": 19284,
+      "pad_anchor_count": 5,
+      "repaired_nodes": 2341,
+      "fallback_used_nodes": 304,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        4,
+        5
+      ],
+      "original_nodes": 755324,
+      "sampled_nodes": 75534,
+      "original_resistors": 1401871,
+      "sampled_resistors": 43009,
+      "original_capacitors": 776838,
+      "sampled_capacitors": 97048,
+      "original_current_sources": 113137,
+      "sampled_current_sources": 11286,
+      "pad_anchor_count": 10,
+      "repaired_nodes": 2974,
+      "fallback_used_nodes": 172,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        5,
+        0
+      ],
+      "original_nodes": 545144,
+      "sampled_nodes": 54520,
+      "original_resistors": 997520,
+      "sampled_resistors": 33983,
+      "original_capacitors": 566849,
+      "sampled_capacitors": 76234,
+      "original_current_sources": 106178,
+      "sampled_current_sources": 10606,
+      "pad_anchor_count": 8,
+      "repaired_nodes": 7451,
+      "fallback_used_nodes": 173,
+      "unrepairable_nodes": 78
+    },
+    {
+      "tile_id": [
+        5,
+        1
+      ],
+      "original_nodes": 1036665,
+      "sampled_nodes": 103663,
+      "original_resistors": 1944756,
+      "sampled_resistors": 84392,
+      "original_capacitors": 1110545,
+      "sampled_capacitors": 177646,
+      "original_current_sources": 707948,
+      "sampled_current_sources": 70724,
+      "pad_anchor_count": 8,
+      "repaired_nodes": 6349,
+      "fallback_used_nodes": 593,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        5,
+        2
+      ],
+      "original_nodes": 736841,
+      "sampled_nodes": 73681,
+      "original_resistors": 1364884,
+      "sampled_resistors": 46558,
+      "original_capacitors": 767064,
+      "sampled_capacitors": 103915,
+      "original_current_sources": 209239,
+      "sampled_current_sources": 20859,
+      "pad_anchor_count": 8,
+      "repaired_nodes": 5324,
+      "fallback_used_nodes": 418,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        5,
+        3
+      ],
+      "original_nodes": 585393,
+      "sampled_nodes": 58545,
+      "original_resistors": 1068889,
+      "sampled_resistors": 35363,
+      "original_capacitors": 596123,
+      "sampled_capacitors": 69275,
+      "original_current_sources": 58642,
+      "sampled_current_sources": 5860,
+      "pad_anchor_count": 8,
+      "repaired_nodes": 2628,
+      "fallback_used_nodes": 259,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        5,
+        4
+      ],
+      "original_nodes": 602356,
+      "sampled_nodes": 60236,
+      "original_resistors": 1101902,
+      "sampled_resistors": 36624,
+      "original_capacitors": 616124,
+      "sampled_capacitors": 74004,
+      "original_current_sources": 91180,
+      "sampled_current_sources": 9115,
+      "pad_anchor_count": 4,
+      "repaired_nodes": 1816,
+      "fallback_used_nodes": 236,
+      "unrepairable_nodes": 0
+    },
+    {
+      "tile_id": [
+        5,
+        5
+      ],
+      "original_nodes": 603655,
+      "sampled_nodes": 60362,
+      "original_resistors": 1105419,
+      "sampled_resistors": 33995,
+      "original_capacitors": 614602,
+      "sampled_capacitors": 71309,
+      "original_current_sources": 59605,
+      "sampled_current_sources": 5956,
+      "pad_anchor_count": 8,
+      "repaired_nodes": 1758,
+      "fallback_used_nodes": 182,
+      "unrepairable_nodes": 0
+    }
+  ]
+}
