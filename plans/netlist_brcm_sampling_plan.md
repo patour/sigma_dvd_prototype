@@ -1,5 +1,33 @@
 # Plan: Generate a ~10x-smaller sampled netlist from `netlist_brcm`
 
+## REVISED 2026-07-16 — node-drop sampling replaced by contraction/coarsening
+
+**§4.2/§4.3 below (and the original §4.2/§4.3 decisions-table rows in §3) are superseded.** The
+originally-implemented algorithm — layer-stratified independent random NODE sampling (§4.2) +
+BFS/via-chain connectivity repair for mandatory nodes only (§4.3) — was run end-to-end and
+measured in `docs/brcm_distributed_runtime_optimization.md` §7.5. It produced an invalid proxy:
+
+- Nodes reduced 10× but **resistors 26×**, so **R/node collapsed 1.87 → 0.72** (below the ≥1.0
+  needed for connectivity — an edge only survives a node-drop pass if BOTH endpoints are
+  independently kept, so P(edge survives) ≈ retention² for optional-optional pairs, while
+  mandatory-only repair can't rescue the rest).
+- **83% of sampled nodes were dropped as resistively floating** at parse time (10,899 global
+  islands, 11,034 penalized) — an effective 60× reduction instead of the intended 10×.
+- Interface Schur density collapsed 9.9% → 0.51% (224× nnz drop), inverting the per-step profile
+  (interface solve 51%→5% of BRCM's step share) — the sampled netlist no longer exercises the
+  bottleneck it exists to proxy for. Non-physical solve (max_drop 1.29 V on a 0.76 V rail).
+
+**Fix (implemented in `src/parser/brcm_tile_sampler.py`): contraction/coarsening.** Instead of
+independently keeping/dropping nodes and their edges, every optional node is assigned to a small
+geometric cell (per layer), split into connected components within that cell (so two disconnected
+mesh fragments sharing a cell are never spuriously merged), and each resulting cluster collapses
+to one representative node with parallel-merged conductances/capacitances. This preserves
+connectivity **by construction** (a quotient of a connected graph is connected — no BFS repair
+phase needed, just a cheap mandatory-node degree sanity assertion), preserves total capacitance
+exactly, and keeps R/node close to the source ratio because mesh edges map to coarse-mesh edges
+instead of vanishing. Fully deterministic (no RNG in the node/edge contraction passes); the
+`base_seed` parameter now affects only Pass 4's current-source down-sampling.
+
 ## 1. Problem statement
 
 `netlist/netlist_brcm` is a real, production-scale PDN netlist (not a synthetic
@@ -112,12 +140,12 @@ per-tile, text-level** approach rather than loading a monolithic graph
 | `package.ckt` / `ckt.sp` header | Copied unchanged, **filtered to VDD_VAR-only** lines/parameters; same `.die_area`, `.partition_info 6 6`, absolute coordinates |
 | **Data source for mesh + classification** | **`distributed_pkl/tile_X_Y.pkl` (`TileData`) and `distributed_pkl/metadata.pkl` (`PackageData.die_attachment_nodes`)** — already VDD_VAR-filtered, decompressed, unit-converted (mS/fF/mA), with boundary nodes and pad-anchor nodes precomputed. Avoids re-parsing/re-filtering raw gzip text for the mesh |
 | **Data source for current sources** | **Raw `instanceModels_X_Y.sp` text** (not the pkl) — the pkl's `current_injections` is a flattened per-node DC scalar with no instance names/waveforms, so pulse/PWL/wscale fidelity requires reading the original SPICE text |
-| Die-mesh sampling method | **Layer-stratified random node sampling + connectivity repair** (not grid/pitch decimation, not random edge sampling, not flat/uniform-across-layers sampling) |
-| **Layer stratification** | Rank each tile's layers by their **original node count** (descending = bulk/bottom-of-stack layers first). Assign each layer a retention weight **inversely related to its count**, so sparse upper layers (nearest the pad/RDL layer, e.g. layer 86 with only 11 nodes in tile (1,5)) are retained **close to 100%**, while dense bulk layers are squeezed hardest to reach the tile's overall ~10x target |
+| Die-mesh sampling method | **REVISED: layer-stratified geometric contraction/coarsening** (not grid/pitch decimation, not random edge sampling, not independent node-drop sampling — see the banner at the top of this doc) |
+| **Layer stratification** | Rank each tile's layers by their **original node count** (descending = bulk/bottom-of-stack layers first). Assign each layer a retention weight **inversely related to its count** (same budget/bisection math as the original design), so sparse upper layers (nearest the pad/RDL layer, e.g. layer 86 with only 11 nodes in tile (1,5)) contract to **~100% singleton representatives**, while dense bulk layers absorb most of the reduction via geometric-cell clustering |
 | Reduction ratio granularity | **Per-tile independently** (~10x per tile, preserving each tile's original relative size) |
-| Mandatory-keep nodes | Pad-anchor (`die_attachment_nodes`) nodes, boundary (`TileData.boundary_nodes`) nodes, and current-source-bearing nodes are always retained regardless of layer-stratified sampling |
-| Current sources | **Force-keep** any node with a current source attached (even if random sampling wouldn't have kept it), then **independently down-sample the current source instances themselves by ~10x** among those force-kept nodes (values/waveforms copied verbatim, not rescaled) |
-| Connectivity repair | **Series (conductance-space) path repair**: BFS the *original* mesh from an isolated surviving node to the nearest surviving node and insert one equivalent resistor combining conductances in series (`g = g1*g2/(g1+g2)` for a 2-hop path, generalized for longer paths) along that path. Constrained: **non-via nodes repair only via same-layer paths**; **via nodes repair via up to 2 edges** — nearest surviving via-connected node on the layer immediately above and immediately below (skip a side if the node is on the top/bottom-most layer) |
+| Mandatory-keep nodes | Pad-anchor (`die_attachment_nodes`) nodes, boundary (`TileData.boundary_nodes`) nodes, and current-source-bearing nodes are always retained as **singleton cluster representatives** — never absorbed into a cluster and never absorbing other nodes |
+| Current sources | **Force-keep** any node with a current source attached (even if contraction wouldn't have made it a representative), then **independently down-sample the current source instances themselves by ~10x** among those force-kept nodes (values/waveforms copied verbatim, not rescaled) |
+| Connectivity repair | **REVISED: not needed** — contraction preserves connectivity by construction (a quotient of a connected graph is connected). Replaced by a cheap mandatory-node degree sanity `AssertionError` in `contract_tile_edges` (fail loud if a mandatory node ends up with zero degree post-contraction — a contraction bug, not a data condition) |
 | Current source net filtering | `instanceModels_X_Y.sp` interleaves **multiple nets'** current sources in the same file (instance names are structured as `...:<NET>:...`, e.g. `i_..._bank0:VDD_VAR:VDD:0:0:0:0:0`). Only lines whose structured name field is **`VDD_VAR`** are considered for classification and down-sampling; all other nets' lines are fully ignored (reusing `parser.spice_lexer._has_structured_instance_names` / `_fast_instance_net_filter` + `parser.current_sources._prepare_instance_source`, not a hand-rolled substring check) |
 | Capacitor-follows-current-source | Any node whose **surviving** (post-10%-down-sampling) VDD_VAR current source is kept **must** retain its grounded capacitor line in the output tile `.ckt`, even though the node itself was already force-kept for the broader "current-source-bearing" reason — treated as an explicit, separately-verified invariant rather than an implicit side effect |
 | Auxiliary unused files | **Omit entirely** from output |
@@ -135,7 +163,8 @@ For each `tile_X_Y`:
    `current_injections`. This is already VDD_VAR-filtered, decompressed,
    and unit-converted — no raw-text scanning needed for the mesh.
 2. Build an adjacency structure (plain dict/array, not `rustworkx`) from
-   `resistive_edges`, keyed by node, for BFS/repair use in Pass 3.
+   `resistive_edges`, keyed by node, for the connected-component split
+   (isolated-node detection + per-cell CC-split) reused in Pass 2.
 3. Classify each node in `all_nodes`:
    - **via** vs **non-via**: a node is `via` if it has >=1 resistive edge to
      another node sharing the same `(x, y)` but a different layer (parsed
@@ -156,68 +185,67 @@ For each `tile_X_Y`:
    (VDD_VAR only, from Pass 4's pre-scan). **Optional pool** = all
    remaining nodes in the tile, grouped by layer.
 
-### 4.2 Pass 2 — layer-stratified node sampling
+### 4.2 Pass 2 — layer-stratified geometric contraction (REVISED, supersedes the
+original node-sampling text — see the banner at the top of this doc)
 
-1. Compute the tile's target kept-node count as `~10%` of its original
-   VDD_VAR node count (from `len(all_nodes)`).
-2. If `|mandatory-keep set| >= target`, keep the mandatory set as-is (log a
-   warning — this tile's reduction will be less than 10x, dominated by
-   mandatory categories; expected for current-source-dense or pad-dense
-   tiles).
-3. Otherwise, distribute the remaining budget
-   `remaining = target - |mandatory-keep set|` across the **optional pool**
-   using **layer-stratified** sampling rather than flat-uniform sampling:
-   - For each layer `L` present in the optional pool, let `n_L` be its
-     node count.
-   - Assign a per-layer retention **weight** `w_L = n_L ** (-alpha)` for a
-     tunable exponent `alpha` (default `alpha = 1.0`), so **sparser layers
-     get proportionally much higher retention** than dense bulk layers —
-     directly implementing "keep top-layer (pad-adjacent) nodes as much as
-     possible, sample bottom/bulk layers harder".
-   - Solve for a single per-tile scale factor `s` such that
-     `sum_L( min(1.0, w_L * s) * n_L ) ~= remaining` (simple bisection on
-     `s`, since the sum is monotonic in `s`).
-   - Per-layer retention fraction = `min(1.0, w_L * s)`; randomly sample
-     that fraction of each layer's optional-pool nodes (fixed seed, per
-     tile+layer, for reproducibility).
-   - Layers that are already tiny (e.g. the pad-adjacent layer 86, ~11
-     nodes per tile) will naturally hit the `1.0` cap and be retained in
-     full; the big bulk layers (e.g. 43-55, tens of thousands of nodes)
-     absorb almost all of the reduction.
-4. `kept_nodes = mandatory-keep set ∪ layer-stratified sample`.
+Implemented as `contract_tile_nodes` in `src/parser/brcm_tile_sampler.py`. Fully
+deterministic — **no RNG anywhere in this pass**.
 
-### 4.3 Pass 3 — filter edges + repair connectivity (conductance-space)
+1. **Per-layer retention targets `r_L`** — identical budget math to the original design:
+   compute the tile's target kept-node count as `target_kept = round(ratio * len(all_nodes))`.
+   If `|mandatory-keep set| >= target_kept`, keep the mandatory set as-is (log a warning — this
+   tile's reduction will be less than the target ratio). Otherwise distribute
+   `remaining = target_kept - |mandatory-keep set|` across the optional pool using per-layer
+   weights `w_L = n_L ** (-alpha)` (sparser layers weighted higher) and a single scale factor `s`
+   solved by bisection so `sum_L( min(1.0, w_L * s) * n_L ) ~= remaining`. Unlike the original
+   design, `r_L = min(1.0, w_L * s)` is now interpreted as "fraction of layer `L`'s optional nodes
+   that remain as **cluster representatives**", i.e. expected cluster size on layer `L` is
+   `~= 1 / r_L` — not an independent per-node keep probability.
+2. **Geometric cell assignment** (per layer `L` with `r_L < 1.0`; layers with `r_L >= 1.0`, or
+   absent from the optional pool, make every optional node its own singleton cluster — no
+   coordinate parsing needed): parse `(x, y)` for each optional node on `L`. Unparseable-xy nodes
+   each become their own singleton cluster (never merged with anything, parseable or not).
+   Compute the bbox of the parseable nodes and a cell edge length
+   `h = sqrt(bbox_area / (n_parseable * r_L))` so the expected cluster occupies one cell; nodes
+   are bucketed by `(floor((x-x0)/h), floor((y-y0)/h))`. Degenerate (zero-width and/or
+   zero-height) bboxes fall back to a 1-D or single-shared-cell assignment along whichever axis
+   actually varies.
+3. **Connected-component split within each (layer, cell) bucket**: union-find restricted to
+   resistive edges where BOTH endpoints are optional-pool members of the SAME bucket — this is
+   what prevents two disconnected mesh fragments that happen to land in the same geometric cell
+   from being spuriously merged (no fabricated connection is ever created).
+4. **Representative selection** (deterministic, no RNG): the cluster member minimizing
+   `(squared distance to the cluster's coordinate centroid, node_name)`; a cluster with no
+   coordinate-parseable member falls back to the lexicographically smallest name.
+5. **Originally-isolated nodes** (zero resistive edges in the tile's own adjacency, independent of
+   `r_L`): optional isolates are **dropped entirely** (the production parser would island-drop
+   them anyway); mandatory isolates are **kept as self-mapped singletons** (never given a
+   fabricated edge), logged once with a count.
+6. `kept_nodes = mandatory-keep set ∪ {cluster representatives}` (minus dropped optional
+   isolates). Mandatory nodes are **always singleton representatives** — never absorbed into a
+   cluster and never absorbing other nodes, so boundary/pad-anchor/current-source node names
+   survive verbatim for cross-tile stitching, package hookup, and Pass-4 consistency.
 
-1. **Resistors**: keep an edge iff both endpoints are in `kept_nodes`
-   (after ground `'0'` special-casing). Drop otherwise. Values are already
-   conductances (mS) from `TileData.resistive_edges`.
-2. **Capacitors**: keep iff the non-ground endpoint is in `kept_nodes`
-   (ground caps just disappear with their node — no repair needed).
-3. For every node in the **mandatory-keep set** (pad-anchors first, since
-   these are most critical), check post-filter degree:
-   - If degree > 0, done.
-   - If degree == 0 (isolated): run BFS/shortest-path over the *original*
-     (pre-sampling) tile adjacency built in Pass 1:
-     - **Non-via node**: restrict traversal to same-layer edges only;
-       find nearest node that is in `kept_nodes`; insert one equivalent
-       resistor combining the path's conductances in series
-       (`g_eq = 1 / sum(1/g_i)`, i.e. resistances add, expressed back as
-       conductance since that's `TileData`'s native unit).
-     - **Via node**: search independently upward (next layer up) and
-       downward (next layer down) via chains of same-`(x,y)` via edges
-       until a `kept_nodes` member is found on each side (skip a side if
-       this is the top/bottom-most layer present); insert up to 2 series
-       (conductance-combined) resistors.
-     - **Fallback**: if the constrained (same-layer / adjacent-layer)
-       search finds no candidate within the tile, fall back to an
-       unconstrained BFS over the full original tile mesh to guarantee no
-       leftover floating node (should be rare; log when it happens).
-4. Randomly-sampled (non-mandatory) nodes that end up isolated are simply
-   **dropped** (not repaired) — repair effort is reserved for the
-   mandatory-keep set, since those are hard correctness requirements
-   (pads, current sources, cross-tile stitching); losing an arbitrary
-   interior node is an acceptable, expected consequence of 10x sampling
-   and keeps the algorithm's cost bounded.
+### 4.3 Pass 3 — remap edges through the contraction (REVISED, supersedes the
+original filter+repair text)
+
+Implemented as `contract_tile_edges`. **No repair phase** — contraction already guarantees every
+kept node keeps a path to the rest of the tile (a quotient of a connected graph is connected), so
+this pass only needs to remap and merge edges through Pass 2's `node_to_rep` map
+(`rep('0') = '0'`, ground is its own fixed representative).
+
+1. **Resistors**: for each `(u, v, g_mS)`, map `ru, rv = rep(u), rep(v)`. If `ru == rv` the edge
+   is intra-cluster and dropped (counted). Otherwise accumulate parallel conductance into
+   `G[(min(ru,rv), max(ru,rv))] += g_mS` — independently-ordered mappings of the same physical
+   edge (e.g. arriving via different original endpoints) still merge into one coarse edge.
+2. **Capacitors**: same remap/merge (general case, though tile capacitors are always grounded per
+   root `CLAUDE.md`) — grounded caps of absorbed cluster members accumulate onto their
+   representative, so total tile capacitance is preserved exactly (minus caps on dropped
+   optional isolates, counted separately, never conserved).
+3. **Mandatory-degree sanity check**: every mandatory node that had resistive degree > 0 in the
+   original (pre-contraction) adjacency must have degree > 0 in the contracted edge list; a
+   violation raises `AssertionError` — this indicates a bug in the contraction itself, not a data
+   condition, and is deliberately NOT downgraded to a warning-and-continue.
 
 ### 4.4 Pass 4 — current sources (from raw text, pre-scanned before Pass 2)
 
@@ -255,7 +283,7 @@ For each `tile_X_Y`:
 ### 4.5 Write outputs
 
 - `tile_X_Y.ckt` (gzip): updated `.node_count`, `.flag_boundary`, `r`/`c`
-  lines regenerated from the filtered+repaired `kept_nodes`/edge sets
+  lines regenerated from the contracted `kept_nodes`/edge sets
   (converting `TileData`'s mS/fF back to raw Ohms/Farads:
   `R_ohm = 1000/g_mS`, `C_farad = c_fF * 1e-15`), `*` prefix re-added for
   nodes in `TileData.boundary_nodes`.
@@ -310,8 +338,9 @@ For each `tile_X_Y`:
   nodes and fully self-contained).
 - Uses plain Python dicts/arrays (not `rustworkx`/`networkx`) for per-tile
   adjacency to keep memory bounded per tile.
-- Deterministic via a fixed random seed (configurable), for reproducibility
-  — both for layer-stratified node sampling (§4.2) and current-source
+- Pass 2/3 (geometric contraction, §4.2/§4.3) are fully deterministic with
+  **no RNG at all** — same input always produces byte-identical output. The
+  configurable `--seed`/`base_seed` affects **only** Pass 4's current-source
   down-sampling (§4.4).
 
 ## 6. Validation
@@ -336,6 +365,25 @@ For each `tile_X_Y`:
 3. Report final statistics (nodes/R/C/current-sources per tile and total,
    before/after, reduction ratio achieved) similar to
    `sampled_netlist.py`'s `compute_statistics()`.
+4. **Acceptance criteria from the §7.5 failure analysis** (the reason this
+   redesign exists — a re-measurement that doesn't clear these is not a valid
+   proxy, regardless of how close it gets to 10x node reduction):
+   - **Parse-time islands ≈ 0** (`Islands penalized ≈ 0` in the parse log, not
+     the 10,899/11,034 seen pre-contraction).
+   - **Kept-interior ≈ node count** — i.e. the parser's post-island-removal
+     interior node count should match `sampling_report.json`'s
+     `total_sampled_nodes`, not collapse to a fraction of it (pre-contraction:
+     514K of an intended 3.08M, an effective 60x instead of 10x).
+   - **R/node within ~±30% of the source's** — `sampling_report.json`'s
+     `totals.r_per_node_before` vs `totals.r_per_node_after` (pre-contraction:
+     1.87 → 0.72, a 61% collapse and below the ≥1.0 connectivity floor).
+   - **Per-step profile share sanity**: a short transient re-run's RHS/solve/
+     recovery percentage split should stay within ~±10 points of full BRCM's
+     32/51/16 (§7.5) — if the interface-solve share collapses toward single
+     digits, the sample no longer exercises the bottleneck it exists to proxy.
+   - Seeds now affect **only** Pass 4's current-source down-sampling — a
+     re-run with a different `--seed` should reproduce identical node/edge
+     counts and topology, differing only in which current-source lines survive.
 
 ## 7. Open/adjustable items for review
 

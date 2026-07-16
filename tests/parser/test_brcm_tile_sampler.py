@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
 """Unit tests for the Pass 1-4 pieces of ``parser.brcm_tile_sampler``.
 
-Covers (see ``netlist_brcm_sampling_plan.md`` §4.1-4.4):
+Covers (see ``netlist_brcm_sampling_plan.md`` §4.1-4.4 and the "REVISED"
+banner):
 - Via vs non-via node classification.
 - Layer suffix parsing.
 - Mandatory-keep set union correctness (pad-anchor / boundary /
   current-source-bearing, no double counting).
-- Layer-stratified sampling (sparse-vs-dense retention, target closeness,
-  reproducibility).
-- The "mandatory set already exceeds target" edge case.
+- Pass 2 (``contract_tile_nodes``): determinism, mandatory nodes as
+  singleton representatives, sparse-vs-dense per-layer retention, overall
+  kept-count closeness to target, isolated-node handling, degenerate/
+  unparseable coordinate inputs.
 - ``scan_current_source_nodes`` net-filter correctness (the core
   correctness risk: accidentally treating other-net current sources as
   VDD_VAR).
-- Pass 3 (``filter_and_repair_tile``): resistor/capacitor edge filtering,
-  non-via same-layer repair, via up/down-chain repair (including dead-end
-  and both-directions-succeed cases), the unconstrained-BFS fallback, and
-  the genuinely-unrepairable case.
+- Pass 3 (``contract_tile_edges``): connectivity preservation (the
+  regression test for the §7.5 node-drop failure), R/node preservation,
+  parallel-conductance/capacitance merging, no spurious cross-cluster
+  merges, via/cross-layer edge survival, and the mandatory-degree sanity
+  assertion.
 - Pass 4 (``sample_current_sources``): raw-text-preserving down-sampling,
   net filtering, reproducibility, and the "node_pos not in kept_nodes"
   defensive warning.
 - ``verify_capacitor_invariant``: passing and violating cases.
+- End-to-end: ``run_sampling_pipeline`` output re-parsed via
+  ``DistributedNetlistParser`` -- zero floating nodes, R/node sanity.
 
 All tests use small synthetic ``TileData``/inputs constructed directly in
 this file -- no dependency on real ``netlist_brcm`` data (that belongs to a
@@ -31,28 +36,31 @@ import gzip
 import json
 import logging
 import pickle
+import random
+from collections import deque
 from pathlib import Path
 
 import pytest
 
-from distributed.parser import PackageData, PowerGridMetaData, TileConfig
+from distributed.parser import DistributedNetlistParser, PackageData, PowerGridMetaData, TileConfig
 from distributed.tile_parsing import TileData
 from parser.brcm_tile_sampler import (
     CapacitorInvariantViolation,
     CurrentSourceSamplingResult,
     SamplingPipelineReport,
     TileClassification,
+    TileContractionResult,
+    TileEdgeContractionResult,
     TileProcessingStats,
-    TileRepairResult,
-    TileSamplingResult,
     _capacitance_ff_to_farad,
     _conductance_ms_to_ohm,
     _parse_node_layer,
     _prefixed_node,
     _process_tile_star,
     classify_tile,
+    contract_tile_edges,
+    contract_tile_nodes,
     discover_tile_ids,
-    filter_and_repair_tile,
     filter_package_ckt,
     filter_tile_nd_lines,
     generate_additional_vsrcs,
@@ -65,7 +73,6 @@ from parser.brcm_tile_sampler import (
     read_die_area_from_ckt_sp,
     run_sampling_pipeline,
     sample_current_sources,
-    sample_tile_nodes,
     scan_current_source_nodes,
     verify_capacitor_invariant,
     write_instance_models,
@@ -111,26 +118,79 @@ def _make_classification(
     layer_of,
     mandatory_keep,
     via_nodes=frozenset(),
+    optional_pool_by_layer=None,
 ):
-    """Build a ``TileClassification`` directly for Pass 3 repair tests.
+    """Build a ``TileClassification`` directly for Pass 2/3 unit tests.
 
-    Pass 3 only consults ``adjacency``/``layer_of``/``via_nodes``/
-    ``mandatory_keep``/``tile_id`` -- the other fields are irrelevant here
-    and filled with harmless placeholders.
+    ``optional_pool_by_layer`` defaults to ``all_nodes - mandatory_keep``
+    grouped by ``layer_of`` (mirroring ``classify_tile``'s own derivation)
+    when not given explicitly -- convenient for ``contract_tile_nodes``
+    tests, which need a real optional pool, not the empty placeholder the
+    old (Pass-3-only) version of this helper used.
     """
     all_nodes = set(adjacency)
+    mandatory_keep = set(mandatory_keep)
+    if optional_pool_by_layer is None:
+        optional_pool_by_layer = {}
+        for node in all_nodes - mandatory_keep:
+            optional_pool_by_layer.setdefault(layer_of.get(node), set()).add(node)
     return TileClassification(
         tile_id=tile_id,
         total_nodes=len(all_nodes),
         layer_of=dict(layer_of),
         via_nodes=set(via_nodes),
         adjacency={k: list(v) for k, v in adjacency.items()},
-        mandatory_keep=set(mandatory_keep),
-        optional_pool_by_layer={},
+        mandatory_keep=mandatory_keep,
+        optional_pool_by_layer=optional_pool_by_layer,
         pad_anchor_nodes=set(),
         boundary_nodes=set(),
         current_source_nodes=set(),
     )
+
+
+def _grid_nodes_edges(nx, ny, layer, x0=0, y0=0, g=5.0):
+    """Build a rectangular ``nx x ny`` mesh (with cycles) on one layer.
+
+    Returns ``(nodes, edges, name_fn)`` -- ``name_fn(x, y)`` reconstructs a
+    node name so callers can reference specific grid nodes (corners, a
+    pad-attachment point, etc.).
+    """
+    def name(x, y):
+        return f"{x0 + x}_{y0 + y}_{layer}"
+
+    nodes = [name(x, y) for y in range(ny) for x in range(nx)]
+    edges = []
+    for y in range(ny):
+        for x in range(nx):
+            if x + 1 < nx:
+                edges.append((name(x, y), name(x + 1, y), g))
+            if y + 1 < ny:
+                edges.append((name(x, y), name(x, y + 1), g))
+    return nodes, edges, name
+
+
+def _chain_nodes_edges(n, layer, x0=0, y0=0, g=5.0):
+    """Build an ``n``-node same-layer chain (a tree -- no cycles, R/node < 1)."""
+    nodes = [f"{x0 + i}_{y0}_{layer}" for i in range(n)]
+    edges = [(nodes[i], nodes[i + 1], g) for i in range(n - 1)]
+    return nodes, edges
+
+
+def _reachable_from(start, resistive_edges):
+    """BFS reachability set over a plain ``(u, v, g)`` resistor edge list."""
+    adjacency = {}
+    for u, v, _g in resistive_edges:
+        adjacency.setdefault(u, []).append(v)
+        adjacency.setdefault(v, []).append(u)
+    seen = {start}
+    queue = deque([start])
+    while queue:
+        node = queue.popleft()
+        for neighbor in adjacency.get(node, ()):
+            if neighbor not in seen:
+                seen.add(neighbor)
+                queue.append(neighbor)
+    return seen
 
 
 def _sym_adjacency(edges):
@@ -272,111 +332,269 @@ def test_pad_anchors_and_current_sources_filtered_to_tile_nodes():
 
 
 # =============================================================================
-# Layer-stratified sampling
+# Pass 2 — contract_tile_nodes (plan §4.2, revised)
 # =============================================================================
 
 
-def _classification_with_two_layers(
-    sparse_n=10, dense_n=1000, sparse_layer=86, dense_layer=43, mandatory=None,
-):
-    mandatory = set(mandatory or [])
-    sparse_pool = {f"s{i}_0_{sparse_layer}" for i in range(sparse_n)}
-    dense_pool = {f"d{i}_0_{dense_layer}" for i in range(dense_n)}
-    total_nodes = sparse_n + dense_n + len(mandatory)
-    return TileClassification(
-        tile_id=(0, 0),
-        total_nodes=total_nodes,
-        layer_of={},
-        via_nodes=set(),
-        adjacency={},
-        mandatory_keep=set(mandatory),
-        optional_pool_by_layer={sparse_layer: sparse_pool, dense_layer: dense_pool},
-        pad_anchor_nodes=set(),
-        boundary_nodes=set(),
-        current_source_nodes=set(mandatory),
-    )
+def test_contract_tile_nodes_deterministic_across_calls():
+    """Same classification -> byte-identical node_to_rep, no RNG anywhere."""
+    nodes, edges, _name = _grid_nodes_edges(20, 20, 43)
+    tile_data = _make_tile_data(all_nodes=nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, set(), set())
+
+    result_a = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+    result_b = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+
+    assert result_a.node_to_rep == result_b.node_to_rep
+    assert result_a.kept_nodes == result_b.kept_nodes
+    assert result_a.n_clusters == result_b.n_clusters
 
 
-def test_sampling_sparse_layer_retained_more_than_dense_layer():
-    classification = _classification_with_two_layers(sparse_n=10, dense_n=1000)
-    result = sample_tile_nodes(classification, ratio=0.1, alpha=1.0, base_seed=42)
+def test_contract_tile_nodes_mandatory_nodes_are_singleton_reps():
+    """Mandatory nodes never absorb and are never absorbed by a cluster."""
+    nodes, edges, name = _grid_nodes_edges(15, 15, 43)
+    mandatory = {name(0, 0), name(14, 14)}
+    tile_data = _make_tile_data(all_nodes=nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, mandatory, set())
+
+    result = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+
+    for m in mandatory:
+        assert result.node_to_rep[m] == m
+        assert m in result.kept_nodes
+    # No optional node's representative is one of the mandatory nodes.
+    for node, rep in result.node_to_rep.items():
+        if node not in mandatory:
+            assert rep not in mandatory or rep == node
+
+
+def test_contract_tile_nodes_sparse_layer_retained_more_than_dense_layer():
+    dense_nodes, dense_edges, _ = _grid_nodes_edges(20, 20, 43)
+    sparse_nodes, sparse_edges = _chain_nodes_edges(10, 86, x0=1000)
+    all_nodes = set(dense_nodes) | set(sparse_nodes)
+    edges = dense_edges + sparse_edges
+    tile_data = _make_tile_data(all_nodes=all_nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, set(), set())
+
+    result = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
 
     sparse_retention = result.per_layer_retention[86]
     dense_retention = result.per_layer_retention[43]
     assert sparse_retention > dense_retention
-    # Sparse (pad-adjacent-like) layer should be retained close to fully.
-    assert sparse_retention > 0.9
+    assert sparse_retention == pytest.approx(1.0)
+    assert dense_retention < 1.0
 
 
-def test_sampling_total_kept_close_to_target():
-    classification = _classification_with_two_layers(sparse_n=10, dense_n=1000)
-    result = sample_tile_nodes(classification, ratio=0.1, alpha=1.0, base_seed=1)
+def test_contract_tile_nodes_kept_count_near_target_for_uniform_grid():
+    nodes, edges, _name = _grid_nodes_edges(30, 30, 43)
+    tile_data = _make_tile_data(all_nodes=nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, set(), set())
 
-    # Target is 10% of 1010 = 101. Allow a small fixed-count tolerance for
-    # per-layer rounding (documented as an acceptable approximation).
-    assert abs(len(result.kept_nodes) - result.target_kept) <= 5
-    assert result.target_kept == round(0.1 * 1010)
+    result = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
 
-
-def test_sampling_reproducible_same_seed_and_differs_across_seeds():
-    classification = _classification_with_two_layers(sparse_n=10, dense_n=1000)
-
-    result_a1 = sample_tile_nodes(classification, ratio=0.1, base_seed=7)
-    result_a2 = sample_tile_nodes(classification, ratio=0.1, base_seed=7)
-    assert result_a1.kept_nodes == result_a2.kept_nodes
-
-    result_b = sample_tile_nodes(classification, ratio=0.1, base_seed=99)
-    # Large dense pool (1000 nodes) makes an accidental identical sample
-    # astronomically improbable.
-    assert result_a1.kept_nodes != result_b.kept_nodes
+    total = len(nodes)
+    assert result.target_kept == round(0.1 * total)
+    # Loose bounds (geometric cells + CC-split make this approximate) but
+    # tight enough that a no-op (kept == total) regression fails.
+    assert 0.5 * result.target_kept <= len(result.kept_nodes) <= 2.0 * result.target_kept
+    assert len(result.kept_nodes) < 0.3 * total
 
 
-def test_sampling_mandatory_nodes_always_kept():
-    mandatory = {"m0_0_43", "m1_0_43"}
-    classification = _classification_with_two_layers(mandatory=mandatory)
-    result = sample_tile_nodes(classification, ratio=0.1, base_seed=3)
-    assert mandatory <= result.kept_nodes
-    assert result.mandatory_kept == len(mandatory)
+def test_contract_tile_nodes_isolated_optional_dropped_and_isolated_mandatory_kept(caplog):
+    node_a, node_b = "0_0_43", "10_0_43"  # connected pair -- ordinary optional
+    isolated_optional = "999_999_43"       # zero resistive edges -- must be dropped
+    isolated_mandatory = "0_0_86"          # zero resistive edges but mandatory -- kept
 
-
-def test_sampling_alpha_zero_gives_equal_retention_fraction():
-    """alpha=0 degenerates to flat/uniform-across-layers retention."""
-    classification = _classification_with_two_layers(sparse_n=10, dense_n=1000)
-    result = sample_tile_nodes(classification, ratio=0.1, alpha=0.0, base_seed=5)
-    sparse_retention = result.per_layer_retention[86]
-    dense_retention = result.per_layer_retention[43]
-    assert sparse_retention == pytest.approx(dense_retention, abs=1e-9)
-
-
-# =============================================================================
-# Mandatory-set-exceeds-target edge case
-# =============================================================================
-
-
-def test_sampling_mandatory_exceeds_target_logs_warning_and_keeps_all(caplog):
-    mandatory = {f"m{i}_0_43" for i in range(50)}
-    classification = TileClassification(
-        tile_id=(1, 2),
-        total_nodes=100,  # target_kept = round(0.1 * 100) = 10 < 50 mandatory
-        layer_of={},
-        via_nodes=set(),
-        adjacency={},
-        mandatory_keep=mandatory,
-        optional_pool_by_layer={43: {f"opt{i}_0_43" for i in range(50)}},
-        pad_anchor_nodes=set(),
-        boundary_nodes=set(),
-        current_source_nodes=mandatory,
-    )
+    edges = [(node_a, node_b, 5.0)]
+    all_nodes = {node_a, node_b, isolated_optional, isolated_mandatory}
+    tile_data = _make_tile_data(all_nodes=all_nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, {isolated_mandatory}, set())
 
     with caplog.at_level(logging.WARNING, logger="parser.brcm_tile_sampler"):
-        result = sample_tile_nodes(classification, ratio=0.1, base_seed=0)
+        result = contract_tile_nodes(classification, ratio=0.9, alpha=1.0)
 
-    assert result.kept_nodes == mandatory
-    assert result.optional_kept == 0
-    assert result.mandatory_kept == 50
+    assert isolated_optional not in result.kept_nodes
+    assert isolated_optional not in result.node_to_rep
+    assert result.isolated_optional_dropped == 1
+
+    assert isolated_mandatory in result.kept_nodes
+    assert result.node_to_rep[isolated_mandatory] == isolated_mandatory
+    assert result.isolated_mandatory_kept == 1
     assert any(
-        record.levelno == logging.WARNING for record in caplog.records
-    ), "expected a WARNING log when mandatory-keep exceeds target"
+        record.levelno == logging.WARNING and "isolated" in record.message
+        for record in caplog.records
+    )
+
+
+def test_contract_tile_nodes_unparseable_xy_and_degenerate_layers_do_not_crash():
+    """Unparseable-name nodes and a degenerate ("single point" bbox) layer
+    must not crash. Unparseable nodes always end up as singletons; two
+    differently-spelled node names that parse to the exact same (x, y)
+    (e.g. leading-zero / trailing-``.0`` spelling) exercise the
+    zero-width-and-height branch of ``_assign_geometric_cells`` and, being
+    connected and coincident, merge into one cluster.
+    """
+    unparseable_a, unparseable_b = "not-a-coord-node", "another-bad-one"
+    coincident_a, coincident_b = "5_5_60", "05_5.0_60"  # both parse to (5.0, 5.0)
+    grid_nodes, grid_edges, _name = _grid_nodes_edges(10, 10, 43)
+
+    edges = list(grid_edges) + [
+        (unparseable_a, unparseable_b, 3.0),
+        (unparseable_a, grid_nodes[0], 1.0),
+        (coincident_a, coincident_b, 2.0),
+        (coincident_a, grid_nodes[-1], 1.0),
+    ]
+    all_nodes = set(grid_nodes) | {unparseable_a, unparseable_b, coincident_a, coincident_b}
+    tile_data = _make_tile_data(all_nodes=all_nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, set(), set())
+
+    # Aggressive ratio so even the 2-node degenerate layer must contract
+    # (a looser ratio would just retain it whole, never reaching the
+    # zero-area-bbox code path at all).
+    result = contract_tile_nodes(classification, ratio=0.02, alpha=1.0)
+
+    assert result.node_to_rep[unparseable_a] == unparseable_a
+    assert result.node_to_rep[unparseable_b] == unparseable_b
+    assert unparseable_a in result.kept_nodes
+    assert result.node_to_rep[coincident_a] == result.node_to_rep[coincident_b]
+
+
+def test_contract_tile_nodes_mandatory_only_branch_keeps_direct_lifeline(caplog):
+    """Regression test: in the "mandatory-keep >= target_kept" degenerate
+    branch, a mandatory node whose ONLY original resistive neighbor is an
+    optional node must not be stranded. The degenerate branch runs the same
+    clustering machinery as the normal path (with ``remaining = 0``), so the
+    lifeline node is kept as a cluster representative rather than dropped.
+    """
+    mandatory = "0_0_43"
+    lifeline = "10_0_43"    # optional; mandatory's ONLY original neighbor
+    other_optional = "20_0_43"  # optional; connected to lifeline, not to mandatory
+
+    edges = [(mandatory, lifeline, 5.0), (lifeline, other_optional, 5.0)]
+    all_nodes = {mandatory, lifeline, other_optional}
+    tile_data = _make_tile_data(all_nodes=all_nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, {mandatory}, set())
+
+    # ratio=0.1 over 3 nodes -> target_kept = round(0.3) = 0, so
+    # len(mandatory_keep) == 1 >= target_kept triggers the degenerate branch.
+    with caplog.at_level(logging.WARNING, logger="parser.brcm_tile_sampler"):
+        result = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+
+    assert result.target_kept == 0
+    assert mandatory in result.kept_nodes
+    assert lifeline in result.kept_nodes
+    assert any(
+        record.levelno == logging.WARNING
+        and "already meets or exceeds" in record.message
+        for record in caplog.records
+    )
+
+    # Pass 3 must not strand the mandatory node, and the sanity assert must
+    # not fire (this is a legitimate data condition, not a contraction bug).
+    edge_result = contract_tile_edges(tile_data, result)
+    degree = {n: 0 for n in result.kept_nodes}
+    for u, v, _g in edge_result.kept_resistive_edges:
+        degree[u] = degree.get(u, 0) + 1
+        degree[v] = degree.get(v, 0) + 1
+    assert degree[mandatory] > 0
+
+
+def test_contract_tile_nodes_mandatory_only_branch_preserves_long_chain_connectivity():
+    """Regression test for the §7.5-style fragmentation bug: two mandatory
+    nodes joined ONLY by a chain of optional nodes of length >= 2
+    (M1-o1-o2-o3-M2) must remain connected through the degenerate
+    "mandatory-keep >= target_kept" branch. A rescue that only promotes
+    DIRECT optional neighbors of mandatory nodes keeps the two end-stub
+    edges (M1-o1, o3-M2) but drops the interior optional node o2, severing
+    the chain and silently fragmenting the tile into two islands even
+    though both M1 and M2 individually still show degree > 0.
+    """
+    m1, o1, o2, o3, m2 = "0_0_43", "10_0_43", "20_0_43", "30_0_43", "40_0_43"
+    edges = [(m1, o1, 5.0), (o1, o2, 5.0), (o2, o3, 5.0), (o3, m2, 5.0)]
+    all_nodes = {m1, o1, o2, o3, m2}
+    tile_data = _make_tile_data(all_nodes=all_nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, {m1, m2}, set())
+
+    # ratio=0.1 over 5 nodes -> target_kept = round(0.5) = 0 (banker's
+    # rounding), so len(mandatory_keep) == 2 >= target_kept triggers the
+    # degenerate branch.
+    result = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+    assert result.mandatory_kept >= result.target_kept
+
+    edge_result = contract_tile_edges(tile_data, result)
+    reached = _reachable_from(m1, edge_result.kept_resistive_edges)
+    assert reached == result.kept_nodes
+    assert m2 in reached
+
+
+def test_contract_tile_nodes_mandatory_only_branch_spread_mesh_single_component():
+    """Same regression as above but on a realistic uniform 10x10 mesh with
+    ~15% spread mandatory nodes (ratio 0.1 -> target_kept=10 < 15
+    mandatory), matching the topology observed on production BRCM tiles
+    where sampling is mandatory-keep-set-dominated.
+
+    The mandatory subset is a fixed (seeded) random sample -- this exact
+    seed/topology fragments a single-component mesh into 4 disconnected
+    islands under a "keep mandatory only, rescue direct neighbors" branch
+    (direct-neighbor rescue is not equivalent to full contraction: it
+    happens to preserve connectivity for *some* spread patterns via
+    redundant grid paths, but not this one). The seed is fixed for
+    reproducibility, not for cryptographic/statistical properties.
+    """
+    def name(x, y):
+        return f"{x * 10}_{y * 10}_43"
+
+    nodes = [name(x, y) for x in range(10) for y in range(10)]
+    edges = []
+    for x in range(10):
+        for y in range(10):
+            if x + 1 < 10:
+                edges.append((name(x, y), name(x + 1, y), 5.0))
+            if y + 1 < 10:
+                edges.append((name(x, y), name(x, y + 1), 5.0))
+
+    mandatory = set(random.Random(43).sample(nodes, 15))
+    assert len(mandatory) == 15
+
+    tile_data = _make_tile_data(all_nodes=set(nodes), resistive_edges=edges)
+    classification = classify_tile(tile_data, mandatory, set())
+
+    result = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+    assert result.target_kept == 10
+    assert result.mandatory_kept == 15  # confirms the degenerate branch triggers
+
+    edge_result = contract_tile_edges(tile_data, result)
+    start = next(iter(result.kept_nodes))
+    reached = _reachable_from(start, edge_result.kept_resistive_edges)
+    assert reached == result.kept_nodes  # single connected component, no islands
+
+
+def test_contract_tile_nodes_mandatory_only_branch_reports_isolated_optional_dropped():
+    """Regression test: the degenerate "mandatory-keep >= target_kept"
+    branch must not hardcode ``isolated_optional_dropped=0``. An
+    originally-isolated optional node (zero resistive edges) is dropped in
+    this branch exactly like the normal path, and the counter must reflect
+    that -- otherwise the contraction diagnostics understate node loss on
+    exactly the tiles most likely to hit the connectivity-fragmentation
+    regression above.
+    """
+    mandatory = "0_0_43"
+    connected_optional = "10_0_43"
+    isolated_optional = "999_999_43"  # zero resistive edges -- must be dropped + counted
+
+    edges = [(mandatory, connected_optional, 5.0)]
+    all_nodes = {mandatory, connected_optional, isolated_optional}
+    tile_data = _make_tile_data(all_nodes=all_nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, {mandatory}, set())
+
+    # ratio=0.1 over 3 nodes -> target_kept = 0, so len(mandatory_keep) == 1
+    # >= target_kept triggers the degenerate branch.
+    result = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+    assert result.mandatory_kept >= result.target_kept
+
+    assert isolated_optional not in result.kept_nodes
+    assert isolated_optional not in result.node_to_rep
+    assert result.isolated_optional_dropped == 1
 
 
 # =============================================================================
@@ -445,275 +663,194 @@ def test_scan_current_source_nodes_default_net_filter_is_lowercase_vdd_var(tmp_p
 
 
 # =============================================================================
-# Pass 3 — basic edge filtering (plan §4.3, points 1/2)
+# Pass 3 — contract_tile_edges (plan §4.3, revised)
 # =============================================================================
 
 
-def test_filter_edges_resistor_survives_iff_both_endpoints_kept():
-    node_a, node_b, node_c = "0_0_43", "10_0_43", "20_0_43"
-    tile_data = _make_tile_data(
-        all_nodes=[node_a, node_b, node_c],
-        resistive_edges=[(node_a, node_b, 2.0), (node_b, node_c, 3.0)],
-    )
-    classification = classify_tile(tile_data, set(), set())
-    kept_nodes = {node_a, node_b}  # node_c dropped
+def test_contract_tile_edges_connectivity_preserved_for_grid_mesh():
+    """THE regression test for the §7.5 node-drop failure: contraction must
+    never fragment a connected mesh. BFS from one representative reaches
+    EVERY kept node."""
+    grid_nodes, grid_edges, name = _grid_nodes_edges(30, 30, 43)
+    via_coords = [(0, 0), (29, 0), (0, 29), (29, 29), (15, 15)]
+    sparse_nodes = [f"{x}_{y}_86" for x, y in via_coords]
+    via_edges = [(name(x, y), f"{x}_{y}_86", 8.0) for x, y in via_coords]
 
-    result = filter_and_repair_tile(tile_data, classification, kept_nodes)
-
-    assert (node_a, node_b, 2.0) in result.kept_resistive_edges
-    assert not any(node_c in (u, v) for u, v, _g in result.kept_resistive_edges)
-    assert len(result.kept_resistive_edges) == 1
-    assert result.unrepairable_nodes == set()
-    assert result.repaired_nodes == set()
-
-
-def test_filter_edges_capacitor_survives_iff_nonground_endpoint_kept():
-    node_a, node_b = "0_0_43", "10_0_43"
-    tile_data = _make_tile_data(
-        all_nodes=[node_a, node_b],
-        resistive_edges=[(node_a, node_b, 1.0)],
-        capacitive_edges=[(node_a, "0", 5.0), (node_b, "0", 7.0)],
-    )
+    all_nodes = set(grid_nodes) | set(sparse_nodes)
+    all_edges = grid_edges + via_edges
+    tile_data = _make_tile_data(all_nodes=all_nodes, resistive_edges=all_edges)
     classification = classify_tile(tile_data, set(), set())
 
-    result_both = filter_and_repair_tile(tile_data, classification, {node_a, node_b})
-    assert set(result_both.kept_capacitive_edges) == {(node_a, "0", 5.0), (node_b, "0", 7.0)}
+    contraction = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+    edge_result = contract_tile_edges(tile_data, contraction)
 
-    result_a_only = filter_and_repair_tile(tile_data, classification, {node_a})
-    assert result_a_only.kept_capacitive_edges == [(node_a, "0", 5.0)]
-
-
-def test_repair_not_attempted_when_mandatory_node_not_isolated():
-    """A mandatory node with a surviving edge needs no repair (no-op path)."""
-    node_a, node_b = "0_0_43", "10_0_43"
-    edges = [(node_a, node_b, 2.0)]
-    tile_data = _make_tile_data(all_nodes=[node_a, node_b], resistive_edges=edges)
-    classification = _make_classification(
-        tile_id=(0, 0), adjacency=_sym_adjacency(edges),
-        layer_of={node_a: 43, node_b: 43}, mandatory_keep={node_a},
-    )
-
-    result = filter_and_repair_tile(tile_data, classification, {node_a, node_b})
-
-    assert result.repaired_nodes == set()
-    assert result.kept_resistive_edges == [(node_a, node_b, 2.0)]
+    start = next(iter(contraction.kept_nodes))
+    reached = _reachable_from(start, edge_result.kept_resistive_edges)
+    assert reached == contraction.kept_nodes
 
 
-def test_optional_isolated_node_not_repaired():
-    """Non-mandatory isolated nodes are dropped/left as-is, never repaired."""
-    node_a, node_b, node_c = "0_0_43", "10_0_43", "20_0_43"
-    edges = [(node_a, node_b, 2.0)]
-    adjacency = _sym_adjacency(edges)
-    adjacency.setdefault(node_c, [])  # node_c has no edges at all
-    tile_data = _make_tile_data(all_nodes=[node_a, node_b, node_c], resistive_edges=edges)
-    classification = _make_classification(
-        tile_id=(0, 0), adjacency=adjacency,
-        layer_of={node_a: 43, node_b: 43, node_c: 43}, mandatory_keep=set(),
-    )
+def test_contract_tile_edges_r_per_node_preservation():
+    """Same grid fixture: contracted R/node stays within +/-40% of the
+    original ratio (grid ~= 2.0) and never dips below 1.0."""
+    nodes, edges, _name = _grid_nodes_edges(30, 30, 43)
+    tile_data = _make_tile_data(all_nodes=nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, set(), set())
 
-    result = filter_and_repair_tile(tile_data, classification, {node_a, node_b, node_c})
+    contraction = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+    edge_result = contract_tile_edges(tile_data, contraction)
 
-    assert result.repaired_nodes == set()
-    assert result.unrepairable_nodes == set()
-    assert not any(node_c in e[:2] for e in result.kept_resistive_edges)
+    r_per_node_before = len(edges) / len(nodes)
+    r_per_node_after = len(edge_result.kept_resistive_edges) / len(contraction.kept_nodes)
+
+    assert r_per_node_after >= 1.0
+    assert 0.6 * r_per_node_before <= r_per_node_after <= 1.4 * r_per_node_before
 
 
-# =============================================================================
-# Pass 3 — non-via same-layer repair (plan §4.3, point 3, non-via bullet)
-# =============================================================================
-
-
-def test_repair_non_via_chain_adds_series_combined_edge():
-    """A-B-C-D same-layer chain: A mandatory+isolated, B/C dropped, D kept.
-
-    Expect one repair edge A-D with series-combined conductance, and B/C
-    are NOT added back to kept_nodes.
+def _hand_built_two_cluster_contraction():
+    """Two 3-node chains (clusters A/B), joined by two parallel inter-cluster
+    edges -- shared fixture for the parallel-merge and cap-accumulation tests.
     """
-    node_a, node_b, node_c, node_d = "0_0_43", "10_0_43", "20_0_43", "30_0_43"
-    edges = [(node_a, node_b, 4.0), (node_b, node_c, 4.0), (node_c, node_d, 4.0)]
-    layer_of = {node_a: 43, node_b: 43, node_c: 43, node_d: 43}
-    tile_data = _make_tile_data(all_nodes=[node_a, node_b, node_c, node_d], resistive_edges=edges)
-    classification = _make_classification(
-        tile_id=(0, 0), adjacency=_sym_adjacency(edges), layer_of=layer_of,
-        mandatory_keep={node_a},
-    )
-    kept_nodes = {node_a, node_d}  # B, C dropped
-
-    result = filter_and_repair_tile(tile_data, classification, kept_nodes)
-
-    expected_g = 1.0 / (1.0 / 4.0 + 1.0 / 4.0 + 1.0 / 4.0)
-    assert len(result.kept_resistive_edges) == 1
-    u, v, g = result.kept_resistive_edges[0]
-    assert {u, v} == {node_a, node_d}
-    assert g == pytest.approx(expected_g)
-
-    assert result.repaired_nodes == {node_a}
-    assert result.fallback_used_nodes == set()
-    assert result.unrepairable_nodes == set()
-
-    # B/C must NOT be resurrected into kept_nodes by the repair.
-    assert node_b not in kept_nodes
-    assert node_c not in kept_nodes
-
-
-# =============================================================================
-# Pass 3 — via up/down chain repair (plan §4.3, point 3, via bullet)
-# =============================================================================
-
-
-def test_repair_via_node_both_directions_succeed():
-    """Via stack 40(kept)-43(dropped)-46(target)-49(dropped)-52(kept).
-
-    Both the up-chain (46->49->52) and down-chain (46->43->40) walks
-    should succeed, adding 2 repair edges with correctly series-combined
-    conductances.
-    """
-    n40, n43, n46, n49, n52 = (
-        "100_100_40", "100_100_43", "100_100_46", "100_100_49", "100_100_52",
-    )
-    edges = [(n40, n43, 2.0), (n43, n46, 3.0), (n46, n49, 5.0), (n49, n52, 7.0)]
-    layer_of = {n40: 40, n43: 43, n46: 46, n49: 49, n52: 52}
-    via_nodes = {n40, n43, n46, n49, n52}
-    tile_data = _make_tile_data(all_nodes=list(layer_of), resistive_edges=edges)
-    classification = _make_classification(
-        tile_id=(0, 0), adjacency=_sym_adjacency(edges), layer_of=layer_of,
-        mandatory_keep={n46}, via_nodes=via_nodes,
-    )
-    kept_nodes = {n40, n46, n52}  # 43, 49 dropped
-
-    result = filter_and_repair_tile(tile_data, classification, kept_nodes)
-
-    repair_edges = [e for e in result.kept_resistive_edges if n46 in e[:2]]
-    assert len(repair_edges) == 2
-
-    targets = {frozenset((u, v)): g for u, v, g in repair_edges}
-    expected_up = 1.0 / (1.0 / 5.0 + 1.0 / 7.0)     # 46->49->52
-    expected_down = 1.0 / (1.0 / 3.0 + 1.0 / 2.0)   # 46->43->40
-    assert targets[frozenset((n46, n52))] == pytest.approx(expected_up)
-    assert targets[frozenset((n46, n40))] == pytest.approx(expected_down)
-
-    assert result.repaired_nodes == {n46}
-    assert result.fallback_used_nodes == set()
-    assert result.unrepairable_nodes == set()
-
-
-def test_repair_via_node_branching_nearest_dead_ends_farther_succeeds():
-    """Regression test (found in code review): via chain branches at n40 into
-    two "up" candidates -- a nearest-layer one (n41) that dead-ends, and a
-    farther one (n45) that reaches the kept target (n50) via n45. A greedy
-    "always pick nearest layer delta" walk would incorrectly return None for
-    this direction; the correct (BFS-complete) walk must find the n45 branch.
-    """
-    n40, n41, n45, n50 = "10_10_40", "10_10_41", "10_10_45", "10_10_50"
-    edges = [
-        (n40, n41, 2.0),   # nearest-layer candidate -- dead ends (n41 has no further via edge)
-        (n40, n45, 3.0),   # farther candidate -- continues to the kept target
-        (n45, n50, 4.0),
+    a1, a2, a3 = "a1", "a2", "a3"
+    b1, b2, b3 = "b1", "b2", "b3"
+    resistive_edges = [
+        (a1, a2, 10.0), (a2, a3, 10.0),  # intra-cluster A -- both dropped
+        (b1, b2, 10.0), (b2, b3, 10.0),  # intra-cluster B -- both dropped
+        (a1, b1, 2.0),                   # inter-cluster, parallel edge #1
+        (a3, b3, 3.0),                   # inter-cluster, parallel edge #2
     ]
-    layer_of = {n40: 40, n41: 41, n45: 45, n50: 50}
-    via_nodes = {n40, n41, n45, n50}
-    tile_data = _make_tile_data(all_nodes=list(layer_of), resistive_edges=edges)
-    classification = _make_classification(
-        tile_id=(0, 0), adjacency=_sym_adjacency(edges), layer_of=layer_of,
-        mandatory_keep={n40}, via_nodes=via_nodes,
+    node_to_rep = {a1: a1, a2: a1, a3: a1, b1: b1, b2: b1, b3: b1}
+    contraction = TileContractionResult(
+        tile_id=(0, 0), kept_nodes={a1, b1}, node_to_rep=node_to_rep,
+        mandatory_nodes={a1, b1}, target_kept=2, mandatory_kept=2, optional_kept=0,
+        per_layer_retention={}, n_clusters=2, isolated_optional_dropped=0,
+        isolated_mandatory_kept=0,
     )
-    kept_nodes = {n40, n50}  # n41, n45 dropped
-
-    result = filter_and_repair_tile(tile_data, classification, kept_nodes)
-
-    repair_edges = [e for e in result.kept_resistive_edges if n40 in e[:2]]
-    assert len(repair_edges) == 1
-    u, v, g = repair_edges[0]
-    assert {u, v} == {n40, n50}
-    assert g == pytest.approx(1.0 / (1.0 / 3.0 + 1.0 / 4.0))  # via n45, not the n41 dead end
-
-    assert result.repaired_nodes == {n40}
-    assert result.fallback_used_nodes == set()  # constrained via-chain search must succeed
-    assert result.unrepairable_nodes == set()
+    return resistive_edges, node_to_rep, contraction, (a1, b1)
 
 
-def test_repair_via_node_dead_end_one_direction_only():
-    """Via node at the TOP of its stack: up-chain dead-ends (no crash), only
-    the down-chain repair edge is added, and the (unneeded) fallback is not
-    triggered."""
-    n40, n43, n46 = "100_100_40", "100_100_43", "100_100_46"
-    edges = [(n40, n43, 2.0), (n43, n46, 3.0)]
-    layer_of = {n40: 40, n43: 43, n46: 46}
-    via_nodes = {n40, n43, n46}
-    tile_data = _make_tile_data(all_nodes=list(layer_of), resistive_edges=edges)
-    classification = _make_classification(
-        tile_id=(0, 0), adjacency=_sym_adjacency(edges), layer_of=layer_of,
-        mandatory_keep={n46}, via_nodes=via_nodes,
-    )
-    kept_nodes = {n40, n46}  # n43 dropped; n46 is the topmost layer present
+def test_contract_tile_edges_parallel_conductance_merge_correctness():
+    resistive_edges, _node_to_rep, contraction, (a1, b1) = _hand_built_two_cluster_contraction()
+    tile_data = _make_tile_data(all_nodes={"a1", "a2", "a3", "b1", "b2", "b3"}, resistive_edges=resistive_edges)
 
-    result = filter_and_repair_tile(tile_data, classification, kept_nodes)
+    edge_result = contract_tile_edges(tile_data, contraction)
 
-    repair_edges = [e for e in result.kept_resistive_edges if n46 in e[:2]]
-    assert len(repair_edges) == 1
-    u, v, g = repair_edges[0]
-    assert {u, v} == {n46, n40}
-    assert g == pytest.approx(1.0 / (1.0 / 3.0 + 1.0 / 2.0))
-
-    assert result.repaired_nodes == {n46}
-    assert result.fallback_used_nodes == set()  # one side succeeded -- no fallback needed
-    assert result.unrepairable_nodes == set()
+    assert edge_result.kept_resistive_edges == [(a1, b1, 5.0)]  # 2.0 + 3.0
+    assert edge_result.intra_cluster_resistors_dropped == 4  # 2 in A, 2 in B
+    assert edge_result.parallel_resistors_merged == 1  # 2 inter-cluster edges -> 1
 
 
-def test_repair_via_node_both_dead_end_triggers_fallback(caplog):
-    """Both via-chain directions dead-end, but an unconstrained lateral path
-    exists elsewhere in the tile -- the fallback BFS must find it and log a
-    WARNING."""
-    n43, n46, n49, c_node = (
-        "100_100_43", "100_100_46", "100_100_49", "500_500_43",
-    )
-    edges = [(n43, n46, 3.0), (n46, n49, 5.0), (n43, c_node, 9.0)]
-    layer_of = {n43: 43, n46: 46, n49: 49, c_node: 43}
-    via_nodes = {n43, n46, n49}  # c_node is NOT via (its edge to n43 is same-layer/diff-xy)
-    tile_data = _make_tile_data(all_nodes=list(layer_of), resistive_edges=edges)
-    classification = _make_classification(
-        tile_id=(9, 9), adjacency=_sym_adjacency(edges), layer_of=layer_of,
-        mandatory_keep={n46}, via_nodes=via_nodes,
-    )
-    kept_nodes = {n46, c_node}  # n43, n49 dropped -- both via directions dead-end
+def test_contract_tile_edges_no_spurious_cross_stripe_merge():
+    """Two disconnected same-layer stripes forced through matching geometric
+    cells (identical x-spacing pattern at y=0 and y=1) must stay separate --
+    no coarse edge is ever fabricated between them."""
+    xs = list(range(30))
+    stripe_a = [f"{x}_0_43" for x in xs]
+    stripe_b = [f"{x}_1_43" for x in xs]
+    edges = []
+    for stripe in (stripe_a, stripe_b):
+        edges.extend((u, v, 5.0) for u, v in zip(stripe, stripe[1:]))
 
-    with caplog.at_level(logging.WARNING, logger="parser.brcm_tile_sampler"):
-        result = filter_and_repair_tile(tile_data, classification, kept_nodes)
+    all_nodes = set(stripe_a) | set(stripe_b)
+    tile_data = _make_tile_data(all_nodes=all_nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, set(), set())
 
-    repair_edges = [e for e in result.kept_resistive_edges if n46 in e[:2]]
-    assert len(repair_edges) == 1
-    u, v, g = repair_edges[0]
-    assert {u, v} == {n46, c_node}
-    assert g == pytest.approx(1.0 / (1.0 / 3.0 + 1.0 / 9.0))  # 46->43->c_node
+    contraction = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+    edge_result = contract_tile_edges(tile_data, contraction)
 
-    assert result.repaired_nodes == {n46}
-    assert result.fallback_used_nodes == {n46}
-    assert result.unrepairable_nodes == set()
-    assert any(
-        record.levelno == logging.WARNING and "fallback" in record.message
-        for record in caplog.records
+    reps_a = {contraction.node_to_rep[n] for n in stripe_a}
+    reps_b = {contraction.node_to_rep[n] for n in stripe_b}
+    assert reps_a.isdisjoint(reps_b)
+    for u, v, _g in edge_result.kept_resistive_edges:
+        assert not (u in reps_a and v in reps_b)
+        assert not (u in reps_b and v in reps_a)
+
+
+def test_contract_tile_edges_capacitor_accumulation_conserved():
+    resistive_edges, _node_to_rep, contraction, (a1, b1) = _hand_built_two_cluster_contraction()
+    capacitive_edges = [
+        ("a1", "0", 1.0), ("a2", "0", 2.0), ("a3", "0", 3.0),
+        ("b1", "0", 4.0), ("b2", "0", 5.0), ("b3", "0", 6.0),
+    ]
+    tile_data = _make_tile_data(
+        all_nodes={"a1", "a2", "a3", "b1", "b2", "b3"},
+        resistive_edges=resistive_edges, capacitive_edges=capacitive_edges,
     )
 
+    edge_result = contract_tile_edges(tile_data, contraction)
 
-def test_repair_genuinely_unrepairable_node_logs_error_and_does_not_raise(caplog):
-    """An isolated tile fragment with no path to any kept node anywhere."""
-    node_x, node_y = "1_1_43", "2_1_43"
-    edges = [(node_x, node_y, 1.0)]
-    layer_of = {node_x: 43, node_y: 43}
-    tile_data = _make_tile_data(all_nodes=[node_x, node_y], resistive_edges=edges)
-    classification = _make_classification(
-        tile_id=(5, 5), adjacency=_sym_adjacency(edges), layer_of=layer_of,
-        mandatory_keep={node_x},
+    # (min(u, v), max(u, v)) key normalization means '0' (ground) may end up
+    # in either tuple slot -- extract by "the non-ground endpoint", not by
+    # a fixed position (same convention _grounded_cap_nodes relies on).
+    kept_by_node = {
+        (v if u == "0" else u): c for u, v, c in edge_result.kept_capacitive_edges
+    }
+    assert kept_by_node[a1] == pytest.approx(1.0 + 2.0 + 3.0)
+    assert kept_by_node[b1] == pytest.approx(4.0 + 5.0 + 6.0)
+    total_before = sum(c for _u, _v, c in capacitive_edges)
+    total_after = sum(c for _u, _v, c in edge_result.kept_capacitive_edges)
+    assert total_after == pytest.approx(total_before)
+
+
+def test_contract_tile_edges_capacitor_on_dropped_isolate_not_conserved():
+    """A grounded cap on an originally-isolated (dropped) optional node is
+    NOT conserved -- counted via edges_to_dropped_nodes instead."""
+    node_a, node_b = "0_0_43", "10_0_43"
+    isolated = "999_999_43"  # zero resistive edges -- dropped by contract_tile_nodes
+    edges = [(node_a, node_b, 5.0)]
+    capacitive_edges = [(node_a, "0", 1.0), (isolated, "0", 9.0)]
+    all_nodes = {node_a, node_b, isolated}
+    tile_data = _make_tile_data(
+        all_nodes=all_nodes, resistive_edges=edges, capacitive_edges=capacitive_edges,
     )
-    kept_nodes = {node_x}  # node_y dropped, and node_y is a dead-end leaf
+    classification = classify_tile(tile_data, set(), set())
 
-    with caplog.at_level(logging.ERROR, logger="parser.brcm_tile_sampler"):
-        result = filter_and_repair_tile(tile_data, classification, kept_nodes)
+    contraction = contract_tile_nodes(classification, ratio=0.9, alpha=1.0)
+    assert isolated not in contraction.kept_nodes
+    edge_result = contract_tile_edges(tile_data, contraction)
 
-    assert result.unrepairable_nodes == {node_x}
-    assert result.repaired_nodes == set()
-    assert not any(node_x in e[:2] for e in result.kept_resistive_edges)
-    assert any(record.levelno == logging.ERROR for record in caplog.records)
+    kept_by_node = {u: c for u, _v, c in edge_result.kept_capacitive_edges}
+    assert isolated not in kept_by_node
+    assert edge_result.edges_to_dropped_nodes == 1
+
+
+def test_contract_tile_edges_via_edges_survive_and_connect_layers():
+    """Contraction is per-layer -- a via edge between two kept reps on
+    different layers must map to a coarse edge, keeping the coarse graph
+    connected across layers."""
+    grid_nodes, grid_edges, name = _grid_nodes_edges(10, 10, 43)
+    via_node = "0_0_86"
+    edges = list(grid_edges) + [(via_node, name(0, 0), 8.0)]
+    all_nodes = set(grid_nodes) | {via_node}
+    tile_data = _make_tile_data(all_nodes=all_nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, set(), set())
+
+    contraction = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+    edge_result = contract_tile_edges(tile_data, contraction)
+
+    via_rep = contraction.node_to_rep[via_node]
+    assert via_rep in contraction.kept_nodes
+    reached = _reachable_from(via_rep, edge_result.kept_resistive_edges)
+    assert reached == contraction.kept_nodes  # layer-86 rep still reaches the grid
+
+
+def test_contract_tile_edges_mandatory_degree_sanity_check_raises():
+    """Synthetically corrupted node_to_rep (mandatory node's identity
+    replaced everywhere it appears) strands a mandatory node -- must raise."""
+    node_a, node_b = "a", "b"
+    edges = [(node_a, node_b, 5.0)]
+    tile_data = _make_tile_data(all_nodes={node_a, node_b}, resistive_edges=edges)
+
+    # node_a is mandatory but its edges get remapped to "other" everywhere,
+    # so node_a itself ends up with contracted degree 0 -- a contraction bug.
+    corrupted = TileContractionResult(
+        tile_id=(0, 0), kept_nodes={"other", node_b}, node_to_rep={node_a: "other", node_b: node_b},
+        mandatory_nodes={node_a, node_b}, target_kept=2, mandatory_kept=2, optional_kept=0,
+        per_layer_retention={}, n_clusters=2, isolated_optional_dropped=0,
+        isolated_mandatory_kept=0,
+    )
+
+    with pytest.raises(AssertionError):
+        contract_tile_edges(tile_data, corrupted)
 
 
 # =============================================================================
@@ -1385,7 +1522,8 @@ def test_process_tile_writes_all_3_files_and_keeps_mandatory_nodes(tmp_path):
     assert stats.pad_anchor_count == 1
     assert stats.original_nodes == 12  # 10 bulk + pad + cs node
     assert stats.sampled_current_sources <= stats.original_current_sources == 1
-    assert stats.unrepairable_nodes == 0
+    assert stats.isolated_mandatory_kept == 0
+    assert stats.n_clusters == stats.sampled_nodes
 
     ckt_path = output_dir / "tile_0_0.ckt"
     nd_path = output_dir / "tile_0_0.nd"
@@ -1553,6 +1691,141 @@ def test_write_top_level_files_writes_all_4_plain_text_files(tmp_path):
 
 
 # =============================================================================
+# End-to-end proxy-validity (plan §6) -- would have caught the §7.5 failure
+# =============================================================================
+
+
+def _build_synthetic_2tile_mesh_design(tmp_path):
+    """Build a 2-tile design with an actual cross-tile mesh (cycles + a
+    shared boundary node), unlike ``_build_synthetic_2tile_design``'s
+    disjoint per-tile chains -- needed so the union graph has real
+    inter-tile connectivity to check post-contraction (plan §6 point (b)).
+    """
+    tile_ids = [(0, 0), (1, 0)]
+    source_dir = tmp_path / "source"
+    pkl_dir = tmp_path / "pkl"
+    source_dir.mkdir()
+    pkl_dir.mkdir()
+
+    boundary_node = "999_999_43"
+    pad_nodes = {}
+    all_pad_anchors: set = set()
+    tile_x_offsets = {(0, 0): 0, (1, 0): 100}
+
+    for i, tile_id in enumerate(tile_ids):
+        x0 = tile_x_offsets[tile_id]
+        nodes, edges, name = _grid_nodes_edges(5, 5, 43, x0=x0, y0=0)
+        pad_node = f"{x0}_500_86"
+        cs_node = name(2, 2)
+        edges.append((pad_node, name(0, 0), 10.0))
+        edges.append((boundary_node, name(4, 4), 10.0))  # cross-tile stitch point
+        all_nodes = set(nodes) | {pad_node, boundary_node}
+        capacitive_edges = [(n, "0", 5.0) for n in nodes] + [(pad_node, "0", 5.0)]
+
+        tile_data = TileData(
+            tile_id=tile_id, resistive_edges=edges, all_nodes=all_nodes,
+            boundary_nodes={boundary_node}, current_injections={cs_node: 1.0},
+            capacitive_edges=capacitive_edges,
+        )
+        _write_pkl(pkl_dir / f"tile_{tile_id[0]}_{tile_id[1]}.pkl", tile_data)
+
+        nd_lines = [f"{n} 1 2 3 4 VDD_VAR" for n in sorted(all_nodes)]
+        _write_gzip_text(source_dir / f"tile_{tile_id[0]}_{tile_id[1]}.nd", nd_lines)
+
+        inst_lines = [
+            ".flag_boundary",
+            f"i_test_{i}:VDD_VAR:VDD:0:0:0:0:0 {cs_node} 0 1e-08 dv=0.76",
+        ]
+        _write_gzip_text(source_dir / f"instanceModels_{tile_id[0]}_{tile_id[1]}.sp", inst_lines)
+
+        pad_nodes[tile_id] = pad_node
+        all_pad_anchors.add(pad_node)
+
+    package_lines = _make_package_ckt_fixture(
+        [(f"bmp_{i}", "VDD_VAR", pad_nodes[tid]) for i, tid in enumerate(tile_ids)]
+    )
+    (source_dir / "package.ckt").write_text("\n".join(package_lines) + "\n")
+    (source_dir / "ckt.sp").write_text(
+        ".partition_info 2 1\n.die_area 0 0 200 200\n.parameter VDD_VAR 0.76\n"
+    )
+
+    tile_configs = [
+        TileConfig(tile_id=tid, ckt_path="", nd_path="", instance_path="", net_filter="vdd_var")
+        for tid in tile_ids
+    ]
+    package_data = PackageData(
+        vsrc_dict={}, package_edges=[], pad_nodes=set(pad_nodes.values()),
+        tap_nodes=set(), die_attachment_nodes=set(all_pad_anchors), vdd=0.76,
+        net_name="VDD_VAR",
+    )
+    metadata = PowerGridMetaData(
+        tile_grid=(2, 1), parameters={}, tile_configs=tile_configs,
+        package_data=package_data, net_name="VDD_VAR", vdd=0.76,
+    )
+    _write_pkl(pkl_dir / "metadata.pkl", {"metadata": metadata, "boundary_nodes": {boundary_node}})
+
+    return source_dir, pkl_dir, tile_ids, all_pad_anchors
+
+
+def test_sampled_output_reparses_with_zero_floating_nodes_and_sane_r_per_node(tmp_path):
+    """The regression test for §7.5: run the sampling pipeline, then feed its
+    OUTPUT back through ``DistributedNetlistParser`` like a real user would,
+    and verify (a) every sampled node survives re-parsing, (b) the union
+    graph is fully connected from a pad anchor (zero floating nodes), and
+    (c) aggregate R/node lands >= 1.0 and within +/-40% of the source's.
+    """
+    source_dir, pkl_dir, tile_ids, all_pad_anchors = _build_synthetic_2tile_mesh_design(tmp_path)
+
+    # Source (pre-sampling) R/node, for the ±40% comparison below.
+    source_total_nodes = 0
+    source_total_resistors = 0
+    for tile_id in tile_ids:
+        td = load_tile_data(pkl_dir, tile_id)
+        source_total_nodes += len(td.all_nodes)
+        source_total_resistors += len(td.resistive_edges)
+
+    output_dir = tmp_path / "output"
+    report = run_sampling_pipeline(source_dir, pkl_dir, output_dir, ratio=0.5, base_seed=1, workers=1)
+    assert report.total_pad_anchors_found == report.total_pad_anchors_expected
+
+    dump_dir = tmp_path / "distributed_pkl"
+    parser_ = DistributedNetlistParser(str(output_dir), net_filter='VDD_VAR')
+    parser_.parse_and_dump(str(dump_dir), backend='local')
+
+    with open(dump_dir / "metadata.pkl", "rb") as f:
+        payload = pickle.load(f)
+    reparsed_metadata = payload["metadata"]
+
+    all_tile_data = [
+        load_tile_data(dump_dir, tc.tile_id) for tc in reparsed_metadata.tile_configs
+    ]
+
+    # (a) every node written to the sampled .ckt files survives parsing.
+    written_nodes = set()
+    for tile_id in tile_ids:
+        with gzip.open(output_dir / f"tile_{tile_id[0]}_{tile_id[1]}.nd", "rt") as f:
+            written_nodes |= {line.split()[0] for line in f if line.strip()}
+    reparsed_nodes = set()
+    for td in all_tile_data:
+        reparsed_nodes |= td.all_nodes
+    assert written_nodes <= reparsed_nodes
+
+    # (b) union graph connected from a pad-anchor node -- zero floating nodes.
+    resistive_edges = [e for td in all_tile_data for e in td.resistive_edges]
+    die_attachment_nodes = reparsed_metadata.package_data.die_attachment_nodes
+    assert die_attachment_nodes  # sanity: at least one pad anchor survived
+    start = next(iter(die_attachment_nodes))
+    reached = _reachable_from(start, resistive_edges)
+    assert reached == reparsed_nodes, f"floating nodes: {reparsed_nodes - reached}"
+
+    # (c) aggregate R/node >= 1.0 and within +/-40% of the source design's.
+    r_per_node_source = source_total_resistors / source_total_nodes
+    r_per_node_sampled = len(resistive_edges) / len(reparsed_nodes)
+    assert r_per_node_sampled >= 1.0
+    assert 0.6 * r_per_node_source <= r_per_node_sampled <= 1.4 * r_per_node_source
+
+
+# =============================================================================
 # Real-data validation (plan §5/§6) -- single-tile smoke test, real netlist_brcm
 # =============================================================================
 
@@ -1567,20 +1840,18 @@ def test_process_tile_real_smallest_tile_end_to_end(tmp_path):
     against real data, roughly hits the target ratio, and every pad anchor
     present in this tile survives.
 
-    Note on ``unrepairable_nodes`` (verified by direct inspection, not a
-    bug): on real data, some ``TileData.boundary_nodes`` have *zero*
+    Note on ``isolated_mandatory_kept`` (verified by direct inspection, not
+    a bug): on real data, some ``TileData.boundary_nodes`` have *zero*
     resistive degree within this tile's own mesh -- their only resistive
     edge is recorded in the *adjacent* tile's ``TileData.resistive_edges``
     (the raw netlist stores each cross-tile edge once, attributed to one
-    side). Pass 3's repair BFS is deliberately per-tile-only (plan §4.3),
-    so these are structurally unrepairable from within a single tile and
-    are left for downstream (cross-tile) validation to reason about, per
-    the "Leaving unrepaired; downstream validation must catch this" log
-    message. Confirmed for tile (1,5): every one of the 557 unrepairable
-    nodes is in ``TileData.boundary_nodes``, and none are pad-anchor or
-    current-source-bearing nodes -- so we assert the invariants that
-    actually matter (pad anchors and current-source nodes always survive
-    repair) rather than a blanket zero-unrepairable count.
+    side). Contraction correctly keeps these as self-mapped singleton
+    representatives (never dropped, never given a fabricated edge) and
+    counts them via ``isolated_mandatory_kept`` with a WARNING log -- they
+    remain zero-local-degree nodes for downstream (cross-tile) validation
+    to reason about, same as the pre-contraction design's
+    "unrepairable" outcome, just without ever risking a fabricated
+    same-tile shortcut edge.
     """
     if not _REAL_PKL_DIR.exists() or not (_REAL_NETLIST_DIR / "tile_1_5.nd").exists():
         pytest.skip("netlist/netlist_brcm (real data) not available in this environment")
@@ -1600,11 +1871,11 @@ def test_process_tile_real_smallest_tile_end_to_end(tmp_path):
     # Sampling is mandatory-keep-set-dominated for some tiles (expected per
     # plan) -- just check we're in the right ballpark, not exactly 10%.
     assert 0 < stats.sampled_nodes <= stats.original_nodes
-    # Unrepairable nodes are expected on real data (see docstring above) --
-    # they're exclusively a subset of TileData.boundary_nodes, bounded by
-    # this tile's total boundary-node count.
+    # Isolated-mandatory nodes are expected on real data (see docstring
+    # above) -- they're exclusively a subset of TileData.boundary_nodes,
+    # bounded by this tile's total boundary-node count.
     tile_data = load_tile_data(_REAL_PKL_DIR, tile_id)
-    assert 0 <= stats.unrepairable_nodes <= len(tile_data.boundary_nodes)
+    assert 0 <= stats.isolated_mandatory_kept <= len(tile_data.boundary_nodes)
 
     ckt_path = output_dir / "tile_1_5.ckt"
     nd_path = output_dir / "tile_1_5.nd"

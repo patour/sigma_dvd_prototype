@@ -1,31 +1,43 @@
 """Phase 1-4 tooling for the netlist_brcm sampling pipeline.
 
-Design doc: ``netlist_brcm_sampling_plan.md`` (repo root). This module
-currently implements the plan's:
+Design doc: ``netlist_brcm_sampling_plan.md`` (repo root), see the
+"REVISED" banner + §4.2/§4.3 for the algorithm this module implements, and
+``docs/brcm_distributed_runtime_optimization.md`` §7.5 for why the
+original node-drop + BFS-repair design was replaced.
 
 - **Phase 1**: reading the existing ``distributed_pkl/`` output of
   `netlist/netlist_brcm` (a real 36-tile (6x6) production PDN netlist,
   already parsed via ``sigma-dvd parse ./netlist/netlist_brcm --net
   VDD_VAR``) and verifying the pad-anchor bookkeeping needed by later
   phases.
-- **Pass 1 / Pass 2** (plan §4.1/§4.2): per-tile node classification
-  (layer, via, boundary, pad-anchor, current-source-bearing) and
-  layer-stratified node sampling down to a target retention ratio.
-- **Pass 3** (plan §4.3): resistor/capacitor edge filtering to
-  ``kept_nodes``, plus conductance-space connectivity repair for any
-  mandatory-keep node left isolated by the filter (same-layer BFS for
-  non-via nodes; up/down via-chain walk + unconstrained-BFS fallback for
-  via nodes).
-- **Pass 4** (plan §4.4): current-source down-sampling from the raw
-  ``instanceModels_X_Y.sp`` text (preserving original line text verbatim,
-  unlike ``scan_current_source_nodes``'s node-only pre-scan), plus the
-  capacitor-follows-current-source invariant check.
+- **Pass 1** (plan §4.1): per-tile node classification (layer, via,
+  boundary, pad-anchor, current-source-bearing) into a mandatory-keep set
+  and an optional pool grouped by layer.
+- **Pass 2** (plan §4.2, revised): ``contract_tile_nodes`` -- deterministic
+  geometric contraction/coarsening of the optional pool. Nodes are grouped
+  into small per-layer geometric cells, connected-component split within
+  each cell (never merges disconnected mesh fragments), and each resulting
+  cluster collapses to one representative node. Unlike the original
+  node-drop design, contraction never discards a connected node without
+  folding its edges into a surviving representative -- connectivity is
+  preserved BY CONSTRUCTION (a quotient of a connected graph is connected).
+- **Pass 3** (plan §4.3, revised): ``contract_tile_edges`` -- remaps every
+  resistor/capacitor edge through Pass 2's node-to-representative map,
+  merging parallel edges (conductances/capacitances add) and dropping
+  intra-cluster edges. There is NO repair phase: contraction makes BFS
+  connectivity repair unnecessary, replaced by a cheap mandatory-node
+  degree sanity assertion (fail loud on a genuine contraction bug, not a
+  data condition).
+- **Pass 4** (plan §4.4, unchanged): current-source down-sampling from the
+  raw ``instanceModels_X_Y.sp`` text (preserving original line text
+  verbatim, unlike ``scan_current_source_nodes``'s node-only pre-scan),
+  plus the capacitor-follows-current-source invariant check. ``base_seed``
+  now only affects this pass -- Passes 2/3 are fully deterministic (no RNG).
 
-The end goal (later phase, NOT implemented here) is to produce a
-``netlist/netlist_brcm_sampled/`` directory that is a ~10x-smaller version
-of `netlist_brcm`, preserving the tile count, pad count, and the
-statistical distribution of the RC mesh and current sources. This module
-so far provides:
+This module also provides the full pipeline orchestration/CLI
+(``process_tile``, ``run_sampling_pipeline``, ``main``) that stitches all
+of the above -- plus the output-file writers below -- into a real
+``netlist/netlist_brcm_sampled/`` directory:
 
 - Loaders for ``metadata.pkl`` / ``tile_X_Y.pkl`` (thin wrappers, no
   redefinition of ``PowerGridMetaData`` / ``TileData``).
@@ -40,27 +52,16 @@ so far provides:
   flattened DC-only scalar with no instance-name/waveform fidelity).
 - ``classify_tile``: per-tile node classification (layer/via/boundary/
   pad-anchor/current-source-bearing, mandatory-keep set, optional pool by
-  layer), building a plain-dict adjacency structure meant to be reused
-  (not rebuilt) by the BFS-based connectivity-repair phase.
-- ``sample_tile_nodes``: layer-stratified random sampling of the optional
-  pool down to an overall target retention ratio, with sparser layers
-  retained closer to 100% than dense bulk layers.
-- ``filter_and_repair_tile``: Pass 3 edge filtering + connectivity repair
-  for mandatory-keep nodes left isolated by the filter.
+  layer), building a plain-dict adjacency structure reused by
+  ``contract_tile_nodes``'s connected-component split.
 - ``sample_current_sources`` / ``verify_capacitor_invariant``: Pass 4
   current-source down-sampling (raw-text-preserving) and the
   capacitor-follows-current-source correctness invariant.
-- **Output generation** (plan §4.5, TOP-LEVEL files only):
-  ``generate_pg_net_voltage``, ``generate_additional_vsrcs``,
-  ``generate_ckt_sp`` (+ ``read_die_area_from_ckt_sp``), and
-  ``filter_package_ckt`` -- pure text-in/text-out functions for the 4
-  tile-count-independent output files (``pg_net_voltage``,
-  ``additional_vsrcs``, ``ckt.sp``, ``package.ckt``).
-
-Per-tile output writers (``tile_X_Y.ckt``/``.nd``, gzip
-``instanceModels_X_Y.sp``) and the full pipeline orchestration/CLI that
-stitches all of the above into a real ``netlist/netlist_brcm_sampled/``
-directory are a LATER phase — see the plan doc.
+- **Output generation** (plan §4.5): ``generate_pg_net_voltage``,
+  ``generate_additional_vsrcs``, ``generate_ckt_sp`` (+
+  ``read_die_area_from_ckt_sp``), ``filter_package_ckt`` (top-level,
+  tile-count-independent files), and the per-tile writers
+  (``write_tile_ckt``, ``write_tile_nd``, ``write_instance_models``).
 """
 
 from __future__ import annotations
@@ -69,10 +70,10 @@ import argparse
 import gzip
 import json
 import logging
+import math
 import multiprocessing
 import random
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 import pickle
@@ -167,7 +168,8 @@ def compute_pad_anchor_accounting(
     are not guaranteed to be uniform rectangles at the node level, so
     set-intersection against the loaded mesh is the only reliable way to
     classify which tile a die_attachment_node belongs to (and is exactly
-    what later sampling/repair phases need anyway).
+    what ``classify_tile``'s mandatory-keep pass needs as its
+    ``pad_anchors_for_tile`` argument).
 
     Verifies (logging at INFO/WARNING, does not raise) that:
       (a) the union of all per-tile sets covers every die_attachment_node
@@ -373,9 +375,11 @@ def scan_current_source_nodes(
 class TileClassification:
     """Per-tile node classification (Pass 1, plan §4.1).
 
-    ``adjacency`` is built once here specifically so the later (not yet
-    implemented) Pass 3 BFS connectivity-repair phase can reuse it directly
-    rather than re-scanning ``resistive_edges``.
+    ``adjacency`` is built once here specifically so Pass 2
+    (``contract_tile_nodes``, which restricts cell-splitting BFS/union-find
+    to this same adjacency dict) and the mandatory-degree sanity check in
+    Pass 3 (``contract_tile_edges``) can reuse it directly rather than
+    re-scanning ``resistive_edges``.
 
     The pad-anchor / boundary / current-source subsets are kept alongside
     the ``mandatory_keep`` union (rather than only exposing the union)
@@ -405,8 +409,10 @@ def classify_tile(
     """Classify every node in *tile_data* (Pass 1, plan §4.1).
 
     Builds a plain-dict adjacency structure from ``resistive_edges`` (kept
-    for reuse by the later BFS-based repair phase, not a throwaway local),
-    and computes each node's layer and via/non-via status in the same
+    on the returned ``TileClassification`` for reuse by Pass 2's
+    connected-component split and Pass 3's mandatory-degree sanity check,
+    not a throwaway local), and computes each node's layer and via/non-via
+    status in the same
     single pass over ``resistive_edges`` (a node is ``via`` iff it has >= 1
     resistive edge to another node sharing the same ``(x, y)`` but a
     different layer — by symmetry, one such edge marks both endpoints via
@@ -488,27 +494,47 @@ def classify_tile(
 
 
 # =============================================================================
-# Pass 2 — layer-stratified node sampling (plan §4.2)
+# Pass 2 — geometric contraction/coarsening (plan §4.2, revised)
 # =============================================================================
+#
+# Replaces the original node-drop layer-stratified sampling (see the §7.5
+# failure analysis in the module docstring). Instead of independently
+# keep/drop-ing each optional node (which starves an edge of survival to
+# P ~= retention^2 for optional-optional pairs), every optional node is
+# assigned to a small connected cluster and the cluster collapses to one
+# representative -- no node is ever discarded without its edges being
+# folded into a surviving representative, so connectivity is preserved BY
+# CONSTRUCTION. Fully deterministic: no ``random`` use anywhere below.
+
+
+GROUND_NODE = '0'
+
+_SINGLETON_CELL_EPS = 1e-9  # bbox-area floor to avoid a division by zero
 
 
 @dataclass
-class TileSamplingResult:
-    """Result of Pass 2 layer-stratified sampling for one tile.
+class TileContractionResult:
+    """Result of Pass 2 geometric contraction for one tile.
 
-    ``kept_nodes`` is the primary output (mandatory-keep ∪ sampled optional
-    nodes) — a richer dataclass is returned rather than a bare ``Set[str]``
-    because tests and later phases (e.g. the §6 validation statistics
-    report) benefit from the diagnostics below; none of them are required
-    to reproduce ``kept_nodes`` given the same inputs/seed.
+    ``node_to_rep`` is the primary output consumed by Pass 3
+    (``contract_tile_edges``): every original node that was not dropped as
+    an isolated optional node maps to its cluster's representative
+    (mandatory and singleton-representative nodes map to themselves).
+    ``mandatory_nodes`` is carried through so Pass 3's degree sanity check
+    doesn't need a second ``classify_tile`` call.
     """
 
     tile_id: Tuple[int, int]
     kept_nodes: Set[str]
+    node_to_rep: Dict[str, str]
+    mandatory_nodes: Set[str]
     target_kept: int
     mandatory_kept: int
     optional_kept: int
     per_layer_retention: Dict[Optional[int], float]
+    n_clusters: int
+    isolated_optional_dropped: int
+    isolated_mandatory_kept: int
 
 
 def _achieved_optional_sum(
@@ -521,252 +547,343 @@ def _achieved_optional_sum(
     )
 
 
-def _tile_layer_seed(base_seed: int, tile_id: Tuple[int, int], layer: Optional[int]) -> int:
-    """Deterministic per-tile+per-layer RNG seed.
+def _solve_per_layer_retention(
+    optional_sizes: Dict[Optional[int], int], remaining: int, alpha: float,
+) -> Dict[Optional[int], float]:
+    """Solve for per-layer retention fractions via the plan §4.2 weight/bisection scheme.
 
-    Built only from plain ints/tuples-of-ints (``None`` is remapped to the
-    sentinel ``-1``, since real layer numbers are always non-negative), so
-    ``hash(...)`` is stable across separate Python processes regardless of
-    ``PYTHONHASHSEED`` string-hash randomization — required for
-    reproducibility across the embarrassingly-parallel per-tile runs the
-    plan calls for (§5).
-
-    Note: ``hash(None)`` is NOT covered by ``PYTHONHASHSEED`` salting — it
-    falls back to identity-based ``id(None)``, which is only stable across
-    process launches on non-PIE/ASLR-exempt Python builds. Using a fixed
-    int sentinel instead avoids relying on that build-dependent behavior.
+    Identical math to the original ``sample_tile_nodes``: weight
+    ``w_L = n_L ** (-alpha)``, single scale factor ``s`` via exponential
+    search + bisection so ``sum_L( min(1.0, w_L * s) * n_L ) ~= remaining``.
     """
-    layer_key = -1 if layer is None else layer
-    return hash((base_seed, tile_id, layer_key)) & 0xFFFFFFFF
+    total_optional = sum(optional_sizes.values())
+    if total_optional == 0 or remaining >= total_optional:
+        return {layer: 1.0 for layer in optional_sizes}
+
+    weights = {layer: n ** (-alpha) for layer, n in optional_sizes.items()}
+
+    lo, hi = 0.0, 1.0
+    # Exponential search for an upper bound at which the achieved sum
+    # reaches `remaining`. Guaranteed to terminate: remaining <
+    # total_optional was just checked above, and
+    # _achieved_optional_sum(scale) -> total_optional monotonically as
+    # scale -> inf. The 1e12 cap is just a safety net against pathological
+    # inputs (e.g. all-zero weights), not expected to be hit.
+    while (
+        _achieved_optional_sum(optional_sizes, weights, hi) < remaining
+        and hi < 1e12
+    ):
+        hi *= 2.0
+
+    mid = hi
+    for _ in range(100):
+        mid = (lo + hi) / 2.0
+        achieved = _achieved_optional_sum(optional_sizes, weights, mid)
+        if abs(achieved - remaining) <= 1.0:
+            break
+        if achieved < remaining:
+            lo = mid
+        else:
+            hi = mid
+
+    return {layer: min(1.0, weights[layer] * mid) for layer in optional_sizes}
 
 
-def sample_tile_nodes(
+def _assign_geometric_cells(
+    nodes: Set[str], xy_of: Dict[str, Tuple[Optional[float], Optional[float]]], retention: float,
+) -> Dict[str, Tuple]:
+    """Assign each node a hashable cell id for the CC-split step (plan §4.2, point 2).
+
+    Unparseable-xy nodes get a per-node-unique cell key so they always end
+    up as singleton clusters after the CC split (never grouped with any
+    other node, parseable or not) -- this directly implements "each becomes
+    a singleton cluster" without a separate code path.
+
+    Cell edge length targets an expected cluster size of ``1 / retention``:
+    ``h = sqrt(bbox_area / (n_parseable * retention))``. Degenerate bboxes
+    (zero width and/or height -- collinear or coincident nodes) fall back
+    to a 1-D or single-cell assignment along whichever axis actually varies.
+    """
+    cell_of: Dict[str, Tuple] = {}
+    parseable = []
+    for n in nodes:
+        x, y = xy_of[n]
+        if x is None or y is None:
+            cell_of[n] = ('unparseable', n)
+        else:
+            parseable.append(n)
+
+    if not parseable:
+        return cell_of
+
+    xs = [xy_of[n][0] for n in parseable]
+    ys = [xy_of[n][1] for n in parseable]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    width, height = x1 - x0, y1 - y0
+    n_parseable = len(parseable)
+    denom = max(n_parseable * retention, 1.0)
+
+    if width > 0 and height > 0:
+        h = math.sqrt(max(width * height, _SINGLETON_CELL_EPS) / denom)
+        for n in parseable:
+            x, y = xy_of[n]
+            cell_of[n] = (math.floor((x - x0) / h), math.floor((y - y0) / h))
+    elif width > 0 or height > 0:
+        axis, extent, origin = (0, width, x0) if width > 0 else (1, height, y0)
+        cell_len = extent / denom
+        for n in parseable:
+            cell_of[n] = (math.floor((xy_of[n][axis] - origin) / cell_len),)
+    else:
+        # Single point (all parseable nodes share (x, y)) -- one shared cell.
+        for n in parseable:
+            cell_of[n] = (0,)
+
+    return cell_of
+
+
+def _connected_component_split(
+    nodes: Set[str], cell_of: Dict[str, Tuple], adjacency: Dict[str, List[Tuple[str, float]]],
+) -> List[List[str]]:
+    """Union-find over *nodes*, unioning only same-cell neighbors (plan §4.2, point 3).
+
+    Restricting unions to ``cell_of[u] == cell_of[v]`` (in addition to both
+    endpoints being members of *nodes*) is what prevents two disconnected
+    mesh fragments that happen to land in the same geometric cell from
+    being spuriously merged.
+    """
+    parent = {n: n for n in nodes}
+
+    def find(n: str) -> str:
+        while parent[n] != n:
+            parent[n] = parent[parent[n]]
+            n = parent[n]
+        return n
+
+    for u in nodes:
+        cell_u = cell_of[u]
+        for v, _g in adjacency.get(u, ()):
+            if v in nodes and cell_of[v] == cell_u:
+                ru, rv = find(u), find(v)
+                if ru != rv:
+                    parent[ru] = rv
+
+    clusters: Dict[str, List[str]] = {}
+    for n in nodes:
+        clusters.setdefault(find(n), []).append(n)
+    return list(clusters.values())
+
+
+def _pick_cluster_representative(
+    members: List[str], xy_of: Dict[str, Tuple[Optional[float], Optional[float]]],
+) -> str:
+    """Deterministic representative: nearest to the coordinate centroid, tie-broken by name.
+
+    Falls back to the lexicographically smallest name when no member has a
+    parseable coordinate (plan §4.2, point 4) -- not expected to trigger
+    given ``_assign_geometric_cells``'s singleton treatment of unparseable
+    nodes, but a cluster is a plain list here, not guaranteed coordinate-full.
+    """
+    if len(members) == 1:
+        return members[0]
+
+    coord_members = [m for m in members if xy_of.get(m, (None, None))[0] is not None]
+    if not coord_members:
+        return min(members)
+
+    cx = sum(xy_of[m][0] for m in coord_members) / len(coord_members)
+    cy = sum(xy_of[m][1] for m in coord_members) / len(coord_members)
+
+    def _key(m: str) -> Tuple[float, str]:
+        x, y = xy_of.get(m, (None, None))
+        if x is None:
+            return (float('inf'), m)
+        return ((x - cx) ** 2 + (y - cy) ** 2, m)
+
+    return min(members, key=_key)
+
+
+def contract_tile_nodes(
     classification: TileClassification,
     ratio: float = 0.1,
     alpha: float = 1.0,
-    base_seed: int = 0,
-) -> TileSamplingResult:
-    """Layer-stratified node sampling for one tile (Pass 2, plan §4.2).
+) -> TileContractionResult:
+    """Geometric contraction of the optional pool for one tile (Pass 2, plan §4.2).
 
-    1. ``target_kept = round(ratio * classification.total_nodes)`` (the
-       *original* per-tile node count, not the optional-pool size).
-    2. If the mandatory-keep set already meets or exceeds ``target_kept``,
-       keep it as-is, log a warning (this tile's reduction will be less
-       than ``ratio``, dominated by mandatory categories), and sample
-       nothing from the optional pool.
-    3. Otherwise, distribute ``remaining = target_kept - |mandatory_keep|``
-       across ``optional_pool_by_layer`` using per-layer weights
-       ``w_L = n_L ** (-alpha)`` (sparser layers get a higher weight, so
-       they're retained closer to 100% while dense bulk layers absorb most
-       of the reduction), solving for a single scale factor ``s`` via
-       exponential search + bisection such that
-       ``sum_L( min(1.0, w_L * s) * n_L ) ~= remaining``.
-    4. Per layer, deterministically sample
-       ``round(min(1.0, w_L * s) * n_L)`` nodes via a per-tile+per-layer
-       seeded ``random.Random`` (reproducible given the same
-       ``base_seed``; the pool is sorted before sampling so the result
-       does not depend on Python's per-process string-hash randomization
-       of set iteration order).
-    5. ``kept_nodes = mandatory_keep | sampled_optional_nodes``.
-
-    Bisection tolerance/iteration note: real integer sampling (step 4's
-    ``round()`` per layer) will not hit the continuous bisection target
-    exactly. Small (a node or two) leftover/overshoot from independent
-    per-layer rounding is treated as an acceptable approximation and is
-    *not* individually rebalanced afterward — see plan §4.2.
+    1. Per-layer retention targets ``r_L`` -- identical budget math to the
+       original sampling design (see ``_solve_per_layer_retention``):
+       ``target_kept = round(ratio * total_nodes)``. If the mandatory-keep
+       set alone already meets/exceeds ``target_kept``, a warning is logged
+       (this tile's reduction will be worse than the target ratio), but the
+       optional pool still runs through the SAME clustering machinery below
+       with ``remaining = 0`` -- NOT a bare "drop every optional node"
+       special case. A hand-picked rescue of only the DIRECT resistive
+       neighbors of mandatory nodes is not sufficient: two mandatory nodes
+       joined solely by a chain of optional nodes of length >= 2
+       (M1-o1-o2-o3-M2) would keep their end-stub edges but lose the
+       interior edge, silently fragmenting the tile into disconnected
+       islands even though every individual mandatory node still shows
+       degree > 0. Feeding ``remaining = 0`` into the normal per-layer
+       clustering keeps every non-isolated optional node as a member of
+       SOME cluster (never simply dropped), so the "quotient of a connected
+       graph is connected" guarantee below applies uniformly, degenerate
+       branch included.
+       ``r_L`` is "fraction of layer L's optional nodes that remain as
+       cluster representatives", i.e. expected cluster size on layer L is
+       ``~= 1 / r_L``.
+    2. Nodes with zero resistive edges in ``classification.adjacency``
+       ("originally isolated") are handled specially, never clustered:
+       optional isolates are dropped entirely (counted, not repaired --
+       the production parser would island-drop them anyway); mandatory
+       isolates are kept as self-mapped singletons (counted + one WARNING
+       if any -- never given a fabricated edge).
+    3. Every other optional node is assigned a geometric cell
+       (``_assign_geometric_cells``, skipped -- singleton per node -- when
+       ``r_L >= 1.0``) then connected-component split within its
+       (layer, cell) bucket (``_connected_component_split``) so two
+       disconnected mesh fragments sharing a cell never merge.
+    4. Each cluster collapses to one representative
+       (``_pick_cluster_representative``). Mandatory nodes are never part
+       of this process -- always singleton representatives, never absorbed
+       and never absorbing.
 
     Args:
         classification: Output of ``classify_tile`` for one tile.
         ratio: Overall target retention ratio (default 0.1, i.e. ~10x
             reduction).
         alpha: Layer-weight exponent (default 1.0). ``alpha = 0`` degenerates
-            to flat/uniform-across-layers sampling.
-        base_seed: Base seed for the per-tile+per-layer deterministic RNG.
+            to flat/uniform-across-layers retention.
 
     Returns:
-        A ``TileSamplingResult`` (see above).
+        A ``TileContractionResult`` (see above).
     """
     tile_id = classification.tile_id
     total_nodes = classification.total_nodes
     mandatory_keep = classification.mandatory_keep
     optional_pool_by_layer = classification.optional_pool_by_layer
+    adjacency = classification.adjacency
+
+    def _degree(n: str) -> int:
+        return len(adjacency.get(n, ()))
+
+    isolated_mandatory = {n for n in mandatory_keep if _degree(n) == 0}
+    if isolated_mandatory:
+        logger.warning(
+            "Tile %s: %d mandatory-keep node(s) have zero resistive edges "
+            "(isolated) -- kept as singleton representatives per plan, no "
+            "fabricated edge added: %s%s",
+            tile_id, len(isolated_mandatory), sorted(isolated_mandatory)[:10],
+            "..." if len(isolated_mandatory) > 10 else "",
+        )
 
     target_kept = round(ratio * total_nodes)
+    node_to_rep: Dict[str, str] = {n: n for n in mandatory_keep}
 
     if len(mandatory_keep) >= target_kept:
         logger.warning(
             "Tile %s: mandatory-keep set (%d nodes: pad_anchor=%d "
             "boundary=%d current_source=%d) already meets or exceeds the "
             "target kept-node count (%d = ratio %.3g of %d original nodes) "
-            "-- this tile's reduction will be less than the target ratio.",
+            "-- this tile's reduction will be less than the target ratio. "
+            "The optional pool is still contracted (never bulk-dropped) so "
+            "connectivity between mandatory nodes joined only by optional "
+            "chains is preserved.",
             tile_id, len(mandatory_keep), len(classification.pad_anchor_nodes),
             len(classification.boundary_nodes), len(classification.current_source_nodes),
             target_kept, ratio, total_nodes,
         )
-        return TileSamplingResult(
-            tile_id=tile_id,
-            kept_nodes=set(mandatory_keep),
-            target_kept=target_kept,
-            mandatory_kept=len(mandatory_keep),
-            optional_kept=0,
-            per_layer_retention={layer: 0.0 for layer in optional_pool_by_layer},
-        )
+        # Do NOT special-case "keep mandatory only, rescue direct optional
+        # neighbors": that drops every non-rescued optional node outright,
+        # and two mandatory nodes connected solely through a chain of
+        # optional nodes of length >= 2 would lose their interior edge and
+        # fragment into disconnected islands (the exact §7.5 failure mode)
+        # even though each mandatory endpoint still shows degree > 0.
+        # Falling through to the normal clustering path below with
+        # remaining = 0 keeps every non-isolated optional node in some
+        # cluster (never dropped), so connectivity is preserved by
+        # construction here too.
 
-    remaining = target_kept - len(mandatory_keep)
+    remaining = max(0, target_kept - len(mandatory_keep))
     optional_sizes = {layer: len(pool) for layer, pool in optional_pool_by_layer.items()}
-    total_optional = sum(optional_sizes.values())
+    retention = _solve_per_layer_retention(optional_sizes, remaining, alpha)
 
-    if total_optional == 0 or remaining >= total_optional:
-        # Budget covers (or exceeds) the whole optional pool -- keep
-        # everything, no need to solve for a scale factor.
-        retention: Dict[Optional[int], float] = {layer: 1.0 for layer in optional_sizes}
-    else:
-        weights = {layer: n ** (-alpha) for layer, n in optional_sizes.items()}
+    kept_nodes = set(mandatory_keep)
+    isolated_optional_dropped = 0
+    n_clusters_optional = 0
 
-        lo, hi = 0.0, 1.0
-        # Exponential search for an upper bound at which the achieved sum
-        # reaches `remaining`. Guaranteed to terminate: remaining <
-        # total_optional was just checked above, and
-        # _achieved_optional_sum(scale) -> total_optional monotonically as
-        # scale -> inf. The 1e12 cap is just a safety net against pathological
-        # inputs (e.g. all-zero weights), not expected to be hit.
-        while (
-            _achieved_optional_sum(optional_sizes, weights, hi) < remaining
-            and hi < 1e12
-        ):
-            hi *= 2.0
-
-        mid = hi
-        for _ in range(100):
-            mid = (lo + hi) / 2.0
-            achieved = _achieved_optional_sum(optional_sizes, weights, mid)
-            if abs(achieved - remaining) <= 1.0:
-                break
-            if achieved < remaining:
-                lo = mid
-            else:
-                hi = mid
-
-        retention = {
-            layer: min(1.0, weights[layer] * mid) for layer in optional_sizes
-        }
-
-    sampled_optional: Set[str] = set()
     for layer, pool in optional_pool_by_layer.items():
-        frac = retention.get(layer, 0.0)
-        k = min(len(pool), round(frac * len(pool)))
-        if k <= 0:
-            continue
-        rng = random.Random(_tile_layer_seed(base_seed, tile_id, layer))
-        sampled_optional.update(rng.sample(sorted(pool), k))
+        r_L = retention.get(layer, 0.0)
 
-    kept_nodes = set(mandatory_keep) | sampled_optional
+        active_nodes = set()
+        for n in pool:
+            if _degree(n) == 0:
+                isolated_optional_dropped += 1
+            else:
+                active_nodes.add(n)
+
+        if not active_nodes:
+            continue
+
+        if r_L >= 1.0:
+            # Every active node is its own cluster -- skip the geometric
+            # assignment entirely (cheap path, no coordinate parsing needed).
+            for n in active_nodes:
+                node_to_rep[n] = n
+            kept_nodes |= active_nodes
+            n_clusters_optional += len(active_nodes)
+            continue
+
+        xy_of = {n: _parse_node_xy(n) for n in active_nodes}
+        cell_of = _assign_geometric_cells(active_nodes, xy_of, r_L)
+        clusters = _connected_component_split(active_nodes, cell_of, adjacency)
+
+        for members in clusters:
+            rep = _pick_cluster_representative(members, xy_of)
+            kept_nodes.add(rep)
+            for m in members:
+                node_to_rep[m] = rep
+            n_clusters_optional += 1
+
+    n_clusters = len(mandatory_keep) + n_clusters_optional
 
     logger.info(
-        "Tile %s: sampled %d/%d optional nodes (target=%d mandatory=%d) "
+        "Tile %s: contracted optional pool into %d clusters (target=%d "
+        "mandatory=%d isolated_optional_dropped=%d isolated_mandatory_kept=%d) "
         "-> kept=%d (%.3g%% of %d original nodes)",
-        tile_id, len(sampled_optional), total_optional, target_kept,
-        len(mandatory_keep), len(kept_nodes),
+        tile_id, n_clusters_optional, target_kept, len(mandatory_keep),
+        isolated_optional_dropped, len(isolated_mandatory), len(kept_nodes),
         100.0 * len(kept_nodes) / total_nodes if total_nodes else 0.0,
         total_nodes,
     )
 
-    return TileSamplingResult(
+    return TileContractionResult(
         tile_id=tile_id,
         kept_nodes=kept_nodes,
+        node_to_rep=node_to_rep,
+        mandatory_nodes=set(mandatory_keep),
         target_kept=target_kept,
         mandatory_kept=len(mandatory_keep),
-        optional_kept=len(sampled_optional),
+        optional_kept=n_clusters_optional,
         per_layer_retention=retention,
+        n_clusters=n_clusters,
+        isolated_optional_dropped=isolated_optional_dropped,
+        isolated_mandatory_kept=len(isolated_mandatory),
     )
 
 
 # =============================================================================
-# Pass 3 — filter edges + repair connectivity (plan §4.3)
+# Pass 3 — remap edges through the contraction (plan §4.3, revised)
 # =============================================================================
-
-
-GROUND_NODE = '0'
-
-
-@dataclass
-class TileRepairResult:
-    """Result of Pass 3 edge filtering + connectivity repair for one tile.
-
-    ``kept_resistive_edges``/``kept_capacitive_edges`` are the final edge
-    lists for this tile: post-filter edges (both/non-ground endpoint in
-    ``kept_nodes``) plus any repair edges inserted for mandatory-keep
-    nodes left isolated by the filter (plan §4.3, point 3). Repair edges
-    are appended, never replace an original edge.
-
-    ``repaired_nodes``/``fallback_used_nodes``/``unrepairable_nodes`` are
-    diagnostics for later validation (plan Phase 6) and for this module's
-    unit tests -- none are needed to reproduce
-    ``kept_resistive_edges``/``kept_capacitive_edges`` given the same
-    inputs/seed.
-    """
-
-    tile_id: Tuple[int, int]
-    kept_resistive_edges: List[Tuple[str, str, float]]
-    kept_capacitive_edges: List[Tuple[str, str, float]]
-    repaired_nodes: Set[str]
-    fallback_used_nodes: Set[str]
-    unrepairable_nodes: Set[str]
-
-
-def _in_kept_or_ground(node: str, kept_nodes: Set[str]) -> bool:
-    """Ground (``'0'``) is never sampled away -- always treated as "kept"."""
-    return node == GROUND_NODE or node in kept_nodes
-
-
-def _filter_resistive_edges(
-    resistive_edges: Sequence[Tuple[str, str, float]], kept_nodes: Set[str],
-) -> List[Tuple[str, str, float]]:
-    """Keep a resistor edge iff both endpoints are in ``kept_nodes`` (plan §4.3.1).
-
-    Ground is special-cased as always "in kept_nodes" per the plan, though
-    real ``netlist_brcm`` die resistors are not expected to ever have a
-    ground endpoint (checked defensively here, not assumed).
-    """
-    return [
-        (u, v, g) for u, v, g in resistive_edges
-        if _in_kept_or_ground(u, kept_nodes) and _in_kept_or_ground(v, kept_nodes)
-    ]
-
-
-def _filter_capacitive_edges(
-    capacitive_edges: Sequence[Tuple[str, str, float]], kept_nodes: Set[str],
-) -> List[Tuple[str, str, float]]:
-    """Keep a (grounded) cap edge iff its non-ground endpoint is kept (plan §4.3.2).
-
-    Per root ``CLAUDE.md``, tile capacitors are always grounded (one
-    endpoint is always ``'0'``). The "neither endpoint is ground" case is
-    handled defensively (falls back to the both-endpoints-kept resistor
-    rule) in case some other tile design ever has a coupling cap, but is
-    not expected to trigger on real data.
-    """
-    kept: List[Tuple[str, str, float]] = []
-    for u, v, c in capacitive_edges:
-        u_ground = u == GROUND_NODE
-        v_ground = v == GROUND_NODE
-        if u_ground and v_ground:
-            kept.append((u, v, c))  # degenerate, keep trivially
-        elif u_ground:
-            if v in kept_nodes:
-                kept.append((u, v, c))
-        elif v_ground:
-            if u in kept_nodes:
-                kept.append((u, v, c))
-        elif u in kept_nodes and v in kept_nodes:
-            # Not actually grounded (unexpected) -- fall back to the
-            # both-endpoints-kept rule rather than silently dropping or
-            # silently keeping.
-            kept.append((u, v, c))
-    return kept
+#
+# Replaces the original filter + BFS/via-chain connectivity repair (see the
+# §7.5 failure analysis in the module docstring). There is no repair phase
+# here: contraction already guarantees every kept node keeps a path to the
+# rest of the tile (a quotient of a connected graph is connected), so Pass 3
+# only needs to remap and merge edges through Pass 2's node_to_rep map.
 
 
 def _compute_degrees(resistive_edges: Sequence[Tuple[str, str, float]]) -> Dict[str, int]:
-    """Post-filter degree count per node (number of surviving resistor edges)."""
+    """Degree count per node (number of edges in *resistive_edges*)."""
     degree: Dict[str, int] = {}
     for u, v, _g in resistive_edges:
         degree[u] = degree.get(u, 0) + 1
@@ -774,288 +891,144 @@ def _compute_degrees(resistive_edges: Sequence[Tuple[str, str, float]]) -> Dict[
     return degree
 
 
-def _series_conductance(path_conductances: Sequence[float]) -> float:
-    """Equivalent series conductance for a chain of conductances (mS).
+@dataclass
+class TileEdgeContractionResult:
+    """Result of Pass 3 edge remapping for one tile.
 
-    Resistances add in series: ``R_eq = sum(1/g_i)``, so
-    ``g_eq = 1 / sum(1/g_i)``.
+    ``kept_resistive_edges``/``kept_capacitive_edges`` use the same
+    ``(u, v, value)`` tuple shape as the original filter output, so the
+    per-tile output writers are unchanged.
     """
-    return 1.0 / sum(1.0 / g for g in path_conductances)
+
+    tile_id: Tuple[int, int]
+    kept_resistive_edges: List[Tuple[str, str, float]]
+    kept_capacitive_edges: List[Tuple[str, str, float]]
+    intra_cluster_resistors_dropped: int
+    parallel_resistors_merged: int
+    intra_cluster_caps_dropped: int
+    parallel_caps_merged: int
+    edges_to_dropped_nodes: int
 
 
-def _bfs_nearest_kept(
-    adjacency: Dict[str, List[Tuple[str, float]]],
-    start: str,
-    kept_nodes: Set[str],
-    layer_of: Optional[Dict[str, Optional[int]]] = None,
-    same_layer_only: bool = False,
-) -> Optional[Tuple[str, List[float]]]:
-    """BFS over *adjacency* from *start* for the nearest ``kept_nodes`` member.
+def _remap_and_merge_edges(
+    edges: Sequence[Tuple[str, str, float]], rep_of,
+) -> Tuple[List[Tuple[str, str, float]], int, int, int]:
+    """Remap+merge one edge list through *rep_of* (shared by R and C passes).
 
-    When ``same_layer_only`` is True, an edge ``(u, v, g)`` is only
-    traversed if ``layer_of[u] == layer_of[v] == layer_of[start]`` (plan
-    §4.3's non-via repair constraint) -- enforced at every hop, so the
-    whole discovered path is transitively confined to ``start``'s layer,
-    which also means it can never include a via edge (those always cross
-    layers by definition).
-
-    Returns ``(nearest_kept_node, path_conductances)`` for the first
-    (shortest, since this is a BFS) ``kept_nodes`` member found -- never
-    ``start`` itself, even though Pass 3 only calls this for isolated
-    *mandatory* nodes that are already in ``kept_nodes`` (we're looking
-    for a *different* kept node to attach a repair edge to). Returns
-    ``None`` if no such node is reachable.
+    Returns ``(kept_edges, n_intra_cluster_dropped, n_parallel_merged,
+    n_edges_to_dropped_nodes)``. ``rep_of`` is a plain callable
+    (``node_to_rep.get`` with ground special-cased) rather than a dict, so
+    the same helper serves both resistors and capacitors without exposing
+    ``GROUND_NODE`` handling twice.
     """
-    start_layer = layer_of.get(start) if (same_layer_only and layer_of) else None
-    visited = {start}
-    queue: "deque" = deque([(start, ())])
+    merged: Dict[Tuple[str, str], float] = {}
+    intra_cluster_dropped = 0
+    edges_to_dropped_nodes = 0
+    n_mapped = 0
 
-    while queue:
-        node, path = queue.popleft()
-        for neighbor, g in adjacency.get(node, []):
-            if same_layer_only:
-                if layer_of.get(node) != start_layer or layer_of.get(neighbor) != start_layer:
-                    continue
-            if neighbor in visited:
-                continue
-            visited.add(neighbor)
-            new_path = path + (g,)
-            if neighbor in kept_nodes:
-                return neighbor, list(new_path)
-            queue.append((neighbor, new_path))
-
-    return None
-
-
-def _via_chain_walk(
-    adjacency: Dict[str, List[Tuple[str, float]]],
-    layer_of: Dict[str, Optional[int]],
-    xy_of: Dict[str, Tuple[Optional[float], Optional[float]]],
-    start: str,
-    kept_nodes: Set[str],
-    direction: int,
-) -> Optional[Tuple[str, List[float]]]:
-    """Walk a chain of same-``(x, y)`` via edges from *start* in one *direction*.
-
-    ``direction`` is ``+1`` for increasing layer number ("up", toward the
-    pad/RDL layer) or ``-1`` for decreasing layer number ("down", toward
-    the bulk/bottom routing layers). Convention verified on real
-    ``netlist_brcm`` data (see module docstring / report): pad-anchor
-    (``die_attachment_node``) nodes are all layer 86, the design's max
-    observed layer, and per-tile node counts drop off sharply as layer
-    number increases past the bulk layers (tile (1,5): layers 43-55 in
-    the tens of thousands each, layer 86 only 11 nodes) -- so increasing
-    layer number moves *toward* the pad/RDL side ("up"), decreasing moves
-    toward the bulk/bottom ("down").
-
-    At each step, looks for resistive edges from the current node to
-    neighbors at the *same* ``(x, y)`` as ``start`` and at a layer strictly
-    further in *direction* than the CURRENT node's own layer (this may
-    require hopping through several intermediate via nodes stacked at the
-    same ``(x, y)``, not just one hop). When a node has more than one such
-    candidate next hop (e.g. a via that bridges non-adjacent layers in
-    addition to a step-by-step chain), this is a genuine BFS over all of
-    them -- not a greedy nearest-layer-delta pick -- so a dead end down
-    one branch can never hide a valid ``kept_nodes`` member reachable via
-    a different branch. Stops as soon as a ``kept_nodes`` member is
-    reached (returns the fewest-via-hop one found) or the whole
-    direction-constrained frontier is exhausted with no ``kept_nodes``
-    member reached (dead end -- legitimately happens at the top/bottom-most
-    layer present, or when there is genuinely only one branch).
-
-    Returns ``(found_node, path_conductances)`` on success, ``None`` on a
-    dead end. The ``visited`` set (shared across the whole BFS frontier,
-    not per-branch) prevents both infinite loops from a cyclic via chain
-    and redundant re-exploration of a node reached by multiple branches.
-    """
-    xy_start = xy_of.get(start)
-    visited = {start}
-    queue: "deque" = deque([(start, ())])
-
-    while queue:
-        current, path = queue.popleft()
-        current_layer = layer_of.get(current)
-        if current_layer is None:
+    for u, v, value in edges:
+        ru, rv = rep_of(u), rep_of(v)
+        if ru is None or rv is None:
+            # Impossible by construction (dropped nodes have no edges --
+            # they were isolated), guarded defensively per plan §4.3.
+            edges_to_dropped_nodes += 1
             continue
-        for neighbor, g in adjacency.get(current, []):
-            if neighbor in visited:
-                continue
-            neighbor_layer = layer_of.get(neighbor)
-            if neighbor_layer is None:
-                continue
-            if xy_of.get(neighbor) != xy_start:
-                continue
-            delta = neighbor_layer - current_layer
-            if direction > 0 and delta <= 0:
-                continue
-            if direction < 0 and delta >= 0:
-                continue
+        n_mapped += 1
+        if ru == rv:
+            intra_cluster_dropped += 1
+            continue
+        key = (ru, rv) if ru < rv else (rv, ru)
+        merged[key] = merged.get(key, 0.0) + value
 
-            visited.add(neighbor)
-            new_path = path + (g,)
-            if neighbor in kept_nodes:
-                return neighbor, list(new_path)
-            queue.append((neighbor, new_path))
-
-    return None  # direction-constrained frontier exhausted, no kept_nodes member reached
+    kept_edges = sorted((a, b, value) for (a, b), value in merged.items())
+    parallel_merged = n_mapped - intra_cluster_dropped - len(merged)
+    return kept_edges, intra_cluster_dropped, parallel_merged, edges_to_dropped_nodes
 
 
-def _repair_non_via_node(
-    node: str,
-    classification: TileClassification,
-    kept_nodes: Set[str],
-) -> Tuple[List[Tuple[str, str, float]], bool]:
-    """Non-via repair: same-layer BFS, falling back to unconstrained BFS.
+def contract_tile_edges(
+    tile_data: TileData, contraction: TileContractionResult,
+) -> TileEdgeContractionResult:
+    """Pass 3: remap R/C edges through Pass 2's contraction map (plan §4.3).
 
-    Returns ``(new_repair_edges, fallback_used)``.
-    """
-    found = _bfs_nearest_kept(
-        classification.adjacency, node, kept_nodes,
-        layer_of=classification.layer_of, same_layer_only=True,
-    )
-    if found is not None:
-        target, path_conductances = found
-        return [(node, target, _series_conductance(path_conductances))], False
-
-    # Fallback: unconstrained BFS over the full original adjacency.
-    found = _bfs_nearest_kept(classification.adjacency, node, kept_nodes)
-    if found is None:
-        return [], True  # fallback attempted but found nothing either
-    target, path_conductances = found
-    return [(node, target, _series_conductance(path_conductances))], True
-
-
-def _repair_via_node(
-    node: str,
-    classification: TileClassification,
-    kept_nodes: Set[str],
-    xy_of: Dict[str, Tuple[Optional[float], Optional[float]]],
-) -> Tuple[List[Tuple[str, str, float]], bool]:
-    """Via repair: up to 2 directional via-chain edges, falling back to an
-    unconstrained BFS only if BOTH directions dead-end.
-
-    Returns ``(new_repair_edges, fallback_used)``.
-    """
-    repair_edges: List[Tuple[str, str, float]] = []
-
-    for direction in (+1, -1):
-        found = _via_chain_walk(
-            classification.adjacency, classification.layer_of, xy_of,
-            node, kept_nodes, direction,
-        )
-        if found is not None:
-            target, path_conductances = found
-            repair_edges.append((node, target, _series_conductance(path_conductances)))
-
-    if repair_edges:
-        return repair_edges, False
-
-    # Both directional via-chain walks dead-ended -- unconstrained fallback.
-    found = _bfs_nearest_kept(classification.adjacency, node, kept_nodes)
-    if found is None:
-        return [], True
-    target, path_conductances = found
-    return [(node, target, _series_conductance(path_conductances))], True
-
-
-def filter_and_repair_tile(
-    tile_data: TileData,
-    classification: TileClassification,
-    kept_nodes: Set[str],
-) -> TileRepairResult:
-    """Pass 3: filter R/C edges to ``kept_nodes`` + repair mandatory-keep isolates.
-
-    See plan §4.3 and this module's docstring. Steps:
-
-    1. Filter ``tile_data.resistive_edges``/``capacitive_edges`` to
-       ``kept_nodes`` (ground special-cased as always kept).
-    2. For every node in ``classification.mandatory_keep`` left with
-       post-filter degree 0 (isolated), attempt a connectivity repair
-       using the *original* (pre-filter) ``classification.adjacency``:
-       same-layer BFS for non-via nodes, up/down via-chain walk for via
-       nodes, falling back to an unconstrained BFS if the constrained
-       search finds nothing. Each repair inserts one series-combined
-       "virtual" shortcut resistor edge directly to the nearest surviving
-       node -- intermediate original-path nodes are never added back to
-       ``kept_nodes``.
-    3. Non-mandatory (randomly-sampled) isolated nodes are left as-is (no
-       repair attempted) per the plan.
+    1. ``rep(n) = node_to_rep.get(n)``, with ``rep('0') = '0'``.
+    2. Resistors: intra-cluster edges (``ru == rv``) are dropped; the rest
+       accumulate parallel conductance keyed by ``(min(ru,rv), max(ru,rv))``
+       so independently-ordered mappings of the same physical edge always
+       merge into one entry.
+    3. Capacitors: same remap/merge, general case handled (not just
+       grounded) though tile capacitors are always grounded per root
+       ``CLAUDE.md`` -- grounded caps of absorbed cluster members
+       therefore accumulate onto their representative, so total tile
+       capacitance is preserved exactly (minus caps on dropped isolates,
+       counted separately).
+    4. A cheap sanity check: every mandatory node with original degree > 0
+       must have degree > 0 in the contracted resistor list. This is NOT a
+       repair -- it's a hard fail-loud assertion, since contraction is
+       supposed to guarantee this by construction; a violation means a bug
+       in Pass 2, not a data condition.
 
     Args:
-        tile_data: Loaded ``TileData`` for this tile.
-        classification: Output of ``classify_tile`` for this tile (supplies
-            ``adjacency``, ``layer_of``, ``via_nodes``, ``mandatory_keep``
-            -- the BFS/chain-walk repair always traverses this ORIGINAL,
-            pre-filter adjacency, never the filtered edge list).
-        kept_nodes: Final kept-node set from Pass 2
-            (``TileSamplingResult.kept_nodes``).
+        tile_data: Loaded ``TileData`` for this tile (original, pre-contraction
+            edge lists).
+        contraction: Output of ``contract_tile_nodes`` for this tile.
 
     Returns:
-        A ``TileRepairResult`` (see above).
+        A ``TileEdgeContractionResult`` (see above).
+
+    Raises:
+        AssertionError: if a mandatory node that had resistive edges before
+            contraction ends up with none after -- a contraction bug.
     """
-    tile_id = classification.tile_id
+    tile_id = contraction.tile_id
+    node_to_rep = contraction.node_to_rep
 
-    kept_resistive_edges = _filter_resistive_edges(tile_data.resistive_edges, kept_nodes)
-    kept_capacitive_edges = _filter_capacitive_edges(tile_data.capacitive_edges, kept_nodes)
+    def rep_of(n: str) -> Optional[str]:
+        return GROUND_NODE if n == GROUND_NODE else node_to_rep.get(n)
 
-    degree = _compute_degrees(kept_resistive_edges)
+    (
+        kept_resistive_edges, intra_cluster_resistors_dropped,
+        parallel_resistors_merged, edges_to_dropped_r,
+    ) = _remap_and_merge_edges(tile_data.resistive_edges, rep_of)
 
-    repaired_nodes: Set[str] = set()
-    fallback_used_nodes: Set[str] = set()
-    unrepairable_nodes: Set[str] = set()
-    repair_edges: List[Tuple[str, str, float]] = []
+    (
+        kept_capacitive_edges, intra_cluster_caps_dropped,
+        parallel_caps_merged, edges_to_dropped_c,
+    ) = _remap_and_merge_edges(tile_data.capacitive_edges, rep_of)
 
-    xy_of = {n: _parse_node_xy(n) for n in classification.adjacency}
+    original_degree = _compute_degrees(tile_data.resistive_edges)
+    contracted_degree = _compute_degrees(kept_resistive_edges)
 
-    for node in classification.mandatory_keep:
-        if degree.get(node, 0) > 0:
-            continue  # not isolated, nothing to repair
-
-        if node in classification.via_nodes:
-            new_edges, fallback_used = _repair_via_node(node, classification, kept_nodes, xy_of)
-        else:
-            new_edges, fallback_used = _repair_non_via_node(node, classification, kept_nodes)
-
-        if new_edges:
-            repair_edges.extend(new_edges)
-            repaired_nodes.add(node)
-            if fallback_used:
-                fallback_used_nodes.add(node)
-                logger.warning(
-                    "Tile %s: node %s required the unconstrained-BFS repair "
-                    "fallback (constrained same-layer/via-chain search found "
-                    "nothing) -- added %d repair edge(s)",
-                    tile_id, node, len(new_edges),
-                )
-        else:
-            unrepairable_nodes.add(node)
-            logger.error(
-                "Tile %s: node %s is isolated post-filter and UNREPAIRABLE -- "
-                "no path to any kept_nodes member found even via the "
-                "unconstrained fallback BFS. Leaving unrepaired; downstream "
-                "validation must catch this.",
-                tile_id, node,
-            )
-
-    n_filtered_resistors = len(kept_resistive_edges)
-    if repair_edges:
-        kept_resistive_edges = kept_resistive_edges + repair_edges
+    stranded = sorted(
+        n for n in contraction.mandatory_nodes
+        if original_degree.get(n, 0) > 0 and contracted_degree.get(n, 0) == 0
+    )
+    if stranded:
+        raise AssertionError(
+            f"Tile {tile_id}: contraction stranded {len(stranded)} mandatory "
+            f"node(s) that had original resistive degree > 0 but zero degree "
+            f"after contraction (contraction bug, not a data condition): "
+            f"{stranded[:20]}"
+        )
 
     logger.info(
-        "Tile %s Pass 3: resistors %d -> %d (+%d repair), capacitors %d -> %d, "
-        "repaired_nodes=%d (fallback_used=%d, unrepairable=%d)",
-        tile_id, len(tile_data.resistive_edges), n_filtered_resistors,
-        len(repair_edges), len(tile_data.capacitive_edges), len(kept_capacitive_edges),
-        len(repaired_nodes), len(fallback_used_nodes), len(unrepairable_nodes),
+        "Tile %s Pass 3: resistors %d -> %d (intra_cluster_dropped=%d "
+        "parallel_merged=%d), capacitors %d -> %d (intra_cluster_dropped=%d "
+        "parallel_merged=%d)",
+        tile_id, len(tile_data.resistive_edges), len(kept_resistive_edges),
+        intra_cluster_resistors_dropped, parallel_resistors_merged,
+        len(tile_data.capacitive_edges), len(kept_capacitive_edges),
+        intra_cluster_caps_dropped, parallel_caps_merged,
     )
 
-    return TileRepairResult(
+    return TileEdgeContractionResult(
         tile_id=tile_id,
         kept_resistive_edges=kept_resistive_edges,
         kept_capacitive_edges=kept_capacitive_edges,
-        repaired_nodes=repaired_nodes,
-        fallback_used_nodes=fallback_used_nodes,
-        unrepairable_nodes=unrepairable_nodes,
+        intra_cluster_resistors_dropped=intra_cluster_resistors_dropped,
+        parallel_resistors_merged=parallel_resistors_merged,
+        intra_cluster_caps_dropped=intra_cluster_caps_dropped,
+        parallel_caps_merged=parallel_caps_merged,
+        edges_to_dropped_nodes=edges_to_dropped_r + edges_to_dropped_c,
     )
 
 
@@ -1085,13 +1058,12 @@ class CurrentSourceSamplingResult:
 def _tile_current_source_seed(base_seed: int, tile_id: Tuple[int, int]) -> int:
     """Deterministic per-tile RNG seed for Pass 4 current-source down-sampling.
 
-    Mirrors ``_tile_layer_seed``'s int-only-hash-tuple pattern (no string
-    elements) for the same ``PYTHONHASHSEED``-reproducibility reason -- see
-    that function's docstring for why a string element in the hashed tuple
-    would break cross-process reproducibility. The ``-2`` sentinel keeps
-    this seed's hash space disjoint from ``_tile_layer_seed``'s real-layer
-    (``>= 0``) and None-layer (``-1``) seeds, in case both are ever
-    derived from the same ``base_seed``.
+    Built only from plain ints/tuples-of-ints (no string elements), so
+    ``hash(...)`` is stable across separate Python processes regardless of
+    ``PYTHONHASHSEED`` string-hash randomization -- required for
+    reproducibility across the embarrassingly-parallel per-tile runs the
+    plan calls for (§5). This is the only RNG seed left in the pipeline --
+    Passes 2/3 (contraction) are fully deterministic, no RNG at all.
     """
     return hash((base_seed, tile_id, -2)) & 0xFFFFFFFF
 
@@ -1203,9 +1175,8 @@ def sample_current_sources(
     bug elsewhere, not a Pass 4 concern) and excluded, since that node
     isn't present in the sampled tile output at all.
 
-    Down-sampling uses a seeded ``random.Random`` (same deterministic
-    per-tile seeding pattern as ``_tile_layer_seed``/``sample_tile_nodes``,
-    see ``_tile_current_source_seed``) to pick
+    Down-sampling uses a seeded ``random.Random`` (deterministic per-tile
+    seeding, see ``_tile_current_source_seed``) to pick
     ``round(ratio * total_eligible)`` of the eligible *lines*, index-sampled
     from the file's natural (already-deterministic) iteration order -- no
     ``set``-iteration-order reproducibility risk, since eligible lines are
@@ -1218,9 +1189,8 @@ def sample_current_sources(
         kept_nodes: This tile's final Pass-2/Pass-3 kept-node set.
         tile_id: This tile's ``(x, y)`` id. Not present in
             ``scan_current_source_nodes``'s signature, but required here
-            for deterministic per-tile seeding (mirrors
-            ``_tile_layer_seed``'s ``(base_seed, tile_id, ...)`` scheme)
-            and for log messages.
+            for deterministic per-tile seeding (see
+            ``_tile_current_source_seed``) and for log messages.
         nd_path: Optional ``.nd`` path (fallback net filtering only).
         net_filter: Lowercase net name to match (default ``'vdd_var'``).
         ratio: Target down-sampling ratio (default 0.1, i.e. keep ~10% of
@@ -1329,12 +1299,12 @@ def verify_capacitor_invariant(
             (e.g. ``classification.current_source_nodes`` from Pass 1 /
             ``scan_current_source_nodes``'s pre-scan).
         kept_capacitive_edges: This tile's Pass-3 output
-            (``TileRepairResult.kept_capacitive_edges``).
+            (``TileEdgeContractionResult.kept_capacitive_edges``).
 
     Raises:
         CapacitorInvariantViolation: if any current-source-bearing node
             that originally had a grounded cap lost it during Pass 3
-            filtering. Per the plan this must hold by construction, so a
+            contraction. Per the plan this must hold by construction, so a
             violation indicates a real bug elsewhere -- this function
             does not warn-and-continue.
     """
@@ -1359,10 +1329,12 @@ def verify_capacitor_invariant(
 #
 # Covers ONLY the 4 top-level, tile-count-independent files: `pg_net_voltage`,
 # `additional_vsrcs`, `ckt.sp`, and `package.ckt`. Per-tile output writers
-# (`tile_X_Y.ckt`/`.nd`, gzip `instanceModels_X_Y.sp`) and the full pipeline
-# orchestration/CLI that stitches Phases 1-4 + this section together into a
-# real `netlist/netlist_brcm_sampled/` directory are a LATER phase -- see the
-# plan doc's §4.5 per-tile bullets and the `run-full-sampling-pipeline` todo.
+# (`generate_tile_ckt_content`/`write_tile_ckt`/`write_tile_nd`, gzip
+# `write_instance_models`) follow below, and the full pipeline orchestration/
+# CLI that stitches Phases 1-4 + this section together into a real
+# `netlist/netlist_brcm_sampled/` directory (`process_tile`,
+# `run_sampling_pipeline`, `main`) follows after that -- see the plan doc's
+# §4.5 per-tile bullets for the file-format details.
 
 
 def _format_number(value: float) -> str:
@@ -1760,18 +1732,18 @@ def generate_tile_ckt_content(
     per plan §4.5.
 
     Args:
-        node_count: The new (post-sampling) kept-node count for this
-            tile, i.e. ``len(TileSamplingResult.kept_nodes)``.
+        node_count: The new (post-contraction) kept-node count for this
+            tile, i.e. ``len(TileContractionResult.kept_nodes)``.
         boundary_nodes: This tile's boundary-node set (e.g.
             ``TileClassification.boundary_nodes`` /
             ``TileData.boundary_nodes``) -- a node gets the ``*`` prefix
             on every element line it appears on iff it's in this set.
-        resistive_edges: Final (post Pass-3 filter + repair) resistor
-            edges, conductance in mS -- typically
-            ``TileRepairResult.kept_resistive_edges``.
-        capacitive_edges: Final (post Pass-3 filter) grounded capacitor
-            edges, in fF -- typically
-            ``TileRepairResult.kept_capacitive_edges``.
+        resistive_edges: Final (post Pass-3 contraction) resistor edges,
+            conductance in mS -- typically
+            ``TileEdgeContractionResult.kept_resistive_edges``.
+        capacitive_edges: Final (post Pass-3 contraction) grounded
+            capacitor edges, in fF -- typically
+            ``TileEdgeContractionResult.kept_capacitive_edges``.
 
     Returns:
         Full file content (including trailing newline), ready to be
@@ -1878,7 +1850,7 @@ def write_instance_models(output_path: Path, kept_raw_lines: Sequence[str]) -> N
 
 @dataclass
 class TileProcessingStats:
-    """Original vs. sampled counts + repair diagnostics for one processed tile.
+    """Original vs. sampled counts + contraction diagnostics for one processed tile.
 
     Everything a final aggregate report (plan §6) needs, without forcing
     callers to re-derive it from the individual Pass 1-4 result objects
@@ -1896,9 +1868,11 @@ class TileProcessingStats:
     original_current_sources: int
     sampled_current_sources: int
     pad_anchor_count: int
-    repaired_nodes: int
-    fallback_used_nodes: int
-    unrepairable_nodes: int
+    n_clusters: int
+    isolated_optional_dropped: int
+    isolated_mandatory_kept: int
+    intra_cluster_resistors_dropped: int
+    parallel_resistors_merged: int
 
     @property
     def node_ratio(self) -> float:
@@ -1922,8 +1896,8 @@ def process_tile(
          subset (``_pad_anchors_in_tile``).
       2. Pre-scan current-source-bearing nodes from the raw
          ``instanceModels_X_Y.sp`` (``scan_current_source_nodes``).
-      3. Classify (``classify_tile``), sample (``sample_tile_nodes``),
-         filter+repair (``filter_and_repair_tile``).
+      3. Classify (``classify_tile``), contract nodes
+         (``contract_tile_nodes``), remap edges (``contract_tile_edges``).
       4. Down-sample current sources (``sample_current_sources`` --
          re-reads the same raw instanceModels file a second time; a known,
          accepted minor inefficiency, not restructured here since Pass 4's
@@ -1948,11 +1922,12 @@ def process_tile(
             set, e.g. ``metadata.package_data.die_attachment_nodes`` --
             intersected internally with this tile's node set.
         ratio: Target retention ratio (default 0.1, ~10x reduction), used
-            for both node sampling (Pass 2) and current-source
+            for both node contraction (Pass 2) and current-source
             down-sampling (Pass 4).
         alpha: Layer-weight exponent for Pass 2 (default 1.0).
-        base_seed: Base seed for deterministic per-tile+per-layer/
-            per-tile RNGs (Pass 2 / Pass 4).
+        base_seed: Base seed for the deterministic per-tile RNG -- affects
+            ONLY Pass 4's current-source down-sampling; Passes 2/3
+            (contraction) have no RNG and are unaffected by this value.
 
     Returns:
         A ``TileProcessingStats`` summarizing this tile's run.
@@ -1961,6 +1936,9 @@ def process_tile(
         CapacitorInvariantViolation: propagated uncaught from
             ``verify_capacitor_invariant`` -- a hard failure, not
             swallowed or downgraded to a warning.
+        AssertionError: propagated uncaught from ``contract_tile_edges``'s
+            mandatory-degree sanity check -- a contraction bug, not a data
+            condition.
     """
     tile_x, tile_y = tile_id
     output_dir = Path(output_dir)
@@ -1975,16 +1953,16 @@ def process_tile(
     current_source_nodes = scan_current_source_nodes(instance_path, nd_path)
 
     classification = classify_tile(tile_data, pad_anchors_for_tile, current_source_nodes)
-    sampling_result = sample_tile_nodes(classification, ratio=ratio, alpha=alpha, base_seed=base_seed)
-    repair_result = filter_and_repair_tile(tile_data, classification, sampling_result.kept_nodes)
+    contraction = contract_tile_nodes(classification, ratio=ratio, alpha=alpha)
+    edge_result = contract_tile_edges(tile_data, contraction)
 
     cs_result = sample_current_sources(
-        instance_path, sampling_result.kept_nodes, tile_id,
+        instance_path, contraction.kept_nodes, tile_id,
         nd_path=nd_path, ratio=ratio, base_seed=base_seed,
     )
 
     verify_capacitor_invariant(
-        tile_data, classification.current_source_nodes, repair_result.kept_capacitive_edges,
+        tile_data, classification.current_source_nodes, edge_result.kept_capacitive_edges,
     )
 
     ckt_out = output_dir / f"tile_{tile_x}_{tile_y}.ckt"
@@ -1992,27 +1970,27 @@ def process_tile(
     instance_out = output_dir / f"instanceModels_{tile_x}_{tile_y}.sp"
 
     write_tile_ckt(
-        ckt_out, len(sampling_result.kept_nodes), classification.boundary_nodes,
-        repair_result.kept_resistive_edges, repair_result.kept_capacitive_edges,
+        ckt_out, len(contraction.kept_nodes), classification.boundary_nodes,
+        edge_result.kept_resistive_edges, edge_result.kept_capacitive_edges,
     )
-    n_nd_lines = write_tile_nd(nd_out, source_nd_path, sampling_result.kept_nodes)
+    n_nd_lines = write_tile_nd(nd_out, source_nd_path, contraction.kept_nodes)
     write_instance_models(instance_out, cs_result.kept_raw_lines)
 
     logger.info(
         "Tile %s: wrote %s (%d R + %d C), %s (%d lines), %s (%d current sources)",
-        tile_id, ckt_out.name, len(repair_result.kept_resistive_edges),
-        len(repair_result.kept_capacitive_edges), nd_out.name, n_nd_lines,
+        tile_id, ckt_out.name, len(edge_result.kept_resistive_edges),
+        len(edge_result.kept_capacitive_edges), nd_out.name, n_nd_lines,
         instance_out.name, len(cs_result.kept_raw_lines),
     )
 
     return TileProcessingStats(
         tile_id=tile_id,
         original_nodes=classification.total_nodes,
-        sampled_nodes=len(sampling_result.kept_nodes),
+        sampled_nodes=len(contraction.kept_nodes),
         original_resistors=len(tile_data.resistive_edges),
-        sampled_resistors=len(repair_result.kept_resistive_edges),
+        sampled_resistors=len(edge_result.kept_resistive_edges),
         original_capacitors=len(tile_data.capacitive_edges),
-        sampled_capacitors=len(repair_result.kept_capacitive_edges),
+        sampled_capacitors=len(edge_result.kept_capacitive_edges),
         # total_matching_net (not total_eligible) is the true pre-sampling
         # count of all VDD_VAR current-source lines in the raw file --
         # total_eligible already excludes the rare lines whose node_pos
@@ -2021,9 +1999,11 @@ def process_tile(
         original_current_sources=cs_result.total_matching_net,
         sampled_current_sources=len(cs_result.kept_raw_lines),
         pad_anchor_count=len(pad_anchors_for_tile),
-        repaired_nodes=len(repair_result.repaired_nodes),
-        fallback_used_nodes=len(repair_result.fallback_used_nodes),
-        unrepairable_nodes=len(repair_result.unrepairable_nodes),
+        n_clusters=contraction.n_clusters,
+        isolated_optional_dropped=contraction.isolated_optional_dropped,
+        isolated_mandatory_kept=contraction.isolated_mandatory_kept,
+        intra_cluster_resistors_dropped=edge_result.intra_cluster_resistors_dropped,
+        parallel_resistors_merged=edge_result.parallel_resistors_merged,
     )
 
 
@@ -2045,7 +2025,7 @@ def _init_worker_logging(level: int) -> None:
     basicConfig`` call in ``main()``/the driver process does NOT propagate
     to them (no shared handlers), so without this, every ``logger.info``/
     ``logger.warning`` call made inside ``process_tile`` (and everything it
-    calls: ``classify_tile``, ``sample_tile_nodes``, ``filter_and_repair_tile``,
+    calls: ``classify_tile``, ``contract_tile_nodes``, ``contract_tile_edges``,
     etc.) would be silently dropped rather than just unformatted -- Python's
     logging module only auto-prints WARNING+ via a bare "lastResort" handler
     when NO handler is configured at all, and even that is easy to miss
@@ -2154,21 +2134,42 @@ class SamplingPipelineReport:
         return self._sum('pad_anchor_count')
 
     @property
-    def total_repaired_nodes(self) -> int:
-        return self._sum('repaired_nodes')
+    def total_n_clusters(self) -> int:
+        return self._sum('n_clusters')
 
     @property
-    def total_fallback_used_nodes(self) -> int:
-        return self._sum('fallback_used_nodes')
+    def total_isolated_optional_dropped(self) -> int:
+        return self._sum('isolated_optional_dropped')
 
     @property
-    def total_unrepairable_nodes(self) -> int:
-        return self._sum('unrepairable_nodes')
+    def total_isolated_mandatory_kept(self) -> int:
+        return self._sum('isolated_mandatory_kept')
 
     @property
     def overall_node_reduction_ratio(self) -> float:
         sampled = self.total_sampled_nodes
         return self.total_original_nodes / sampled if sampled else float('inf')
+
+    @property
+    def r_per_node_before(self) -> float:
+        """Resistors-per-node in the ORIGINAL (pre-contraction) mesh.
+
+        THE acceptance metric this redesign exists for (§7.5): the
+        node-drop design let this collapse from ~1.87 to ~0.72
+        (< 1.0 guarantees fragmentation). Contraction should keep
+        ``r_per_node_after`` within ~+/-30% of ``r_per_node_before``.
+        """
+        return (
+            self.total_original_resistors / self.total_original_nodes
+            if self.total_original_nodes else 0.0
+        )
+
+    @property
+    def r_per_node_after(self) -> float:
+        return (
+            self.total_sampled_resistors / self.total_sampled_nodes
+            if self.total_sampled_nodes else 0.0
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """JSON-serializable rollup (for ``sampling_report.json``)."""
@@ -2186,9 +2187,11 @@ class SamplingPipelineReport:
                 'original_current_sources': self.total_original_current_sources,
                 'sampled_current_sources': self.total_sampled_current_sources,
                 'overall_node_reduction_ratio': self.overall_node_reduction_ratio,
-                'repaired_nodes': self.total_repaired_nodes,
-                'fallback_used_nodes': self.total_fallback_used_nodes,
-                'unrepairable_nodes': self.total_unrepairable_nodes,
+                'r_per_node_before': self.r_per_node_before,
+                'r_per_node_after': self.r_per_node_after,
+                'n_clusters': self.total_n_clusters,
+                'isolated_optional_dropped': self.total_isolated_optional_dropped,
+                'isolated_mandatory_kept': self.total_isolated_mandatory_kept,
             },
             'per_tile': [
                 {
@@ -2202,9 +2205,11 @@ class SamplingPipelineReport:
                     'original_current_sources': t.original_current_sources,
                     'sampled_current_sources': t.sampled_current_sources,
                     'pad_anchor_count': t.pad_anchor_count,
-                    'repaired_nodes': t.repaired_nodes,
-                    'fallback_used_nodes': t.fallback_used_nodes,
-                    'unrepairable_nodes': t.unrepairable_nodes,
+                    'n_clusters': t.n_clusters,
+                    'isolated_optional_dropped': t.isolated_optional_dropped,
+                    'isolated_mandatory_kept': t.isolated_mandatory_kept,
+                    'intra_cluster_resistors_dropped': t.intra_cluster_resistors_dropped,
+                    'parallel_resistors_merged': t.parallel_resistors_merged,
                 }
                 for t in sorted(self.tile_stats, key=lambda t: t.tile_id)
             ],
@@ -2232,20 +2237,25 @@ class SamplingPipelineReport:
             f"Capacitors:       {self.total_original_capacitors:>12,} -> {self.total_sampled_capacitors:>12,}",
             f"Current sources:  {self.total_original_current_sources:>12,} -> {self.total_sampled_current_sources:>12,}",
             "",
-            f"Repair diagnostics: repaired={self.total_repaired_nodes} "
-            f"fallback_used={self.total_fallback_used_nodes} "
-            f"unrepairable={self.total_unrepairable_nodes}",
+            f"R/node:           {self.r_per_node_before:>12.3f} -> {self.r_per_node_after:>12.3f}"
+            + (
+                "  <-- BELOW 1.0 (fragmentation risk)" if self.r_per_node_after < 1.0 else ""
+            ),
+            "",
+            f"Contraction diagnostics: clusters={self.total_n_clusters} "
+            f"isolated_optional_dropped={self.total_isolated_optional_dropped} "
+            f"isolated_mandatory_kept={self.total_isolated_mandatory_kept}",
             "",
             "Per-tile breakdown:",
             f"{'tile':>10} {'orig_nodes':>12} {'samp_nodes':>12} {'ratio':>7} "
-            f"{'pad':>5} {'repair':>7} {'fallbk':>7} {'unrep':>6}",
+            f"{'pad':>5} {'clusters':>8} {'iso_drop':>8} {'iso_mand':>8}",
         ]
         for t in sorted(self.tile_stats, key=lambda t: t.tile_id):
             ratio = t.original_nodes / t.sampled_nodes if t.sampled_nodes else float('inf')
             lines.append(
                 f"{str(t.tile_id):>10} {t.original_nodes:>12,} {t.sampled_nodes:>12,} "
-                f"{ratio:>6.2f}x {t.pad_anchor_count:>5} {t.repaired_nodes:>7} "
-                f"{t.fallback_used_nodes:>7} {t.unrepairable_nodes:>6}"
+                f"{ratio:>6.2f}x {t.pad_anchor_count:>5} {t.n_clusters:>8} "
+                f"{t.isolated_optional_dropped:>8} {t.isolated_mandatory_kept:>8}"
             )
         lines.append("=" * 78)
         return "\n".join(lines) + "\n"
@@ -2298,7 +2308,9 @@ def run_sampling_pipeline(
             (created if missing -- must NOT be *source_dir* itself).
         ratio: Target retention ratio (default 0.1).
         alpha: Layer-weight exponent for Pass 2 (default 1.0).
-        base_seed: Base seed for deterministic sampling.
+        base_seed: Base seed for the deterministic per-tile RNG -- affects
+            ONLY Pass 4's current-source down-sampling (Pass 2/3 node
+            contraction has no RNG at all).
         workers: Number of worker processes. ``1`` (default) runs fully
             sequential; ``> 1`` uses a ``multiprocessing.Pool`` of that
             size (capped at the tile count).
@@ -2410,12 +2422,14 @@ def main() -> None:
     )
     parser_.add_argument(
         '--alpha', type=float, default=1.0,
-        help="Layer-weight exponent for Pass 2 layer-stratified sampling "
+        help="Layer-weight exponent for Pass 2 geometric contraction "
              "(--sample only; default: %(default)s).",
     )
     parser_.add_argument(
         '--seed', type=int, default=42,
-        help="Base seed for deterministic sampling (--sample only; default: %(default)s).",
+        help="Base seed for the deterministic per-tile RNG (--sample only; "
+             "default: %(default)s). Affects ONLY Pass 4's current-source "
+             "down-sampling -- Pass 2/3 node contraction has no RNG.",
     )
     parser_.add_argument(
         '--workers', type=int, default=1,
