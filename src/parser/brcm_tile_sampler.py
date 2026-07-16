@@ -687,7 +687,11 @@ def _pick_cluster_representative(
     if len(members) == 1:
         return members[0]
 
-    coord_members = [m for m in members if xy_of.get(m, (None, None))[0] is not None]
+    # Sorted so the float centroid sum has a canonical order: cluster member
+    # lists inherit set-iteration order (PYTHONHASHSEED-dependent across
+    # processes), and float addition is only order-independent when the
+    # coordinates happen to be integer-valued.
+    coord_members = sorted(m for m in members if xy_of.get(m, (None, None))[0] is not None)
     if not coord_members:
         return min(members)
 
