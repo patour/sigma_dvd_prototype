@@ -10,9 +10,9 @@ original node-drop + BFS-repair design was replaced.
   already parsed via ``sigma-dvd parse ./netlist/netlist_brcm --net
   VDD_VAR``) and verifying the pad-anchor bookkeeping needed by later
   phases.
-- **Pass 1** (plan §4.1): per-tile node classification (layer, via,
-  boundary, pad-anchor, current-source-bearing) into a mandatory-keep set
-  and an optional pool grouped by layer.
+- **Pass 1** (plan §4.1): per-tile node classification (layer, boundary,
+  pad-anchor, current-source-bearing) into a mandatory-keep set and an
+  optional pool grouped by layer.
 - **Pass 2** (plan §4.2, revised): ``contract_tile_nodes`` -- deterministic
   geometric contraction/coarsening of the optional pool. Nodes are grouped
   into small per-layer geometric cells, connected-component split within
@@ -50,7 +50,7 @@ of the above -- plus the output-file writers below -- into a real
   ``instanceModels_X_Y.sp`` for VDD_VAR current-source-bearing nodes
   (deliberately NOT using ``TileData.current_injections``, which is a
   flattened DC-only scalar with no instance-name/waveform fidelity).
-- ``classify_tile``: per-tile node classification (layer/via/boundary/
+- ``classify_tile``: per-tile node classification (layer/boundary/
   pad-anchor/current-source-bearing, mandatory-keep set, optional pool by
   layer), building a plain-dict adjacency structure reused by
   ``contract_tile_nodes``'s connected-component split.
@@ -67,7 +67,9 @@ of the above -- plus the output-file writers below -- into a real
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gzip
+import io
 import json
 import logging
 import math
@@ -392,7 +394,6 @@ class TileClassification:
     tile_id: Tuple[int, int]
     total_nodes: int
     layer_of: Dict[str, Optional[int]]
-    via_nodes: Set[str]
     adjacency: Dict[str, List[Tuple[str, float]]]  # node -> [(neighbor, conductance_mS), ...]
     mandatory_keep: Set[str]
     optional_pool_by_layer: Dict[Optional[int], Set[str]]
@@ -411,12 +412,9 @@ def classify_tile(
     Builds a plain-dict adjacency structure from ``resistive_edges`` (kept
     on the returned ``TileClassification`` for reuse by Pass 2's
     connected-component split and Pass 3's mandatory-degree sanity check,
-    not a throwaway local), and computes each node's layer and via/non-via
-    status in the same
-    single pass over ``resistive_edges`` (a node is ``via`` iff it has >= 1
-    resistive edge to another node sharing the same ``(x, y)`` but a
-    different layer — by symmetry, one such edge marks both endpoints via
-    in the same step, so no second per-node pass is needed).
+    not a throwaway local) and each node's layer. (Via/non-via
+    classification was removed together with the BFS repair machinery it
+    fed -- layer-stratified contraction never consults via-ness.)
 
     Args:
         tile_data: Loaded ``TileData`` for one tile.
@@ -433,7 +431,7 @@ def classify_tile(
         without pre-filtering them to this tile.
 
     Returns:
-        A ``TileClassification`` with layer/via/mandatory/optional-pool
+        A ``TileClassification`` with layer/mandatory/optional-pool
         breakdowns.
     """
     all_nodes = tile_data.all_nodes
@@ -443,10 +441,8 @@ def classify_tile(
     current_source_nodes = current_source_nodes_for_tile & all_nodes
 
     layer_of: Dict[str, Optional[int]] = {node: _parse_node_layer(node) for node in all_nodes}
-    xy_of = {node: _parse_node_xy(node) for node in all_nodes}
 
     adjacency: Dict[str, List[Tuple[str, float]]] = {node: [] for node in all_nodes}
-    via_nodes: Set[str] = set()
 
     for u, v, g in tile_data.resistive_edges:
         # Both endpoints of every resistive edge are always members of
@@ -455,15 +451,6 @@ def classify_tile(
         adjacency.setdefault(u, []).append((v, g))
         adjacency.setdefault(v, []).append((u, g))
 
-        xy_u, xy_v = xy_of.get(u), xy_of.get(v)
-        layer_u, layer_v = layer_of.get(u), layer_of.get(v)
-        if (
-            xy_u is not None and xy_u[0] is not None and xy_u == xy_v
-            and layer_u is not None and layer_u != layer_v
-        ):
-            via_nodes.add(u)
-            via_nodes.add(v)
-
     mandatory_keep = pad_anchor_nodes | boundary_nodes | current_source_nodes
 
     optional_pool_by_layer: Dict[Optional[int], Set[str]] = {}
@@ -471,10 +458,10 @@ def classify_tile(
         optional_pool_by_layer.setdefault(layer_of[node], set()).add(node)
 
     logger.info(
-        "Tile %s classified: %d nodes (%d via), mandatory_keep=%d "
+        "Tile %s classified: %d nodes, mandatory_keep=%d "
         "(pad_anchor=%d boundary=%d current_source=%d), optional_pool=%d "
         "nodes across %d layers",
-        tile_data.tile_id, len(all_nodes), len(via_nodes), len(mandatory_keep),
+        tile_data.tile_id, len(all_nodes), len(mandatory_keep),
         len(pad_anchor_nodes), len(boundary_nodes), len(current_source_nodes),
         len(all_nodes) - len(mandatory_keep), len(optional_pool_by_layer),
     )
@@ -483,7 +470,6 @@ def classify_tile(
         tile_id=tile_data.tile_id,
         total_nodes=len(all_nodes),
         layer_of=layer_of,
-        via_nodes=via_nodes,
         adjacency=adjacency,
         mandatory_keep=mandatory_keep,
         optional_pool_by_layer=optional_pool_by_layer,
@@ -511,6 +497,11 @@ GROUND_NODE = '0'
 
 _SINGLETON_CELL_EPS = 1e-9  # bbox-area floor to avoid a division by zero
 
+# Mirror of distributed.tile_parsing._parse_tile_ckt's SHORT_THRESHOLD
+# (function-local there, not importable): raw resistances below this many
+# kOhm are clamped to the GMAX sentinel on (re)parse.
+_REPARSE_SHORT_THRESHOLD_KOHM = 1e-6
+
 
 @dataclass
 class TileContractionResult:
@@ -528,9 +519,14 @@ class TileContractionResult:
     kept_nodes: Set[str]
     node_to_rep: Dict[str, str]
     mandatory_nodes: Set[str]
+    # Mandatory nodes with >= 1 non-self, non-ground resistive neighbor --
+    # the exact scope of Pass 3's fail-loud degree sanity check.
+    mandatory_connected_nodes: Set[str]
     target_kept: int
     mandatory_kept: int
     optional_kept: int
+    # ACHIEVED per-layer retention (clusters / active optional nodes), which
+    # can differ from the solved budget target on stripe-shaped layers.
     per_layer_retention: Dict[Optional[int], float]
     n_clusters: int
     isolated_optional_dropped: int
@@ -540,10 +536,17 @@ class TileContractionResult:
 def _achieved_optional_sum(
     optional_sizes: Dict[Any, int], weights: Dict[Any, float], scale: float
 ) -> float:
-    """``sum_L( min(1.0, w_L * scale) * n_L )`` — monotonic non-decreasing in *scale*."""
+    """``sum_L( min(1.0, w_L * scale) * n_L )`` — monotonic non-decreasing in *scale*.
+
+    Summed in sorted layer order: ``optional_sizes`` inherits dict/set
+    iteration order (PYTHONHASHSEED-dependent across processes), and the
+    bisected scale feeds cell assignment where a last-ulp difference can
+    flip a node across a cell boundary — the float sum order must be
+    canonical for the cross-process byte-identical-output contract.
+    """
     return sum(
-        min(1.0, weights[layer] * scale) * n
-        for layer, n in optional_sizes.items()
+        min(1.0, weights[layer] * scale) * optional_sizes[layer]
+        for layer in sorted(optional_sizes, key=lambda k: -1 if k is None else k)
     )
 
 
@@ -672,6 +675,51 @@ def _connected_component_split(
     for n in nodes:
         clusters.setdefault(find(n), []).append(n)
     return list(clusters.values())
+
+
+_RETENTION_FIT_MAX_ITERS = 5
+_RETENTION_FIT_TOLERANCE = 1.2  # accept achieved/target cluster count within [1/1.2, 1.2]
+
+
+def _cluster_layer_to_target(
+    active_nodes: Set[str],
+    xy_of: Dict[str, Tuple[Optional[float], Optional[float]]],
+    adjacency: Dict[str, List[Tuple[str, float]]],
+    r_L: float,
+) -> List[List[str]]:
+    """Cluster one layer's active optional nodes to ~``round(r_L * n)`` clusters.
+
+    A single geometric pass systematically overshoots on stripe-shaped PDN
+    layers: clusters = cells x within-cell connected components, and
+    parallel stripes that only interconnect through OTHER layers split
+    every h-by-h cell into one cluster per stripe segment, so achieved
+    retention lands near sqrt(r_L) instead of r_L (~3x too many nodes at
+    r_L = 0.1). The achieved count is monotone in the cell-count parameter
+    (clusters ~ cells^gamma, gamma in (0, 1]), so a multiplicative
+    fixed-point update on the retention parameter (error exponent
+    ``1 - gamma`` per iteration) converges in a few steps for both the
+    stripe (gamma ~= 0.5) and 2-D-mesh (gamma ~= 1) regimes.
+    """
+    target = max(1, round(r_L * len(active_nodes)))
+    r_eff = r_L
+    best: Optional[List[List[str]]] = None
+    prev_achieved: Optional[int] = None
+    for _ in range(_RETENTION_FIT_MAX_ITERS):
+        cell_of = _assign_geometric_cells(active_nodes, xy_of, r_eff)
+        clusters = _connected_component_split(active_nodes, cell_of, adjacency)
+        achieved = len(clusters)
+        if best is None or abs(achieved - target) < abs(len(best) - target):
+            best = clusters
+        err = achieved / target
+        if 1.0 / _RETENTION_FIT_TOLERANCE <= err <= _RETENTION_FIT_TOLERANCE:
+            break
+        if achieved == prev_achieved:
+            # Floor/ceiling reached (e.g. target below the layer's intrinsic
+            # connected-component count) -- further rescaling cannot help.
+            break
+        prev_achieved = achieved
+        r_eff = min(1.0, r_eff / err)
+    return best if best is not None else []
 
 
 def _pick_cluster_representative(
@@ -811,9 +859,9 @@ def contract_tile_nodes(
     optional_sizes = {layer: len(pool) for layer, pool in optional_pool_by_layer.items()}
     retention = _solve_per_layer_retention(optional_sizes, remaining, alpha)
 
-    kept_nodes = set(mandatory_keep)
     isolated_optional_dropped = 0
     n_clusters_optional = 0
+    achieved_retention: Dict[Optional[int], float] = {}
 
     for layer, pool in optional_pool_by_layer.items():
         r_L = retention.get(layer, 0.0)
@@ -826,6 +874,7 @@ def contract_tile_nodes(
                 active_nodes.add(n)
 
         if not active_nodes:
+            achieved_retention[layer] = 0.0
             continue
 
         if r_L >= 1.0:
@@ -833,22 +882,34 @@ def contract_tile_nodes(
             # assignment entirely (cheap path, no coordinate parsing needed).
             for n in active_nodes:
                 node_to_rep[n] = n
-            kept_nodes |= active_nodes
             n_clusters_optional += len(active_nodes)
+            achieved_retention[layer] = 1.0
             continue
 
         xy_of = {n: _parse_node_xy(n) for n in active_nodes}
-        cell_of = _assign_geometric_cells(active_nodes, xy_of, r_L)
-        clusters = _connected_component_split(active_nodes, cell_of, adjacency)
+        clusters = _cluster_layer_to_target(active_nodes, xy_of, adjacency, r_L)
 
         for members in clusters:
             rep = _pick_cluster_representative(members, xy_of)
-            kept_nodes.add(rep)
             for m in members:
                 node_to_rep[m] = rep
-            n_clusters_optional += 1
+        n_clusters_optional += len(clusters)
+        achieved_retention[layer] = len(clusters) / len(active_nodes)
 
+    # kept_nodes is derived, not maintained in parallel across the branches
+    # above -- every representative (and every self-mapped mandatory node)
+    # appears as a node_to_rep value exactly once.
+    kept_nodes = set(node_to_rep.values())
     n_clusters = len(mandatory_keep) + n_clusters_optional
+
+    # Mandatory nodes with at least one real (non-self, non-ground) resistive
+    # neighbor -- Pass 3's degree sanity check covers exactly these (a
+    # self-loop-only or ground-only mandatory node legitimately contracts to
+    # zero effective degree and is NOT a contraction bug).
+    mandatory_connected = {
+        n for n in mandatory_keep
+        if any(v != n and v != GROUND_NODE for v, _g in adjacency.get(n, ()))
+    }
 
     logger.info(
         "Tile %s: contracted optional pool into %d clusters (target=%d "
@@ -865,10 +926,11 @@ def contract_tile_nodes(
         kept_nodes=kept_nodes,
         node_to_rep=node_to_rep,
         mandatory_nodes=set(mandatory_keep),
+        mandatory_connected_nodes=mandatory_connected,
         target_kept=target_kept,
         mandatory_kept=len(mandatory_keep),
         optional_kept=n_clusters_optional,
-        per_layer_retention=retention,
+        per_layer_retention=achieved_retention,
         n_clusters=n_clusters,
         isolated_optional_dropped=isolated_optional_dropped,
         isolated_mandatory_kept=len(isolated_mandatory),
@@ -884,15 +946,6 @@ def contract_tile_nodes(
 # here: contraction already guarantees every kept node keeps a path to the
 # rest of the tile (a quotient of a connected graph is connected), so Pass 3
 # only needs to remap and merge edges through Pass 2's node_to_rep map.
-
-
-def _compute_degrees(resistive_edges: Sequence[Tuple[str, str, float]]) -> Dict[str, int]:
-    """Degree count per node (number of edges in *resistive_edges*)."""
-    degree: Dict[str, int] = {}
-    for u, v, _g in resistive_edges:
-        degree[u] = degree.get(u, 0) + 1
-        degree[v] = degree.get(v, 0) + 1
-    return degree
 
 
 @dataclass
@@ -911,7 +964,19 @@ class TileEdgeContractionResult:
     parallel_resistors_merged: int
     intra_cluster_caps_dropped: int
     parallel_caps_merged: int
-    edges_to_dropped_nodes: int
+    # Split counters: resistors routing to a dropped node indicate a Pass 2
+    # isolation bug (isolated nodes have zero R edges by definition) and are
+    # ERROR-logged; caps routing to a dropped node are EXPECTED (cap-only
+    # nodes are resistively isolated yet carry grounded caps) and quantify
+    # the fF NOT conserved by contraction.
+    resistors_to_dropped_nodes: int
+    caps_to_dropped_nodes: int
+    # Kept optional representatives removed post-merge because their
+    # effective (non-ground) contracted degree was zero -- optional-only
+    # islands swallowed by one cell, or ground-only stubs -- which would
+    # otherwise reparse as floating nodes.
+    islanded_optional_reps_dropped: int
+    islanded_edges_dropped: int
 
 
 def _remap_and_merge_edges(
@@ -965,23 +1030,35 @@ def contract_tile_edges(
        therefore accumulate onto their representative, so total tile
        capacitance is preserved exactly (minus caps on dropped isolates,
        counted separately).
-    4. A cheap sanity check: every mandatory node with original degree > 0
-       must have degree > 0 in the contracted resistor list. This is NOT a
-       repair -- it's a hard fail-loud assertion, since contraction is
-       supposed to guarantee this by construction; a violation means a bug
-       in Pass 2, not a data condition.
+    4. A cheap sanity check: every node in ``mandatory_connected_nodes``
+       (mandatory with >= 1 non-self, non-ground resistive neighbor,
+       precomputed in Pass 2) must have effective (non-ground) degree > 0
+       in the contracted resistor list. This is NOT a repair -- it's a hard
+       fail-loud assertion, since contraction guarantees it by construction
+       (a mandatory node never absorbs its neighbor, so the remapped edge
+       always survives as inter-cluster); a violation means a bug in
+       Pass 2, not a data condition. Self-loop-only / ground-only mandatory
+       nodes are exempt by definition of ``mandatory_connected_nodes``.
+    5. Kept OPTIONAL representatives with zero effective contracted degree
+       (optional-only islands fully swallowed by one cell; ground-only
+       stubs) are removed together with their remaining ground/cap edges --
+       they would otherwise be written to ``.nd``/``.node_count`` yet
+       reparse as floating nodes. This step MUTATES
+       ``contraction.kept_nodes`` / ``contraction.node_to_rep`` in place so
+       downstream writers (``write_tile_nd`` etc.) see the final node set.
 
     Args:
         tile_data: Loaded ``TileData`` for this tile (original, pre-contraction
             edge lists).
         contraction: Output of ``contract_tile_nodes`` for this tile.
+            ``kept_nodes``/``node_to_rep`` may be shrunk in place (step 5).
 
     Returns:
         A ``TileEdgeContractionResult`` (see above).
 
     Raises:
-        AssertionError: if a mandatory node that had resistive edges before
-            contraction ends up with none after -- a contraction bug.
+        AssertionError: if a ``mandatory_connected_nodes`` member ends up
+            with zero effective degree after contraction -- a contraction bug.
     """
     tile_id = contraction.tile_id
     node_to_rep = contraction.node_to_rep
@@ -991,37 +1068,89 @@ def contract_tile_edges(
 
     (
         kept_resistive_edges, intra_cluster_resistors_dropped,
-        parallel_resistors_merged, edges_to_dropped_r,
+        parallel_resistors_merged, resistors_to_dropped_nodes,
     ) = _remap_and_merge_edges(tile_data.resistive_edges, rep_of)
 
     (
         kept_capacitive_edges, intra_cluster_caps_dropped,
-        parallel_caps_merged, edges_to_dropped_c,
+        parallel_caps_merged, caps_to_dropped_nodes,
     ) = _remap_and_merge_edges(tile_data.capacitive_edges, rep_of)
 
-    original_degree = _compute_degrees(tile_data.resistive_edges)
-    contracted_degree = _compute_degrees(kept_resistive_edges)
+    if resistors_to_dropped_nodes:
+        # Dropped (isolated) nodes have zero resistive edges by definition,
+        # so a resistor routing to a dropped rep means Pass 2's isolation
+        # logic mis-dropped a connected node: the output mesh is missing
+        # real conductance. (Caps routing to dropped cap-only nodes are the
+        # expected case and are reported, not errored.)
+        logger.error(
+            "Tile %s: %d resistor(s) reference a dropped node -- Pass 2 "
+            "isolation bug, output mesh is missing conductance",
+            tile_id, resistors_to_dropped_nodes,
+        )
+
+    # Effective (non-ground) contracted degree: ground resistors do not count
+    # as connectivity for island detection at reparse (root CLAUDE.md).
+    effective_degree: Dict[str, int] = {}
+    for u, v, _g in kept_resistive_edges:
+        if u != GROUND_NODE and v != GROUND_NODE:
+            effective_degree[u] = effective_degree.get(u, 0) + 1
+            effective_degree[v] = effective_degree.get(v, 0) + 1
 
     stranded = sorted(
-        n for n in contraction.mandatory_nodes
-        if original_degree.get(n, 0) > 0 and contracted_degree.get(n, 0) == 0
+        n for n in contraction.mandatory_connected_nodes
+        if effective_degree.get(n, 0) == 0
     )
     if stranded:
         raise AssertionError(
             f"Tile {tile_id}: contraction stranded {len(stranded)} mandatory "
-            f"node(s) that had original resistive degree > 0 but zero degree "
-            f"after contraction (contraction bug, not a data condition): "
-            f"{stranded[:20]}"
+            f"node(s) that had >= 1 non-self, non-ground resistive neighbor "
+            f"before contraction but zero effective degree after (contraction "
+            f"bug, not a data condition): {stranded[:20]}"
+        )
+
+    # A kept OPTIONAL rep with zero effective degree would reparse as a
+    # floating node: either an optional-only resistive island fully swallowed
+    # by one cell (every incident edge intra-cluster) or a ground-only stub.
+    # Such reps carry no edges to any other kept rep (an inter-rep edge would
+    # give both endpoints degree >= 1), so removing them and their remaining
+    # ground/cap edges cannot strand anything else.
+    islanded_reps = {
+        n for n in contraction.kept_nodes
+        if n not in contraction.mandatory_nodes and effective_degree.get(n, 0) == 0
+    }
+    islanded_edges_dropped = 0
+    if islanded_reps:
+        n_r, n_c = len(kept_resistive_edges), len(kept_capacitive_edges)
+        kept_resistive_edges = [
+            e for e in kept_resistive_edges
+            if e[0] not in islanded_reps and e[1] not in islanded_reps
+        ]
+        kept_capacitive_edges = [
+            e for e in kept_capacitive_edges
+            if e[0] not in islanded_reps and e[1] not in islanded_reps
+        ]
+        islanded_edges_dropped = (
+            (n_r - len(kept_resistive_edges)) + (n_c - len(kept_capacitive_edges))
+        )
+        contraction.kept_nodes -= islanded_reps
+        for member, rep in list(node_to_rep.items()):
+            if rep in islanded_reps:
+                del node_to_rep[member]
+        logger.warning(
+            "Tile %s: dropped %d optional representative(s) with zero "
+            "effective (non-ground) contracted degree plus %d incident "
+            "edge(s) -- these would reparse as floating nodes",
+            tile_id, len(islanded_reps), islanded_edges_dropped,
         )
 
     logger.info(
         "Tile %s Pass 3: resistors %d -> %d (intra_cluster_dropped=%d "
         "parallel_merged=%d), capacitors %d -> %d (intra_cluster_dropped=%d "
-        "parallel_merged=%d)",
+        "parallel_merged=%d), islanded_reps_dropped=%d",
         tile_id, len(tile_data.resistive_edges), len(kept_resistive_edges),
         intra_cluster_resistors_dropped, parallel_resistors_merged,
         len(tile_data.capacitive_edges), len(kept_capacitive_edges),
-        intra_cluster_caps_dropped, parallel_caps_merged,
+        intra_cluster_caps_dropped, parallel_caps_merged, len(islanded_reps),
     )
 
     return TileEdgeContractionResult(
@@ -1032,7 +1161,10 @@ def contract_tile_edges(
         parallel_resistors_merged=parallel_resistors_merged,
         intra_cluster_caps_dropped=intra_cluster_caps_dropped,
         parallel_caps_merged=parallel_caps_merged,
-        edges_to_dropped_nodes=edges_to_dropped_r + edges_to_dropped_c,
+        resistors_to_dropped_nodes=resistors_to_dropped_nodes,
+        caps_to_dropped_nodes=caps_to_dropped_nodes,
+        islanded_optional_reps_dropped=len(islanded_reps),
+        islanded_edges_dropped=islanded_edges_dropped,
     )
 
 
@@ -1213,11 +1345,19 @@ def sample_current_sources(
         instance_path, net_filter, nd_path,
     ):
         total_matching_net += 1
-        if prepared.node_pos in kept_nodes:
+        # Mirror scan_current_source_nodes' terminal handling: when the
+        # positive terminal is ground (reversed-terminal line), the die node
+        # that Pass 1/2 mandatory-kept is node_neg -- eligibility must check
+        # the same terminal or the line is silently lost.
+        anchor = (
+            prepared.node_pos if prepared.node_pos != GROUND_NODE
+            else prepared.node_neg
+        )
+        if anchor in kept_nodes:
             eligible_lines.append(raw_line)
-            eligible_node_pos.append(prepared.node_pos)
+            eligible_node_pos.append(anchor)
         else:
-            excluded_not_in_kept_nodes.add(prepared.node_pos)
+            excluded_not_in_kept_nodes.add(anchor)
 
     if excluded_not_in_kept_nodes:
         logger.warning(
@@ -1357,7 +1497,26 @@ def _format_number(value: float) -> str:
     return str(value)
 
 
-def generate_pg_net_voltage(vdd: float) -> str:
+def _resolve_net_display_name(source_dir: Path, net_name: str) -> str:
+    """Resolve the net's DISPLAY casing from the source ``pg_net_voltage``.
+
+    ``metadata.net_name`` is the verbatim ``--net`` argument from parse time
+    (possibly lowercase); output files must declare the net as the SOURCE
+    design spells it, or reparsing the sampled netlist fails to find its
+    voltage (``_extract_vdd`` matches the file token, not a lowercased
+    form). Falls back to *net_name* as-is when the source file is missing
+    or has no case-insensitive match.
+    """
+    pg_path = Path(source_dir) / 'pg_net_voltage'
+    if pg_path.exists():
+        for line in pg_path.read_text().splitlines():
+            tokens = line.split()
+            if tokens and tokens[0].lower() == net_name.lower():
+                return tokens[0]
+    return net_name
+
+
+def generate_pg_net_voltage(vdd: float, net_name: str = 'VDD_VAR') -> str:
     """Generate the sampled ``pg_net_voltage`` file content (VDD_VAR-only).
 
     Matches the REAL file's exact format, verified byte-for-byte against
@@ -1370,11 +1529,14 @@ def generate_pg_net_voltage(vdd: float) -> str:
 
     Args:
         vdd: The net's voltage (``metadata.vdd``, e.g. ``0.76``).
+        net_name: Display net name as it appears in the SOURCE design's
+            files (default ``'VDD_VAR'`` for backward compatibility --
+            callers should pass ``_resolve_net_display_name(...)``).
 
     Returns:
         Full file content, including the trailing newline.
     """
-    return f"VDD_VAR - {_format_number(vdd)} \n"
+    return f"{net_name} - {_format_number(vdd)} \n"
 
 
 def generate_additional_vsrcs() -> str:
@@ -1421,6 +1583,7 @@ def generate_ckt_sp(
     die_area: Tuple[float, float, float, float],
     vdd: float,
     tile_ids: Sequence[Tuple[int, int]],
+    net_name: str = 'VDD_VAR',
 ) -> str:
     """Generate the sampled top-level ``ckt.sp`` content (VDD_VAR-only).
 
@@ -1462,8 +1625,8 @@ def generate_ckt_sp(
     lines: List[str] = [
         f".partition_info {n_x} {n_y}",
         ".die_area " + " ".join(_format_number(v) for v in die_area),
-        f".parameter VDD_VAR {_format_number(vdd)}",
-        "vVDD_VAR vVDD_VAR  0  VDD_VAR",
+        f".parameter {net_name} {_format_number(vdd)}",
+        f"v{net_name} v{net_name}  0  {net_name}",
     ]
     lines.extend(f".include ./tile_{x}_{y}.ckt" for x, y in tile_ids)
     lines.append(".include ./package.ckt")
@@ -1587,7 +1750,10 @@ def filter_package_ckt(source_lines: List[str], net_filter: str = 'VDD_VAR') -> 
                 f"'v_<pad> <pad>_vsrc 0 <NET>'): {block[0]!r}"
             )
         net = v_tokens[3]
-        if net != net_filter:
+        # Case-insensitive: metadata.net_name is the verbatim --net argument
+        # (a lowercase `sigma-dvd parse --net vdd_var` works everywhere else
+        # in the pipeline), while package.ckt net tokens are upper-case.
+        if net.lower() != net_filter.lower():
             continue
         pad_name = v_tokens[0][len('v_'):]
         kept_pad_names.add(pad_name)
@@ -1664,7 +1830,14 @@ def _conductance_ms_to_ohm(g_mS: float) -> float:
     regularized conductance the original ``distributed_pkl`` (and any
     solve against it) already used.
     """
-    r_kohm = 1.0 / g_mS
+    # Parallel-merged near-shorts (e.g. k GMAX via edges between two reps,
+    # g = k*1e5 mS) can invert to r_kohm below the reparse SHORT_THRESHOLD
+    # (1e-6 kOhm in distributed.tile_parsing), which would re-clamp the edge
+    # back to a single GMAX and silently lose a factor-k of conductance.
+    # Clamp the written resistance AT the threshold instead: the reparse
+    # then reconstructs min(g_mS, 1e6) exactly (bounded, conservative loss
+    # only for g > 1e6 mS, i.e. sub-microohm merges).
+    r_kohm = max(1.0 / g_mS, _REPARSE_SHORT_THRESHOLD_KOHM)
     return r_kohm / R_TO_KOHM
 
 
@@ -1763,6 +1936,22 @@ def generate_tile_ckt_content(
     return "\n".join(lines) + "\n"
 
 
+@contextlib.contextmanager
+def _open_gzip_text_deterministic(output_path: Path):
+    """gzip text writer with ``mtime=0`` and no embedded filename.
+
+    ``gzip.open(path, 'wt')`` stamps the current wall clock into the gzip
+    header's MTIME field, so identical content yields byte-different files
+    across runs -- breaking the pipeline's rerun-and-checksum
+    reproducibility contract (plan §5). Report files (wall clock inside)
+    are exempt from that contract; per-tile outputs are not.
+    """
+    with open(output_path, 'wb') as raw:
+        with gzip.GzipFile(fileobj=raw, mode='wb', filename='', mtime=0) as gz:
+            with io.TextIOWrapper(gz, encoding='utf-8') as text:
+                yield text
+
+
 def write_tile_ckt(
     output_path: Path,
     node_count: int,
@@ -1772,7 +1961,7 @@ def write_tile_ckt(
 ) -> None:
     """Write a gzip ``tile_X_Y.ckt`` (plain filename, gzip content -- plan §4.5)."""
     content = generate_tile_ckt_content(node_count, boundary_nodes, resistive_edges, capacitive_edges)
-    with gzip.open(output_path, 'wt') as f:
+    with _open_gzip_text_deterministic(output_path) as f:
         f.write(content)
 
 
@@ -1821,7 +2010,7 @@ def write_tile_nd(output_path: Path, source_nd_path: Path, kept_nodes: Set[str])
     source_lines = _read_text_lines_auto(source_nd_path)
     kept_lines = filter_tile_nd_lines(source_lines, kept_nodes)
     content = "\n".join(kept_lines) + ("\n" if kept_lines else "")
-    with gzip.open(output_path, 'wt') as f:
+    with _open_gzip_text_deterministic(output_path) as f:
         f.write(content)
     return len(kept_lines)
 
@@ -1843,7 +2032,7 @@ def write_instance_models(output_path: Path, kept_raw_lines: Sequence[str]) -> N
             this tile.
     """
     content = "\n".join(kept_raw_lines) + ("\n" if kept_raw_lines else "")
-    with gzip.open(output_path, 'wt') as f:
+    with _open_gzip_text_deterministic(output_path) as f:
         f.write(content)
 
 
@@ -1875,6 +2064,7 @@ class TileProcessingStats:
     n_clusters: int
     isolated_optional_dropped: int
     isolated_mandatory_kept: int
+    islanded_optional_reps_dropped: int
     intra_cluster_resistors_dropped: int
     parallel_resistors_merged: int
 
@@ -1892,6 +2082,7 @@ def process_tile(
     ratio: float = 0.1,
     alpha: float = 1.0,
     base_seed: int = 42,
+    net_filter: str = 'vdd_var',
 ) -> TileProcessingStats:
     """Run Pass 1-4 + per-tile output writing for a single tile (plan §5).
 
@@ -1954,7 +2145,9 @@ def process_tile(
 
     tile_data = load_tile_data(pkl_dir, tile_id)
     pad_anchors_for_tile = _pad_anchors_in_tile(tile_data, all_pad_anchors)
-    current_source_nodes = scan_current_source_nodes(instance_path, nd_path)
+    current_source_nodes = scan_current_source_nodes(
+        instance_path, nd_path, net_filter=net_filter,
+    )
 
     classification = classify_tile(tile_data, pad_anchors_for_tile, current_source_nodes)
     contraction = contract_tile_nodes(classification, ratio=ratio, alpha=alpha)
@@ -1962,7 +2155,7 @@ def process_tile(
 
     cs_result = sample_current_sources(
         instance_path, contraction.kept_nodes, tile_id,
-        nd_path=nd_path, ratio=ratio, base_seed=base_seed,
+        nd_path=nd_path, net_filter=net_filter, ratio=ratio, base_seed=base_seed,
     )
 
     verify_capacitor_invariant(
@@ -2005,6 +2198,7 @@ def process_tile(
         pad_anchor_count=len(pad_anchors_for_tile),
         n_clusters=contraction.n_clusters,
         isolated_optional_dropped=contraction.isolated_optional_dropped,
+        islanded_optional_reps_dropped=edge_result.islanded_optional_reps_dropped,
         isolated_mandatory_kept=contraction.isolated_mandatory_kept,
         intra_cluster_resistors_dropped=edge_result.intra_cluster_resistors_dropped,
         parallel_resistors_merged=edge_result.parallel_resistors_merged,
@@ -2070,12 +2264,16 @@ def write_top_level_files(
     output_dir.mkdir(parents=True, exist_ok=True)
     source_dir = Path(source_dir)
 
-    (output_dir / 'pg_net_voltage').write_text(generate_pg_net_voltage(metadata.vdd))
+    net_display = _resolve_net_display_name(source_dir, metadata.net_name)
+    (output_dir / 'pg_net_voltage').write_text(
+        generate_pg_net_voltage(metadata.vdd, net_name=net_display)
+    )
     (output_dir / 'additional_vsrcs').write_text(generate_additional_vsrcs())
 
     die_area = read_die_area_from_ckt_sp(source_dir / 'ckt.sp')
     ckt_sp_content = generate_ckt_sp(
-        tile_grid=metadata.tile_grid, die_area=die_area, vdd=metadata.vdd, tile_ids=tile_ids,
+        tile_grid=metadata.tile_grid, die_area=die_area, vdd=metadata.vdd,
+        tile_ids=tile_ids, net_name=net_display,
     )
     (output_dir / 'ckt.sp').write_text(ckt_sp_content)
 
@@ -2150,6 +2348,10 @@ class SamplingPipelineReport:
         return self._sum('isolated_mandatory_kept')
 
     @property
+    def total_islanded_optional_reps_dropped(self) -> int:
+        return self._sum('islanded_optional_reps_dropped')
+
+    @property
     def overall_node_reduction_ratio(self) -> float:
         sampled = self.total_sampled_nodes
         return self.total_original_nodes / sampled if sampled else float('inf')
@@ -2196,6 +2398,7 @@ class SamplingPipelineReport:
                 'n_clusters': self.total_n_clusters,
                 'isolated_optional_dropped': self.total_isolated_optional_dropped,
                 'isolated_mandatory_kept': self.total_isolated_mandatory_kept,
+                'islanded_optional_reps_dropped': self.total_islanded_optional_reps_dropped,
             },
             'per_tile': [
                 {
@@ -2212,6 +2415,7 @@ class SamplingPipelineReport:
                     'n_clusters': t.n_clusters,
                     'isolated_optional_dropped': t.isolated_optional_dropped,
                     'isolated_mandatory_kept': t.isolated_mandatory_kept,
+                    'islanded_optional_reps_dropped': t.islanded_optional_reps_dropped,
                     'intra_cluster_resistors_dropped': t.intra_cluster_resistors_dropped,
                     'parallel_resistors_merged': t.parallel_resistors_merged,
                 }
@@ -2248,7 +2452,8 @@ class SamplingPipelineReport:
             "",
             f"Contraction diagnostics: clusters={self.total_n_clusters} "
             f"isolated_optional_dropped={self.total_isolated_optional_dropped} "
-            f"isolated_mandatory_kept={self.total_isolated_mandatory_kept}",
+            f"isolated_mandatory_kept={self.total_isolated_mandatory_kept} "
+            f"islanded_reps_dropped={self.total_islanded_optional_reps_dropped}",
             "",
             "Per-tile breakdown:",
             f"{'tile':>10} {'orig_nodes':>12} {'samp_nodes':>12} {'ratio':>7} "
@@ -2342,8 +2547,15 @@ def run_sampling_pipeline(
         len(tile_ids), ratio, alpha, base_seed, workers, output_dir,
     )
 
+    # Single source of truth for the net across ALL pipeline stages: the
+    # metadata's parse-time net name, lowercased for the instance-source
+    # filters (matching TileConfig.net_filter's own lowercasing) -- never a
+    # hardcoded 'vdd_var'.
+    net_filter = metadata.net_name.lower()
+
     task_args = [
-        (source_dir, pkl_dir, output_dir, tile_id, all_pad_anchors, ratio, alpha, base_seed)
+        (source_dir, pkl_dir, output_dir, tile_id, all_pad_anchors, ratio, alpha,
+         base_seed, net_filter)
         for tile_id in tile_ids
     ]
 

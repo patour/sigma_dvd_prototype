@@ -165,10 +165,9 @@ For each `tile_X_Y`:
 2. Build an adjacency structure (plain dict/array, not `rustworkx`) from
    `resistive_edges`, keyed by node, for the connected-component split
    (isolated-node detection + per-cell CC-split) reused in Pass 2.
-3. Classify each node in `all_nodes`:
-   - **via** vs **non-via**: a node is `via` if it has >=1 resistive edge to
-     another node sharing the same `(x, y)` but a different layer (parsed
-     from the node name suffix).
+3. Classify each node in `all_nodes` (via/non-via classification was removed
+   together with the BFS repair machinery it fed — contraction never
+   consults via-ness):
    - **layer**: parsed directly from the node name (e.g.
      `1197000_449800_86` -> layer `86`).
    - **boundary**: node is in `TileData.boundary_nodes` (already computed
@@ -193,14 +192,23 @@ deterministic — **no RNG anywhere in this pass**.
 
 1. **Per-layer retention targets `r_L`** — identical budget math to the original design:
    compute the tile's target kept-node count as `target_kept = round(ratio * len(all_nodes))`.
-   If `|mandatory-keep set| >= target_kept`, keep the mandatory set as-is (log a warning — this
-   tile's reduction will be less than the target ratio). Otherwise distribute
+   If `|mandatory-keep set| >= target_kept`, a warning is logged (this tile's reduction will be
+   less than the target ratio) but the optional pool is STILL contracted through the same
+   clustering machinery below with `remaining = 0` — never bulk-dropped. Keeping "the mandatory
+   set as-is" would sever mandatory nodes joined only through chains of optional nodes
+   (M1-o1-o2-o3-M2 fragments even though every mandatory endpoint keeps degree > 0), silently
+   reintroducing the §7.5 failure on mandatory-dominated tiles. Otherwise distribute
    `remaining = target_kept - |mandatory-keep set|` across the optional pool using per-layer
    weights `w_L = n_L ** (-alpha)` (sparser layers weighted higher) and a single scale factor `s`
    solved by bisection so `sum_L( min(1.0, w_L * s) * n_L ) ~= remaining`. Unlike the original
    design, `r_L = min(1.0, w_L * s)` is now interpreted as "fraction of layer `L`'s optional nodes
    that remain as **cluster representatives**", i.e. expected cluster size on layer `L` is
-   `~= 1 / r_L` — not an independent per-node keep probability.
+   `~= 1 / r_L` — not an independent per-node keep probability. Because clusters = cells x
+   within-cell connected components, a single geometric pass overshoots on stripe-shaped layers
+   (achieved retention ~ sqrt(r_L)); the cell size is therefore fitted iteratively
+   (`_cluster_layer_to_target`, <= 5 deterministic passes) until the achieved cluster count is
+   within ~20% of `round(r_L * n_L)`. The reported `per_layer_retention` is the ACHIEVED
+   fraction, not the requested one.
 2. **Geometric cell assignment** (per layer `L` with `r_L < 1.0`; layers with `r_L >= 1.0`, or
    absent from the optional pool, make every optional node its own singleton cluster — no
    coordinate parsing needed): parse `(x, y)` for each optional node on `L`. Unparseable-xy nodes
@@ -339,8 +347,12 @@ this pass only needs to remap and merge edges through Pass 2's `node_to_rep` map
 - Uses plain Python dicts/arrays (not `rustworkx`/`networkx`) for per-tile
   adjacency to keep memory bounded per tile.
 - Pass 2/3 (geometric contraction, §4.2/§4.3) are fully deterministic with
-  **no RNG at all** — same input always produces byte-identical output. The
-  configurable `--seed`/`base_seed` affects **only** Pass 4's current-source
+  **no RNG at all** — same input always produces byte-identical per-tile
+  output files (`tile_X_Y.ckt`/`.nd`, `instanceModels_X_Y.sp`; gzip headers
+  are written with `mtime=0` so rerun-and-checksum verification works). The
+  report files (`sampling_report.txt/json`) embed wall-clock timing and are
+  exempt from the byte-identical contract. The configurable
+  `--seed`/`base_seed` affects **only** Pass 4's current-source
   down-sampling (§4.4).
 
 ## 6. Validation

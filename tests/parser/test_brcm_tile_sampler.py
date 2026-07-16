@@ -37,6 +37,7 @@ import json
 import logging
 import pickle
 import random
+import time
 from collections import deque
 from pathlib import Path
 
@@ -58,6 +59,7 @@ from parser.brcm_tile_sampler import (
     _prefixed_node,
     _process_tile_star,
     classify_tile,
+    _resolve_net_display_name,
     contract_tile_edges,
     contract_tile_nodes,
     discover_tile_ids,
@@ -117,7 +119,6 @@ def _make_classification(
     adjacency,
     layer_of,
     mandatory_keep,
-    via_nodes=frozenset(),
     optional_pool_by_layer=None,
 ):
     """Build a ``TileClassification`` directly for Pass 2/3 unit tests.
@@ -138,7 +139,6 @@ def _make_classification(
         tile_id=tile_id,
         total_nodes=len(all_nodes),
         layer_of=dict(layer_of),
-        via_nodes=set(via_nodes),
         adjacency={k: list(v) for k, v in adjacency.items()},
         mandatory_keep=mandatory_keep,
         optional_pool_by_layer=optional_pool_by_layer,
@@ -203,54 +203,23 @@ def _sym_adjacency(edges):
 
 
 # =============================================================================
-# Via vs non-via classification
+# Pass 1 adjacency construction
 # =============================================================================
 
 
-def test_via_detection_same_xy_different_layer():
-    """Two same-(x,y) different-layer nodes connected by a resistor are via."""
-    node_via_a = "100_200_43"
-    node_via_b = "100_200_45"
-    node_plain_c = "300_400_43"  # same layer as A, different (x, y) -> non-via
-    node_plain_d = "500_600_47"  # different (x, y) from C, connected only to C
-
+def test_classify_tile_adjacency_is_bidirectional():
+    """Adjacency is built once and reflects both directions of every edge."""
+    a, b, c, d = "100_200_43", "100_200_45", "300_400_43", "500_600_47"
     tile_data = _make_tile_data(
-        all_nodes=[node_via_a, node_via_b, node_plain_c, node_plain_d],
-        resistive_edges=[
-            (node_via_a, node_via_b, 5.0),   # via edge (same xy, diff layer)
-            (node_via_a, node_plain_c, 2.0),  # same-layer routing edge
-            (node_plain_c, node_plain_d, 1.0),  # different xy, different layer, not a via edge
-        ],
+        all_nodes=[a, b, c, d],
+        resistive_edges=[(a, b, 5.0), (a, c, 2.0), (c, d, 1.0)],
     )
-
     classification = classify_tile(
         tile_data, pad_anchors_for_tile=set(), current_source_nodes_for_tile=set()
     )
-
-    assert classification.via_nodes == {node_via_a, node_via_b}
-    assert node_plain_c not in classification.via_nodes
-    assert node_plain_d not in classification.via_nodes
-
-    # Adjacency is built once and reflects both directions of every edge.
-    assert set(classification.adjacency[node_via_a]) == {
-        (node_via_b, 5.0), (node_plain_c, 2.0),
-    }
-    assert set(classification.adjacency[node_via_b]) == {(node_via_a, 5.0)}
-    assert set(classification.adjacency[node_plain_d]) == {(node_plain_c, 1.0)}
-
-
-def test_via_detection_no_vias_when_no_cross_layer_edges():
-    """A tile with only same-layer edges has zero via nodes."""
-    nodes = ["0_0_43", "10_0_43", "20_0_43"]
-    tile_data = _make_tile_data(
-        all_nodes=nodes,
-        resistive_edges=[
-            (nodes[0], nodes[1], 3.0),
-            (nodes[1], nodes[2], 3.0),
-        ],
-    )
-    classification = classify_tile(tile_data, set(), set())
-    assert classification.via_nodes == set()
+    assert set(classification.adjacency[a]) == {(b, 5.0), (c, 2.0)}
+    assert set(classification.adjacency[b]) == {(a, 5.0)}
+    assert set(classification.adjacency[d]) == {(c, 1.0)}
 
 
 # =============================================================================
@@ -721,7 +690,8 @@ def _hand_built_two_cluster_contraction():
     node_to_rep = {a1: a1, a2: a1, a3: a1, b1: b1, b2: b1, b3: b1}
     contraction = TileContractionResult(
         tile_id=(0, 0), kept_nodes={a1, b1}, node_to_rep=node_to_rep,
-        mandatory_nodes={a1, b1}, target_kept=2, mandatory_kept=2, optional_kept=0,
+        mandatory_nodes={a1, b1}, mandatory_connected_nodes={a1, b1},
+        target_kept=2, mandatory_kept=2, optional_kept=0,
         per_layer_retention={}, n_clusters=2, isolated_optional_dropped=0,
         isolated_mandatory_kept=0,
     )
@@ -793,7 +763,7 @@ def test_contract_tile_edges_capacitor_accumulation_conserved():
 
 def test_contract_tile_edges_capacitor_on_dropped_isolate_not_conserved():
     """A grounded cap on an originally-isolated (dropped) optional node is
-    NOT conserved -- counted via edges_to_dropped_nodes instead."""
+    NOT conserved -- counted via caps_to_dropped_nodes instead."""
     node_a, node_b = "0_0_43", "10_0_43"
     isolated = "999_999_43"  # zero resistive edges -- dropped by contract_tile_nodes
     edges = [(node_a, node_b, 5.0)]
@@ -808,9 +778,12 @@ def test_contract_tile_edges_capacitor_on_dropped_isolate_not_conserved():
     assert isolated not in contraction.kept_nodes
     edge_result = contract_tile_edges(tile_data, contraction)
 
-    kept_by_node = {u: c for u, _v, c in edge_result.kept_capacitive_edges}
-    assert isolated not in kept_by_node
-    assert edge_result.edges_to_dropped_nodes == 1
+    cap_endpoints = {u for u, _v, _c in edge_result.kept_capacitive_edges} | {
+        v for _u, v, _c in edge_result.kept_capacitive_edges
+    }
+    assert isolated not in cap_endpoints
+    assert edge_result.caps_to_dropped_nodes == 1
+    assert edge_result.resistors_to_dropped_nodes == 0
 
 
 def test_contract_tile_edges_via_edges_survive_and_connect_layers():
@@ -844,7 +817,8 @@ def test_contract_tile_edges_mandatory_degree_sanity_check_raises():
     # so node_a itself ends up with contracted degree 0 -- a contraction bug.
     corrupted = TileContractionResult(
         tile_id=(0, 0), kept_nodes={"other", node_b}, node_to_rep={node_a: "other", node_b: node_b},
-        mandatory_nodes={node_a, node_b}, target_kept=2, mandatory_kept=2, optional_kept=0,
+        mandatory_nodes={node_a, node_b}, mandatory_connected_nodes={node_a, node_b},
+        target_kept=2, mandatory_kept=2, optional_kept=0,
         per_layer_retention={}, n_clusters=2, isolated_optional_dropped=0,
         isolated_mandatory_kept=0,
     )
@@ -1456,7 +1430,7 @@ def _write_pkl(path, obj):
         pickle.dump(obj, f)
 
 
-def _build_synthetic_tile_environment(tmp_path, tile_id=(0, 0)):
+def _build_synthetic_tile_environment(tmp_path, tile_id=(0, 0), net="VDD_VAR"):
     """Build a tiny synthetic netlist_brcm-shaped source dir + pkl dir for one tile.
 
     Layout:
@@ -1496,12 +1470,12 @@ def _build_synthetic_tile_environment(tmp_path, tile_id=(0, 0)):
     )
     _write_pkl(pkl_dir / f"tile_{tile_id[0]}_{tile_id[1]}.pkl", tile_data)
 
-    nd_lines = [f"{n} 1 2 3 4 VDD_VAR" for n in sorted(all_nodes)]
+    nd_lines = [f"{n} 1 2 3 4 {net}" for n in sorted(all_nodes)]
     _write_gzip_text(source_dir / f"tile_{tile_id[0]}_{tile_id[1]}.nd", nd_lines)
 
     inst_lines = [
         ".flag_boundary",
-        f"i_test:VDD_VAR:VDD:0:0:0:0:0 {cs_node} 0 1e-08 dv=0.76",
+        f"i_test:{net}:VDD:0:0:0:0:0 {cs_node} 0 1e-08 dv=0.76",
     ]
     _write_gzip_text(source_dir / f"instanceModels_{tile_id[0]}_{tile_id[1]}.sp", inst_lines)
 
@@ -1823,6 +1797,192 @@ def test_sampled_output_reparses_with_zero_floating_nodes_and_sane_r_per_node(tm
     r_per_node_sampled = len(resistive_edges) / len(reparsed_nodes)
     assert r_per_node_sampled >= 1.0
     assert 0.6 * r_per_node_source <= r_per_node_sampled <= 1.4 * r_per_node_source
+
+
+# =============================================================================
+# /code-review max findings -- regression tests
+# =============================================================================
+
+
+def test_filter_package_ckt_net_filter_is_case_insensitive():
+    """metadata.net_name is the verbatim --net argument (possibly lowercase);
+    a lowercase filter must keep the same pads as the canonical casing --
+    pre-fix it silently produced a padless (unsolvable) package.ckt."""
+    pads = [
+        ("bmp_VDD_VAR_0", "VDD_VAR", "100_100_86"),
+        ("bmp_VSS_0", "VSS", "200_200_86"),
+    ]
+    lines = _make_package_ckt_fixture(pads)
+    kept_upper = filter_package_ckt(lines, net_filter="VDD_VAR")
+    kept_lower = filter_package_ckt(lines, net_filter="vdd_var")
+    assert kept_lower == kept_upper
+    assert kept_lower
+
+
+def test_stripe_layer_retention_reaches_target_ratio():
+    """Parallel disconnected stripes (real bulk-metal shape): a single
+    geometric pass achieves ~sqrt(r) retention (0.32 at r=0.1) because every
+    cell splits into one cluster per stripe segment; the iterative cell-size
+    fit must land near the requested ratio."""
+    n_stripes, per_stripe = 40, 40
+    nodes, edges = [], []
+    for sy in range(n_stripes):
+        stripe = [f"{x * 10}_{sy * 10}_43" for x in range(per_stripe)]
+        nodes.extend(stripe)
+        edges.extend((u, v, 5.0) for u, v in zip(stripe, stripe[1:]))
+    tile_data = _make_tile_data(all_nodes=nodes, resistive_edges=edges)
+    classification = classify_tile(tile_data, set(), set())
+
+    contraction = contract_tile_nodes(classification, ratio=0.1, alpha=1.0)
+
+    kept_fraction = len(contraction.kept_nodes) / len(nodes)
+    assert kept_fraction <= 0.2, f"retention overshoot: {kept_fraction:.3f}"
+    assert kept_fraction >= 0.04
+
+
+def test_conductance_ms_to_ohm_clamps_merged_near_shorts():
+    """11+ parallel GMAX (1e5 mS) edges merge to > 1e6 mS; a naive inversion
+    writes r below the reparse SHORT_THRESHOLD (1e-6 kOhm) and the parser
+    re-clamps to a single GMAX, silently losing a factor-k of conductance.
+    The written resistance must stay at/above the threshold."""
+    r_ohm = _conductance_ms_to_ohm(11 * 1e5)
+    assert r_ohm >= 1e-3
+    # Unmerged values are untouched.
+    assert _conductance_ms_to_ohm(1e5) == pytest.approx(0.01)
+
+
+def test_ground_only_optional_node_dropped_as_islanded():
+    """Ground resistors don't count as connectivity at reparse (island BFS
+    excludes ground), so a kept optional node whose only edge goes to '0'
+    would be written as a floating node -- it must be dropped."""
+    a, b, stub = "0_0_43", "10_0_43", "20_0_43"
+    edges = [(a, b, 5.0), (stub, "0", 2.0)]
+    caps = [(stub, "0", 3.0)]
+    tile_data = _make_tile_data(
+        all_nodes={a, b, stub}, resistive_edges=edges, capacitive_edges=caps,
+    )
+    classification = classify_tile(tile_data, set(), set())
+
+    contraction = contract_tile_nodes(classification, ratio=0.9, alpha=1.0)
+    edge_result = contract_tile_edges(tile_data, contraction)
+
+    assert stub not in contraction.kept_nodes
+    assert stub not in contraction.node_to_rep
+    assert edge_result.islanded_optional_reps_dropped == 1
+    for u, v, _val in edge_result.kept_resistive_edges + edge_result.kept_capacitive_edges:
+        assert stub not in (u, v)
+
+
+def test_optional_island_swallowed_by_one_cell_dropped():
+    """An optional-only resistive island that contracts into a single cluster
+    loses every edge as intra-cluster; its representative must not be written
+    as an edge-less (floating) node. Hand-built contraction map so the
+    island-in-one-cell condition is exact, not geometry-dependent."""
+    a, b = "0_0_43", "10_0_43"
+    i1, i2 = "500_500_43", "510_500_43"
+    edges = [(a, b, 5.0), (i1, i2, 4.0)]
+    caps = [(i1, "0", 2.0), (i2, "0", 2.0)]
+    tile_data = _make_tile_data(
+        all_nodes={a, b, i1, i2}, resistive_edges=edges, capacitive_edges=caps,
+    )
+    contraction = TileContractionResult(
+        tile_id=(0, 0), kept_nodes={a, b, i1},
+        node_to_rep={a: a, b: b, i1: i1, i2: i1},
+        mandatory_nodes={a, b}, mandatory_connected_nodes={a, b},
+        target_kept=3, mandatory_kept=2, optional_kept=1,
+        per_layer_retention={}, n_clusters=3, isolated_optional_dropped=0,
+        isolated_mandatory_kept=0,
+    )
+
+    edge_result = contract_tile_edges(tile_data, contraction)
+
+    assert i1 not in contraction.kept_nodes
+    assert i2 not in contraction.node_to_rep
+    assert edge_result.islanded_optional_reps_dropped == 1
+    assert edge_result.islanded_edges_dropped == 1  # the merged ('0', i1) cap
+    cap_endpoints = {u for u, _v, _c in edge_result.kept_capacitive_edges} | {
+        v for _u, v, _c in edge_result.kept_capacitive_edges
+    }
+    assert not ({i1, i2} & cap_endpoints)
+
+
+def test_self_loop_only_mandatory_node_does_not_raise():
+    """A mandatory node whose only resistive edge is a self-loop contracts to
+    zero effective degree legitimately -- the fail-loud sanity assert must
+    not fire on this data condition (pre-fix: AssertionError, tile aborted)."""
+    m, a, b = "5_5_43", "0_0_43", "10_0_43"
+    edges = [(a, b, 5.0), (m, m, 9.0)]
+    tile_data = _make_tile_data(all_nodes={a, b, m}, resistive_edges=edges)
+    classification = classify_tile(
+        tile_data, pad_anchors_for_tile={m}, current_source_nodes_for_tile=set(),
+    )
+
+    contraction = contract_tile_nodes(classification, ratio=0.9, alpha=1.0)
+    edge_result = contract_tile_edges(tile_data, contraction)  # must not raise
+
+    assert m in contraction.kept_nodes
+    assert m not in contraction.mandatory_connected_nodes
+    assert edge_result.intra_cluster_resistors_dropped == 1  # the self-loop
+
+
+def test_reversed_terminal_current_source_line_kept(tmp_path):
+    """A source line with ground as the positive terminal anchors on node_neg
+    (scan_current_source_nodes already handles this); Pass 4 eligibility must
+    check the same terminal or the line is silently lost."""
+    node = "77_0_43"
+    path = tmp_path / "instanceModels_0_0.sp"
+    _write_gzip_text(path, [f"i_rev:VDD_VAR:VDD:0:0:0:0:0 0 {node} 1e-08 dv=0.76"])
+
+    assert node in scan_current_source_nodes(str(path), None)
+
+    result = sample_current_sources(str(path), {node}, (0, 0), ratio=1.0)
+    assert len(result.kept_raw_lines) == 1
+    assert not result.excluded_not_in_kept_nodes
+
+
+def test_gzip_tile_outputs_byte_identical_across_runs(tmp_path):
+    """Rerun-and-checksum reproducibility: gzip MTIME must not embed the
+    wall clock (gzip header timestamps have 1 s resolution)."""
+    edges = [("0_0_43", "10_0_43", 5.0)]
+    caps = [("0_0_43", "0", 1.0)]
+    p1, p2 = tmp_path / "a.ckt", tmp_path / "b.ckt"
+    write_tile_ckt(p1, 2, set(), edges, caps)
+    time.sleep(1.1)
+    write_tile_ckt(p2, 2, set(), edges, caps)
+    assert p1.read_bytes() == p2.read_bytes()
+
+
+def test_generate_top_level_files_use_custom_net_name():
+    content = generate_ckt_sp(
+        tile_grid=(1, 1), die_area=(0.0, 0.0, 10.0, 10.0), vdd=0.9,
+        tile_ids=[(0, 0)], net_name="VDD_X",
+    )
+    assert ".parameter VDD_X" in content
+    assert "vVDD_X vVDD_X  0  VDD_X" in content
+    assert "VDD_VAR" not in content
+    assert generate_pg_net_voltage(0.9, net_name="VDD_X").startswith("VDD_X - ")
+
+
+def test_resolve_net_display_name_matches_source_casing(tmp_path):
+    (tmp_path / "pg_net_voltage").write_text("VDD_VAR - 0.76 \nVSS - 0 \n")
+    assert _resolve_net_display_name(tmp_path, "vdd_var") == "VDD_VAR"
+    assert _resolve_net_display_name(tmp_path, "VDD_MISSING") == "VDD_MISSING"
+
+
+def test_process_tile_honors_net_filter(tmp_path):
+    """The pipeline must thread metadata.net_name into the instance-source
+    scans -- pre-fix a hardcoded 'vdd_var' matched zero lines on any other
+    net and silently wrote a sampled netlist with no current sources."""
+    source_dir, pkl_dir, pad_node, cs_node = _build_synthetic_tile_environment(
+        tmp_path, net="VDD_X",
+    )
+    out_dir = tmp_path / "out"
+    stats = process_tile(
+        source_dir, pkl_dir, out_dir, (0, 0), {pad_node},
+        ratio=1.0, net_filter="vdd_x",
+    )
+    assert stats.original_current_sources == 1
+    assert stats.sampled_current_sources == 1
 
 
 # =============================================================================
