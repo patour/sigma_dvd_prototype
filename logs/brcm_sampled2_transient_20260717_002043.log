@@ -1,0 +1,756 @@
+00:20:44 distributed.cli INFO: Solver backend: cholmod
+00:20:44 distributed.model INFO: Loaded metadata from netlist/netlist_brcm_sampled/distributed_pkl: 36 tiles, 69504 shared boundary nodes
+00:20:44 filelock DEBUG: Attempting to acquire lock 140005772321232 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/node_ip_address.json.lock
+00:20:44 filelock DEBUG: Lock 140005772321232 acquired on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/node_ip_address.json.lock
+00:20:44 filelock DEBUG: Attempting to release lock 140005772321232 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/node_ip_address.json.lock
+00:20:44 filelock DEBUG: Lock 140005772321232 released on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/node_ip_address.json.lock
+00:20:44 filelock DEBUG: Attempting to acquire lock 140005772321232 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Lock 140005772321232 acquired on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Attempting to release lock 140005772321232 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Lock 140005772321232 released on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Attempting to acquire lock 140005772321232 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Lock 140005772321232 acquired on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Attempting to release lock 140005772321232 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Lock 140005772321232 released on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Attempting to acquire lock 140005772316480 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Lock 140005772316480 acquired on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Attempting to release lock 140005772316480 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Lock 140005772316480 released on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Attempting to acquire lock 140005772313168 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Lock 140005772313168 acquired on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Attempting to release lock 140005772313168 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Lock 140005772313168 released on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Attempting to acquire lock 140005772319024 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Lock 140005772319024 acquired on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Attempting to release lock 140005772319024 on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+00:20:44 filelock DEBUG: Lock 140005772319024 released on /tmp/ray/session_2026-07-17_00-20-44_413869_227882/ports_by_node.json.lock
+2026-07-17 00:20:45,360	INFO worker.py:2007 -- Started a local Ray instance.
+/home/exx/workspace/sdvd/sigma_dvd_prototype/venv/lib/python3.10/site-packages/ray/_private/worker.py:2046: FutureWarning: Tip: In future versions of Ray, Ray will no longer override accelerator visible devices env var if num_gpus=0 or num_gpus=None (default). To enable this behavior and turn off this error message, set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+  warnings.warn(
+00:20:46 distributed.model INFO: Interface: 69813 nodes (69504 boundary + 309 die attachment)
+00:20:55 distributed.model INFO: Model created in 11.108s: 36 tile-worker handles, 8136388 interior nodes, 136909 boundary entries, 69813 interface nodes
+00:20:55 distributed.cli INFO: Interface solver: auto (matvec=assembled, precond=block_jacobi, rtol=1.00e-12)
+[36m(pid=gcs_server)[0m [2026-07-17 00:21:14,779 E 228055 228055] (gcs_server) gcs_server.cc:303: Failed to establish connection to the event+metrics exporter agent. Events and metrics will not be exported. Exporter agent status: RpcError: Running out of retries to initialize the metrics agent. rpc_code: 14
+[33m(raylet)[0m [2026-07-17 00:21:15,269 E 228232 228232] (raylet) main.cc:1032: Failed to establish connection to the metrics exporter agent. Metrics will not be exported. Exporter agent status: RpcError: Running out of retries to initialize the metrics agent. rpc_code: 14
+[36m(TileWorker pid=228330)[0m [2026-07-17 00:21:15,692 E 228330 228970] core_worker_process.cc:842: Failed to establish connection to the metrics exporter agent. Metrics will not be exported. Exporter agent status: RpcError: Running out of retries to initialize the metrics agent. rpc_code: 14
+[2026-07-17 00:21:16,535 E 227882 228323] core_worker_process.cc:842: Failed to establish connection to the metrics exporter agent. Metrics will not be exported. Exporter agent status: RpcError: Running out of retries to initialize the metrics agent. rpc_code: 14
+00:22:04 distributed.solver_td INFO: Smoothing: 36 tiles, cache hits=0/36, per-tile wall: max=57.301s mean=11.343s
+00:22:04 distributed.solver_td INFO: VCS init: 1239320 total sources across 36 tiles (0 from cache)
+00:22:04 distributed.solver_td INFO:   init_vcs: 12.0119s
+00:22:04 distributed.solver_td INFO:   smooth_sources: 57.3968s
+00:22:20 distributed.result_factorization DEBUG: Tile (0, 0) factor_and_compute_schur:
+  G_ii: 104,919 x 104,919, nnz=988,889 (density 0.00898%), 12.3 MB
+  G_pp: 2,604 x 2,604, nnz=3,450
+  G_pi: 2,604 x 104,919, nnz=5,720  |  G_ip: 104,919 x 2,604, nnz=5,720
+  Block system memory: 12.3 MB
+  factor_interior: 1.344s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 2.015s  |  Schur: 2,604 x 2,604 dense (51.7 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (0, 1) factor_and_compute_schur:
+  G_ii: 312,133 x 312,133, nnz=2,514,487 (density 0.00258%), 31.4 MB
+  G_pp: 3,891 x 3,891, nnz=4,743
+  G_pi: 3,891 x 312,133, nnz=8,693  |  G_ip: 312,133 x 3,891, nnz=8,693
+  Block system memory: 31.4 MB
+  factor_interior: 3.679s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 5.314s  |  Schur: 3,891 x 3,891 dense (115.5 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (0, 2) factor_and_compute_schur:
+  G_ii: 171,939 x 171,939, nnz=1,544,055 (density 0.00522%), 19.3 MB
+  G_pp: 3,796 x 3,796, nnz=5,476
+  G_pi: 3,796 x 171,939, nnz=7,796  |  G_ip: 171,939 x 3,796, nnz=7,796
+  Block system memory: 19.3 MB
+  factor_interior: 2.558s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 4.189s  |  Schur: 3,796 x 3,796 dense (109.9 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (0, 3) factor_and_compute_schur:
+  G_ii: 83,692 x 83,692, nnz=992,970 (density 0.01418%), 12.2 MB
+  G_pp: 3,353 x 3,353, nnz=4,211
+  G_pi: 3,353 x 83,692, nnz=6,354  |  G_ip: 83,692 x 3,353, nnz=6,354
+  Block system memory: 12.2 MB
+  factor_interior: 2.426s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 3.621s  |  Schur: 3,353 x 3,353 dense (85.8 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (0, 4) factor_and_compute_schur:
+  G_ii: 107,587 x 107,587, nnz=1,149,579 (density 0.00993%), 14.2 MB
+  G_pp: 3,112 x 3,112, nnz=4,634
+  G_pi: 3,112 x 107,587, nnz=5,669  |  G_ip: 107,587 x 3,112, nnz=5,669
+  Block system memory: 14.2 MB
+  factor_interior: 2.359s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 3.374s  |  Schur: 3,112 x 3,112 dense (73.9 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (0, 5) factor_and_compute_schur:
+  G_ii: 84,109 x 84,109, nnz=921,405 (density 0.01302%), 11.3 MB
+  G_pp: 1,110 x 1,110, nnz=1,798
+  G_pi: 1,110 x 84,109, nnz=2,438  |  G_ip: 84,109 x 1,110, nnz=2,438
+  Block system memory: 11.3 MB
+  factor_interior: 0.966s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 1.144s  |  Schur: 1,110 x 1,110 dense (9.4 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (1, 0) factor_and_compute_schur:
+  G_ii: 99,041 x 99,041, nnz=949,725 (density 0.00968%), 11.8 MB
+  G_pp: 2,781 x 2,781, nnz=3,613
+  G_pi: 2,781 x 99,041, nnz=3,565  |  G_ip: 99,041 x 2,781, nnz=3,565
+  Block system memory: 11.8 MB
+  factor_interior: 1.673s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 2.503s  |  Schur: 2,781 x 2,781 dense (59.0 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (1, 1) factor_and_compute_schur:
+  G_ii: 312,839 x 312,839, nnz=2,531,719 (density 0.00259%), 31.6 MB
+  G_pp: 4,189 x 4,189, nnz=5,033
+  G_pi: 4,189 x 312,839, nnz=6,822  |  G_ip: 312,839 x 4,189, nnz=6,822
+  Block system memory: 31.6 MB
+  factor_interior: 3.729s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 5.702s  |  Schur: 4,189 x 4,189 dense (133.9 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (1, 2) factor_and_compute_schur:
+  G_ii: 380,860 x 380,860, nnz=3,057,162 (density 0.00211%), 38.2 MB
+  G_pp: 5,276 x 5,276, nnz=6,954
+  G_pi: 5,276 x 380,860, nnz=8,324  |  G_ip: 380,860 x 5,276, nnz=8,324
+  Block system memory: 38.2 MB
+  factor_interior: 3.033s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 6.422s  |  Schur: 5,276 x 5,276 dense (212.4 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (1, 3) factor_and_compute_schur:
+  G_ii: 113,727 x 113,727, nnz=1,213,731 (density 0.00938%), 15.0 MB
+  G_pp: 4,269 x 4,269, nnz=5,117
+  G_pi: 4,269 x 113,727, nnz=6,663  |  G_ip: 113,727 x 4,269, nnz=6,663
+  Block system memory: 15.0 MB
+  factor_interior: 3.114s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 5.105s  |  Schur: 4,269 x 4,269 dense (139.0 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (1, 4) factor_and_compute_schur:
+  G_ii: 219,199 x 219,199, nnz=1,894,081 (density 0.00394%), 23.5 MB
+  G_pp: 3,307 x 3,307, nnz=4,227
+  G_pi: 3,307 x 219,199, nnz=5,173  |  G_ip: 219,199 x 3,307, nnz=5,173
+  Block system memory: 23.5 MB
+  factor_interior: 3.496s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 4.571s  |  Schur: 3,307 x 3,307 dense (83.4 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (1, 5) factor_and_compute_schur:
+  G_ii: 70,189 x 70,189, nnz=532,285 (density 0.01080%), 6.7 MB
+  G_pp: 1,330 x 1,330, nnz=1,410
+  G_pi: 1,330 x 70,189, nnz=2,284  |  G_ip: 70,189 x 1,330, nnz=2,284
+  Block system memory: 6.7 MB
+  factor_interior: 0.338s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 0.451s  |  Schur: 1,330 x 1,330 dense (13.5 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (2, 0) factor_and_compute_schur:
+  G_ii: 97,652 x 97,652, nnz=944,336 (density 0.00990%), 11.7 MB
+  G_pp: 2,778 x 2,778, nnz=3,610
+  G_pi: 2,778 x 97,652, nnz=3,307  |  G_ip: 97,652 x 2,778, nnz=3,307
+  Block system memory: 11.7 MB
+  factor_interior: 1.817s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 2.572s  |  Schur: 2,778 x 2,778 dense (58.9 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (2, 1) factor_and_compute_schur:
+  G_ii: 312,591 x 312,591, nnz=2,530,619 (density 0.00259%), 31.6 MB
+  G_pp: 4,183 x 4,183, nnz=5,021
+  G_pi: 4,183 x 312,591, nnz=6,561  |  G_ip: 312,591 x 4,183, nnz=6,561
+  Block system memory: 31.6 MB
+  factor_interior: 3.872s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 5.830s  |  Schur: 4,183 x 4,183 dense (133.5 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (2, 2) factor_and_compute_schur:
+  G_ii: 455,966 x 455,966, nnz=3,591,668 (density 0.00173%), 45.0 MB
+  G_pp: 6,252 x 6,252, nnz=7,930
+  G_pi: 6,252 x 455,966, nnz=10,914  |  G_ip: 455,966 x 6,252, nnz=10,914
+  Block system memory: 45.0 MB
+  factor_interior: 7.053s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 11.933s  |  Schur: 6,252 x 6,252 dense (298.2 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (2, 3) factor_and_compute_schur:
+  G_ii: 552,172 x 552,172, nnz=4,360,614 (density 0.00143%), 54.6 MB
+  G_pp: 6,707 x 6,707, nnz=7,583
+  G_pi: 6,707 x 552,172, nnz=13,435  |  G_ip: 552,172 x 6,707, nnz=13,435
+  Block system memory: 54.6 MB
+  factor_interior: 9.593s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 15.577s  |  Schur: 6,707 x 6,707 dense (343.2 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (2, 4) factor_and_compute_schur:
+  G_ii: 463,112 x 463,112, nnz=3,711,182 (density 0.00173%), 46.4 MB
+  G_pp: 6,168 x 6,168, nnz=7,876
+  G_pi: 6,168 x 463,112, nnz=12,707  |  G_ip: 463,112 x 6,168, nnz=12,707
+  Block system memory: 46.4 MB
+  factor_interior: 8.366s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 13.164s  |  Schur: 6,168 x 6,168 dense (290.3 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (2, 5) factor_and_compute_schur:
+  G_ii: 236,521 x 236,521, nnz=2,084,081 (density 0.00373%), 25.9 MB
+  G_pp: 3,888 x 3,888, nnz=4,754
+  G_pi: 3,888 x 236,521, nnz=7,860  |  G_ip: 236,521 x 3,888, nnz=7,860
+  Block system memory: 25.9 MB
+  factor_interior: 4.030s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 5.695s  |  Schur: 3,888 x 3,888 dense (115.3 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (3, 0) factor_and_compute_schur:
+  G_ii: 105,263 x 105,263, nnz=989,915 (density 0.00893%), 12.3 MB
+  G_pp: 2,789 x 2,789, nnz=3,635
+  G_pi: 2,789 x 105,263, nnz=6,164  |  G_ip: 105,263 x 2,789, nnz=6,164
+  Block system memory: 12.3 MB
+  factor_interior: 1.531s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 2.302s  |  Schur: 2,789 x 2,789 dense (59.3 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (3, 1) factor_and_compute_schur:
+  G_ii: 312,328 x 312,328, nnz=2,514,326 (density 0.00258%), 31.5 MB
+  G_pp: 4,081 x 4,081, nnz=4,939
+  G_pi: 4,081 x 312,328, nnz=9,142  |  G_ip: 312,328 x 4,081, nnz=9,142
+  Block system memory: 31.5 MB
+  factor_interior: 4.386s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 6.094s  |  Schur: 4,081 x 4,081 dense (127.1 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (3, 2) factor_and_compute_schur:
+  G_ii: 407,012 x 407,012, nnz=3,224,636 (density 0.00195%), 40.4 MB
+  G_pp: 5,122 x 5,122, nnz=6,814
+  G_pi: 5,122 x 407,012, nnz=10,015  |  G_ip: 407,012 x 5,122, nnz=10,015
+  Block system memory: 40.4 MB
+  factor_interior: 6.277s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 9.217s  |  Schur: 5,122 x 5,122 dense (200.2 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (3, 3) factor_and_compute_schur:
+  G_ii: 489,534 x 489,534, nnz=3,918,830 (density 0.00164%), 49.0 MB
+  G_pp: 5,985 x 5,985, nnz=6,849
+  G_pi: 5,985 x 489,534, nnz=12,453  |  G_ip: 489,534 x 5,985, nnz=12,453
+  Block system memory: 49.0 MB
+  factor_interior: 8.687s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 13.195s  |  Schur: 5,985 x 5,985 dense (273.3 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (3, 4) factor_and_compute_schur:
+  G_ii: 424,910 x 424,910, nnz=3,429,240 (density 0.00190%), 42.9 MB
+  G_pp: 5,189 x 5,189, nnz=6,881
+  G_pi: 5,189 x 424,910, nnz=11,172  |  G_ip: 424,910 x 5,189, nnz=11,172
+  Block system memory: 42.9 MB
+  factor_interior: 7.545s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 10.721s  |  Schur: 5,189 x 5,189 dense (205.4 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (3, 5) factor_and_compute_schur:
+  G_ii: 131,382 x 131,382, nnz=1,328,078 (density 0.00769%), 16.4 MB
+  G_pp: 2,878 x 2,878, nnz=3,736
+  G_pi: 2,878 x 131,382, nnz=5,726  |  G_ip: 131,382 x 2,878, nnz=5,726
+  Block system memory: 16.4 MB
+  factor_interior: 2.946s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 3.820s  |  Schur: 2,878 x 2,878 dense (63.2 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (4, 0) factor_and_compute_schur:
+  G_ii: 98,339 x 98,339, nnz=947,221 (density 0.00979%), 11.7 MB
+  G_pp: 2,774 x 2,774, nnz=3,602
+  G_pi: 2,774 x 98,339, nnz=3,303  |  G_ip: 98,339 x 2,774, nnz=3,303
+  Block system memory: 11.7 MB
+  factor_interior: 1.480s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 2.257s  |  Schur: 2,774 x 2,774 dense (58.7 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (4, 1) factor_and_compute_schur:
+  G_ii: 312,584 x 312,584, nnz=2,530,594 (density 0.00259%), 31.6 MB
+  G_pp: 4,179 x 4,179, nnz=5,013
+  G_pi: 4,179 x 312,584, nnz=6,557  |  G_ip: 312,584 x 4,179, nnz=6,557
+  Block system memory: 31.6 MB
+  factor_interior: 3.404s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 5.352s  |  Schur: 4,179 x 4,179 dense (133.2 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (4, 2) factor_and_compute_schur:
+  G_ii: 381,620 x 381,620, nnz=3,064,230 (density 0.00210%), 38.2 MB
+  G_pp: 4,547 x 4,547, nnz=6,213
+  G_pi: 4,547 x 381,620, nnz=6,901  |  G_ip: 381,620 x 4,547, nnz=6,901
+  Block system memory: 38.2 MB
+  factor_interior: 3.530s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 5.999s  |  Schur: 4,547 x 4,547 dense (157.7 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (4, 3) factor_and_compute_schur:
+  G_ii: 114,020 x 114,020, nnz=1,217,388 (density 0.00936%), 15.0 MB
+  G_pp: 4,141 x 4,141, nnz=4,987
+  G_pi: 4,141 x 114,020, nnz=6,443  |  G_ip: 114,020 x 4,141, nnz=6,443
+  Block system memory: 15.0 MB
+  factor_interior: 2.360s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 4.335s  |  Schur: 4,141 x 4,141 dense (130.8 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (4, 4) factor_and_compute_schur:
+  G_ii: 153,792 x 153,792, nnz=1,494,598 (density 0.00632%), 18.5 MB
+  G_pp: 4,191 x 4,191, nnz=5,865
+  G_pi: 4,191 x 153,792, nnz=6,426  |  G_ip: 153,792 x 4,191, nnz=6,426
+  Block system memory: 18.5 MB
+  factor_interior: 3.946s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 5.884s  |  Schur: 4,191 x 4,191 dense (134.0 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (4, 5) factor_and_compute_schur:
+  G_ii: 163,892 x 163,892, nnz=1,563,450 (density 0.00582%), 19.3 MB
+  G_pp: 2,924 x 2,924, nnz=3,770
+  G_pi: 2,924 x 163,892, nnz=4,563  |  G_ip: 163,892 x 2,924, nnz=4,563
+  Block system memory: 19.3 MB
+  factor_interior: 3.376s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 4.374s  |  Schur: 2,924 x 2,924 dense (65.2 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (5, 0) factor_and_compute_schur:
+  G_ii: 104,648 x 104,648, nnz=987,254 (density 0.00902%), 12.3 MB
+  G_pp: 2,601 x 2,601, nnz=3,443
+  G_pi: 2,601 x 104,648, nnz=5,974  |  G_ip: 104,648 x 2,601, nnz=5,974
+  Block system memory: 12.3 MB
+  factor_interior: 1.439s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 2.135s  |  Schur: 2,601 x 2,601 dense (51.6 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (5, 1) factor_and_compute_schur:
+  G_ii: 312,247 x 312,247, nnz=2,514,093 (density 0.00258%), 31.4 MB
+  G_pp: 3,891 x 3,891, nnz=4,745
+  G_pi: 3,891 x 312,247, nnz=8,950  |  G_ip: 312,247 x 3,891, nnz=8,950
+  Block system memory: 31.4 MB
+  factor_interior: 3.949s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 5.625s  |  Schur: 3,891 x 3,891 dense (115.5 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (5, 2) factor_and_compute_schur:
+  G_ii: 172,001 x 172,001, nnz=1,543,957 (density 0.00522%), 19.2 MB
+  G_pp: 3,792 x 3,792, nnz=5,472
+  G_pi: 3,792 x 172,001, nnz=7,142  |  G_ip: 172,001 x 3,792, nnz=7,142
+  Block system memory: 19.2 MB
+  factor_interior: 2.375s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 4.107s  |  Schur: 3,792 x 3,792 dense (109.7 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (5, 3) factor_and_compute_schur:
+  G_ii: 84,816 x 84,816, nnz=997,490 (density 0.01387%), 12.3 MB
+  G_pp: 3,345 x 3,345, nnz=4,187
+  G_pi: 3,345 x 84,816, nnz=5,576  |  G_ip: 84,816 x 3,345, nnz=5,576
+  Block system memory: 12.3 MB
+  factor_interior: 2.778s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 3.962s  |  Schur: 3,345 x 3,345 dense (85.4 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (5, 4) factor_and_compute_schur:
+  G_ii: 92,982 x 92,982, nnz=1,054,356 (density 0.01220%), 13.0 MB
+  G_pp: 3,378 x 3,378, nnz=5,044
+  G_pi: 3,378 x 92,982, nnz=5,200  |  G_ip: 92,982 x 3,378, nnz=5,200
+  Block system memory: 13.0 MB
+  factor_interior: 2.079s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 3.298s  |  Schur: 3,378 x 3,378 dense (87.1 MB)
+00:22:20 distributed.result_factorization DEBUG: Tile (5, 5) factor_and_compute_schur:
+  G_ii: 96,770 x 96,770, nnz=1,073,708 (density 0.01147%), 13.2 MB
+  G_pp: 2,108 x 2,108, nnz=2,950
+  G_pi: 2,108 x 96,770, nnz=3,801  |  G_ip: 96,770 x 2,108, nnz=3,801
+  Block system memory: 13.2 MB
+  factor_interior: 1.654s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+  compute_schur: 2.266s  |  Schur: 2,108 x 2,108 dense (33.9 MB)
+00:27:20 distributed.result_factorization INFO: === Distributed DDM Prepare Statistics ===
+00:27:20 distributed.result_factorization INFO: Tiles: 36
+00:27:20 distributed.result_factorization INFO:   Interior nodes:  70,189 / 226,011 / 552,172  (min/mean/max)
+00:27:20 distributed.result_factorization INFO:   Port nodes:      1,110 / 3,803 / 6,707
+00:27:20 distributed.result_factorization INFO:   G_ii nnz:        532,285 / 1.9M / 4.4M
+00:27:20 distributed.result_factorization INFO:   G_ii memory:     6.7 MB / 24.2 MB / 54.6 MB  (total: 870.9 MB)
+00:27:20 distributed.result_factorization INFO:   Schur memory:    9.4 MB / 122.7 MB / 343.2 MB  (total: 4.3 GB)
+00:27:20 distributed.result_factorization INFO:   Factor time:     0.338s / 3.533s / 9.593s
+00:27:20 distributed.result_factorization INFO:   Factor backend:  cholmod(partial, mode=auto, ordering=default, natural, idx=auto)
+00:27:20 distributed.result_factorization INFO:   Factor + Schur wall time: 15.680s
+00:27:20 distributed.result_factorization INFO: Interface system: 70,734 unknowns, 493.5M nnz (density 9.864%), 5.5 GB
+00:27:20 distributed.result_factorization INFO:   Backend: cholmod(mode=supernodal, ordering=default, idx=auto)
+00:27:20 distributed.result_factorization INFO:   Factor time: 27.857s
+00:27:20 distributed.result_factorization INFO:   Islands penalized: 0
+00:27:20 distributed.result_factorization INFO:   Assemble time: 34.109s
+00:27:20 distributed.result_factorization INFO:   Detect islands time: 238.350s
+00:27:20 distributed.result_factorization INFO: === Total Prepare: 315.995s ===
+00:27:33 distributed.result_factorization DEBUG: Tile (0, 0) factor_transient_system:
+  A_ii: nnz=988,889  |  A_pp: nnz=3,450
+  C_ii cap nodes: 104909 / 104919  |  C_pp cap nodes: 2604 / 2604
+  Total tile cap: 250536.4 fF  |  C_coeff: 0.2000
+  factor_interior: 1.385s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 2.163s  |  Schur: 2,604 x 2,604 dense (51.7 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (0, 1) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=4,743
+  C_ii cap nodes: 312030 / 312133  |  C_pp cap nodes: 3891 / 3891
+  Total tile cap: 1423549.4 fF  |  C_coeff: 0.2000
+  factor_interior: 1.939s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 3.572s  |  Schur: 3,891 x 3,891 dense (115.5 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (0, 2) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=5,476
+  C_ii cap nodes: 171907 / 171939  |  C_pp cap nodes: 3796 / 3796
+  Total tile cap: 473073.2 fF  |  C_coeff: 0.2000
+  factor_interior: 1.928s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 3.464s  |  Schur: 3,796 x 3,796 dense (109.9 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (0, 3) factor_transient_system:
+  A_ii: nnz=992,970  |  A_pp: nnz=4,211
+  C_ii cap nodes: 83685 / 83692  |  C_pp cap nodes: 3352 / 3353
+  Total tile cap: 171377.6 fF  |  C_coeff: 0.2000
+  factor_interior: 2.049s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 3.244s  |  Schur: 3,353 x 3,353 dense (85.8 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (0, 4) factor_transient_system:
+  A_ii: nnz=1.1M  |  A_pp: nnz=4,634
+  C_ii cap nodes: 107572 / 107587  |  C_pp cap nodes: 3107 / 3112
+  Total tile cap: 240167.3 fF  |  C_coeff: 0.2000
+  factor_interior: 1.595s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 2.692s  |  Schur: 3,112 x 3,112 dense (73.9 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (0, 5) factor_transient_system:
+  A_ii: nnz=921,405  |  A_pp: nnz=1,798
+  C_ii cap nodes: 84109 / 84109  |  C_pp cap nodes: 1105 / 1110
+  Total tile cap: 168052.6 fF  |  C_coeff: 0.2000
+  factor_interior: 0.766s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 1.015s  |  Schur: 1,110 x 1,110 dense (9.4 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (1, 0) factor_transient_system:
+  A_ii: nnz=949,725  |  A_pp: nnz=3,613
+  C_ii cap nodes: 99037 / 99041  |  C_pp cap nodes: 2781 / 2781
+  Total tile cap: 244513.2 fF  |  C_coeff: 0.2000
+  factor_interior: 1.079s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 1.816s  |  Schur: 2,781 x 2,781 dense (59.0 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (1, 1) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=5,033
+  C_ii cap nodes: 312629 / 312839  |  C_pp cap nodes: 4189 / 4189
+  Total tile cap: 1455171.0 fF  |  C_coeff: 0.2000
+  factor_interior: 2.804s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 4.660s  |  Schur: 4,189 x 4,189 dense (133.9 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (1, 2) factor_transient_system:
+  A_ii: nnz=3.1M  |  A_pp: nnz=6,954
+  C_ii cap nodes: 380687 / 380860  |  C_pp cap nodes: 5276 / 5276
+  Total tile cap: 1196292.6 fF  |  C_coeff: 0.2000
+  factor_interior: 3.593s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 6.680s  |  Schur: 5,276 x 5,276 dense (212.4 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (1, 3) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=5,117
+  C_ii cap nodes: 113715 / 113727  |  C_pp cap nodes: 4268 / 4269
+  Total tile cap: 288808.3 fF  |  C_coeff: 0.2000
+  factor_interior: 1.961s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 3.937s  |  Schur: 4,269 x 4,269 dense (139.0 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (1, 4) factor_transient_system:
+  A_ii: nnz=1.9M  |  A_pp: nnz=4,227
+  C_ii cap nodes: 219158 / 219199  |  C_pp cap nodes: 3307 / 3307
+  Total tile cap: 494876.3 fF  |  C_coeff: 0.2000
+  factor_interior: 1.499s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 2.776s  |  Schur: 3,307 x 3,307 dense (83.4 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (1, 5) factor_transient_system:
+  A_ii: nnz=532,285  |  A_pp: nnz=1,410
+  C_ii cap nodes: 70189 / 70189  |  C_pp cap nodes: 1330 / 1330
+  Total tile cap: 122196.1 fF  |  C_coeff: 0.2000
+  factor_interior: 0.322s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 0.445s  |  Schur: 1,330 x 1,330 dense (13.5 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (2, 0) factor_transient_system:
+  A_ii: nnz=944,336  |  A_pp: nnz=3,610
+  C_ii cap nodes: 97648 / 97652  |  C_pp cap nodes: 2778 / 2778
+  Total tile cap: 242497.1 fF  |  C_coeff: 0.2000
+  factor_interior: 1.367s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 2.248s  |  Schur: 2,778 x 2,778 dense (58.9 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (2, 1) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=5,021
+  C_ii cap nodes: 312381 / 312591  |  C_pp cap nodes: 4183 / 4183
+  Total tile cap: 1452760.1 fF  |  C_coeff: 0.2000
+  factor_interior: 2.921s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 4.739s  |  Schur: 4,183 x 4,183 dense (133.5 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (2, 2) factor_transient_system:
+  A_ii: nnz=3.6M  |  A_pp: nnz=7,930
+  C_ii cap nodes: 455740 / 455966  |  C_pp cap nodes: 6252 / 6252
+  Total tile cap: 1327707.5 fF  |  C_coeff: 0.2000
+  factor_interior: 4.817s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 9.627s  |  Schur: 6,252 x 6,252 dense (298.2 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (2, 3) factor_transient_system:
+  A_ii: nnz=4.4M  |  A_pp: nnz=7,583
+  C_ii cap nodes: 552007 / 552172  |  C_pp cap nodes: 6707 / 6707
+  Total tile cap: 2426190.6 fF  |  C_coeff: 0.2000
+  factor_interior: 6.226s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 12.206s  |  Schur: 6,707 x 6,707 dense (343.2 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (2, 4) factor_transient_system:
+  A_ii: nnz=3.7M  |  A_pp: nnz=7,876
+  C_ii cap nodes: 462961 / 463112  |  C_pp cap nodes: 6168 / 6168
+  Total tile cap: 1558294.7 fF  |  C_coeff: 0.2000
+  factor_interior: 5.726s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 10.582s  |  Schur: 6,168 x 6,168 dense (290.3 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (2, 5) factor_transient_system:
+  A_ii: nnz=2.1M  |  A_pp: nnz=4,754
+  C_ii cap nodes: 236491 / 236521  |  C_pp cap nodes: 3888 / 3888
+  Total tile cap: 676425.7 fF  |  C_coeff: 0.2000
+  factor_interior: 2.862s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 4.426s  |  Schur: 3,888 x 3,888 dense (115.3 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (3, 0) factor_transient_system:
+  A_ii: nnz=989,915  |  A_pp: nnz=3,635
+  C_ii cap nodes: 105253 / 105263  |  C_pp cap nodes: 2789 / 2789
+  Total tile cap: 253022.2 fF  |  C_coeff: 0.2000
+  factor_interior: 1.255s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 2.021s  |  Schur: 2,789 x 2,789 dense (59.3 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (3, 1) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=4,939
+  C_ii cap nodes: 312224 / 312328  |  C_pp cap nodes: 4081 / 4081
+  Total tile cap: 1426322.4 fF  |  C_coeff: 0.2000
+  factor_interior: 2.091s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 3.860s  |  Schur: 4,081 x 4,081 dense (127.1 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (3, 2) factor_transient_system:
+  A_ii: nnz=3.2M  |  A_pp: nnz=6,814
+  C_ii cap nodes: 406911 / 407012  |  C_pp cap nodes: 5122 / 5122
+  Total tile cap: 1000806.9 fF  |  C_coeff: 0.2000
+  factor_interior: 3.308s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 6.262s  |  Schur: 5,122 x 5,122 dense (200.2 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (3, 3) factor_transient_system:
+  A_ii: nnz=3.9M  |  A_pp: nnz=6,849
+  C_ii cap nodes: 489320 / 489534  |  C_pp cap nodes: 5984 / 5985
+  Total tile cap: 1606008.6 fF  |  C_coeff: 0.2000
+  factor_interior: 5.234s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 9.622s  |  Schur: 5,985 x 5,985 dense (273.3 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (3, 4) factor_transient_system:
+  A_ii: nnz=3.4M  |  A_pp: nnz=6,881
+  C_ii cap nodes: 424760 / 424910  |  C_pp cap nodes: 5184 / 5189
+  Total tile cap: 1097236.8 fF  |  C_coeff: 0.2000
+  factor_interior: 5.399s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 8.465s  |  Schur: 5,189 x 5,189 dense (205.4 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (3, 5) factor_transient_system:
+  A_ii: nnz=1.3M  |  A_pp: nnz=3,736
+  C_ii cap nodes: 131363 / 131382  |  C_pp cap nodes: 2873 / 2878
+  Total tile cap: 349165.6 fF  |  C_coeff: 0.2000
+  factor_interior: 1.784s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 2.887s  |  Schur: 2,878 x 2,878 dense (63.2 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (4, 0) factor_transient_system:
+  A_ii: nnz=947,221  |  A_pp: nnz=3,602
+  C_ii cap nodes: 98335 / 98339  |  C_pp cap nodes: 2774 / 2774
+  Total tile cap: 242515.3 fF  |  C_coeff: 0.2000
+  factor_interior: 1.267s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 2.383s  |  Schur: 2,774 x 2,774 dense (58.7 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (4, 1) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=5,013
+  C_ii cap nodes: 312374 / 312584  |  C_pp cap nodes: 4179 / 4179
+  Total tile cap: 1452778.4 fF  |  C_coeff: 0.2000
+  factor_interior: 2.447s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 4.322s  |  Schur: 4,179 x 4,179 dense (133.2 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (4, 2) factor_transient_system:
+  A_ii: nnz=3.1M  |  A_pp: nnz=6,213
+  C_ii cap nodes: 381504 / 381620  |  C_pp cap nodes: 4547 / 4547
+  Total tile cap: 1181415.5 fF  |  C_coeff: 0.2000
+  factor_interior: 4.004s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 6.180s  |  Schur: 4,547 x 4,547 dense (157.7 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (4, 3) factor_transient_system:
+  A_ii: nnz=1.2M  |  A_pp: nnz=4,987
+  C_ii cap nodes: 114017 / 114020  |  C_pp cap nodes: 4141 / 4141
+  Total tile cap: 302117.3 fF  |  C_coeff: 0.2000
+  factor_interior: 2.469s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 4.312s  |  Schur: 4,141 x 4,141 dense (130.8 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (4, 4) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=5,865
+  C_ii cap nodes: 153792 / 153792  |  C_pp cap nodes: 4187 / 4191
+  Total tile cap: 390128.8 fF  |  C_coeff: 0.2000
+  factor_interior: 2.800s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 4.680s  |  Schur: 4,191 x 4,191 dense (134.0 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (4, 5) factor_transient_system:
+  A_ii: nnz=1.6M  |  A_pp: nnz=3,770
+  C_ii cap nodes: 163892 / 163892  |  C_pp cap nodes: 2921 / 2924
+  Total tile cap: 334552.0 fF  |  C_coeff: 0.2000
+  factor_interior: 1.939s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 2.843s  |  Schur: 2,924 x 2,924 dense (65.2 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (5, 0) factor_transient_system:
+  A_ii: nnz=987,254  |  A_pp: nnz=3,443
+  C_ii cap nodes: 104638 / 104648  |  C_pp cap nodes: 2601 / 2601
+  Total tile cap: 252945.8 fF  |  C_coeff: 0.2000
+  factor_interior: 0.999s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 1.886s  |  Schur: 2,601 x 2,601 dense (51.6 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (5, 1) factor_transient_system:
+  A_ii: nnz=2.5M  |  A_pp: nnz=4,745
+  C_ii cap nodes: 312143 / 312247  |  C_pp cap nodes: 3891 / 3891
+  Total tile cap: 1426246.5 fF  |  C_coeff: 0.2000
+  factor_interior: 2.489s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 4.082s  |  Schur: 3,891 x 3,891 dense (115.5 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (5, 2) factor_transient_system:
+  A_ii: nnz=1.5M  |  A_pp: nnz=5,472
+  C_ii cap nodes: 171990 / 172001  |  C_pp cap nodes: 3792 / 3792
+  Total tile cap: 475165.1 fF  |  C_coeff: 0.2000
+  factor_interior: 2.711s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 4.210s  |  Schur: 3,792 x 3,792 dense (109.7 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (5, 3) factor_transient_system:
+  A_ii: nnz=997,490  |  A_pp: nnz=4,187
+  C_ii cap nodes: 84813 / 84816  |  C_pp cap nodes: 3345 / 3345
+  Total tile cap: 175959.3 fF  |  C_coeff: 0.2000
+  factor_interior: 1.445s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 2.587s  |  Schur: 3,345 x 3,345 dense (85.4 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (5, 4) factor_transient_system:
+  A_ii: nnz=1.1M  |  A_pp: nnz=5,044
+  C_ii cap nodes: 92982 / 92982  |  C_pp cap nodes: 3374 / 3378
+  Total tile cap: 214515.0 fF  |  C_coeff: 0.2000
+  factor_interior: 2.224s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 3.538s  |  Schur: 3,378 x 3,378 dense (87.1 MB)
+00:27:33 distributed.result_factorization DEBUG: Tile (5, 5) factor_transient_system:
+  A_ii: nnz=1.1M  |  A_pp: nnz=2,950
+  C_ii cap nodes: 96770 / 96770  |  C_pp cap nodes: 2105 / 2108
+  Total tile cap: 193351.4 fF  |  C_coeff: 0.2000
+  factor_interior: 1.489s  |  backend: cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+  compute_schur: 2.155s  |  Schur: 2,108 x 2,108 dense (33.9 MB)
+00:28:57 distributed.result_factorization INFO: === Distributed DDM Prepare Transient Statistics ===
+00:28:57 distributed.result_factorization INFO: Method: be  |  dt: 5.0 ps  |  C_coeff: 0.2000
+00:28:57 distributed.result_factorization INFO: Tiles: 36
+00:28:57 distributed.result_factorization INFO:   A_ii nnz:         532,285 / 1.9M / 4.4M  (min/mean/max)
+00:28:57 distributed.result_factorization INFO:   A_pp nnz:         1,410 / 4,877 / 7,930
+00:28:57 distributed.result_factorization INFO:   Total cap:        122196 fF / 738521 fF / 2426191 fF  (total: 26586743 fF)
+00:28:57 distributed.result_factorization INFO:   Schur memory:     9.4 MB / 122.7 MB / 343.2 MB  (total: 4.3 GB)
+00:28:57 distributed.result_factorization INFO:   Factor time:      0.322s / 2.505s / 6.226s
+00:28:57 distributed.result_factorization INFO:   Factor backend:   cholmod(partial, mode=auto, ordering=default, natural, idx=auto, symbolic_reuse=True)
+00:28:57 distributed.result_factorization INFO:   Factor + Schur wall time: 12.964s
+00:28:57 distributed.result_factorization INFO: Transient interface: 70,734 unknowns, 493.5M nnz (density 9.864%), 5.5 GB
+00:28:57 distributed.result_factorization INFO:   Backend: cholmod(mode=supernodal, ordering=default, idx=auto)
+00:28:57 distributed.result_factorization INFO:   Factor time: 30.144s
+00:28:57 distributed.result_factorization INFO:   Has capacitance: True
+00:28:57 distributed.result_factorization INFO:   Package C_uu nnz: 0  |  Package G_uu nnz: 3090
+00:28:57 distributed.result_factorization INFO:   Assemble time: 53.225s
+00:28:57 distributed.result_factorization INFO:   Detect islands time: 0.000s
+00:28:57 distributed.result_factorization INFO: === Total Prepare: 96.333s ===
+00:29:30 distributed.solver_td INFO: A2 step columns: 36 tiles, tiers=['chunked', 'chunked', 'chunked', 'phase', 'chunked', 'phase', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'chunked', 'phase', 'chunked', 'phase'], 31.358s
+00:29:30 distributed.solver_td INFO: Step 1/2000 (t=5.000e-12 s): max_drop=0.0045 V, total_I=81.44 mA
+00:29:36 distributed.solver_td INFO: Step 11/2000 (t=5.500e-11 s): max_drop=0.0138 V, total_I=88.60 mA
+00:29:42 distributed.solver_td INFO: Step 21/2000 (t=1.050e-10 s): max_drop=0.0699 V, total_I=99.46 mA
+00:29:48 distributed.solver_td INFO: Step 31/2000 (t=1.550e-10 s): max_drop=0.0149 V, total_I=137.43 mA
+00:29:54 distributed.solver_td INFO: Step 41/2000 (t=2.050e-10 s): max_drop=0.0185 V, total_I=270.58 mA
+00:29:59 distributed.solver_td INFO: Step 51/2000 (t=2.550e-10 s): max_drop=0.0149 V, total_I=189.90 mA
+00:30:05 distributed.solver_td INFO: Step 61/2000 (t=3.050e-10 s): max_drop=0.0153 V, total_I=167.49 mA
+00:30:11 distributed.solver_td INFO: Step 71/2000 (t=3.550e-10 s): max_drop=0.0385 V, total_I=113.35 mA
+00:30:17 distributed.solver_td INFO: Step 81/2000 (t=4.050e-10 s): max_drop=0.0305 V, total_I=87.00 mA
+00:30:23 distributed.solver_td INFO: Step 91/2000 (t=4.550e-10 s): max_drop=0.0077 V, total_I=179.97 mA
+00:30:28 distributed.solver_td INFO: Step 101/2000 (t=5.050e-10 s): max_drop=0.0068 V, total_I=112.36 mA
+00:30:34 distributed.solver_td INFO: Step 111/2000 (t=5.550e-10 s): max_drop=0.0138 V, total_I=89.72 mA
+00:30:40 distributed.solver_td INFO: Step 121/2000 (t=6.050e-10 s): max_drop=0.0699 V, total_I=96.80 mA
+00:30:46 distributed.solver_td INFO: Step 131/2000 (t=6.550e-10 s): max_drop=0.0149 V, total_I=128.44 mA
+00:30:51 distributed.solver_td INFO: Step 141/2000 (t=7.050e-10 s): max_drop=0.0185 V, total_I=263.13 mA
+00:30:57 distributed.solver_td INFO: Step 151/2000 (t=7.550e-10 s): max_drop=0.0152 V, total_I=229.77 mA
+00:31:03 distributed.solver_td INFO: Step 161/2000 (t=8.050e-10 s): max_drop=0.0140 V, total_I=176.86 mA
+00:31:09 distributed.solver_td INFO: Step 171/2000 (t=8.550e-10 s): max_drop=0.0381 V, total_I=116.94 mA
+00:31:15 distributed.solver_td INFO: Step 181/2000 (t=9.050e-10 s): max_drop=0.0270 V, total_I=93.58 mA
+00:31:21 distributed.solver_td INFO: Step 191/2000 (t=9.550e-10 s): max_drop=0.0077 V, total_I=177.78 mA
+00:31:27 distributed.solver_td INFO: Step 201/2000 (t=1.005e-09 s): max_drop=0.0068 V, total_I=112.96 mA
+00:31:33 distributed.solver_td INFO: Step 211/2000 (t=1.055e-09 s): max_drop=0.0138 V, total_I=89.00 mA
+00:31:39 distributed.solver_td INFO: Step 221/2000 (t=1.105e-09 s): max_drop=0.0699 V, total_I=98.65 mA
+00:31:44 distributed.solver_td INFO: Step 231/2000 (t=1.155e-09 s): max_drop=0.0149 V, total_I=133.21 mA
+00:31:50 distributed.solver_td INFO: Step 241/2000 (t=1.205e-09 s): max_drop=0.0185 V, total_I=277.16 mA
+00:31:56 distributed.solver_td INFO: Step 251/2000 (t=1.255e-09 s): max_drop=0.0152 V, total_I=241.01 mA
+00:32:02 distributed.solver_td INFO: Step 261/2000 (t=1.305e-09 s): max_drop=0.0140 V, total_I=194.74 mA
+00:32:07 distributed.solver_td INFO: Step 271/2000 (t=1.355e-09 s): max_drop=0.0140 V, total_I=122.54 mA
+00:32:13 distributed.solver_td INFO: Step 281/2000 (t=1.405e-09 s): max_drop=0.0461 V, total_I=88.59 mA
+00:32:19 distributed.solver_td INFO: Step 291/2000 (t=1.455e-09 s): max_drop=0.0077 V, total_I=180.80 mA
+00:32:25 distributed.solver_td INFO: Step 301/2000 (t=1.505e-09 s): max_drop=0.0062 V, total_I=111.93 mA
+00:32:31 distributed.solver_td INFO: Step 311/2000 (t=1.555e-09 s): max_drop=0.0138 V, total_I=88.25 mA
+00:32:37 distributed.solver_td INFO: Step 321/2000 (t=1.605e-09 s): max_drop=0.0699 V, total_I=96.47 mA
+00:32:43 distributed.solver_td INFO: Step 331/2000 (t=1.655e-09 s): max_drop=0.0149 V, total_I=130.89 mA
+00:32:49 distributed.solver_td INFO: Step 341/2000 (t=1.705e-09 s): max_drop=0.0185 V, total_I=273.69 mA
+00:32:55 distributed.solver_td INFO: Step 351/2000 (t=1.755e-09 s): max_drop=0.0152 V, total_I=249.60 mA
+00:33:00 distributed.solver_td INFO: Step 361/2000 (t=1.805e-09 s): max_drop=0.0172 V, total_I=196.32 mA
+00:33:06 distributed.solver_td INFO: Step 371/2000 (t=1.855e-09 s): max_drop=0.0336 V, total_I=127.24 mA
+00:33:12 distributed.solver_td INFO: Step 381/2000 (t=1.905e-09 s): max_drop=0.0270 V, total_I=91.14 mA
+00:33:18 distributed.solver_td INFO: Step 391/2000 (t=1.955e-09 s): max_drop=0.0077 V, total_I=184.15 mA
+00:33:23 distributed.solver_td INFO: Step 401/2000 (t=2.005e-09 s): max_drop=0.0068 V, total_I=113.29 mA
+00:33:29 distributed.solver_td INFO: Step 411/2000 (t=2.055e-09 s): max_drop=0.0138 V, total_I=88.73 mA
+00:33:35 distributed.solver_td INFO: Step 421/2000 (t=2.105e-09 s): max_drop=0.0699 V, total_I=99.65 mA
+00:33:41 distributed.solver_td INFO: Step 431/2000 (t=2.155e-09 s): max_drop=0.0149 V, total_I=136.89 mA
+00:33:47 distributed.solver_td INFO: Step 441/2000 (t=2.205e-09 s): max_drop=0.0185 V, total_I=286.34 mA
+00:33:53 distributed.solver_td INFO: Step 451/2000 (t=2.255e-09 s): max_drop=0.0152 V, total_I=247.27 mA
+00:33:58 distributed.solver_td INFO: Step 461/2000 (t=2.305e-09 s): max_drop=0.0140 V, total_I=201.58 mA
+00:34:04 distributed.solver_td INFO: Step 471/2000 (t=2.355e-09 s): max_drop=0.0143 V, total_I=122.88 mA
+00:34:10 distributed.solver_td INFO: Step 481/2000 (t=2.405e-09 s): max_drop=0.0098 V, total_I=88.77 mA
+00:34:16 distributed.solver_td INFO: Step 491/2000 (t=2.455e-09 s): max_drop=0.0077 V, total_I=185.21 mA
+00:34:22 distributed.solver_td INFO: Step 501/2000 (t=2.505e-09 s): max_drop=0.0103 V, total_I=114.01 mA
+00:34:28 distributed.solver_td INFO: Step 511/2000 (t=2.555e-09 s): max_drop=0.0138 V, total_I=88.01 mA
+00:35:04 distributed.solver_td INFO: Step 521/2000 (t=2.605e-09 s): max_drop=0.0699 V, total_I=96.35 mA
+00:35:10 distributed.solver_td INFO: Step 531/2000 (t=2.655e-09 s): max_drop=0.0149 V, total_I=128.20 mA
+00:35:16 distributed.solver_td INFO: Step 541/2000 (t=2.705e-09 s): max_drop=0.0185 V, total_I=262.00 mA
+00:35:22 distributed.solver_td INFO: Step 551/2000 (t=2.755e-09 s): max_drop=0.0152 V, total_I=245.87 mA
+00:35:28 distributed.solver_td INFO: Step 561/2000 (t=2.805e-09 s): max_drop=0.0172 V, total_I=188.53 mA
+00:35:34 distributed.solver_td INFO: Step 571/2000 (t=2.855e-09 s): max_drop=0.0174 V, total_I=127.92 mA
+00:35:40 distributed.solver_td INFO: Step 581/2000 (t=2.905e-09 s): max_drop=0.0555 V, total_I=99.14 mA
+00:35:45 distributed.solver_td INFO: Step 591/2000 (t=2.955e-09 s): max_drop=0.0077 V, total_I=181.80 mA
+00:35:51 distributed.solver_td INFO: Step 601/2000 (t=3.005e-09 s): max_drop=0.0068 V, total_I=112.70 mA
+00:35:57 distributed.solver_td INFO: Step 611/2000 (t=3.055e-09 s): max_drop=0.0138 V, total_I=89.42 mA
+00:36:03 distributed.solver_td INFO: Step 621/2000 (t=3.105e-09 s): max_drop=0.0699 V, total_I=99.50 mA
+00:36:09 distributed.solver_td INFO: Step 631/2000 (t=3.155e-09 s): max_drop=0.0149 V, total_I=133.99 mA
+00:36:15 distributed.solver_td INFO: Step 641/2000 (t=3.205e-09 s): max_drop=0.0185 V, total_I=280.94 mA
+00:36:20 distributed.solver_td INFO: Step 651/2000 (t=3.255e-09 s): max_drop=0.0152 V, total_I=247.68 mA
+00:36:26 distributed.solver_td INFO: Step 661/2000 (t=3.305e-09 s): max_drop=0.0140 V, total_I=199.14 mA
+00:36:32 distributed.solver_td INFO: Step 671/2000 (t=3.355e-09 s): max_drop=0.0375 V, total_I=126.25 mA
+00:36:38 distributed.solver_td INFO: Step 681/2000 (t=3.405e-09 s): max_drop=0.0284 V, total_I=93.20 mA
+00:36:44 distributed.solver_td INFO: Step 691/2000 (t=3.455e-09 s): max_drop=0.0077 V, total_I=185.46 mA
+00:36:49 distributed.solver_td INFO: Step 701/2000 (t=3.505e-09 s): max_drop=0.0062 V, total_I=112.03 mA
+00:36:55 distributed.solver_td INFO: Step 711/2000 (t=3.555e-09 s): max_drop=0.0138 V, total_I=88.04 mA
+00:37:01 distributed.solver_td INFO: Step 721/2000 (t=3.605e-09 s): max_drop=0.0699 V, total_I=96.38 mA
+00:37:07 distributed.solver_td INFO: Step 731/2000 (t=3.655e-09 s): max_drop=0.0149 V, total_I=128.05 mA
+00:37:13 distributed.solver_td INFO: Step 741/2000 (t=3.705e-09 s): max_drop=0.0185 V, total_I=268.91 mA
+00:37:19 distributed.solver_td INFO: Step 751/2000 (t=3.755e-09 s): max_drop=0.0152 V, total_I=244.92 mA
+00:37:24 distributed.solver_td INFO: Step 761/2000 (t=3.805e-09 s): max_drop=0.0172 V, total_I=193.92 mA
+00:37:30 distributed.solver_td INFO: Step 771/2000 (t=3.855e-09 s): max_drop=0.0135 V, total_I=124.14 mA
+00:37:36 distributed.solver_td INFO: Step 781/2000 (t=3.905e-09 s): max_drop=0.0270 V, total_I=91.09 mA
+00:37:42 distributed.solver_td INFO: Step 791/2000 (t=3.955e-09 s): max_drop=0.0077 V, total_I=183.95 mA
+00:37:48 distributed.solver_td INFO: Step 801/2000 (t=4.005e-09 s): max_drop=0.0117 V, total_I=115.52 mA
+00:37:54 distributed.solver_td INFO: Step 811/2000 (t=4.055e-09 s): max_drop=0.0138 V, total_I=89.48 mA
+00:37:59 distributed.solver_td INFO: Step 821/2000 (t=4.105e-09 s): max_drop=0.0699 V, total_I=99.99 mA
+00:38:05 distributed.solver_td INFO: Step 831/2000 (t=4.155e-09 s): max_drop=0.0149 V, total_I=138.62 mA
+00:38:11 distributed.solver_td INFO: Step 841/2000 (t=4.205e-09 s): max_drop=0.0185 V, total_I=286.57 mA
+00:38:17 distributed.solver_td INFO: Step 851/2000 (t=4.255e-09 s): max_drop=0.0152 V, total_I=259.42 mA
+00:38:23 distributed.solver_td INFO: Step 861/2000 (t=4.305e-09 s): max_drop=0.0140 V, total_I=205.74 mA
+00:38:29 distributed.solver_td INFO: Step 871/2000 (t=4.355e-09 s): max_drop=0.0450 V, total_I=129.06 mA
+00:38:34 distributed.solver_td INFO: Step 881/2000 (t=4.405e-09 s): max_drop=0.0241 V, total_I=91.50 mA
+00:38:40 distributed.solver_td INFO: Step 891/2000 (t=4.455e-09 s): max_drop=0.0077 V, total_I=185.49 mA
+00:38:46 distributed.solver_td INFO: Step 901/2000 (t=4.505e-09 s): max_drop=0.0062 V, total_I=113.21 mA
+00:38:52 distributed.solver_td INFO: Step 911/2000 (t=4.555e-09 s): max_drop=0.0138 V, total_I=88.06 mA
+00:38:57 distributed.solver_td INFO: Step 921/2000 (t=4.605e-09 s): max_drop=0.0699 V, total_I=96.42 mA
+00:39:03 distributed.solver_td INFO: Step 931/2000 (t=4.655e-09 s): max_drop=0.0149 V, total_I=128.16 mA
+00:39:09 distributed.solver_td INFO: Step 941/2000 (t=4.705e-09 s): max_drop=0.0185 V, total_I=271.88 mA
+00:39:15 distributed.solver_td INFO: Step 951/2000 (t=4.755e-09 s): max_drop=0.0152 V, total_I=252.92 mA
+00:39:21 distributed.solver_td INFO: Step 961/2000 (t=4.805e-09 s): max_drop=0.0172 V, total_I=198.66 mA
+00:39:27 distributed.solver_td INFO: Step 971/2000 (t=4.855e-09 s): max_drop=0.0143 V, total_I=130.23 mA
+00:39:33 distributed.solver_td INFO: Step 981/2000 (t=4.905e-09 s): max_drop=0.0305 V, total_I=99.33 mA
+00:39:38 distributed.solver_td INFO: Step 991/2000 (t=4.955e-09 s): max_drop=0.0077 V, total_I=186.85 mA
+00:39:44 distributed.solver_td INFO: Step 1001/2000 (t=5.005e-09 s): max_drop=0.0068 V, total_I=113.82 mA
+00:39:50 distributed.solver_td INFO: Step 1011/2000 (t=5.055e-09 s): max_drop=0.0138 V, total_I=88.93 mA
+00:39:56 distributed.solver_td INFO: Step 1021/2000 (t=5.105e-09 s): max_drop=0.0699 V, total_I=97.33 mA
+00:40:31 distributed.solver_td INFO: Step 1031/2000 (t=5.155e-09 s): max_drop=0.0149 V, total_I=133.67 mA
+00:40:37 distributed.solver_td INFO: Step 1041/2000 (t=5.205e-09 s): max_drop=0.0185 V, total_I=286.99 mA
+00:40:43 distributed.solver_td INFO: Step 1051/2000 (t=5.255e-09 s): max_drop=0.0152 V, total_I=250.16 mA
+00:40:48 distributed.solver_td INFO: Step 1061/2000 (t=5.305e-09 s): max_drop=0.0140 V, total_I=204.19 mA
+00:40:54 distributed.solver_td INFO: Step 1071/2000 (t=5.355e-09 s): max_drop=0.0140 V, total_I=120.93 mA
+00:41:00 distributed.solver_td INFO: Step 1081/2000 (t=5.405e-09 s): max_drop=0.0133 V, total_I=91.28 mA
+00:41:06 distributed.solver_td INFO: Step 1091/2000 (t=5.455e-09 s): max_drop=0.0077 V, total_I=182.22 mA
+00:41:12 distributed.solver_td INFO: Step 1101/2000 (t=5.505e-09 s): max_drop=0.0082 V, total_I=114.41 mA
+00:41:18 distributed.solver_td INFO: Step 1111/2000 (t=5.555e-09 s): max_drop=0.0138 V, total_I=88.79 mA
+00:41:23 distributed.solver_td INFO: Step 1121/2000 (t=5.605e-09 s): max_drop=0.0699 V, total_I=96.49 mA
+00:41:29 distributed.solver_td INFO: Step 1131/2000 (t=5.655e-09 s): max_drop=0.0149 V, total_I=130.02 mA
+00:41:35 distributed.solver_td INFO: Step 1141/2000 (t=5.705e-09 s): max_drop=0.0185 V, total_I=277.50 mA
+00:41:41 distributed.solver_td INFO: Step 1151/2000 (t=5.755e-09 s): max_drop=0.0152 V, total_I=247.22 mA
+00:41:47 distributed.solver_td INFO: Step 1161/2000 (t=5.805e-09 s): max_drop=0.0172 V, total_I=193.05 mA
+00:41:53 distributed.solver_td INFO: Step 1171/2000 (t=5.855e-09 s): max_drop=0.0450 V, total_I=127.20 mA
+00:41:58 distributed.solver_td INFO: Step 1181/2000 (t=5.905e-09 s): max_drop=0.0270 V, total_I=92.21 mA
+00:42:04 distributed.solver_td INFO: Step 1191/2000 (t=5.955e-09 s): max_drop=0.0077 V, total_I=184.48 mA
+00:42:10 distributed.solver_td INFO: Step 1201/2000 (t=6.005e-09 s): max_drop=0.0068 V, total_I=113.19 mA
+00:42:16 distributed.solver_td INFO: Step 1211/2000 (t=6.055e-09 s): max_drop=0.0138 V, total_I=88.90 mA
+00:42:22 distributed.solver_td INFO: Step 1221/2000 (t=6.105e-09 s): max_drop=0.0699 V, total_I=99.55 mA
+00:42:28 distributed.solver_td INFO: Step 1231/2000 (t=6.155e-09 s): max_drop=0.0149 V, total_I=133.33 mA
+00:42:33 distributed.solver_td INFO: Step 1241/2000 (t=6.205e-09 s): max_drop=0.0185 V, total_I=286.40 mA
+00:42:39 distributed.solver_td INFO: Step 1251/2000 (t=6.255e-09 s): max_drop=0.0152 V, total_I=246.45 mA
+00:42:45 distributed.solver_td INFO: Step 1261/2000 (t=6.305e-09 s): max_drop=0.0140 V, total_I=195.16 mA
+00:42:51 distributed.solver_td INFO: Step 1271/2000 (t=6.355e-09 s): max_drop=0.0174 V, total_I=123.07 mA
+00:42:57 distributed.solver_td INFO: Step 1281/2000 (t=6.405e-09 s): max_drop=0.0305 V, total_I=89.32 mA
+00:43:03 distributed.solver_td INFO: Step 1291/2000 (t=6.455e-09 s): max_drop=0.0073 V, total_I=184.70 mA
+00:43:08 distributed.solver_td INFO: Step 1301/2000 (t=6.505e-09 s): max_drop=0.0053 V, total_I=113.07 mA
+00:43:14 distributed.solver_td INFO: Step 1311/2000 (t=6.555e-09 s): max_drop=0.0538 V, total_I=91.78 mA
+00:43:20 distributed.solver_td INFO: Step 1321/2000 (t=6.605e-09 s): max_drop=0.0695 V, total_I=95.95 mA
+00:43:26 distributed.solver_td INFO: Step 1331/2000 (t=6.655e-09 s): max_drop=0.0166 V, total_I=175.92 mA
+00:43:32 distributed.solver_td INFO: Step 1341/2000 (t=6.705e-09 s): max_drop=0.0149 V, total_I=228.78 mA
+00:43:38 distributed.solver_td INFO: Step 1351/2000 (t=6.755e-09 s): max_drop=0.0153 V, total_I=229.39 mA
+00:43:44 distributed.solver_td INFO: Step 1361/2000 (t=6.805e-09 s): max_drop=0.0156 V, total_I=174.06 mA
+00:43:49 distributed.solver_td INFO: Step 1371/2000 (t=6.855e-09 s): max_drop=0.0433 V, total_I=123.03 mA
+00:43:55 distributed.solver_td INFO: Step 1381/2000 (t=6.905e-09 s): max_drop=0.0231 V, total_I=99.24 mA
+00:44:01 distributed.solver_td INFO: Step 1391/2000 (t=6.955e-09 s): max_drop=0.0073 V, total_I=185.91 mA
+00:44:07 distributed.solver_td INFO: Step 1401/2000 (t=7.005e-09 s): max_drop=0.0053 V, total_I=113.81 mA
+00:44:13 distributed.solver_td INFO: Step 1411/2000 (t=7.055e-09 s): max_drop=0.0538 V, total_I=83.41 mA
+00:44:18 distributed.solver_td INFO: Step 1421/2000 (t=7.105e-09 s): max_drop=0.0695 V, total_I=96.19 mA
+00:44:24 distributed.solver_td INFO: Step 1431/2000 (t=7.155e-09 s): max_drop=0.0166 V, total_I=183.62 mA
+00:44:30 distributed.solver_td INFO: Step 1441/2000 (t=7.205e-09 s): max_drop=0.0149 V, total_I=239.77 mA
+00:44:36 distributed.solver_td INFO: Step 1451/2000 (t=7.255e-09 s): max_drop=0.0175 V, total_I=231.57 mA
+00:44:42 distributed.solver_td INFO: Step 1461/2000 (t=7.305e-09 s): max_drop=0.0146 V, total_I=161.69 mA
+00:44:47 distributed.solver_td INFO: Step 1471/2000 (t=7.355e-09 s): max_drop=0.0385 V, total_I=108.45 mA
+00:44:53 distributed.solver_td INFO: Step 1481/2000 (t=7.405e-09 s): max_drop=0.0305 V, total_I=93.35 mA
+00:44:59 distributed.solver_td INFO: Step 1491/2000 (t=7.455e-09 s): max_drop=0.0141 V, total_I=186.35 mA
+00:45:05 distributed.solver_td INFO: Step 1501/2000 (t=7.505e-09 s): max_drop=0.0056 V, total_I=114.23 mA
+00:45:11 distributed.solver_td INFO: Step 1511/2000 (t=7.555e-09 s): max_drop=0.0538 V, total_I=82.72 mA
+00:45:17 distributed.solver_td INFO: Step 1521/2000 (t=7.605e-09 s): max_drop=0.0695 V, total_I=95.24 mA
+00:45:22 distributed.solver_td INFO: Step 1531/2000 (t=7.655e-09 s): max_drop=0.0166 V, total_I=173.67 mA
+00:45:55 distributed.solver_td INFO: Step 1541/2000 (t=7.705e-09 s): max_drop=0.0149 V, total_I=241.37 mA
+00:46:00 distributed.solver_td INFO: Step 1551/2000 (t=7.755e-09 s): max_drop=0.0153 V, total_I=227.70 mA
+00:46:06 distributed.solver_td INFO: Step 1561/2000 (t=7.805e-09 s): max_drop=0.0146 V, total_I=165.59 mA
+00:46:12 distributed.solver_td INFO: Step 1571/2000 (t=7.855e-09 s): max_drop=0.0433 V, total_I=109.28 mA
+00:46:18 distributed.solver_td INFO: Step 1581/2000 (t=7.905e-09 s): max_drop=0.0108 V, total_I=92.83 mA
+00:46:23 distributed.solver_td INFO: Step 1591/2000 (t=7.955e-09 s): max_drop=0.0073 V, total_I=182.67 mA
+00:46:29 distributed.solver_td INFO: Step 1601/2000 (t=8.005e-09 s): max_drop=0.0053 V, total_I=113.85 mA
+00:46:35 distributed.solver_td INFO: Step 1611/2000 (t=8.055e-09 s): max_drop=0.0538 V, total_I=83.90 mA
+00:46:41 distributed.solver_td INFO: Step 1621/2000 (t=8.105e-09 s): max_drop=0.0695 V, total_I=98.55 mA
+00:46:47 distributed.solver_td INFO: Step 1631/2000 (t=8.155e-09 s): max_drop=0.0167 V, total_I=187.44 mA
+00:46:53 distributed.solver_td INFO: Step 1641/2000 (t=8.205e-09 s): max_drop=0.0149 V, total_I=252.82 mA
+00:46:58 distributed.solver_td INFO: Step 1651/2000 (t=8.255e-09 s): max_drop=0.0153 V, total_I=255.12 mA
+00:47:04 distributed.solver_td INFO: Step 1661/2000 (t=8.305e-09 s): max_drop=0.0146 V, total_I=179.69 mA
+00:47:10 distributed.solver_td INFO: Step 1671/2000 (t=8.355e-09 s): max_drop=0.0138 V, total_I=117.81 mA
+00:47:16 distributed.solver_td INFO: Step 1681/2000 (t=8.405e-09 s): max_drop=0.0214 V, total_I=93.73 mA
+00:47:22 distributed.solver_td INFO: Step 1691/2000 (t=8.455e-09 s): max_drop=0.0073 V, total_I=190.00 mA
+00:47:27 distributed.solver_td INFO: Step 1701/2000 (t=8.505e-09 s): max_drop=0.0055 V, total_I=115.46 mA
+00:47:33 distributed.solver_td INFO: Step 1711/2000 (t=8.555e-09 s): max_drop=0.0538 V, total_I=84.74 mA
+00:47:39 distributed.solver_td INFO: Step 1721/2000 (t=8.605e-09 s): max_drop=0.0695 V, total_I=95.38 mA
+00:47:45 distributed.solver_td INFO: Step 1731/2000 (t=8.655e-09 s): max_drop=0.0167 V, total_I=173.81 mA
+00:47:50 distributed.solver_td INFO: Step 1741/2000 (t=8.705e-09 s): max_drop=0.0149 V, total_I=253.50 mA
+00:47:56 distributed.solver_td INFO: Step 1751/2000 (t=8.755e-09 s): max_drop=0.0153 V, total_I=248.07 mA
+00:48:02 distributed.solver_td INFO: Step 1761/2000 (t=8.805e-09 s): max_drop=0.0146 V, total_I=183.86 mA
+00:48:08 distributed.solver_td INFO: Step 1771/2000 (t=8.855e-09 s): max_drop=0.0433 V, total_I=123.52 mA
+00:48:14 distributed.solver_td INFO: Step 1781/2000 (t=8.905e-09 s): max_drop=0.0307 V, total_I=96.43 mA
+00:48:19 distributed.solver_td INFO: Step 1791/2000 (t=8.955e-09 s): max_drop=0.0073 V, total_I=191.51 mA
+00:48:25 distributed.solver_td INFO: Step 1801/2000 (t=9.005e-09 s): max_drop=0.0106 V, total_I=113.64 mA
+00:48:31 distributed.solver_td INFO: Step 1811/2000 (t=9.055e-09 s): max_drop=0.0538 V, total_I=83.59 mA
+00:48:37 distributed.solver_td INFO: Step 1821/2000 (t=9.105e-09 s): max_drop=0.0695 V, total_I=97.19 mA
+00:48:43 distributed.solver_td INFO: Step 1831/2000 (t=9.155e-09 s): max_drop=0.0167 V, total_I=185.01 mA
+00:48:48 distributed.solver_td INFO: Step 1841/2000 (t=9.205e-09 s): max_drop=0.0149 V, total_I=251.76 mA
+00:48:54 distributed.solver_td INFO: Step 1851/2000 (t=9.255e-09 s): max_drop=0.0153 V, total_I=252.96 mA
+00:49:00 distributed.solver_td INFO: Step 1861/2000 (t=9.305e-09 s): max_drop=0.0146 V, total_I=175.28 mA
+00:49:06 distributed.solver_td INFO: Step 1871/2000 (t=9.355e-09 s): max_drop=0.0138 V, total_I=115.04 mA
+00:49:12 distributed.solver_td INFO: Step 1881/2000 (t=9.405e-09 s): max_drop=0.0214 V, total_I=96.90 mA
+00:49:18 distributed.solver_td INFO: Step 1891/2000 (t=9.455e-09 s): max_drop=0.0073 V, total_I=190.93 mA
+00:49:23 distributed.solver_td INFO: Step 1901/2000 (t=9.505e-09 s): max_drop=0.0053 V, total_I=113.87 mA
+00:49:29 distributed.solver_td INFO: Step 1911/2000 (t=9.555e-09 s): max_drop=0.0538 V, total_I=82.63 mA
+00:49:35 distributed.solver_td INFO: Step 1921/2000 (t=9.605e-09 s): max_drop=0.0695 V, total_I=94.79 mA
+00:49:41 distributed.solver_td INFO: Step 1931/2000 (t=9.655e-09 s): max_drop=0.0166 V, total_I=174.43 mA
+00:49:47 distributed.solver_td INFO: Step 1941/2000 (t=9.705e-09 s): max_drop=0.0149 V, total_I=244.89 mA
+00:49:53 distributed.solver_td INFO: Step 1951/2000 (t=9.755e-09 s): max_drop=0.0153 V, total_I=231.88 mA
+00:49:58 distributed.solver_td INFO: Step 1961/2000 (t=9.805e-09 s): max_drop=0.0146 V, total_I=184.65 mA
+00:50:04 distributed.solver_td INFO: Step 1971/2000 (t=9.855e-09 s): max_drop=0.0433 V, total_I=121.41 mA
+00:50:10 distributed.solver_td INFO: Step 1981/2000 (t=9.905e-09 s): max_drop=0.0100 V, total_I=94.65 mA
+00:50:16 distributed.solver_td INFO: Step 1991/2000 (t=9.955e-09 s): max_drop=0.0073 V, total_I=192.10 mA
+00:50:21 distributed.solver_td INFO: Step 2000/2000 (t=1.000e-08 s): max_drop=0.0051 V, total_I=85.94 mA
+00:50:21 distributed.solver_td INFO: === Distributed DDM Transient Solve Statistics ===
+00:50:21 distributed.solver_td INFO: Time steps: 2000  |  t: [5ps, 10ns]  |  dt: 5ps  |  method: be
+00:50:21 distributed.solver_td INFO: DC initial condition: 1.776s
+00:50:21 distributed.solver_td INFO: Time loop: 1251.15s (2000 steps, avg 0.626s/step)
+00:50:21 distributed.solver_td INFO:   Transient RHS:     0.232s/step (per-tile: 0.012 / 0.123 / 30.582)
+00:50:21 distributed.solver_td INFO:   Assemble + solve:  0.156s/step
+00:50:21 distributed.solver_td INFO:   Interior recovery:  0.237s/step
+00:50:21 distributed.solver_td INFO: Peak IR-drop: 0.0762 V at t=6.585ns
+00:50:22 distributed.cli INFO: transient solve completed in 1778.234s: 2000 time steps, peak IR-drop = 76.176 mV at t = 6.585e-09 s
+[36m(pid=228389)[0m [2026-07-17 00:21:16,530 E 228389 230993] core_worker_process.cc:842: Failed to establish connection to the metrics exporter agent. Metrics will not be exported. Exporter agent status: RpcError: Running out of retries to initialize the metrics agent. rpc_code: 14[32m [repeated 47x across cluster] (Ray deduplicates logs by default. Set RAY_DEDUP_LOGS=0 to disable log deduplication, or see https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#log-deduplication for more options.)[0m
+Matrix factorization (cholmod(mode=supernodal, ordering=default, idx=auto)): CSC conversion 4151.01 ms, factorization 20798.82 ms

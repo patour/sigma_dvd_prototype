@@ -562,6 +562,69 @@ Until then, the cheap-and-faithful alternatives are what §7.4 already used: sho
 the real BRCM bundle (~50 min wall, exact per-step structure) plus netlist_sampled for regression
 gating.
 
+### 7.6 Contraction-sampled proxy re-evaluation (2026-07-17, `netlist/netlist_brcm_sampled/` regenerated)
+
+The sampler was rewritten to contraction/coarsening (2f60c46 + 795094d review fixes) and re-run on
+the BRCM host against the real 30.8M-node PDN: nodes 30,812,194 → 8,275,709 (3.72×), resistors
+57.6M → 31.2M, sources 12.4M → 1.24M (10×), R/node 1.868 → **3.765**, `isolated_optional_dropped=0`,
+`islanded_reps_dropped=0`, pads 309/309. Measured here: parse (17.7 s, zero island warnings) +
+transient 2000 steps BE dt=5ps, default config, Ray
+(`logs/brcm_sampled2_transient_20260717_002043.log`, end-to-end 1,778 s).
+
+**Answer to §7.5's question: yes, with per-phase projection.** The fragmentation failure is gone
+and — the decisive property — **the interface system is reproduced exactly**: boundary, pad, and
+die-attachment nodes are mandatory (never contracted), so the proxy has the *same* 70,734 interface
+unknowns and the *same* S structure (493.5M nnz, 9.864% dense, 5.5 GB) as full BRCM. The
+interface-solve problem being optimized for the remaining 10× is bit-identical in structure, with
+realistic values from merged conductances.
+
+| Metric | BRCM 36-tile (re-run §7.3) | Contraction proxy | Ratio | §7.5 old sampler |
+|---|---|---|---|---|
+| Interior nodes (kept) | 30.67M | 8.14M (98.5% of sampled) | 3.8× | 514K (17%) |
+| Tile interior min/mean/max | 201K/852K/1.6M | 70K/226K/552K | ~3.7× | — |
+| Interface unknowns | 70,734 | **70,734** | **1×** | 20,695 |
+| S_global nnz / density | 493.5M / 9.9% | **493.5M / 9.864%** | **1×** | 2.2M / 0.51% |
+| Interface factor (supernodal) | 83 s | 27.9 s DC / 30.1 s tr | 2.8–3.0× | 0.19 s |
+| Islands penalized | 0 | 0 | — | 11,034 |
+| Tile factor wall | 1,286 s | 15.7 s (max tile 9.6 s) | 82× | 0.16 s |
+| Smoothing (cold) | 3,616 s (straggler 3,614) | 57.4 s (straggler 57.3) | 63× | 24.4 s |
+| DC / transient prepare | 1,933 / 1,431 s | 316 / 96 s | 6.1 / 14.9× | 5.9 / 3.1 s |
+| RHS /step | 1.798 (32%) | 0.232 (37%) | 7.8× | 0.048 (51%) |
+| Assemble+solve /step | 2.858 (**51%**) | 0.156 (**25%**) | 18.3× | 0.005 (5%) |
+| Recovery /step | 0.913 (16%) | 0.237 (38%) | 3.9× | 0.040 (43%) |
+| Loop /step | 5.570 | 0.626 | 8.9× | 0.094 |
+| 10K-step extrapolation | 63,605 s | ~6,790 s | 9.4× | — |
+| Peak drop | 104.9 mV @ 35.6 ns | 76.2 mV @ 6.6 ns (10 ns window) | physical | 1.29 V (> rail) |
+
+**Acceptance criteria from §7.5:** (1) islands ≈ 0 — **met** (0 penalized, 0 parse warnings,
+98.5% of sampled nodes survive as interior vs 17% before). (2) Interface structure — **exceeded**
+(exact, not approximate). (3) R/node ±30% of 1.87 — missed high (3.765): contraction merged nodes
+3.72× but inter-cluster resistors only 1.85×, so the coarse graph is ~2× denser per node. This errs
+in the safe direction (no fragmentation) but makes tile factor/recovery relatively costlier per
+node. (4) Per-step shares ≈ 32/51/16 ±10 pts — RHS 37% met; solve 25% / recovery 38% skewed toward
+the tile side.
+
+**Cross-host confound (all full-BRCM numbers come from the BRCM host; the proxy runs here):** the
+one identically-structured operation measured on both — the supernodal interface factor — runs
+2.8–3.0× faster here (27.9 s vs 83 s). The per-step backsolve gap (18.3×) exceeds that anchor
+because the backsolve is bandwidth-bound and gains more from this host than the GEMM-bound factor;
+treat absolute per-step times as host-specific and compare **shares and per-phase ratios only**.
+
+**How to use the proxy (projection rule):** every phase is now present at ≥25% of the step, so any
+optimization is measurable — but end-to-end loop speedup on the proxy *under*-predicts BRCM for
+interface work and *over*-predicts for tile work. Measure the per-phase improvement factor k on the
+proxy, then project onto BRCM's shares: e.g. an interface-solve k× gives at most 1.33× on the proxy
+loop (share 25%) but 2.04× on BRCM (share 51%). The structural exactness of S means interface
+findings (matvec modes, s-step CG, coarse-space preconditioners, multi-RHS backsolve) transfer
+directly; iteration counts of CG-type methods use realistic contracted conductance values, though
+spectrum-sensitive results should be spot-checked on a 20-step real-BRCM run before landing.
+Practical win: one optimization iteration costs ~30 min wall on the proxy vs ~18 h on BRCM.
+
+Secondary confirmations: island detection is 238 s = 75% of the proxy's DC prepare — ranked
+action (3) of §7.4 (persist islands with the pkl bundle) is now the top prepare-phase item on both
+netlists. The smoothing straggler shape survives sampling (one tile = 99.8% of the wall in both),
+so straggler-oriented smoothing work is also testable here.
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |
