@@ -625,6 +625,95 @@ action (3) of §7.4 (persist islands with the pkl bundle) is now the top prepare
 netlists. The smoothing straggler shape survives sampling (one tile = 99.8% of the wall in both),
 so straggler-oriented smoothing work is also testable here.
 
+### 7.7 Interface-solve acceleration — Stage 0 baselines & microbenchmarks (2026-07-17, dev host)
+
+Measurement campaign for the interface-solve plan (`plans/interface_solve_acceleration_plan.md`).
+Dev host: 48 cores, 251 GB RAM, RTX 6000 Ada 48 GB. Proxy bundles parsed from
+`netlist/netlist_brcm_sampled` (§7.6): `distributed_pkl_mi100k` (116 tiles, 355,623 shared
+boundary) and `distributed_pkl_mi200k` (64 tiles, 167,493 shared boundary → n_interface 167,659
+with die nodes — the closest local analog of the BRCM 107-tile/190,867 split regime). Scripts in
+`scripts/benchmark/microbench/`; raw JSON: `results_matvec_mi200k.json`, `results_gpu_mi200k.json`.
+
+**Finding 0 (blocking, feeds Stage 2): the non-streaming S_i gather + COO assembly does not fit
+this host at the split regime.** Two attempts at a production CG-tilewise `prepare()` on mi200k
+were watchdog-killed: the coordinator ballooned to >190 GB driver RSS (dense S_i retained + COO
+triplets at 24 B/entry + CSR-conversion temporaries) while the 16 packed workers sat at a healthy
+4–8 GB each. A B3-style streaming gather of the same blocks (slice-and-copy per tile, one shard in
+flight) peaks at **26.5 GB** — the D2 direct-stamping fix plus streaming/tilewise-without-S_global
+is a hard requirement for the 107-tile BRCM run, not an optimization. mi100k additionally OOM'd
+with 116 *unpacked* concurrent tile factors; `tiles_per_worker=4` (16 actors) kept factor pressure
+trivial. Also measured: no tile-resident pad ports in this bundle (D1 doesn't bite here; it remains
+latent for netlists with pads on tile ports).
+
+**Ray RTT at 116 actors** (`bench_ray_rtt.py`, Stage 5 go/no-go): broadcast 1.5 MB + gather
+p50 ≈ **15.9 ms**, per-actor 30 KB slices p50 ≈ 16.2 ms — latency-bound, not payload-bound.
+Per-iteration worker-side matvec would pay ~16 ms/iteration of pure RTT on top of compute; on one
+box it adds zero aggregate bandwidth, so Stage 5 stays gated on multi-node need.
+
+**CPU matvec kernels at n = 167,659** (mi200k, sum n_p² = 2.34B, dense blocks 18.7 GB, est.
+S nnz ≈ 2.0B — denser than BRCM's 1.28 B at 190K; BLAS pinned to 1 thread, thread pool only):
+
+| Kernel | mean | note |
+|---|---|---|
+| CSR SpMV, 1 thread (synthetic, matched nnz) | 1384 ms | current assembled-mode cost |
+| tilewise serial (production math) | 570 ms | |
+| tilewise threaded, 8 threads | **150 ms** | best; ~125 GB/s effective |
+| tilewise threaded, 16 / 32 / 48 | 172 / 200 / 225 ms | inverted scaling — accumulator zero-fill + reduction grow with thread count |
+| tilewise fp32 threaded, 48 | (1597 ms — invalid) | mixed fp32·fp64 GEMV fell off the BLAS path; redo in Stage 2 if fp32 promoted |
+| block-Jacobi apply, serial (as production) | 990 ms | 6.8 GB/s — Stage 2 must thread it (~120 ms projected) |
+| matmat, 65 cols, threaded (S·Z coarse setup) | 1272 ms | one-time per factored context — within Stage 3 budget |
+| STREAM triad 1t / 48t | 6.5 / 56.9 GB/s | ceiling reference (NUMA-affected) |
+
+Stage 2 CPU projection: ~150 ms matvec + ~120 ms threaded BJ ≈ **0.27 s/iteration** → even at 15
+warm iterations ≈ 4 s/step on dev — ~3× above the plan's CPU-path estimate (the plan's 45–60 ms
+floor assumed higher effective bandwidth). The CPU path remains the mandatory fallback but is
+firmly off-target; the iteration-count cut (Stage 3) and the GPU matvec (Stage 4) are *jointly*
+load-bearing.
+
+**GPU kernels, RTX 6000 Ada** (`bench_gpu_matvec.py`, synthetic shapes matched to mi200k):
+
+| Kernel | mean | effective BW |
+|---|---|---|
+| device CSR SpMV fp64 | **26.8 ms** | 1188 GB/s |
+| device CSR SpMV fp32 | 17.9 ms | 1335 GB/s |
+| batched dense GEMV fp64 (16 buckets) | 25.3 ms | 886 GB/s |
+| batched dense GEMV fp32 | 12.8 ms | 879 GB/s |
+| batched BJ apply fp64 (padded inverses) | 16.1 ms | 218 GB/s — unoptimized; ~4 ms plausible bucketed |
+| H2D + D2H of CG vector | 0.31 + 0.11 ms | negligible per solve |
+
+Stage 4 layout decision confirmed: device CSR ties batched dense (within 6%) → **device-resident
+assembled CSR fp64**, far simpler. GPU PCG iteration ≈ 30–45 ms → target ≤0.2 s/step on dev needs
+warm iterations ≤ ~5–10, i.e. the Stage 3 coarse space + warm start must deliver its stretch goal;
+whole-loop-on-device (BJ inverses + coarse solve on GPU) avoids the 0.4 ms/iteration transfer tax
+entirely. fp64 fits comfortably (~24 GB of 48 GB), so no fp32 accuracy caveats on this card.
+
+**rtol sweep** (`run_rtol_sweep.py`, 36-tile bundle `distributed_pkl` — production prepare fits
+there; the rtol→error curve is spectrum-driven, so the default choice transfers; split-regime
+iters/step re-measured at Stage 2 gates). 20-step BE dt=5ps transient, CG assembled + block-Jacobi
+(4 GB cap raised to 32 GB — the default would have silently degraded to plain Jacobi), warm-start
+reset per run, errors = max|ΔV| over 400 tracked nodes (200 worst + boundary sample) vs the direct
+reference (direct: loop 12.9 s, peak 76.1606 mV @ 0.095 ns; raw JSON `results_rtol_36t.json`):
+
+| rtol | iters/step (warm) | max\|ΔV\| vs direct | peak-drop Δ | peak node |
+|---|---|---|---|---|
+| 1e-12 | 130.3 | 1.9e-11 V | −8e-10 mV | match |
+| 1e-10 | 86.4 | 1.9e-9 V | +8e-8 mV | match |
+| **1e-8** | **42.1** | **166 nV** | −1.2e-6 mV | match |
+| 1e-7 | 21.6 | 1.66 µV — **over budget** | −1.2e-4 mV | match |
+| 1e-6 | 7.3 | 135 µV | −7.6e-3 mV | match |
+
+Error tracks ≈ rtol × 10–100 mV. **Production default confirmed: `interface_cg_rtol = 1e-8`**
+(166 nV, 6× inside the ≤1 µV budget; 1e-7 is just over — the margin is real but not lavish, so
+1e-8 stands and every later proxy measurement re-reports max|ΔV| as the standing accuracy gate).
+Iteration payoff at 36 tiles: 130 → 42/step (3.1×) from rtol alone; block-Jacobi CG scales
+~130 iters at 36 tiles vs ~180 at 107 tiles (§7.4), consistent with the κ ~ 1/H² growth the
+Stage 3 coarse space removes. Bonus data point: CG prepare (42 s DC) vs direct (317 s DC incl.
+238 s island detection + factor) — the direct factor cost CG avoids is already visible at 36 tiles.
+
+BRCM-host GPU availability and node count: **unconfirmed — required before Stage 4/5 scoping**
+(if CPU-only, fp32 tilewise study is promoted to critical path; if single-node, Stage 5 descopes
+to a design note).
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |
