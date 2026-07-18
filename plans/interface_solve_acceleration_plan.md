@@ -19,8 +19,8 @@ Per-matvec traffic at 190,867 unknowns: dense S_i blocks fp64 12.5 GB (fp32 6.2 
 ### User decisions (binding)
 
 - **Accuracy:** production default `interface_cg_rtol` = **1e-8** (≤1 µV on ~105 mV signals); override flag retained; rtol sweep study validates before the default changes.
-- **GPU:** explore both — CPU threaded first (works everywhere), GPU (cupy, lazy optional import, CPU fallback mandatory) benchmarked on the dev GPU. **BRCM-host GPU availability unknown → checking it is a Stage 0 prerequisite**; if CPU-only there, the fp32 matvec study is promoted to critical path.
-- **Multi-node:** possible for BRCM production → Stage 5 (worker-side CG) is a real stage, gated on Stage 0 RTT numbers.
+- **GPU (RESOLVED 2026-07-18):** BRCM host is **CPU-only** — CPU threaded path is the critical path, **fp32 tilewise matvec promoted to critical path** (Stage 2), Stage 3 coarse-space iteration cut is make-or-break. GPU (Stage 4) remains an *optional* backend (cupy, lazy import, CPU fallback mandatory) — validated on the dev GPU, deployable only where a GPU exists.
+- **Multi-node (updated 2026-07-18):** undecided for BRCM production → Stage 5 stays gated; re-assess after Stage 3 lands the measured CPU-only s/step.
 - **Scope:** core CG acceleration + worker-side/s-step CG + island-detection persistence. Decompose multi-RHS lockstep OUT of scope.
 - **Process:** Stages 1–4 implemented via Workflow orchestration — coding agents: **Sonnet 5 (`claude-sonnet-5`), 1M context, effort xhigh**; reviewers: **Opus 4.8 (`claude-opus-4-8`), 1M context, effort xhigh**; spec-compliance review THEN code-quality review by two distinct reviewer agents, fix loop until both clean. No senior-engineer/principal-code-reviewer custom agents.
 
@@ -65,7 +65,7 @@ Deliverable: docs §7.7 measurement table.
 - **GPU confirms Stage 4 layout**: device CSR fp64 26.8 ms (1188 GB/s) ties batched dense (25.3 ms) → device-resident assembled CSR fp64. GPU iteration ≈ 30–45 ms ⇒ dev target ≤0.2 s/step needs warm iters ≤~5–10: **Stage 3 coarse space and Stage 4 GPU are jointly load-bearing**. H2D/D2H negligible (0.4 ms). fp64 fits (24/48 GB).
 - **Ray RTT p50 ≈ 16 ms at 116 actors** (latency-bound, same for broadcast and slices) — per-iteration worker-side matvec pays 16 ms/iter; Stage 5 remains gated on multi-node need.
 - fp32 CPU probe invalid (mixed-dtype GEMV fell off BLAS); redo in Stage 2 only if BRCM host is CPU-only.
-- Pending user input: BRCM-host GPU availability + node count.
+- User input received (2026-07-18): BRCM host **CPU-only** (fp32 CPU study → critical path; GPU optional), node count **undecided** (Stage 5 stays gated).
 
 ## Stage 1 — Instrumentation, plumbing, small fixes
 

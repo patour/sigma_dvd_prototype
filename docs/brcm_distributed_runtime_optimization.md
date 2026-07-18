@@ -710,9 +710,12 @@ Iteration payoff at 36 tiles: 130 → 42/step (3.1×) from rtol alone; block-Jac
 Stage 3 coarse space removes. Bonus data point: CG prepare (42 s DC) vs direct (317 s DC incl.
 238 s island detection + factor) — the direct factor cost CG avoids is already visible at 36 tiles.
 
-BRCM-host GPU availability and node count: **unconfirmed — required before Stage 4/5 scoping**
-(if CPU-only, fp32 tilewise study is promoted to critical path; if single-node, Stage 5 descopes
-to a design note).
+BRCM-host GPU availability and node count (user-confirmed 2026-07-18): **CPU-only — the fp32
+tilewise matvec study is promoted to critical path** (proper same-dtype fp32 GEMV should roughly
+halve the 150 ms fp64 matvec); GPU (Stage 4) stays as an *optional* backend for hosts that have
+one. Node count **undecided** — Stage 5 remains gated; the realistic CPU-only landing zone is
+re-assessed after Stage 3 measures the coarse-space iteration cut (warm iters ≤5–10 is now the
+make-or-break number for the CPU path).
 
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
