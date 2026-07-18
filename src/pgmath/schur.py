@@ -10,10 +10,76 @@ Contains:
   - find_interface_islands             (BFS island detection)
   - apply_island_penalty               (diagonal penalty for islands)
   - detect_interface_islands           (combined find + apply)
+  - detect_interface_islands_from_summaries  (Stage 1e union-find island detection)
 
 RULE: this module imports ONLY numpy / scipy / stdlib / optional sksparse and
       other pgmath sub-modules.  It must never import from solver/, distributed/,
       analysis/, or model/.
+
+Stage 1e — union-find island detection from parse-time connectivity summaries
+-------------------------------------------------------------------------------
+``detect_interface_islands_from_summaries`` is a drop-in alternative to
+``find_interface_islands`` that avoids ever materializing or scanning
+``S_global`` (O(S.nnz) ≈ 1.3B entries at BRCM 107-tile scale, ~238 s proxy /
+~900 s BRCM measured).  Instead it replays the SAME adjacency relation that
+``find_interface_islands`` derives from ``S_global``'s nonzero structure, but
+from O(Σ boundary incidences + package edges) ≈ 300K parse-time-computed
+per-tile connected-component summaries (``distributed.retile._pre_clean_tile_data``,
+invoked once per tile at parse time -- see ``distributed.parser.parse_and_dump``).
+
+Exactness argument (reviewed against ``find_interface_islands``, this module,
+above): the BFS's adjacency predicate is ``S[u,v] != 0.0`` off-diagonal
+(exact-zero test, no epsilon), liveness is "component contains a pad node",
+pads are reachable ONLY through ``extra_edges`` (``g > 0``, non-ground
+endpoints), and there are no size heuristics.  The union-find below
+replicates exactly three relations:
+
+1. **Tile coupling**: ``S[u,v] = Σ_i S_i[u,v] + package stamps``.  For ports
+   u, v in the SAME local resistive component of one tile, the M-matrix sign
+   structure (G_pp[u,v] ≤ 0 minus a strictly positive Schur correction — a
+   same-sign accumulation, no cancellation) makes ``S_i[u,v]`` strictly
+   negative, and the cross-tile sum preserves the sign ⇒ nonzero.  For u, v
+   in DIFFERENT local resistive components of the same tile, ``G_ii``
+   block-diagonalizes across components ⇒ ``S_i[u,v] = 0.0`` exactly (a
+   stored structural zero the value-aware BFS correctly skips).  Hence
+   ``BFS-edge(u,v) ⟺ same-tile-component(u,v) ∨ package-edge(u,v)`` — exactly
+   the relation ``detect_interface_islands_from_summaries``'s per-summary
+   union loop (step 1) and its package-edge loop (step 2) implement below.
+   (FP underflow to exact 0.0 would need couplings < ~1e-308 mS —
+   physically impossible; the oracle tests (equivalence suite, item (ii))
+   stand guard regardless.)
+2. **Filters**: tile-local components are computed excluding ground ``'0'``
+   (ground edges are diagonal-only — the existing rule, unchanged); the
+   package-edge loop below replicates the BFS's ``g <= 0`` skip and
+   ``'0'``-endpoint skip verbatim.
+3. **Liveness**: package pad endpoints ("virtual pads") mark a root live —
+   identical to the BFS's ``virtual_pads`` mechanism.  **One deliberate,
+   documented divergence** (a genuine BFS bug found during the Stage 1e
+   review): a component kept alive only by a TILE-RESIDENT Dirichlet pad
+   (e.g. an ``additional_vsrcs``-style voltage source whose positive terminal
+   is itself a die-coordinate node physically inside a tile) has NO pad
+   adjacency in ``S_global`` at all — the pad's row/column is sliced into
+   ``rhs_dirichlet`` during Schur elimination, never appearing as an
+   off-diagonal nonzero — so the BFS mislabels this healthy, non-singular
+   component as an island and penalty-pins it to ~Vdd.  The parse-time
+   summary's per-component ``has_pad`` flag (computed directly from
+   ``TileData`` before any Schur elimination happens) rescues exactly this
+   case: a component union-find root reached ONLY via ``has_pad`` (never via
+   a package pad-edge) is logged with a WARNING identifying it as a rescue
+   the BFS would have missed.  The equivalence-suite oracle tests EXEMPT
+   this one documented case (validated against the flat solver, not the
+   BFS — see equivalence suite item (iv)).
+
+Transient mode: tile caps are grounded/diagonal (``A_ip = G_ip`` --
+``build_grounded_capacitance_diags``), so transient ``S_i`` has the SAME
+off-diagonal structure as DC ``S_i`` — the resistive-only tile-component
+summaries remain valid for both modes.  The only mode difference is
+coordinator-side: DC callers pass ``extra_edges=package_edges`` (resistive
+only); transient callers pass ``extra_edges=combined_edges`` (resistive +
+``C_coeff · package_cap_edges``) — this function is mode-agnostic, exactly
+like ``find_interface_islands``, and applies the identical ``g <= 0`` filter
+(``C_coeff > 0`` always, so ``C_coeff · c_fF > 0 ⟺ c_fF > 0`` — the filter is
+C_coeff-invariant).
 """
 
 from __future__ import annotations
@@ -892,3 +958,187 @@ def detect_interface_islands(
     )
 
     return S_fixed, rhs_fixed, island_nodes
+
+
+# ---------------------------------------------------------------------------
+# detect_interface_islands_from_summaries  (Stage 1e union-find)
+# ---------------------------------------------------------------------------
+
+class _UnionFind:
+    """Union-find with two independent OR-propagated liveness flags per root.
+
+    ``live_component``: reached via a summarized component's ``has_pad`` flag.
+    ``live_package``: reached via a package (extra_edges) pad-adjacency, the
+    same mechanism ``find_interface_islands``'s ``virtual_pads`` uses.  Kept
+    separate (rather than a single OR'd flag) so callers can identify nodes
+    whose ONLY liveness path is ``live_component`` -- the documented BFS
+    divergence (module docstring, point 3) -- for the rescue-count WARNING.
+    """
+
+    __slots__ = ('_parent', '_live_component', '_live_package')
+
+    def __init__(self) -> None:
+        self._parent: Dict[str, str] = {}
+        self._live_component: Dict[str, bool] = {}
+        self._live_package: Dict[str, bool] = {}
+
+    def find(self, x: str) -> str:
+        parent = self._parent
+        if x not in parent:
+            parent[x] = x
+            return x
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(self, a: str, b: str) -> str:
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return ra
+        self._parent[rb] = ra
+        self._live_component[ra] = (
+            self._live_component.get(ra, False) or self._live_component.get(rb, False)
+        )
+        self._live_package[ra] = (
+            self._live_package.get(ra, False) or self._live_package.get(rb, False)
+        )
+        return ra
+
+    def mark_live_component(self, node: str) -> None:
+        self._live_component[self.find(node)] = True
+
+    def mark_live_package(self, node: str) -> None:
+        self._live_package[self.find(node)] = True
+
+    def is_live(self, node: str) -> bool:
+        root = self.find(node)
+        return self._live_component.get(root, False) or self._live_package.get(root, False)
+
+    def is_rescued_only(self, node: str) -> bool:
+        """True iff *node*'s root is live SOLELY via a component ``has_pad``
+        flag -- i.e. the legacy BFS (which never sees ``has_pad``) would have
+        wrongly islanded it.  See module docstring point 3."""
+        root = self.find(node)
+        return (
+            self._live_component.get(root, False)
+            and not self._live_package.get(root, False)
+        )
+
+
+def detect_interface_islands_from_summaries(
+    component_summaries: Optional[List[Dict[str, Any]]],
+    interface_node_to_idx: Dict[str, int],
+    pad_nodes: Set[str],
+    extra_edges: Optional[List[Tuple[str, str, float]]] = None,
+) -> Set[str]:
+    """Union-find replacement for :func:`find_interface_islands` (Stage 1e).
+
+    Heuristic-free: every interface unknown starts as its own singleton (an
+    unreached singleton is exactly the BFS's zero-row-island case -- e.g. a
+    boundary node whose components were dropped by island removal in EVERY
+    tile that used to touch it, yet the node still appears in ``S_global`` via
+    a package ``extra_edges`` stamp to some other non-pad node).  Then:
+
+    1. For each summarized component, union its ``candidates`` (already
+       restricted to this component's interface-node members) together, and
+       mark the resulting root ``live_component`` if the component's
+       ``has_pad`` flag is set.  ``candidates`` entries not present in
+       ``interface_node_to_idx`` are dropped defensively (a summary computed
+       at parse time may reference a node a later step pruned).
+    2. For each ``extra_edges`` entry with ``g > 0`` and neither endpoint
+       ``'0'`` (identical filter to :func:`find_interface_islands`): union
+       interface-interface pairs; mark interface-pad pairs ``live_package``.
+    3. Any interface node whose union-find root is not live (neither flag
+       set) is an island -- matches the BFS's "component contains no pad
+       node" rule exactly (see module docstring for the full argument).
+
+    Args:
+        component_summaries: Global list (all tiles, post-split) of
+            ``{'candidates': FrozenSet[str] | Set[str] | List[str],
+            'n_nodes': int, 'has_pad': bool}`` dicts, one per KEPT tile-local
+            component (``distributed.retile._pre_clean_tile_data``).
+        interface_node_to_idx: The FINALIZED interface-node index map (same
+            object passed to :func:`find_interface_islands` for the S_global-
+            based path) -- defines which nodes this call actually judges.
+        pad_nodes: Dirichlet (voltage-source) node names.
+        extra_edges: Package conductance edges ``(u, v, g_mS)``.  DC callers
+            pass resistive-only ``package_edges``; transient callers pass
+            ``combined_edges`` (resistive + ``C_coeff · package_cap_edges``).
+
+    Returns:
+        Set of interface node names with no live path to any pad --
+        identical (modulo the documented tile-resident-pad rescue) to
+        :func:`find_interface_islands`'s return value on the same system.
+    """
+    interface_nodes = interface_node_to_idx.keys()
+    if not interface_nodes:
+        return set()
+
+    uf = _UnionFind()
+
+    # Ensure every interface node has a singleton entry up front so an
+    # entirely-unreached node (no summary, no package edge) is still judged
+    # below -- matches the BFS's "every node starts in its own component"
+    # behaviour (find_interface_islands seeds `adj` for all interface_nodes).
+    for n in interface_nodes:
+        uf.find(n)
+
+    # 1. Tile-component unions (same-tile-component ⟺ BFS-edge, point 1).
+    for comp in (component_summaries or ()):
+        raw_candidates = comp.get('candidates', ())
+        candidates = [n for n in raw_candidates if n in interface_node_to_idx]
+        if not candidates:
+            continue
+        base = candidates[0]
+        uf.find(base)
+        for n in candidates[1:]:
+            uf.union(base, n)
+        if comp.get('has_pad'):
+            uf.mark_live_component(base)
+
+    # 2. Package-edge unions + pad liveness (identical filter to
+    #    find_interface_islands: g <= 0 skip, '0'-endpoint skip).
+    if extra_edges:
+        for u, v, g in extra_edges:
+            if g <= 0:
+                continue
+            if u == '0' or v == '0':
+                continue
+
+            u_is_pad = u in pad_nodes
+            v_is_pad = v in pad_nodes
+            u_is_iface = u in interface_node_to_idx
+            v_is_iface = v in interface_node_to_idx
+
+            if u_is_iface and v_is_iface:
+                uf.union(u, v)
+            elif u_is_iface and v_is_pad:
+                uf.mark_live_package(u)
+            elif v_is_iface and u_is_pad:
+                uf.mark_live_package(v)
+
+    # 3. Collect islands + rescued nodes (for the divergence WARNING).
+    island_nodes: Set[str] = set()
+    rescued_nodes: Set[str] = set()
+    for n in interface_nodes:
+        if not uf.is_live(n):
+            island_nodes.add(n)
+        elif uf.is_rescued_only(n):
+            rescued_nodes.add(n)
+
+    if rescued_nodes:
+        _preview = sorted(rescued_nodes)[:10]
+        logger.warning(
+            "detect_interface_islands_from_summaries: %d interface node(s) "
+            "rescued by tile-resident-pad component liveness that the legacy "
+            "Schur-BFS would have wrongly penalized as islands (documented "
+            "divergence -- see pgmath.schur module docstring, Stage 1e "
+            "section, point 3): %s%s",
+            len(rescued_nodes), _preview,
+            ' ...' if len(rescued_nodes) > len(_preview) else '',
+        )
+
+    return island_nodes

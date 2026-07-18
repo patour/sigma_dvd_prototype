@@ -1273,7 +1273,7 @@ class TestIslandDetectionFix:
 
         td = self._make_tile_with_floating_island()
         port_nodes = {'shared'}  # 'shared' is the port
-        n_removed = _pre_clean_tile_data(td, port_nodes)
+        n_removed, _summaries = _pre_clean_tile_data(td, port_nodes)
 
         assert n_removed == 1, f"Expected 1 component removed; got {n_removed}"
         assert 'island_a' not in td.all_nodes
@@ -1292,13 +1292,29 @@ class TestIslandDetectionFix:
 
         assert 'island_a' not in td.current_injections
 
-    def test_pre_clean_sets_pre_cleaned_flag(self):
-        """_pre_clean_tile_data sets pre_cleaned=True on tile_data."""
+    def test_pre_clean_default_call_does_not_set_pre_cleaned_flag(self):
+        """Finding F3: a default (whole-tile-style, mark_split_pre_cleaned=
+        False) call sets pre_cleaned_full but must NOT set pre_cleaned=True --
+        that would flip the legacy fallback's removal threshold from 5 to 1
+        for every never-split tile (see TestParseTimeCleanedWholeTileFallback
+        below for the threshold-5 regression test)."""
         from distributed.retile import _pre_clean_tile_data
 
         td = self._make_tile_with_floating_island()
         assert td.pre_cleaned is False
         _pre_clean_tile_data(td, {'shared'})
+        assert td.pre_cleaned_full is True
+        assert td.pre_cleaned is False
+
+    def test_pre_clean_mark_split_pre_cleaned_sets_pre_cleaned_flag(self):
+        """The genuine sub-tile pass (mark_split_pre_cleaned=True) DOES set
+        pre_cleaned=True, exactly as the legacy explicit parent-pre-split
+        call used to (pre-Stage-1e)."""
+        from distributed.retile import _pre_clean_tile_data
+
+        td = self._make_tile_with_floating_island()
+        assert td.pre_cleaned is False
+        _pre_clean_tile_data(td, {'shared'}, mark_split_pre_cleaned=True)
         assert td.pre_cleaned is True
 
     def test_pre_clean_keeps_large_interface_component(self):
@@ -1357,20 +1373,28 @@ class TestIslandDetectionFix:
             capacitive_edges=[],
         )
         orig_nodes = set(td.all_nodes)
-        n_removed = _pre_clean_tile_data(td, {'shared'})
+        n_removed, _summaries = _pre_clean_tile_data(td, {'shared'})
 
         assert n_removed == 0
         assert td.all_nodes == orig_nodes
-        assert td.pre_cleaned is True
+        assert td.pre_cleaned_full is True
+        assert td.pre_cleaned is False  # finding F3: whole-tile call, not sub-tile
 
     def test_split_tile_propagates_pre_cleaned(self):
-        """After pre_clean + split, sub-tiles inherit pre_cleaned=True."""
+        """After an explicit sub-tile-style pre_clean + split, sub-tiles
+        inherit pre_cleaned=True from split_tile()'s own propagation logic.
+
+        mark_split_pre_cleaned=True here simulates the legacy explicit
+        parent-pre-split pre-clean call (pre-Stage-1e); this test isolates
+        split_tile()'s propagation mechanism, independent of finding F3's
+        whole-tile-vs-sub-tile pre_cleaned distinction (covered above).
+        """
         from distributed.retile import _pre_clean_tile_data, split_tile
 
         td = _make_chain_tile(n_interior=8)
         assert td.pre_cleaned is False
 
-        _pre_clean_tile_data(td, port_nodes=set())
+        _pre_clean_tile_data(td, port_nodes=set(), mark_split_pre_cleaned=True)
         assert td.pre_cleaned is True
 
         subs = split_tile(td, max_interior=4)
@@ -1395,6 +1419,124 @@ class TestIslandDetectionFix:
             assert sub.pre_cleaned is False, (
                 f"Sub-tile {sub.tile_id} has pre_cleaned=True without pre_clean call"
             )
+
+    def test_fallback_on_parse_time_cleaned_whole_tile_uses_threshold_5(self):
+        """Finding F3 regression: a WHOLE tile that went through the
+        universal parse-time pre-clean pass (parse_and_dump_tile's call,
+        mark_split_pre_cleaned=False -- pre_cleaned_full=True, pre_cleaned
+        stays False) must still use MIN_INTERFACE_NODES_KEEP=5 (not the
+        sub-tile threshold of 1) when the legacy fallback runs
+        TileWorker._remove_floating_islands (e.g. island_detection=
+        'schur_bfs' or a trust-assertion failure).
+
+        Before the F3 fix, _pre_clean_tile_data unconditionally set
+        pre_cleaned=True on every tile it ran on (including whole,
+        never-split tiles), which flipped this threshold to 1 for every
+        never-split tile's legacy fallback -- keeping components that legacy
+        (threshold 5) would have correctly removed as genuinely floating.
+        """
+        from distributed.tile_parsing import TileData
+        from distributed.tile_worker import TileWorker
+
+        # Component B has exactly 2 interface candidates: below threshold=5
+        # (must be REMOVED) but >= threshold=1 (would be wrongly KEPT if the
+        # sub-tile threshold leaked in).  Main component is sized (5 nodes)
+        # to always be the largest-kept component regardless of comparison
+        # with B's 4 nodes (B's own port nodes iface_a/iface_b are part of
+        # its connected component, since ports are ordinary graph nodes here).
+        #
+        # This fixture is built directly in the POST-parse-time state
+        # (pre_cleaned_full=True, pre_cleaned=False, small component NOT yet
+        # removed -- as if the CURRENT model-creation-time interface set
+        # differs from what parse time saw, e.g. a stale/edited metadata.pkl
+        # -- exactly the scenario the trust-assertion-failure fallback exists
+        # to guard) to isolate the legacy-fallback THRESHOLD SELECTION itself.
+        # test_pre_clean_default_call_does_not_set_pre_cleaned_flag (above)
+        # separately covers the pre-clean-pass wiring that produces this
+        # (pre_cleaned_full=True, pre_cleaned=False) state in production.
+        td = TileData(
+            tile_id=(0, 0),
+            resistive_edges=[
+                ('main0', 'main1', 1.0),
+                ('main1', 'main2', 1.0),
+                ('main2', 'main3', 1.0),
+                ('main3', '0', 0.5),
+                ('main0', 'main_port', 5.0),
+                ('small0', 'small1', 1.0),
+                ('small0', 'iface_a', 2.0),
+                ('small1', 'iface_b', 2.0),
+            ],
+            all_nodes={
+                'main0', 'main1', 'main2', 'main3', 'main_port',
+                'small0', 'small1', 'iface_a', 'iface_b',
+            },
+            boundary_nodes={'main_port', 'iface_a', 'iface_b'},
+            current_injections={'main0': 0.1, 'small0': 0.05, 'small1': 0.05},
+            capacitive_edges=[],
+            # Represents the state right after parse_and_dump_tile's
+            # whole-tile pre-clean pass ran (mark_split_pre_cleaned=False):
+            # pre_cleaned_full=True, pre_cleaned stays at its default False.
+            pre_cleaned_full=True,
+        )
+        assert td.pre_cleaned is False, (
+            "Fixture setup error: TileData default for pre_cleaned must be False"
+        )
+        interface_nodes = {'main_port', 'iface_a', 'iface_b'}
+
+        # Legacy fallback removal (as if island_detection='schur_bfs' or the
+        # trust assertion failed) runs on this already-pre_cleaned_full,
+        # never-marked-as-a-sub-tile TileData.
+        w = TileWorker()
+        w._tile_data = td
+
+        islands_removed, _kept = w._remove_floating_islands(
+            interface_nodes & td.all_nodes
+        )
+        assert islands_removed == 1, (
+            "Expected the legacy fallback to use threshold=5 and remove the "
+            "2-interface-candidate component {small0, small1} -- if 0, the "
+            "sub-tile threshold=1 leaked into a never-split tile's fallback "
+            "(the F3 bug)."
+        )
+        assert 'small0' not in w._tile_data.all_nodes
+        assert 'small1' not in w._tile_data.all_nodes
+        assert 'main0' in w._tile_data.all_nodes
+
+        # Negative control: proves the fixture actually distinguishes the two
+        # thresholds -- with pre_cleaned=True (genuine sub-tile), the SAME
+        # component would be kept (threshold=1, 2 >= 1).  Built fresh (not
+        # derived from `td`, which the first _remove_floating_islands call
+        # above already mutated in place).
+        td_sub = TileData(
+            tile_id=(0, 0, 0),
+            resistive_edges=[
+                ('main0', 'main1', 1.0),
+                ('main1', 'main2', 1.0),
+                ('main2', 'main3', 1.0),
+                ('main3', '0', 0.5),
+                ('main0', 'main_port', 5.0),
+                ('small0', 'small1', 1.0),
+                ('small0', 'iface_a', 2.0),
+                ('small1', 'iface_b', 2.0),
+            ],
+            all_nodes={
+                'main0', 'main1', 'main2', 'main3', 'main_port',
+                'small0', 'small1', 'iface_a', 'iface_b',
+            },
+            boundary_nodes={'main_port', 'iface_a', 'iface_b'},
+            current_injections={'main0': 0.1, 'small0': 0.05, 'small1': 0.05},
+            capacitive_edges=[],
+            pre_cleaned_full=True,
+            pre_cleaned=True,
+        )
+        w_sub = TileWorker()
+        w_sub._tile_data = td_sub
+        islands_removed_sub, _kept_sub = w_sub._remove_floating_islands(
+            interface_nodes & td_sub.all_nodes
+        )
+        assert islands_removed_sub == 0
+        assert 'small0' in w_sub._tile_data.all_nodes
+        assert 'small1' in w_sub._tile_data.all_nodes
 
     def _make_two_component_sub_tile(self, pre_cleaned: bool):
         """Build a sub-tile with two disconnected components.
@@ -1878,7 +2020,7 @@ class TestDieAttachmentCapacitiveStub:
 
         # Fixed: include die_attachment_nodes in port_nodes
         port_nodes = {'shared'} | die_nodes
-        n_removed = _pre_clean_tile_data(td, port_nodes)
+        n_removed, _summaries = _pre_clean_tile_data(td, port_nodes)
 
         # die nodes should survive: their component has 6 interface nodes ≥ threshold=5
         assert n_removed == 0, (
@@ -1898,7 +2040,7 @@ class TestDieAttachmentCapacitiveStub:
 
         # Buggy: port_nodes does NOT include die_attachment_nodes
         port_nodes = {'shared'}  # only *-prefixed boundary
-        n_removed = _pre_clean_tile_data(td, port_nodes)
+        n_removed, _summaries = _pre_clean_tile_data(td, port_nodes)
 
         # die nodes have 0 interface nodes → WRONGLY REMOVED
         # (this test documents the old behavior that caused the blocker)
@@ -2273,13 +2415,14 @@ class TestDieOrderingFix:
         original_splits = DistributedNetlistParser._apply_tile_splits
 
         def _patched_apply_tile_splits(self_parser, worker_results, metadata,
-                                       out_path, max_interior, pickle_mod):
+                                       out_path, max_interior, pickle_mod,
+                                       shared_bnd=None):
             captured['die_attachment_nodes'] = set(
                 metadata.package_data.die_attachment_nodes
             )
             return original_splits(
                 self_parser, worker_results, metadata,
-                out_path, max_interior, pickle_mod,
+                out_path, max_interior, pickle_mod, shared_bnd,
             )
 
         monkeypatch.setattr(

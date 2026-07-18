@@ -117,6 +117,87 @@ def _get_interface_solver_setting(model: Optional[Any]) -> str:
     return settings.get('interface_solver', 'auto')
 
 
+def _detect_islands_dispatch(
+    model: Optional[Any],
+    S_global: sp.csr_matrix,
+    rhs_dirichlet: np.ndarray,
+    interface_nodes: List[str],
+    interface_node_to_idx: Dict[str, int],
+    extra_edges: Optional[List[Tuple[str, str, float]]],
+) -> Tuple[sp.csr_matrix, np.ndarray, Set[str]]:
+    """Dispatch island detection: Stage 1e summaries union-find vs Schur-BFS.
+
+    ``model.island_detection_mode`` is resolved ONCE at model creation
+    (``model._resolve_island_detection``, all-new-or-all-legacy) — this
+    function must NOT re-derive or override it.  Callers (DC and transient
+    factor paths, both cache-miss branches) are otherwise unchanged: same
+    return shape as :func:`pgmath.schur.detect_interface_islands`, same A7
+    topology-context caching wrapping this call.
+
+    Finding F15: ``model`` is typed ``Optional`` but every branch below
+    dereferences ``model.pad_nodes``/``model.vdd`` -- island detection
+    (either strategy) is fundamentally model-scoped (it needs the model's
+    pad set and supply voltage), so ``model=None`` is NOT a supported input.
+    Raise loudly and immediately here instead of letting a confusing
+    ``AttributeError`` surface deep inside whichever branch runs next.
+    """
+    if model is None:
+        raise ValueError(
+            "_detect_islands_dispatch requires a non-None model (island "
+            "detection needs model.pad_nodes/model.vdd); got model=None."
+        )
+    _mode = getattr(model, 'island_detection_mode', 'schur_bfs')
+    _summaries = getattr(model, 'component_summaries', None)
+
+    # Finding R6: island_detection_mode == 'summaries' with
+    # component_summaries is None is a FORBIDDEN mixed state -- mode
+    # resolution in model._resolve_island_detection is the only legitimate
+    # place these two fields are set, and it always sets them together
+    # (summaries iff mode == 'summaries').  Because DistributedPowerGridModel
+    # is a plain dataclass, the two fields can go out of sync via direct
+    # construction, field mutation, or a future serialization path that
+    # drops the non-repr summaries field.  Silently degrading to the legacy
+    # Schur-BFS here (the prior behaviour) would lose the tile-resident-pad
+    # rescue and produce silently wrong voltages -- exactly the bug the
+    # summaries path exists to fix -- with no warning that anything is
+    # amiss.  Raise loudly instead.
+    if _mode == 'summaries' and _summaries is None:
+        raise ValueError(
+            "_detect_islands_dispatch: forbidden mixed state -- "
+            "model.island_detection_mode == 'summaries' but "
+            "model.component_summaries is None. These two fields must only "
+            "ever be set together by model._resolve_island_detection; this "
+            "indicates a corrupted or hand-constructed DistributedPowerGridModel, "
+            "or a serialization path that dropped the non-repr summaries "
+            "field. Refusing to silently degrade to the legacy Schur-BFS "
+            "path (which would lose the tile-resident-pad rescue and could "
+            "produce silently wrong voltages)."
+        )
+
+    if _mode == 'summaries' and _summaries is not None:
+        from pgmath.schur import apply_island_penalty, detect_interface_islands_from_summaries
+        island_nodes = detect_interface_islands_from_summaries(
+            component_summaries=_summaries,
+            interface_node_to_idx=interface_node_to_idx,
+            pad_nodes=model.pad_nodes,
+            extra_edges=extra_edges,
+        )
+        if not island_nodes:
+            return S_global, rhs_dirichlet, set()
+        S_fixed, rhs_fixed = apply_island_penalty(
+            S_global, rhs_dirichlet, island_nodes,
+            interface_node_to_idx, model.vdd,
+        )
+        return S_fixed, rhs_fixed, island_nodes
+
+    from pgmath.schur import detect_interface_islands
+    return detect_interface_islands(
+        S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
+        pad_nodes=model.pad_nodes, extra_edges=extra_edges,
+        dirichlet_voltage=model.vdd,
+    )
+
+
 def _coerce_bool(value: Any, setting_name: str) -> bool:
     """Coerce a YAML/CLI-sourced value to bool, rejecting garbage loudly.
 
@@ -1117,13 +1198,11 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
                 len(island_nodes),
             )
     else:
-        # Cache miss: run full BFS detection (resistive-only extra_edges).
-        from pgmath.schur import detect_interface_islands
-        S_global, rhs_dirichlet, island_nodes = detect_interface_islands(
-            S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
-            pad_nodes=model.pad_nodes,
+        # Cache miss: Stage 1e summaries union-find, or legacy Schur-BFS
+        # (resistive-only extra_edges) -- resolved once at model creation.
+        S_global, rhs_dirichlet, island_nodes = _detect_islands_dispatch(
+            model, S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
             extra_edges=model.package_data.package_edges,
-            dirichlet_voltage=model.vdd,
         )
     timings['detect_interface_islands'] = _time.perf_counter() - t0
 
@@ -1839,13 +1918,11 @@ def _factor_transient_context(
                 len(island_nodes),
             )
     else:
-        # Cache miss: run full BFS detection (resistive + cap extra_edges).
-        from pgmath.schur import detect_interface_islands
-        S_global, rhs_dirichlet_A, island_nodes = detect_interface_islands(
-            S_global, rhs_dirichlet_A, interface_nodes, interface_node_to_idx,
-            pad_nodes=model.pad_nodes,
+        # Cache miss: Stage 1e summaries union-find, or legacy Schur-BFS
+        # (resistive + cap extra_edges) -- resolved once at model creation.
+        S_global, rhs_dirichlet_A, island_nodes = _detect_islands_dispatch(
+            model, S_global, rhs_dirichlet_A, interface_nodes, interface_node_to_idx,
             extra_edges=combined_edges,
-            dirichlet_voltage=model.vdd,
         )
     timings['detect_interface_islands'] = _time.perf_counter() - _t_island
 

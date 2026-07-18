@@ -67,6 +67,12 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         self._rhs_dirichlet = None
         self._interface_nodes: Optional[Set[str]] = None
         self._removed_island_nodes: Set[str] = set()
+        # Stage 1e: set via configure({'pre_cleaned_full_trusted': ...}) from
+        # the SAME model-creation-time decision the coordinator resolved
+        # (model._resolve_island_detection).  _build_block_system() skips
+        # _remove_floating_islands entirely only when this is True AND the
+        # tile's own TileData.pre_cleaned_full is True.
+        self._trust_pre_cleaned_full: bool = False
 
         # --- Time-domain state (Phase 4) ---
         # VectorizedCurrentSources (raw and smoothed)
@@ -197,6 +203,10 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         # A4 symbolic-reuse setting
         if 'use_symbolic_reuse' in settings:
             self._use_symbolic_reuse = bool(settings['use_symbolic_reuse'])
+        # Stage 1e: parse-time pre-clean trust flag (all-new-or-all-legacy,
+        # resolved once at model creation -- see model._resolve_island_detection)
+        if 'pre_cleaned_full_trusted' in settings:
+            self._trust_pre_cleaned_full = bool(settings['pre_cleaned_full_trusted'])
 
     def setup(
         self,
@@ -274,11 +284,72 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
         # Classify: port nodes = interface nodes present in this tile
         port_nodes_local = interface_nodes & self._tile_data.all_nodes
 
-        # Floating island detection: remove components not connected to any port/boundary
+        # Floating island detection: remove components not connected to any port/boundary.
+        # Stage 1e: skip entirely when this exact tile was already fully
+        # pre-cleaned at parse time (TileData.pre_cleaned_full) AND the
+        # model-creation-time trust assertion held (_trust_pre_cleaned_full,
+        # set via configure() from model._resolve_island_detection) -- the
+        # pkl is already clean, so no adjacency dict / BFS / mutation is
+        # needed.  Legacy bundles (pre_cleaned_full=False, e.g. parsed before
+        # Stage 1e) run today's path unchanged regardless of the trust flag.
         islands_removed = 0
         kept_nonlargest_iface: Set[str] = set()
-        if port_nodes_local:
+        _skip_removal = (
+            getattr(self._tile_data, 'pre_cleaned_full', False)
+            and self._trust_pre_cleaned_full
+        )
+        if port_nodes_local and not _skip_removal:
             islands_removed, kept_nonlargest_iface = self._remove_floating_islands(port_nodes_local)
+            # Finding R2: this is the legacy/trust-off branch -- the bundle
+            # may already have arrived PRE-CLEANED at parse time (the
+            # universal whole-tile pre-clean runs regardless of which
+            # island_detection mode a LATER model creation requests), so a
+            # fresh _remove_floating_islands call finds nothing left to
+            # remove and reports 0 even though the tile genuinely lost
+            # component(s) before this worker ever saw it.  The shared
+            # _decompose_and_remove_floating core UNIONS the fresh count
+            # into tile_data.n_floating_components_removed (never
+            # overwrites), so after the call above that field already holds
+            # parse-time + fresh -- use it directly (NOT
+            # `islands_removed +=`, which would double-count the fresh
+            # removal) so 'auto'/'summaries' and 'schur_bfs' report
+            # IDENTICAL totals for the same bundle (the F8/F9 fix's stated
+            # goal) instead of schur_bfs silently under-reporting.
+            islands_removed = getattr(
+                self._tile_data, 'n_floating_components_removed', islands_removed)
+        elif _skip_removal:
+            # Stage 1e findings F8/F9: removal already ran at PARSE time (not
+            # here) -- the resulting diagnostics were persisted onto this
+            # exact tile's own TileData (tile-local, in its own .pkl; see
+            # tile_parsing._decompose_and_remove_floating).  Surface them
+            # here exactly as the legacy worker-time removal would have, so
+            # model.island_stats / tile_kept_nonlargest_iface / the
+            # floating-nodes report / the verbose global-island cross-check
+            # produce the SAME output in summaries mode as in schur_bfs mode.
+            islands_removed = getattr(
+                self._tile_data, 'n_floating_components_removed', 0)
+            kept_nonlargest_iface = set(
+                getattr(self._tile_data, 'kept_nonlargest_iface_cached', None) or ())
+            # Finding R3: the cached value was computed against the
+            # PARSE-time port-candidate set (raw shared_bnd at the
+            # whole-tile pass, or sub.boundary_nodes-derived candidates at
+            # the sub-tile pass), which can contain names ABSENT from the
+            # model-creation-time FINAL interface set (e.g. a raw-shared
+            # node demoted by a split neighbor's parse-time clean -- see
+            # finding R1).  Intersect with the FINAL interface set this
+            # worker actually received so no non-interface names leak into
+            # model.tile_kept_nonlargest_iface / the verbose global-island
+            # cross-check, regardless of whether R1's bundle-level
+            # consistency check caught this particular bundle.
+            kept_nonlargest_iface &= interface_nodes
+
+        # Stage 1e F8/F9: unconditionally sync from
+        # TileData.removed_floating_nodes -- populated either by
+        # _remove_floating_islands() just now (via the shared
+        # _decompose_and_remove_floating helper) or by parse-time
+        # persistence (the _skip_removal branch above).
+        self._removed_island_nodes = set(
+            getattr(self._tile_data, 'removed_floating_nodes', None) or ())
 
         # Build BlockMatrixSystem from edges (no factorization yet)
         from pgmath.block_system import build_block_system_from_edges
@@ -333,66 +404,16 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
             else self.MIN_INTERFACE_NODES_KEEP
         )
 
-        # Build adjacency
-        adj: Dict[str, Set[str]] = {}
-        for u, v, g in self._tile_data.resistive_edges:
-            if u == '0' or v == '0':
-                continue
-            adj.setdefault(u, set()).add(v)
-            adj.setdefault(v, set()).add(u)
-
-        # Find connected components via BFS
-        visited: Set[str] = set()
-        components: List[Set[str]] = []
-        for start_node in self._tile_data.all_nodes:
-            if start_node in visited or start_node == '0':
-                continue
-            comp: Set[str] = set()
-            queue = [start_node]
-            while queue:
-                node = queue.pop()
-                if node in visited:
-                    continue
-                visited.add(node)
-                comp.add(node)
-                for nb in adj.get(node, set()):
-                    if nb not in visited:
-                        queue.append(nb)
-            components.append(comp)
-
-        if len(components) <= 1:
-            return 0, set()
-
-        largest = max(components, key=len)
-        removed_nodes: Set[str] = set()
-        kept_nonlargest_iface: Set[str] = set()
-        islands_removed = 0
-        for comp in components:
-            if comp is largest:
-                continue
-            n_interface = len(comp & port_nodes)
-            if n_interface >= min_iface_keep:
-                kept_nonlargest_iface.update(comp & port_nodes)
-                continue
-            removed_nodes.update(comp)
-            islands_removed += 1
-
-        if not removed_nodes:
-            return 0, kept_nonlargest_iface
-
-        self._removed_island_nodes = removed_nodes.copy()
-        self._tile_data.all_nodes -= removed_nodes
-        self._tile_data.boundary_nodes -= removed_nodes
-        self._tile_data.resistive_edges = [
-            (u, v, g) for u, v, g in self._tile_data.resistive_edges
-            if u not in removed_nodes and v not in removed_nodes
-        ]
-        self._tile_data.capacitive_edges = [
-            (u, v, c) for u, v, c in self._tile_data.capacitive_edges
-            if u not in removed_nodes and v not in removed_nodes
-        ]
-        for node in removed_nodes:
-            self._tile_data.current_injections.pop(node, None)
+        # Stage 1e finding F14: delegate to the shared decomposition/removal
+        # core also used by retile._pre_clean_tile_data (parse-time
+        # pre-clean), so the two removal decisions are bit-identical by
+        # construction.  The helper also persists removal diagnostics onto
+        # self._tile_data (findings F8/F9); _build_block_system() syncs
+        # self._removed_island_nodes from there after this call returns.
+        from .tile_parsing import _decompose_and_remove_floating
+        _components, _largest, kept_nonlargest_iface, _removed_nodes, islands_removed = (
+            _decompose_and_remove_floating(self._tile_data, port_nodes, min_iface_keep)
+        )
 
         return islands_removed, kept_nonlargest_iface
 

@@ -656,6 +656,7 @@ class TestDecomposeDispatch:
                 'interface_factor_memory_budget': 'auto',
                 'interface_block_jacobi_max_bytes': 'auto',
             },
+            island_detection='auto',
         )
         mock_print.assert_called_once()
         mock_result.save_json.assert_called_once()
@@ -1662,3 +1663,238 @@ class TestFileLogging:
             assert len(list(nested.glob('parse_*.log'))) == 1
         finally:
             _close_file_logging(fh)
+
+
+# ---------------------------------------------------------------------------
+# Stage 1e island_detection CLI/YAML plumbing: findings F6, F7, F12
+# ---------------------------------------------------------------------------
+
+class TestIslandDetectionYamlPrecedence:
+    """Finding F7 (plus the pre-existing solve/run precedence already wired
+    through _load_and_apply_config): explicit CLI > YAML > 'auto', and a
+    falsy-but-non-None YAML value (e.g. PyYAML parsing `off`/`no` to
+    ``False``) must NOT be silently coerced to 'auto' -- it must survive so
+    model._resolve_island_detection's loud ValueError can fire."""
+
+    def test_yaml_value_applied_when_cli_unset(self, tmp_path):
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text("solver:\n  island_detection: schur_bfs\n")
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+        ])
+        args = _load_and_apply_config(args)
+        assert args.island_detection == 'schur_bfs'
+
+    def test_cli_flag_beats_yaml(self, tmp_path):
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text("solver:\n  island_detection: schur_bfs\n")
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+            '--island-detection', 'summaries',
+        ])
+        args = _load_and_apply_config(args)
+        assert args.island_detection == 'summaries'
+
+    def test_nothing_set_yields_auto(self):
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        args = _load_and_apply_config(args)
+        assert args.island_detection == 'auto'
+
+    def test_falsy_yaml_value_not_coerced_to_auto(self, tmp_path):
+        """PyYAML 1.1 parses `island_detection: off` to the bool False --
+        _load_and_apply_config must preserve it as-is (only an explicit
+        `is None` check gates the 'auto' default), and
+        _resolve_island_detection_arg (the F7 fix at the cmd_solve/cmd_run/
+        cmd_decompose call sites) must NOT silently coerce it to 'auto'
+        either."""
+        from distributed.cli import (
+            build_parser, _load_and_apply_config, _resolve_island_detection_arg,
+        )
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text("solver:\n  island_detection: off\n")
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+        ])
+        args = _load_and_apply_config(args)
+        assert args.island_detection is False, (
+            f"Expected PyYAML to parse 'off' as bool False; "
+            f"got {args.island_detection!r}"
+        )
+        assert _resolve_island_detection_arg(args) is False, (
+            "The old `getattr(args, 'island_detection', None) or 'auto'` "
+            "pattern would have silently coerced False to 'auto' here"
+        )
+
+    def test_falsy_value_reaches_model_resolve_error(self, tmp_path):
+        """End-to-end: the falsy YAML value survives all the way to
+        model._resolve_island_detection, which raises ValueError for it
+        (exactly as it would for any other invalid string) instead of the
+        silently-substituted 'auto' engaging the fast path unannounced."""
+        from distributed.cli import (
+            build_parser, _load_and_apply_config, _resolve_island_detection_arg,
+        )
+        from distributed.model import ParsedTileBundle, _resolve_island_detection
+        from distributed.parser import PackageData, PowerGridMetaData
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text("solver:\n  island_detection: off\n")
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+        ])
+        args = _load_and_apply_config(args)
+        resolved = _resolve_island_detection_arg(args)
+
+        pkg = PackageData(
+            vsrc_dict={}, package_edges=[], pad_nodes=set(),
+            tap_nodes=set(), die_attachment_nodes=set(), vdd=1.0, net_name='VDD',
+        )
+        metadata = PowerGridMetaData(
+            tile_grid=(1, 1), parameters={}, tile_configs=[], package_data=pkg,
+            net_name='VDD', vdd=1.0,
+        )
+        bundle = ParsedTileBundle(
+            metadata=metadata, shared_boundary_nodes=set(), pkl_dir='/tmp/irrelevant',
+        )
+        with pytest.raises(ValueError):
+            _resolve_island_detection(bundle, set(), resolved)
+
+    def test_resolve_island_detection_arg_default_when_truly_unset(self):
+        """A bare Namespace missing island_detection entirely (e.g. a test
+        or caller that skipped _load_and_apply_config) still degrades to
+        'auto' -- only a genuine None falls back, not any other falsy value."""
+        from distributed.cli import _resolve_island_detection_arg
+
+        assert _resolve_island_detection_arg(argparse.Namespace()) == 'auto'
+        assert _resolve_island_detection_arg(
+            argparse.Namespace(island_detection=None)
+        ) == 'auto'
+        assert _resolve_island_detection_arg(
+            argparse.Namespace(island_detection='schur_bfs')
+        ) == 'schur_bfs'
+
+
+class TestDecomposeIslandDetectionConfig:
+    """Finding F6: cmd_decompose nulls args.config before
+    _load_and_apply_config (to avoid re-loading the file through the wrong
+    pdn_solver schema), which means _load_and_apply_config's own
+    island_detection resolution never sees the decompose YAML's solver
+    section -- _merge_decompose_config must resolve it itself."""
+
+    def _default_decompose_args(self, **overrides):
+        defaults = dict(
+            netlist_dir='/tmp/pkl', net=None, backend='local', verbose=False,
+            output='./irdrop_decomp_results', no_plot=False,
+            t_start=0.0, t_end=100e-9, dt=0.1e-9,
+            top_k=5, window_percent=10.0, instances=None,
+            method='be', smooth=None,
+            aggressor_top_k=0, adjoint_method='dynamic',
+            adjoint_memory_window=20,
+            qs_candidate_factor=3000,
+            max_qs_candidates=10000,
+            plot_layers=None, max_stripes=500,
+            config=None, use_cholmod=None, use_splu=False,
+            cholmod_mode='auto', cholmod_ordering='default',
+            cholmod_use_long=None,
+            profile_memory=False,
+        )
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    def test_solver_island_detection_applied_from_yaml(self):
+        from distributed.cli import _merge_decompose_config
+
+        config = {'solver': {'island_detection': 'schur_bfs'}}
+        args = self._default_decompose_args()
+        result = _merge_decompose_config(config, args)
+        assert result.island_detection == 'schur_bfs'
+
+    def test_cli_island_detection_beats_yaml(self):
+        from distributed.cli import _merge_decompose_config
+
+        config = {'solver': {'island_detection': 'schur_bfs'}}
+        args = self._default_decompose_args(island_detection='summaries')
+        result = _merge_decompose_config(config, args)
+        assert result.island_detection == 'summaries'
+
+    def test_unset_without_yaml_stays_none_until_load_and_apply_config(self):
+        """_merge_decompose_config leaves it unset (None) when the YAML
+        doesn't set it either -- _load_and_apply_config's own fallback
+        (called afterward by cmd_decompose) resolves it to 'auto'."""
+        from distributed.cli import _merge_decompose_config, _load_and_apply_config
+
+        args = self._default_decompose_args()
+        result = _merge_decompose_config({}, args)
+        assert getattr(result, 'island_detection', None) is None
+
+        # cmd_decompose nulls args.config before this call (finding F6
+        # comment); simulate that here.
+        result.config = None
+        result = _load_and_apply_config(result)
+        assert result.island_detection == 'auto'
+
+    def test_full_cmd_decompose_flow_resolves_island_detection_from_yaml(self, tmp_path):
+        """End-to-end simulation of cmd_decompose's actual sequence:
+        _load_decompose_config -> args.config = None -> _merge_decompose_config
+        -> _load_and_apply_config. YAML's solver.island_detection must
+        survive to the final resolved args.island_detection."""
+        from distributed.cli import (
+            _load_decompose_config, _merge_decompose_config, _load_and_apply_config,
+        )
+
+        config_path = tmp_path / 'decompose.yaml'
+        config_path.write_text(
+            "solver:\n"
+            "  island_detection: schur_bfs\n"
+        )
+        args = self._default_decompose_args(config=str(config_path))
+        decompose_config = _load_decompose_config(str(config_path))
+        args.config = None  # mirrors cmd_decompose's own line
+        args = _merge_decompose_config(decompose_config, args)
+        args = _load_and_apply_config(args)
+
+        assert args.island_detection == 'schur_bfs'
+
+
+class TestIslandDetectionRoleYamlValidation:
+    """Finding F12: island_detection is a top-level-solver-only setting; it
+    must not silently validate inside a coordinator:/worker: role sub-dict
+    (which _load_and_apply_config never reads it from)."""
+
+    def test_top_level_island_detection_is_valid(self):
+        from distributed.cli import _validate_solver_yaml_keys
+
+        # Must not raise.
+        _validate_solver_yaml_keys({'island_detection': 'schur_bfs'}, 'solver')
+
+    def test_island_detection_in_role_subdict_raises(self):
+        from distributed.cli import _validate_solver_yaml_keys
+
+        with pytest.raises(ValueError, match='island_detection'):
+            _validate_solver_yaml_keys(
+                {'coordinator': {'island_detection': 'schur_bfs'}}, 'solver',
+            )
+
+    def test_island_detection_excluded_from_valid_role_keys(self):
+        from distributed.cli import _VALID_ROLE_YAML_KEYS
+
+        assert 'island_detection' not in _VALID_ROLE_YAML_KEYS
+
+    def test_island_detection_in_worker_subdict_raises(self):
+        from distributed.cli import _validate_solver_yaml_keys
+
+        with pytest.raises(ValueError, match='island_detection'):
+            _validate_solver_yaml_keys(
+                {'worker': {'island_detection': 'summaries'}}, 'solver',
+            )

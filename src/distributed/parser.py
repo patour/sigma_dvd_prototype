@@ -13,7 +13,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,25 @@ _RE_BOUNDARY_NODE = re.compile(r'^\*(\S+)')
 # Unit conversions (matching pdn_parser.py)
 R_TO_KOHM = 1e-3  # Ohm to kOhm
 C_TO_FF = 1e15  # Farad to femtoFarad
+
+# Stage 1e: bump whenever the connectivity-summary computation (component
+# decomposition semantics, port-set rule, or has_pad definition) changes.
+# `model.py._resolve_island_detection` compares this against
+# ``ParsedTileBundle.connectivity_summary_version``; a mismatch (older pkl
+# bundle, or a code change post-parse) forces the full legacy fallback
+# (worker-side removal + coordinator Schur-BFS) rather than trusting stale
+# summaries.
+#
+# Bumped 1 -> 2 for finding R1 (second-round review): component summaries
+# now carry 'is_largest'/'keep_threshold' fields (schema change) and the
+# parser runs a new parse-end consistency re-check
+# (tile_parsing.verify_component_keep_decisions) that can drop trust in a
+# bundle a v1-era parser would have trusted.  Also covers finding R9's
+# TileData field renames (removed_at_parse -> removed_floating_nodes, etc.)
+# -- pre-Stage-1e bundles never had these fields at all, and Stage 1e
+# bundles are dev-only, so no migration path is needed; a version bump is
+# sufficient to force any stale pre-R1 pkl bundle onto the legacy fallback.
+CONNECTIVITY_SUMMARY_VERSION = 2
 
 
 @dataclass
@@ -137,6 +156,27 @@ def compute_shared_boundary_nodes(per_tile_boundaries):
     for boundary_set in per_tile_boundaries:
         tile_count.update(boundary_set)
     return {node for node, count in tile_count.items() if count >= 2}
+
+
+def _sort_component_summaries(
+    component_summaries: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Stage 1e finding F4: deterministic ordering for the aggregated
+    per-tile connectivity summaries.
+
+    Sorts by tile id, then by the summary's smallest candidate node name.
+    Independent of upstream per-tile set-iteration order / PYTHONHASHSEED
+    (the underlying BFS decomposition that produces each tile's summaries is
+    already made deterministic in
+    ``tile_parsing._decompose_and_remove_floating``; this is a cheap,
+    explicit belt-and-suspenders stabilization of the FINAL flattened list
+    order across tiles).  ``candidates`` is always non-empty in a real
+    summary (``retile._summarize`` only emits a summary when it is).
+    """
+    return sorted(
+        component_summaries,
+        key=lambda s: (s.get('tile_id', ()), min(s['candidates'])),
+    )
 
 
 class DistributedNetlistParser:
@@ -490,13 +530,30 @@ class DistributedNetlistParser:
         """Parse netlist and dump per-tile TileData + metadata as .pkl files.
 
         Creates output_dir (if needed) with:
-          - tile_X_Y.pkl  for each tile (pickled TileData)
+          - tile_X_Y.pkl  for each tile (pickled TileData, pre-cleaned -- see
+            Stage 1e below)
           - metadata.pkl  with ``{'metadata': PowerGridMetaData,
-            'boundary_nodes': Set[str]}``
+            'boundary_nodes': Set[str], 'connectivity_summary_version': int,
+            'parser_interface_set': Set[str], 'component_summaries':
+            List[Dict]}``.  The last three keys are Stage 1e additions;
+            ``load_distributed_partitions`` degrades gracefully (``None``)
+            when loading an older bundle written before this field existed.
 
         Workers parse AND dump their own tiles in parallel. The coordinator
         collects only lightweight per-tile boundary/die-attachment metadata,
         merges them, and writes ``metadata.pkl``.
+
+        Stage 1e (parse-time island pre-clean + connectivity summaries):
+        each parse task pre-cleans its own tile in memory before writing the
+        pkl (single pass, no reload), using the SAME port-set/threshold
+        semantics as the island removal that would otherwise run at every
+        ``create_distributed_model()`` call.  This both removes truly-floating
+        components once (at parse time, amortized across every future model
+        creation from this bundle) and produces per-kept-component
+        connectivity summaries that let the coordinator's ``prepare()`` skip
+        the O(S.nnz) Schur-BFS island detection in favour of a cheap
+        union-find (see ``pgmath.schur.detect_interface_islands_from_summaries``
+        and ``model._resolve_island_detection``).
 
         Args:
             output_dir: Directory to write .pkl files into
@@ -523,12 +580,52 @@ class DistributedNetlistParser:
         be.initialize()
 
         die_candidates = metadata.package_data.die_attachment_nodes
+        pad_candidates = metadata.package_data.pad_nodes
         net_name = metadata.net_name
+
+        # Stage 1e step 0: hoist the global shared-boundary port set AHEAD of
+        # the parse pass via a fast, parallel streaming scan of just the
+        # '*'-prefixed boundary declarations (no graph build).  Each parse
+        # map task below pre-cleans its own tile in memory (single pkl write,
+        # no reload) using port_nodes = (all_nodes ∩ shared_bnd) ∪
+        # (all_nodes ∩ die_candidates), promoting the island-removal work
+        # that used to be deferred to TileWorker._remove_floating_islands at
+        # every model creation into a one-time parse-time pass.
+        _scan_args = [(tc.ckt_path,) for tc in metadata.tile_configs]
+        _per_tile_raw_boundaries = be.map_func(
+            DistributedNetlistParser._scan_tile_boundary_nodes, _scan_args,
+        )
+        shared_bnd = compute_shared_boundary_nodes(_per_tile_raw_boundaries)
+
+        # Finding F1: keep the PRE-clean (raw scan) boundary set for every
+        # whole tile, keyed by its (still 2-tuple) tile_id.  Needed below
+        # (step 3b) to compute the FINAL shared_boundary_nodes from the
+        # pre-clean declarations for tiles that stay whole, matching legacy
+        # semantics (legacy never pre-cleaned whole tiles at parse time, so
+        # their contribution to the persisted global interface set was always
+        # the raw '*'-declaration scan, never shrunk by a threshold removal
+        # decision made independently -- and possibly differently -- by each
+        # neighbor tile).  Captured from the ORIGINAL (pre-split)
+        # metadata.tile_configs, before _apply_tile_splits mutates it below.
+        _raw_boundary_by_tile: Dict[tuple, Set[str]] = {
+            tc.tile_id: raw
+            for tc, raw in zip(metadata.tile_configs, _per_tile_raw_boundaries)
+        }
+
+        # Finding F11: ship the (potentially large) shared-boundary and pad
+        # candidate sets to parse map tasks via a single backend.put() call
+        # when the backend has a real shared object store (Ray) instead of
+        # embedding them by value into every one of the N per-tile args
+        # tuples -- LocalBackend's put() is a no-op passthrough (its map_func
+        # never dereferences anything), so this is safe for both backends.
+        _shared_bnd_arg = be.put(shared_bnd)
+        _pad_candidates_arg = be.put(pad_candidates)
 
         args_list = [
             (
                 tc.ckt_path, tc.nd_path, tc.net_filter, tc.tile_id,
                 tc.instance_path, str(out_path), die_candidates, net_name,
+                _shared_bnd_arg, _pad_candidates_arg,
             )
             for tc in metadata.tile_configs
         ]
@@ -557,6 +654,21 @@ class DistributedNetlistParser:
             merged_die_map.update(r.get('die_attachment_net_map', {}))
 
         # Fallback: re-parse package with die_net_map if initial parse found no pads
+        #
+        # Finding F2: whole-tile connectivity summaries (computed above, in
+        # parse_and_dump_tile) were built against `pad_candidates` as it was
+        # captured BEFORE this point -- the (possibly empty) pre-fallback pad
+        # set.  If this fallback fires, every whole tile's `has_pad` flags are
+        # therefore wrong (computed against an empty pad set), while any
+        # sub-tile produced by _apply_tile_splits below sees the CORRECT
+        # (post-fallback) pad set, because that call happens after this
+        # block.  Rather than silently shipping an internally-inconsistent
+        # bundle, mark it: connectivity_summary_version is set to a sentinel
+        # that never matches CONNECTIVITY_SUMMARY_VERSION (below), forcing
+        # model creation to always take the full legacy fallback path
+        # (worker-side removal + coordinator Schur-BFS) for this bundle,
+        # end-to-end, regardless of island_detection='auto'/'summaries'.
+        _pads_fallback_fired = False
         if not metadata.package_data.pad_nodes and merged_die_map:
             logger.info(
                 "No pad nodes from initial package parse; "
@@ -566,6 +678,7 @@ class DistributedNetlistParser:
             metadata.package_data = self._parse_package(
                 metadata.net_name, metadata.vdd, die_net_map=merged_die_map,
             )
+            _pads_fallback_fired = True
 
         # Set die_attachment_net_map and narrow die_attachment_nodes once.
         # After this point die_attachment_nodes is fully resolved and safe to use
@@ -575,17 +688,49 @@ class DistributedNetlistParser:
             metadata.package_data.die_attachment_nodes = set(merged_die_map.keys())
 
         # 2b. Optional: split oversized tiles (B1 balanced retiling).
-        # Runs AFTER die_attachment_nodes is resolved so _pre_clean_tile_data
-        # receives the full port_nodes set (pre_split_shared_bnd | die_attachment_nodes).
+        # Runs AFTER die_attachment_nodes is resolved so the sub-tile pass
+        # inside _apply_tile_splits receives the full die_attachment_nodes set
+        # (its own boundary-node port candidates come from each sub-tile's
+        # own already-complete sub.boundary_nodes -- see that method).
+        parent_removal_diagnostics: Dict[tuple, Dict[str, Any]] = {}
         if max_interior is not None:
-            worker_results, metadata = self._apply_tile_splits(
+            worker_results, metadata, parent_removal_diagnostics = self._apply_tile_splits(
                 worker_results, metadata, out_path, max_interior, pickle,
+                shared_bnd,
             )
 
-        # 3b. Recompute per-tile boundary nodes from POST-split worker_results.
-        # (Pre-split results were used above for die-map collection; post-split
-        # results reflect any new sub-tile boundary nodes introduced by the cut.)
-        per_tile_boundaries = [r['boundary_nodes'] for r in worker_results]
+        # 3b. Recompute the FINAL shared_boundary_nodes.
+        #
+        # Finding F1: whole (never-split) tiles must contribute their
+        # PRE-clean boundary declarations (`_raw_boundary_by_tile`, the
+        # step-0 scan state), NOT their post-pre-clean (possibly shrunk)
+        # `tile_data.boundary_nodes`.  Legacy never ran island removal on
+        # whole tiles at parse time, so a node kept as a port in one tile
+        # (>=5 local interface candidates) but removed from EVERY neighbor
+        # tile's independent local pre-clean pass still counted as globally
+        # "shared" (declared '*' in 2+ tiles at raw-scan time) in legacy, and
+        # remained a genuine port wherever it survived -- the coordinator
+        # union-find (or the legacy Schur-BFS) then judges liveness/islanding
+        # correctly.  Using the post-pre-clean set instead silently demotes
+        # such a surviving port to an interior-only node (it is no longer
+        # "shared" once every neighbor's local view of it disappears),
+        # turning a legitimately-kept component into an unelidable,
+        # portless, singular G_ii under summaries-mode trust.
+        #
+        # Split (sub-)tiles are exempt from this substitution: their
+        # post-split boundary sets (r['boundary_nodes']) trace back through
+        # _build_halves to the PARENT tile as it was pre-cleaned at parse
+        # time -- this mirrors the pre-Stage-1e split path, which explicitly
+        # pre-cleaned the parent BEFORE splitting for exactly this reason.
+        # Sub-tiles are identified by their 3-tuple tile_id (parent (x, y) ->
+        # sub-tile (x, y, k)); a tile that failed to split, or didn't need
+        # to, keeps its original 2-tuple id and is treated as "whole".
+        per_tile_boundaries = [
+            _raw_boundary_by_tile[r['tile_id']]
+            if len(r['tile_id']) == 2 and r['tile_id'] in _raw_boundary_by_tile
+            else r['boundary_nodes']
+            for r in worker_results
+        ]
         shared_boundary_nodes = compute_shared_boundary_nodes(per_tile_boundaries)
 
         if not metadata.package_data.pad_nodes:
@@ -613,18 +758,123 @@ class DistributedNetlistParser:
                 f"{r['n_currents']} current sources -> tile_{tile_str}.pkl"
             )
 
-        # 4. Dump metadata + shared boundary nodes
+        # Stage 1e: aggregate per-tile connectivity summaries (one component
+        # decomposition traversal already paid for by pre-clean above; no
+        # extra pass here).  Sub-tiles produced by _apply_tile_splits already
+        # REPLACE their parent's entry in worker_results (the parent's own
+        # dict never survives when a split occurs), so this flatten naturally
+        # picks up sub-tile summaries instead of stale parent ones.
+        # parser_interface_set is the coordinator-authoritative interface set
+        # the union-find (pgmath.schur.detect_interface_islands_from_summaries)
+        # is scoped against; create_distributed_model() asserts equality
+        # against its own independently-derived interface_nodes before
+        # trusting these summaries (Stage 1e trust assertion).
+        component_summaries: List[Dict[str, Any]] = []
+        for r in worker_results:
+            component_summaries.extend(r.get('component_summaries', ()))
+
+        # Finding F4: aggregate in a deterministic order (see
+        # _sort_component_summaries docstring).
+        component_summaries = _sort_component_summaries(component_summaries)
+
+        # Finding F13: single-sourced interface-node formula (also used by
+        # model._create_distributed_model_from_bundle) -- must mirror it
+        # exactly or the trust assertion spuriously fails and silently
+        # disables the summaries path.
+        from .tile_parsing import compute_interface_nodes, verify_component_keep_decisions
+        die_net_map = getattr(
+            metadata.package_data, 'die_attachment_net_map', {}) or {}
+        parser_interface_set: Set[str] = compute_interface_nodes(
+            shared_boundary_nodes, die_net_map,
+            metadata.package_data.die_attachment_nodes,
+        )
+
+        # Finding R1: parse-end consistency re-check (all-or-nothing
+        # philosophy).  A non-largest component's keep decision was made
+        # against the port-candidate set available AT THAT PASS (raw
+        # shared_bnd for whole tiles; sub.boundary_nodes-derived candidates
+        # for sub-tiles) -- not against the FINAL shared_boundary_nodes just
+        # recomputed above (step 3b).  A raw-shared candidate can be
+        # silently demoted (dropped to a single declaring tile) when a
+        # SPLIT neighbor's own parse-time pre-clean removed the candidate's
+        # fragment there before the split ever ran (see the step-3b comment
+        # above) -- leaving a SIBLING tile's already-kept component
+        # under-ported relative to its own keep decision.  Neither the F10
+        # structural-completeness check (model.py, worker-ports-subset-of-
+        # candidates) nor the interface_nodes == parser_interface_set trust
+        # assertion observes this: both see the ORIGINAL (still-listed)
+        # candidate set, not that the FINAL interface set has shrunk out
+        # from under it.  Re-evaluate every kept component's decision here,
+        # once, against the FINAL interface set.
+        _keep_ok, _keep_violations = verify_component_keep_decisions(
+            component_summaries, parser_interface_set,
+        )
+        if not _keep_ok:
+            for _v in _keep_violations[:10]:
+                _cand = _v.get('candidates') or ()
+                _n_final = len(set(_cand) & parser_interface_set)
+                logger.info(
+                    "Stage 1e parse-end consistency check: tile %s kept a "
+                    "non-largest component (n_nodes=%s) whose keep decision "
+                    "required >=%s interface candidate(s) but only %s "
+                    "survive against the FINAL interface set (had %s at "
+                    "parse time) -- a sibling tile's split-side pre-clean "
+                    "likely demoted a raw-shared candidate. Dropping "
+                    "connectivity_summary_version so this bundle always "
+                    "falls back to the legacy Schur-BFS island detection "
+                    "path end-to-end.",
+                    _v.get('tile_id'), _v.get('n_nodes'), _v.get('keep_threshold'),
+                    _n_final, len(_cand),
+                )
+            if len(_keep_violations) > 10:
+                logger.info(
+                    "Stage 1e parse-end consistency check: %d additional "
+                    "violation(s) not shown.", len(_keep_violations) - 10,
+                )
+
+        # Finding F2: if the pads fallback re-parse fired above, the
+        # whole-tile summaries (has_pad flags) are internally inconsistent
+        # with the sub-tile summaries -- drop trust in the WHOLE bundle by
+        # persisting a connectivity_summary_version that can never match
+        # CONNECTIVITY_SUMMARY_VERSION, forcing model creation onto the full
+        # legacy (worker-removal + Schur-BFS) path end-to-end.
+        _persisted_summary_version: Optional[int] = CONNECTIVITY_SUMMARY_VERSION
+        if not _keep_ok:
+            _persisted_summary_version = None
+        if _pads_fallback_fired:
+            logger.info(
+                "Stage 1e: pads fallback re-parse fired for net '%s' (initial "
+                "package parse found no pad nodes; re-parsed using "
+                "worker-validated die_net_map). Whole-tile connectivity "
+                "summaries were computed against the pre-fallback (empty) pad "
+                "set and are therefore untrustworthy for has_pad-based island "
+                "rescue -- dropping connectivity_summary_version so this "
+                "bundle always falls back to the legacy Schur-BFS island "
+                "detection path end-to-end.",
+                metadata.net_name,
+            )
+            _persisted_summary_version = None
+
+        # 4. Dump metadata + shared boundary nodes + Stage 1e connectivity summaries
         meta_pkl_path = out_path / 'metadata.pkl'
         with open(meta_pkl_path, 'wb') as f:
             pickle.dump(
-                {'metadata': metadata, 'boundary_nodes': shared_boundary_nodes},
+                {
+                    'metadata': metadata,
+                    'boundary_nodes': shared_boundary_nodes,
+                    'connectivity_summary_version': _persisted_summary_version,
+                    'parser_interface_set': parser_interface_set,
+                    'component_summaries': component_summaries,
+                    'parent_removal_diagnostics': parent_removal_diagnostics,
+                },
                 f,
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
 
         logger.info(
             f"Metadata: {len(metadata.tile_configs)} tiles, "
-            f"{len(shared_boundary_nodes)} shared boundary nodes -> {meta_pkl_path.name}"
+            f"{len(shared_boundary_nodes)} shared boundary nodes, "
+            f"{len(component_summaries)} connectivity summaries -> {meta_pkl_path.name}"
         )
 
         # 5. Build and return ParsedTileBundle (lazy import to avoid circular)
@@ -634,6 +884,10 @@ class DistributedNetlistParser:
             metadata=metadata,
             shared_boundary_nodes=shared_boundary_nodes,
             pkl_dir=str(out_path),
+            connectivity_summary_version=_persisted_summary_version,
+            parser_interface_set=parser_interface_set,
+            component_summaries=component_summaries,
+            parent_removal_diagnostics=parent_removal_diagnostics,
         )
 
         return out_path, bundle
@@ -649,23 +903,33 @@ class DistributedNetlistParser:
         out_path: 'Path',
         max_interior: int,
         pickle_mod,
+        shared_bnd: Set[str],
     ):
         """Split oversized tiles and update worker_results + metadata in-place.
 
         For each tile whose interior node count > max_interior:
-        1. Loads the already-written pkl from *out_path*.
-        2. Pre-cleans the parent tile: runs island detection using the parent's
-           global interface nodes (boundary_nodes shared across tiles in the
-           pre-split partition).  This removes genuinely floating nodes before
-           splitting so sub-tiles never need aggressive island removal.
-        3. Calls :func:`retile.split_tile` recursively.
-        4. Writes sub-tile pkls, deletes the original.
+        1. Loads the already-written pkl from *out_path*.  Stage 1e: the pkl
+           was pre-cleaned in memory by ``parse_and_dump_tile`` at threshold=5
+           BEFORE it was ever written, so the parent-level pre-clean pass this
+           function used to run here is now redundant -- the loaded tile
+           already carries ``pre_cleaned_full=True`` and a clean topology.
+        2. Calls :func:`retile.split_tile` recursively.
+        3. Writes sub-tile pkls, deletes the original.
+        4. Runs the sub-tile threshold=1 pre-clean pass on EACH sub-tile
+           (port candidates = ``sub.boundary_nodes ∪ die_attachment_nodes ∪
+           (sub.all_nodes ∩ shared_bnd)`` -- see the inline comment at the
+           call site for why the sub-tile's own already-complete boundary set
+           ALONE is not sufficient, finding F5), replacing the parent's
+           connectivity summary with the sub-tiles' summaries.
         5. Replaces the tile's entry in worker_results and metadata.tile_configs.
 
-        Sub-tiles carry ``TileData.pre_cleaned=True``, which causes
+        Sub-tiles carry ``TileData.pre_cleaned=True`` (set explicitly by the
+        sub-tile ``_pre_clean_tile_data(..., mark_split_pre_cleaned=True)``
+        call below -- finding F3; NOT by the whole-tile pass in
+        ``parse_and_dump_tile``, which must leave it False), which causes
         :meth:`TileWorker._remove_floating_islands` to use a threshold of 1
-        (instead of 5) so that nodes legitimately connected through cut
-        interface nodes are never wrongly discarded.
+        (instead of 5) in the legacy fallback path so that nodes legitimately
+        connected through cut interface nodes are never wrongly discarded.
 
         Args:
             worker_results: List returned by ``be.map_func``.  Modified in-place.
@@ -673,28 +937,48 @@ class DistributedNetlistParser:
             out_path: Directory where pkls live.
             max_interior: Threshold for splitting.
             pickle_mod: The ``pickle`` module (passed in to avoid re-import).
+            shared_bnd: The step-0 global ``*``-declaration scan set (finding
+                F5).  Required so a node '*'-declared only in OTHER tiles --
+                but present unmarked in this tile's ``all_nodes`` (e.g. via an
+                un-prefixed resistor endpoint) -- is still considered an
+                interface-candidate at the sub-tile pass, matching both the
+                whole-tile pass (which uses the same global set) and the
+                legacy worker-time removal (which uses the finalized global
+                interface set).  Finding R10: REQUIRED (no ``None`` default)
+                -- production has exactly one call site (``parse_and_dump``,
+                which always passes it); a ``None`` default would silently
+                revert any future/test caller that omits it to the pre-F5
+                (buggy) candidate set with no warning.  Pass ``set()``
+                explicitly if a caller genuinely has no global candidates.
 
         Returns:
-            ``(new_worker_results, metadata)`` tuple.
+            ``(new_worker_results, metadata, parent_removal_diagnostics)``
+            tuple.  ``parent_removal_diagnostics`` (finding R4) maps a
+            SPLIT parent's original ``(x, y)`` tile id to
+            ``{'islands_removed': int, 'removed_nodes': Set[str]}`` for
+            parents whose whole-tile pre-clean (at ``parse_and_dump_tile``,
+            before this method ever saw them) removed component(s) --
+            reported by the coordinator under a synthetic parent-id
+            ``island_stats`` entry (``model._merge_parent_removal_diagnostics``)
+            instead of being misattributed to whichever sub-tile happens to
+            be first.
         """
         from .retile import split_tile, _pre_clean_tile_data
 
+        pad_nodes = metadata.package_data.pad_nodes
+        _shared_bnd = shared_bnd
+
         # Build lookup: tile_id → TileConfig
         tc_by_id = {tc.tile_id: tc for tc in metadata.tile_configs}
-
-        # Compute the pre-split shared boundary nodes for parent-level island
-        # detection.  These are the nodes shared between tiles in the CURRENT
-        # (unsplit) partition — they serve as port_nodes when running island
-        # detection on a parent tile before it is bisected.
-        pre_split_shared_bnd = compute_shared_boundary_nodes(
-            [r['boundary_nodes'] for r in worker_results]
-        )
 
         new_results: List[Dict] = []
         new_tile_configs: List[TileConfig] = []
         # Track tiles that remain over max_interior after all split attempts
         # (coupling caps on every candidate, identical coordinates, etc.).
         n_tiles_over_max: int = 0
+        # Finding R4: parse-time WHOLE-TILE removal diagnostics, keyed by the
+        # PARENT tile's own (x, y) id -- see the docstring Returns section.
+        parent_removal_diagnostics: Dict[tuple, Dict[str, Any]] = {}
 
         for r in worker_results:
             tid = r['tile_id']
@@ -723,33 +1007,13 @@ class DistributedNetlistParser:
                 n_tiles_over_max += 1
                 continue
 
-            # --- B1 blocker fix: parent-level island detection ----------------
-            # Run island detection on the PARENT tile before splitting.  Port
-            # nodes must EXACTLY MATCH what create_distributed_model passes to
-            # TileWorker._remove_floating_islands for the unsplit path:
-            #   interface_nodes = shared_boundary_nodes | die_attachment_nodes
-            # (same threshold=5 used by TileWorker.MIN_INTERFACE_NODES_KEEP).
-            #
-            # CRITICAL: the original bug used only
-            #   tile_data.boundary_nodes & pre_split_shared_bnd
-            # which omitted die_attachment_nodes.  Die nodes are in
-            # tile_data.all_nodes but NOT in tile_data.boundary_nodes (they are
-            # not marked '*' in the .ckt file), so intersecting with
-            # boundary_nodes was silently dropping them.  This caused 434 nodes
-            # to be removed from the split path that the unsplit path kept,
-            # changing ~1710 fF of grounded capacitance and producing 173 µV
-            # (BE) / 509 µV (TR) transient divergence.
-            #
-            # After this call tile_data.pre_cleaned=True.  That flag propagates
-            # to all sub-tiles via split_tile/_build_halves, signalling
-            # TileWorker to use threshold=1 rather than 5 when sub-tile island
-            # detection runs.  A cut may create small components (< 5 port nodes)
-            # that are still legitimate — they were connected in the parent and
-            # remain connected through at least one cut-interface port node.
+            # Stage 1e: the parent-level pre-clean that used to run HERE is now
+            # redundant -- parse_and_dump_tile() already pre-cleaned this exact
+            # tile (threshold=5, port_nodes = pre-split shared_bnd ∪
+            # die_attachment_nodes) in memory before writing the pkl we just
+            # loaded.  `tile_data.pre_cleaned_full` is True and its topology is
+            # already clean w.r.t. the pre-split interface set.
             die_attachment_nodes = metadata.package_data.die_attachment_nodes
-            parent_port_nodes = pre_split_shared_bnd | die_attachment_nodes
-            # _pre_clean_tile_data further intersects with tile_data.all_nodes
-            _pre_clean_tile_data(tile_data, parent_port_nodes)
 
             sub_tiles = split_tile(tile_data, max_interior)
 
@@ -765,8 +1029,106 @@ class DistributedNetlistParser:
             tc = tc_by_id[tid]
             parent_die_map = r.get('die_attachment_net_map', {})
 
+            # Findings F8/F9 + R4: the loaded PARENT tile_data already
+            # carries its own removal diagnostics from the whole-tile
+            # pre-clean pass that ran in parse_and_dump_tile (before this pkl
+            # was ever written).  Those nodes no longer exist in
+            # `tile_data.all_nodes` and cannot be assigned to either sub-tile
+            # by split_tile(), so their NAMES would otherwise be silently
+            # lost once the parent object is discarded below -- forward them
+            # (union, never overwrite) onto the FIRST sub-tile (transport
+            # only) so the floating-nodes report can still recover them.
+            # _pre_clean_tile_data's sub-tile pass below UNIONS (never
+            # overwrites) this field, so seeding here is safe regardless of
+            # call order.
+            #
+            # R4 fix: the parent's removal COUNT must NOT be forwarded onto
+            # sub_tiles[0] -- that misattributes the WHOLE parent tile's
+            # pre-clean to whichever sub-tile happens to be first, even when
+            # the removed components physically lay in a DIFFERENT
+            # sub-tile's region (finding: island_stats[(x,y,0)] reporting the
+            # parent's count while the sub-tile that actually contained the
+            # removed components reports 0).  Record it instead in
+            # parent_removal_diagnostics, keyed by the PARENT's own (x, y)
+            # id, so the coordinator can report it under a synthetic
+            # parent-id island_stats entry -- sub-tiles report ONLY their own
+            # sub-clean removals.
+            _parent_removed = getattr(tile_data, 'removed_floating_nodes', None) or set()
+            _parent_n_removed = getattr(tile_data, 'n_floating_components_removed', 0)
+            if _parent_removed:
+                sub_tiles[0].removed_floating_nodes = (
+                    set(getattr(sub_tiles[0], 'removed_floating_nodes', None) or ())
+                    | _parent_removed
+                )
+            if _parent_n_removed:
+                parent_removal_diagnostics[tid] = {
+                    'islands_removed': _parent_n_removed,
+                    'removed_nodes': set(_parent_removed),
+                }
+
             for sub in sub_tiles:
                 sub_str = '_'.join(str(c) for c in sub.tile_id)
+
+                # Stage 1e sub-tile pass: threshold=1, port candidates =
+                # sub.boundary_nodes | die_attachment_nodes | (sub.all_nodes
+                # & shared_bnd).
+                #
+                # sub.boundary_nodes is a CORRECT but NOT COMPLETE port-
+                # candidate set here -- not just the newly-introduced cut
+                # nodes, and not just pre_split_shared_bnd.  _build_halves
+                # unconditionally propagates the ENTIRE parent boundary set
+                # into BOTH children (`left_bnd = right_bnd = cut_right_guests
+                # | orig_boundary`), so ANY parent-boundary node -- even one
+                # that was NOT pre-split-shared (declared '*' in only ONE
+                # original tile's .ckt, e.g. a coordinate with no partner tile
+                # in this particular netlist) -- ends up duplicated into >=2
+                # sub-tiles by the split itself and therefore SHOWS UP as a
+                # genuine shared (multi-tile) interface node once
+                # compute_shared_boundary_nodes re-aggregates post-split
+                # (parse_and_dump step "3b").  A first version of this pass
+                # used pre_split_shared_bnd | cut_nodes instead and silently
+                # dropped exactly these split-induced-shared nodes from every
+                # component summary (0 summaries referenced them, despite
+                # them being genuine S_global rows) -- the union-find then
+                # correctly treated them as unreached singletons and wrongly
+                # islanded them (625 nodes on netlist_sampled at
+                # max_interior=8000).  root_parent_boundary ⊆ sub.boundary_nodes
+                # always holds (by induction over _build_halves recursion), so
+                # sub.boundary_nodes ∪ die_attachment_nodes subsumes the
+                # pre_split_shared_bnd case with no extra union needed.
+                #
+                # Finding F5 (remaining gap): a node X that is present in
+                # sub.all_nodes UNMARKED (e.g. an ordinary resistor endpoint
+                # with no '*' prefix in THIS original tile) but '*'-declared
+                # by 2+ OTHER tiles entirely is globally shared (X ∈
+                # shared_bnd) and WAS correctly considered a port candidate at
+                # the parent-level whole-tile pass (which uses the global
+                # shared_bnd set) -- but X is not in sub.boundary_nodes (never
+                # '*'-marked here) and is not necessarily a cut node either, so
+                # it is silently dropped as a candidate at this sub-tile pass
+                # without the explicit `& shared_bnd` term, causing a
+                # legitimately-connected fragment to be removed by the
+                # threshold-1 check.  Adding `sub.all_nodes & shared_bnd`
+                # mirrors the whole-tile pass and the legacy worker-time
+                # removal (both scoped against the global interface set, not
+                # just this tile's own boundary declarations).
+                #
+                # Sets sub.pre_cleaned_full=True AND sub.pre_cleaned=True
+                # (mark_split_pre_cleaned=True -- finding F3: this IS the
+                # genuine post-split sub-tile pass, so the legacy fallback
+                # threshold=1 selection is correct here), and replaces the
+                # parent's (now stale) connectivity summary with this
+                # sub-tile's own.
+                sub_port_nodes = (
+                    sub.boundary_nodes
+                    | die_attachment_nodes
+                    | (sub.all_nodes & _shared_bnd)
+                )
+                n_removed_sub, sub_summaries = _pre_clean_tile_data(
+                    sub, sub_port_nodes, min_interface_keep=1,
+                    pad_nodes=pad_nodes, mark_split_pre_cleaned=True,
+                )
+
                 sub_pkl = out_path / f'tile_{sub_str}.pkl'
                 with open(sub_pkl, 'wb') as f:
                     pickle_mod.dump(sub, f, protocol=pickle_mod.HIGHEST_PROTOCOL)
@@ -785,12 +1147,13 @@ class DistributedNetlistParser:
                     n_tiles_over_max += 1
                 logger.info(
                     "Tile %s → sub-tile %s: %d nodes (%d interior), "
-                    "%d edges, %d current sources -> tile_%s.pkl",
+                    "%d edges, %d current sources -> tile_%s.pkl "
+                    "(sub-clean removed %d component(s))",
                     tile_str, sub_str,
                     len(sub.all_nodes), sub_interior,
                     len(sub.resistive_edges),
                     len(sub.current_injections),
-                    sub_str,
+                    sub_str, n_removed_sub,
                 )
 
                 new_results.append({
@@ -801,6 +1164,8 @@ class DistributedNetlistParser:
                     'n_edges': len(sub.resistive_edges),
                     'n_currents': len(sub.current_injections),
                     'n_cap_edges': len(sub.capacitive_edges),
+                    'islands_removed_at_parse': n_removed_sub,
+                    'component_summaries': sub_summaries,
                 })
                 # Sub-tile TileConfig re-uses parent ckt/nd/instance paths.
                 # VCS init loads from instance_path but filters to sub-tile nodes.
@@ -832,7 +1197,7 @@ class DistributedNetlistParser:
             )
 
         metadata.tile_configs = new_tile_configs
-        return new_results, metadata
+        return new_results, metadata, parent_removal_diagnostics
 
     def collect_boundary_nodes(self, tile_configs: List[TileConfig]) -> Set[str]:
         """Pre-scan all tile .ckt files to collect *all* ``*``-prefixed boundary nodes.

@@ -372,6 +372,7 @@ def analyze_distributed_decomposition(
     worker_solver_config: Optional[SolverBackendConfig] = None,
     threads_per_worker: Optional[Any] = None,
     interface_settings: Optional[Dict[str, Any]] = None,
+    island_detection: str = 'auto',
 ) -> Tuple[DecompositionResult, Any, Any]:
     """Run distributed near/far IR-drop decomposition analysis.
 
@@ -442,6 +443,9 @@ def analyze_distributed_decomposition(
             ``cmd_solve``/``cmd_run`` so all three subcommands push the six
             interface-CG flags identically.  ``None`` (default) leaves
             ``model.settings`` at its factory defaults.
+        island_detection: ``'auto'`` (default) | ``'summaries'`` | ``'schur_bfs'``.
+            Passed straight through to ``create_distributed_model`` -- see
+            its docstring for the fallback matrix.
 
     Returns:
         ``(result, solver, model)`` -- the ``DecompositionResult``,
@@ -472,6 +476,7 @@ def analyze_distributed_decomposition(
         coordinator_solver_config=coordinator_solver_config,
         worker_solver_config=worker_solver_config,
         threads_per_worker=threads_per_worker,
+        island_detection=island_detection,
     )
     if interface_settings:
         model.settings.update(interface_settings)

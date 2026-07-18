@@ -16,6 +16,33 @@ logger = logging.getLogger(__name__)
 # Worker packing support (B1 V1: in-process packed workers)
 # ---------------------------------------------------------------------------
 
+def _deref_packed_args(args: Any) -> Any:
+    """Resolve any ``ray.ObjectRef`` nested inside *args* (finding R5).
+
+    Only meaningful in a Ray worker process (imports ``ray`` lazily); used
+    exclusively by :meth:`PackedTileWorkerActor.call_worker`, which only
+    ever runs inside one.  Mirrors the ``args`` convention shared with
+    :meth:`PackedTileWorker.call_worker` -- ``None``, a dict (``**kwargs``),
+    a tuple/list (``*args``), or a single non-iterable value -- resolving one
+    level deep (a ``ComputeBackend.put()`` handle is never nested more than
+    one level inside the args container in practice).
+    """
+    import ray
+
+    if isinstance(args, ray.ObjectRef):
+        return ray.get(args)
+    if isinstance(args, dict):
+        return {
+            k: (ray.get(v) if isinstance(v, ray.ObjectRef) else v)
+            for k, v in args.items()
+        }
+    if isinstance(args, tuple):
+        return tuple(ray.get(a) if isinstance(a, ray.ObjectRef) else a for a in args)
+    if isinstance(args, list):
+        return [ray.get(a) if isinstance(a, ray.ObjectRef) else a for a in args]
+    return args
+
+
 class PackedTileWorker:
     """Owns k TileWorker instances in-process and fans method calls out serially.
 
@@ -103,7 +130,23 @@ class PackedTileWorkerActor:
         self._pack = PackedTileWorker([TileWorker() for _ in range(k)])
 
     def call_worker(self, local_idx: int, method: str, args: Any) -> Any:
-        """Route *method* to the inner TileWorker at *local_idx*."""
+        """Route *method* to the inner TileWorker at *local_idx*.
+
+        Finding R5 (defensive deref): ``RayBackend.call_all``/
+        ``call_all_streaming`` route packed (``VirtualWorkerHandle``) calls
+        via ``call_worker.remote(local_idx, method, args)``.  Ray's automatic
+        ``ray.ObjectRef`` resolution only applies to TOP-LEVEL positional
+        arguments of a ``.remote()`` call -- ``args`` here is itself one such
+        top-level argument (a container), so a ``ray.put()`` handle nested
+        INSIDE it (e.g. ``args=(handle, other)``) is delivered as a raw,
+        unresolved ``ObjectRef``, not the underlying value.  This silently
+        breaks ``ComputeBackend.put()``'s contract for packed Ray workers
+        even though it works for unpacked Ray actors and ``LocalBackend``
+        (see ``ComputeBackend.put`` docstring).  Resolve any ``ObjectRef``
+        found inside *args* here so the contract holds uniformly regardless
+        of whether ``tiles_per_worker`` packing is active.
+        """
+        args = _deref_packed_args(args)
         return self._pack.call_worker(local_idx, method, args)
 
     def size(self) -> int:
@@ -182,6 +225,41 @@ class ComputeBackend(ABC):
     @abstractmethod
     def gather(self, futures: List[Any]) -> List[Any]:
         """Wait for and collect results from futures."""
+
+    def put(self, value: Any) -> Any:
+        """Store *value* once in the backend's shared object store.
+
+        Returns a handle usable as an element of an args tuple/list passed to
+        :meth:`map_func` / :meth:`call_all`.  Use this for large values
+        shared identically across every task/actor call (e.g. a global
+        candidate-node set) to avoid re-pickling the same payload once per
+        call.
+
+        Resolution contract (finding R5 -- corrected from the original
+        docstring's "TOP-LEVEL positional argument" claim, which was false
+        for one dispatch path):
+
+        * :meth:`map_func`: each element of an args tuple IS a top-level
+          ``.remote()`` argument, so Ray auto-derefs it -- transparent.
+        * :meth:`call_all` on an UNPACKED actor (no ``tiles_per_worker``):
+          same as above -- each element of the per-actor args tuple/list
+          becomes a top-level ``.remote()`` argument, auto-deref'd.
+        * :meth:`call_all` on a PACKED (``VirtualWorkerHandle``) actor: args
+          are routed via ``call_worker.remote(local_idx, method, args)`` --
+          the whole args container is ONE top-level argument, so a handle
+          NESTED inside it is delivered as a raw, unresolved ``ObjectRef``,
+          not the underlying value.  ``PackedTileWorkerActor.call_worker``
+          explicitly deref's any ``ObjectRef`` found inside *args* before
+          dispatch (see ``_deref_packed_args``), so the contract still holds
+          end-to-end for packed workers -- just via explicit code, not Ray's
+          built-in top-level auto-deref.
+
+        Default (in-process backends): a no-op returning *value* unchanged --
+        there is no separate object store, and ``map_func``/``call_all`` never
+        deref anything, so the raw value is already correct as-is.
+        :class:`RayBackend` overrides this to call ``ray.put``.
+        """
+        return value
 
     def call_all_streaming(
         self,
@@ -452,6 +530,9 @@ class RayBackend(ComputeBackend):
 
     def gather(self, futures: List[Any]) -> List[Any]:
         return self._ray.get(futures)
+
+    def put(self, value: Any) -> Any:
+        return self._ray.put(value)
 
     def shutdown(self) -> None:
         pass  # Don't shut down Ray - caller manages lifecycle

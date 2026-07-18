@@ -173,6 +173,26 @@ def _push_interface_settings(
     return settings
 
 
+def _resolve_island_detection_arg(args: argparse.Namespace) -> str:
+    """Read ``args.island_detection`` without falsy-coercing it (finding F7).
+
+    ``_load_and_apply_config`` already resolves ``args.island_detection`` to
+    a definite value (explicit CLI flag > YAML > built-in default 'auto') for
+    every subcommand that calls it before reaching ``create_distributed_model``
+    -- so this is a plain ``None``-check passthrough for that normal case.
+
+    The bug this replaces: ``getattr(args, 'island_detection', None) or
+    'auto'`` silently coerced ANY falsy-but-non-None value (e.g. ``False``,
+    which PyYAML 1.1 parses ``island_detection: off``/``no`` to) to 'auto',
+    defeating ``model._resolve_island_detection``'s loud ``ValueError`` for
+    invalid settings.  Only a genuine ``None`` (island_detection truly never
+    set -- e.g. a bare ``argparse.Namespace`` built directly by a test/caller
+    that skipped ``_load_and_apply_config``) falls back to 'auto' here.
+    """
+    val = getattr(args, 'island_detection', None)
+    return val if val is not None else 'auto'
+
+
 def cmd_solve(args: argparse.Namespace) -> None:
     """Load .pkl partitions and run DDM solver."""
     from .model import create_distributed_model, load_distributed_partitions
@@ -199,6 +219,7 @@ def cmd_solve(args: argparse.Namespace) -> None:
         tiles_per_worker=_parse_threads_per_worker(
             getattr(args, 'tiles_per_worker', None)
         ),
+        island_detection=_resolve_island_detection_arg(args),
     )
 
     # B2/Stage 1: Push interface-solver settings into model.settings (coordinator-side)
@@ -472,6 +493,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         tiles_per_worker=_parse_threads_per_worker(
             getattr(args, 'tiles_per_worker', None)
         ),
+        island_detection=_resolve_island_detection_arg(args),
     )
 
     # B2/Stage 1: Push interface-solver settings into model.settings (coordinator-side)
@@ -603,6 +625,7 @@ def cmd_decompose(args: argparse.Namespace) -> None:
             # decompose-side model instead of being silently accepted and
             # dropped.
             interface_settings=_build_interface_settings(args),
+            island_detection=_resolve_island_detection_arg(args),
         )
 
         elapsed = time.perf_counter() - t0
@@ -820,6 +843,24 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
             "explicit integer byte count).  Exceeding it downgrades to the "
             "'jacobi' diagonal preconditioner (logged as a loud WARNING "
             "naming this setting and the iteration-count consequence). "
+            "(default: auto)"
+        ),
+    )
+
+    # Stage 1e: island detection (parse-time summaries vs legacy Schur-BFS)
+    iface_grp.add_argument(
+        '--island-detection', type=str, default=None,
+        choices=['auto', 'summaries', 'schur_bfs'],
+        dest='island_detection',
+        help=(
+            "Interface island-detection strategy, resolved ONCE at model "
+            "creation (all-new-or-all-legacy).  'auto'/'summaries' (default: "
+            "auto) use the bundle's parse-time connectivity summaries via a "
+            "cheap union-find and skip worker-side island removal, falling "
+            "back to 'schur_bfs' automatically when the bundle lacks "
+            "summaries, the summary version is stale, or the model-creation "
+            "trust assertion fails.  'schur_bfs' forces the legacy "
+            "O(S.nnz) Schur-complement BFS path unconditionally. "
             "(default: auto)"
         ),
     )
@@ -1092,6 +1133,20 @@ def _merge_decompose_config(
                 'auto' if yaml_tpw == 'auto' else int(yaml_tpw)
             )
 
+    # island_detection (YAML only here; explicit CLI flag takes precedence --
+    # finding F6).  cmd_decompose nulls args.config before calling
+    # _load_and_apply_config (to stop it from re-loading this same file via
+    # pdn_solver's unrelated schema), which means _load_and_apply_config's
+    # OWN island_detection resolution (CLI > YAML > 'auto') never sees this
+    # YAML's solver.island_detection -- so it must be resolved HERE, in the
+    # decompose-specific config merge, exactly like every other solver: key
+    # above.  _load_and_apply_config's later resolution step only fills in
+    # 'auto' when args.island_detection is still None, so it will not
+    # override whatever is set here.
+    if solver_cfg.get('island_detection') is not None:
+        if getattr(args, 'island_detection', None) is None:
+            args.island_detection = str(solver_cfg['island_detection'])
+
     logger.info("Merged decompose config from YAML")
     return args
 
@@ -1109,8 +1164,17 @@ _VALID_SOLVER_YAML_KEYS = frozenset({
     'interface_factor_memory_budget', 'interface_block_jacobi_max_bytes',
     # B3: streaming Schur assembly + A2 step-column table
     'streaming_assembly', 'use_step_columns', 'max_table_mb',
+    # Stage 1e: island detection strategy
+    'island_detection',
 })
-_VALID_ROLE_YAML_KEYS = _VALID_SOLVER_YAML_KEYS - {'coordinator', 'worker', 'threads_per_worker'}
+_VALID_ROLE_YAML_KEYS = _VALID_SOLVER_YAML_KEYS - {
+    'coordinator', 'worker', 'threads_per_worker',
+    # Stage 1e finding F12: island_detection is a top-level-solver-only
+    # setting (resolved once at model creation, all-new-or-all-legacy across
+    # the WHOLE model) -- it has no per-role (coordinator/worker) meaning, so
+    # it must not silently validate inside a coordinator:/worker: sub-dict.
+    'island_detection',
+}
 _VALID_DECOMPOSE_TOP_KEYS = frozenset({
     'netlist_dir', 'net', 'backend', 'time', 'analysis',
     'aggressor', 'output', 'solver',
@@ -1372,6 +1436,15 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
         _yaml_mtm = solver_cfg_b3.get('max_table_mb')
         if _yaml_mtm is not None and not hasattr(args, 'max_table_mb'):
             setattr(args, 'max_table_mb', float(_yaml_mtm))
+
+    # -- Stage 1e: island_detection (explicit CLI > YAML > 'auto' default) --
+    # Resolved to a concrete value here (same precedence pattern as the
+    # interface_solver loop above) so cmd_solve/cmd_run/cmd_decompose can
+    # read args.island_detection unconditionally and pass it straight into
+    # create_distributed_model(island_detection=...).
+    if getattr(args, 'island_detection', None) is None:
+        _yaml_id = solver_cfg_iface.get('island_detection')
+        args.island_detection = _yaml_id if _yaml_id is not None else 'auto'
 
     return args
 

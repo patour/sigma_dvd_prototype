@@ -62,7 +62,7 @@ this count so oversized tiles are not silently ignored.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -79,97 +79,105 @@ def _pre_clean_tile_data(
     tile_data: TileData,
     port_nodes: Set[str],
     min_interface_keep: int = 5,
-) -> int:
+    pad_nodes: Optional[Set[str]] = None,
+    mark_split_pre_cleaned: bool = False,
+) -> Tuple[int, List[Dict[str, Any]]]:
     """Remove genuinely floating components from *tile_data* in-place.
 
-    Must be called **before** :func:`split_tile` so that sub-tiles inherit a
-    clean topology.  After this call ``tile_data.pre_cleaned`` is set to
-    ``True``, which causes :meth:`TileWorker._remove_floating_islands` to use
-    a threshold of 1 (instead of 5) when processing sub-tiles — keeping
-    components that connect to the rest of the network through even a single
-    cut-interface node.
+    Always sets ``tile_data.pre_cleaned_full = True`` (Stage 1e: signals that
+    a COMPLETE removal pass, at whatever threshold/port-set this call used,
+    has already run on this exact tile -- see
+    ``tile_worker._build_block_system``).
+
+    ``tile_data.pre_cleaned`` (the *legacy* split-path flag that selects
+    threshold=1 vs threshold=5 in ``TileWorker._remove_floating_islands``'s
+    fallback path) is set ONLY when *mark_split_pre_cleaned* is True (Stage
+    1e finding F3).  Whole-tile parse-time cleans (the universal pre-clean
+    that now runs on every tile, not just tiles about to be split) must NOT
+    set it -- doing so unconditionally flips the legacy-fallback worker
+    removal threshold from 5 to 1 for every never-split tile, corrupting the
+    ``island_detection='schur_bfs'`` / trust-assertion-failure fallback path.
+    Only the genuine post-split sub-tile pass (``_apply_tile_splits``, called
+    with ``min_interface_keep=1``) passes ``mark_split_pre_cleaned=True``.
 
     Args:
         tile_data: TileData to clean in-place.
-        port_nodes: Global interface nodes visible to this tile
-            (``tile_data.boundary_nodes ∩ shared_boundary_nodes``).
+        port_nodes: Global interface-node candidates visible to this tile
+            (``shared_boundary_nodes ∪ die_attachment_nodes``, intersected
+            with ``tile_data.all_nodes`` below).
         min_interface_keep: Minimum interface-node count for a non-largest
-            component to be kept (matches ``TileWorker.MIN_INTERFACE_NODES_KEEP``).
+            component to be kept (matches ``TileWorker.MIN_INTERFACE_NODES_KEEP``
+            for whole tiles at parse time; callers pass 1 for sub-tiles,
+            matching ``TileWorker.MIN_INTERFACE_NODES_KEEP_PRE_CLEANED``).
+        pad_nodes: Global Dirichlet (voltage-source) node names.  Used only to
+            compute the ``has_pad`` flag on each kept-component summary
+            (Stage 1e connectivity summaries) -- never affects removal.
+        mark_split_pre_cleaned: If True, also set ``tile_data.pre_cleaned =
+            True`` (the legacy split-path fallback-threshold flag).  Pass
+            True ONLY from the post-split sub-tile pass.
 
     Returns:
-        Number of floating components removed.
+        ``(n_removed, component_summaries)``.  ``n_removed`` is the number of
+        floating components removed.  ``component_summaries`` is a list of
+        dicts, one per **kept** component with non-empty interface-candidate
+        overlap: ``{'candidates': frozenset[str], 'n_nodes': int,
+        'has_pad': bool, 'tile_id': tuple, 'is_largest': bool,
+        'keep_threshold': int}``.  Removed components and components with
+        zero interface-candidate overlap are omitted (they cannot
+        participate in the coordinator-side interface union-find either
+        way).  ``is_largest``/``keep_threshold`` (finding R1) let the parser's
+        parse-end consistency re-check (``tile_parsing.
+        verify_component_keep_decisions``) distinguish the unconditionally-
+        kept largest component from a component kept only because it met
+        *min_interface_keep* candidates AT THIS PASS -- a decision that a
+        later, coordinator-side interface-set recompute can invalidate.
     """
+    from .tile_parsing import _decompose_and_remove_floating
+
     port_nodes_local: Set[str] = port_nodes & tile_data.all_nodes
+    pad_nodes_local: Set[str] = (pad_nodes & tile_data.all_nodes) if pad_nodes else set()
+
+    def _summarize(comp: Set[str], is_largest_comp: bool) -> Optional[Dict[str, Any]]:
+        candidates = comp & port_nodes_local
+        if not candidates:
+            return None
+        return {
+            'candidates': frozenset(candidates),
+            'n_nodes': len(comp),
+            'has_pad': bool(comp & pad_nodes_local),
+            'tile_id': tile_data.tile_id,
+            'is_largest': is_largest_comp,
+            'keep_threshold': min_interface_keep,
+        }
 
     if not port_nodes_local:
-        tile_data.pre_cleaned = True
-        return 0
+        if mark_split_pre_cleaned:
+            tile_data.pre_cleaned = True
+        tile_data.pre_cleaned_full = True
+        return 0, []
 
-    # Build adjacency (exclude ground node '0')
-    adj: Dict[str, Set[str]] = {}
-    for u, v, _g in tile_data.resistive_edges:
-        if u == '0' or v == '0':
-            continue
-        adj.setdefault(u, set()).add(v)
-        adj.setdefault(v, set()).add(u)
+    components, largest, _kept_iface, removed_nodes, n_removed = _decompose_and_remove_floating(
+        tile_data, port_nodes_local, min_interface_keep,
+    )
 
-    # Connected components via BFS
-    visited: Set[str] = set()
-    components: List[Set[str]] = []
-    for start in tile_data.all_nodes:
-        if start in visited or start == '0':
-            continue
-        comp: Set[str] = set()
-        queue = [start]
-        while queue:
-            node = queue.pop()
-            if node in visited:
-                continue
-            visited.add(node)
-            comp.add(node)
-            for nb in adj.get(node, ()):
-                if nb not in visited:
-                    queue.append(nb)
-        components.append(comp)
-
-    if len(components) <= 1:
-        tile_data.pre_cleaned = True
-        return 0
-
-    largest = max(components, key=len)
-    removed_nodes: Set[str] = set()
-    n_removed = 0
-
+    component_summaries: List[Dict[str, Any]] = []
     for comp in components:
-        if comp is largest:
-            continue
-        n_interface = len(comp & port_nodes_local)
-        if n_interface >= min_interface_keep:
-            continue
-        removed_nodes.update(comp)
-        n_removed += 1
+        if comp & removed_nodes:
+            continue  # this whole component was removed (removal is atomic per component)
+        summary = _summarize(comp, comp is largest)
+        if summary is not None:
+            component_summaries.append(summary)
 
     if removed_nodes:
-        tile_data.all_nodes -= removed_nodes
-        tile_data.boundary_nodes -= removed_nodes
-        tile_data.resistive_edges = [
-            (u, v, g) for u, v, g in tile_data.resistive_edges
-            if u not in removed_nodes and v not in removed_nodes
-        ]
-        tile_data.capacitive_edges = [
-            (u, v, c) for u, v, c in tile_data.capacitive_edges
-            if u not in removed_nodes and v not in removed_nodes
-        ]
-        for node in list(removed_nodes):
-            tile_data.current_injections.pop(node, None)
-
         logger.info(
             "Tile %s: pre_clean removed %d floating component(s) (%d nodes total)",
             tile_data.tile_id, n_removed, len(removed_nodes),
         )
 
-    tile_data.pre_cleaned = True
-    return n_removed
+    if mark_split_pre_cleaned:
+        tile_data.pre_cleaned = True
+    tile_data.pre_cleaned_full = True
+    return n_removed, component_summaries
 
 
 # ---------------------------------------------------------------------------

@@ -36,6 +36,23 @@ class ParsedTileBundle:
     shared_boundary_nodes: Set[str]
     pkl_dir: str
 
+    # Stage 1e: parse-time connectivity summaries + the interface set they
+    # were computed against.  ``None`` for bundles parsed before Stage 1e
+    # (or loaded via the legacy no-pkl shim) -- always means "no summaries
+    # available", forcing the legacy Schur-BFS fallback at model creation.
+    connectivity_summary_version: Optional[int] = None
+    parser_interface_set: Optional[Set[str]] = None
+    component_summaries: Optional[List[Dict[str, Any]]] = None
+
+    # Finding R4: parse-time WHOLE-TILE pre-clean removal diagnostics for
+    # tiles that were subsequently B1-split, keyed by the PARENT tile's own
+    # (x, y) id.  ``{'islands_removed': int, 'removed_nodes': Set[str]}``.
+    # The parent tile no longer exists as a worker after splitting, so this
+    # is surfaced as a SYNTHETIC island_stats[parent_id] entry at model
+    # creation (model._merge_parent_removal_diagnostics) instead of being
+    # misattributed to whichever sub-tile happens to be first.
+    parent_removal_diagnostics: Optional[Dict[tuple, Dict[str, Any]]] = None
+
 
 @dataclass
 class DistributedPowerGridModel:
@@ -61,6 +78,18 @@ class DistributedPowerGridModel:
     metadata: PowerGridMetaData
     island_stats: Dict[tuple, Dict] = field(default_factory=dict)
     tile_kept_nonlargest_iface: Dict[tuple, List[str]] = field(default_factory=dict)
+
+    # Stage 1e: resolved ONCE at model creation (never re-derived downstream).
+    # 'summaries' -- workers skipped _remove_floating_islands (trusted
+    #   pre_cleaned_full) and prepare() should use
+    #   pgmath.schur.detect_interface_islands_from_summaries instead of the
+    #   Schur-BFS.  'schur_bfs' -- full legacy path (workers ran removal;
+    #   prepare() must run the BFS).  See model._resolve_island_detection for
+    #   the fallback matrix (missing summaries / version mismatch / trust
+    #   assertion failure / explicit override all resolve to 'schur_bfs').
+    island_detection_mode: str = field(default='schur_bfs', repr=False)
+    # Non-None only when island_detection_mode == 'summaries'.
+    component_summaries: Optional[List[Dict[str, Any]]] = field(default=None, repr=False)
 
     # Per-role solver backend configs (None = use module globals)
     coordinator_solver_config: Optional[SolverBackendConfig] = field(default=None, repr=False)
@@ -175,15 +204,32 @@ def load_distributed_partitions(
     metadata: PowerGridMetaData = meta_bundle['metadata']
     boundary_nodes: Set[str] = meta_bundle['boundary_nodes']
 
+    # Stage 1e: connectivity summaries are additive keys -- bundles written
+    # before Stage 1e (or by the legacy no-pkl shim) simply lack them, and
+    # `.get(..., None)` degrades to "no summaries available" exactly as if
+    # this were an old-format metadata.pkl (see model._resolve_island_detection).
+    connectivity_summary_version = meta_bundle.get('connectivity_summary_version')
+    parser_interface_set = meta_bundle.get('parser_interface_set')
+    component_summaries = meta_bundle.get('component_summaries')
+    parent_removal_diagnostics = meta_bundle.get('parent_removal_diagnostics')
+
     logger.info(
         f"Loaded metadata from {pkl_dir}: {len(metadata.tile_configs)} tiles, "
         f"{len(boundary_nodes)} shared boundary nodes"
+        + (
+            f", {len(component_summaries)} connectivity summaries"
+            if component_summaries is not None else ""
+        )
     )
 
     return ParsedTileBundle(
         metadata=metadata,
         shared_boundary_nodes=boundary_nodes,
         pkl_dir=str(pkl_path),
+        connectivity_summary_version=connectivity_summary_version,
+        parser_interface_set=parser_interface_set,
+        component_summaries=component_summaries,
+        parent_removal_diagnostics=parent_removal_diagnostics,
     )
 
 
@@ -258,6 +304,31 @@ def _collect_setup_results(
     return tile_boundary_nodes, tile_interior_counts, island_stats, tile_kept_nonlargest_iface
 
 
+def _merge_parent_removal_diagnostics(
+    island_stats: Dict[tuple, Dict],
+    bundle: 'ParsedTileBundle',
+) -> None:
+    """Finding R4: surface parse-time WHOLE-TILE pre-clean removals (paid
+    BEFORE a tile was B1-split) under a synthetic entry keyed by the
+    PARENT's own (x, y) tile id, instead of misattributing them to
+    sub_tiles[0] (whose spatial region may have nothing to do with where
+    the removed components actually lay).
+
+    Mode-independent: ``bundle.parent_removal_diagnostics`` is parse-time
+    bundle metadata, unaffected by which island_detection mode a later
+    model creation chooses -- so calling this after EVERY
+    ``_collect_setup_results`` (both the initial setup and the F10
+    re-setup-with-trust-off path) keeps 'auto'/'summaries' and 'schur_bfs'
+    reporting IDENTICAL totals for the same bundle, matching finding R2's
+    cross-mode equality requirement.  In-place update of *island_stats*.
+    """
+    for parent_tid, diag in (bundle.parent_removal_diagnostics or {}).items():
+        island_stats[parent_tid] = {
+            'islands_removed': diag.get('islands_removed', 0),
+            'is_parent_synthetic_entry': True,
+        }
+
+
 def create_distributed_model(
     bundle_or_metadata,
     backend: str = 'local',
@@ -268,6 +339,7 @@ def create_distributed_model(
     use_step_columns: bool = True,
     max_table_mb: float = 512.0,
     tiles_per_worker: Any = None,
+    island_detection: str = 'auto',
     # Legacy kwargs (deprecated -- use ParsedTileBundle instead)
     use_pkl: bool = False,
     pkl_dir: Optional[str] = None,
@@ -316,6 +388,15 @@ def create_distributed_model(
         max_table_mb: Per-worker memory budget for the phase-table (MB,
             default 512).  Tables estimated to exceed this fall back to the
             chunked-window tier.  Propagated via ``TileWorker.configure``.
+        island_detection: ``'auto'`` (default) | ``'summaries'`` | ``'schur_bfs'``.
+            Decided ONCE here, all-new-or-all-legacy (Stage 1e).  ``'auto'``
+            and ``'summaries'`` both attempt the parse-time-summary fast path
+            (union-find island detection, worker-side removal skipped) and
+            fall back to the legacy Schur-BFS path when the bundle lacks
+            summaries, the summary version is stale, or the trust assertion
+            (``interface_nodes == bundle.parser_interface_set``) fails.
+            ``'schur_bfs'`` forces the legacy path unconditionally.  See
+            ``model._resolve_island_detection`` for the full fallback matrix.
         use_pkl: (Deprecated) If True, use pre-parsed TileData.
         pkl_dir: (Deprecated) Directory containing tile_X_Y.pkl files.
         boundary_nodes: (Deprecated) Pre-collected boundary nodes.
@@ -359,6 +440,7 @@ def create_distributed_model(
         use_step_columns=use_step_columns,
         max_table_mb=max_table_mb,
         tiles_per_worker=tiles_per_worker,
+        island_detection=island_detection,
         **backend_kwargs,
     )
     if _legacy_temp_dir:
@@ -566,6 +648,160 @@ def _create_packed_ray_workers(
     return handles
 
 
+def _resolve_island_detection(
+    bundle: ParsedTileBundle,
+    interface_nodes: Set[str],
+    island_detection: str,
+) -> Tuple[bool, str]:
+    """Decide ONCE whether to trust the bundle's Stage 1e connectivity summaries.
+
+    All-new-or-all-legacy (never a mix): returns ``(trust, resolved_mode)``
+    where ``resolved_mode`` is ``'summaries'`` (workers skip
+    ``_remove_floating_islands``; ``prepare()`` uses the union-find) or
+    ``'schur_bfs'`` (full legacy path).  ``trust`` is the boolean threaded to
+    workers via ``TileWorker.configure({'pre_cleaned_full_trusted': trust})``.
+
+    Fallback matrix (any one of these forces ``'schur_bfs'``):
+      * ``island_detection == 'schur_bfs'`` (explicit override).
+      * ``bundle.component_summaries is None`` (no summaries -- old bundle,
+        or parsed via the legacy no-pkl shim).
+      * ``bundle.connectivity_summary_version != CONNECTIVITY_SUMMARY_VERSION``
+        (stale summaries from a bundle parsed before a summary-semantics change).
+      * ``interface_nodes != bundle.parser_interface_set`` (trust assertion
+        failure -- guards the .ckt-rescan fallback, model.py interface-node
+        derivation drift, or a stale/edited metadata.pkl).
+    """
+    from .parser import CONNECTIVITY_SUMMARY_VERSION
+
+    if island_detection == 'schur_bfs':
+        logger.info(
+            "island_detection='schur_bfs' (explicit): using the legacy "
+            "worker-side island removal + coordinator Schur-BFS path."
+        )
+        return False, 'schur_bfs'
+
+    if island_detection not in ('auto', 'summaries'):
+        raise ValueError(
+            f"Unknown island_detection setting: {island_detection!r}. "
+            "Expected 'auto', 'summaries', or 'schur_bfs'."
+        )
+
+    if bundle.component_summaries is None or bundle.parser_interface_set is None:
+        logger.info(
+            "island_detection=%r: bundle has no Stage 1e connectivity "
+            "summaries (parsed before Stage 1e, or via the legacy no-pkl "
+            "path); falling back to the legacy Schur-BFS island detection. "
+            "Re-parse (DistributedNetlistParser.parse_and_dump) to enable "
+            "the fast summaries path.",
+            island_detection,
+        )
+        return False, 'schur_bfs'
+
+    if bundle.connectivity_summary_version != CONNECTIVITY_SUMMARY_VERSION:
+        logger.info(
+            "island_detection=%r: bundle connectivity_summary_version=%s != "
+            "current CONNECTIVITY_SUMMARY_VERSION=%s; falling back to the "
+            "legacy Schur-BFS island detection. Re-parse to refresh the "
+            "connectivity summaries.",
+            island_detection, bundle.connectivity_summary_version,
+            CONNECTIVITY_SUMMARY_VERSION,
+        )
+        return False, 'schur_bfs'
+
+    if interface_nodes != bundle.parser_interface_set:
+        n_sym_diff = len(interface_nodes ^ bundle.parser_interface_set)
+        logger.warning(
+            "island_detection=%r: trust assertion FAILED -- model-creation "
+            "interface_nodes (%d nodes) != bundle.parser_interface_set "
+            "(%d nodes), symmetric difference=%d. Falling back to the legacy "
+            "Schur-BFS island detection for correctness. This can happen if "
+            "metadata.pkl was edited/stale, or model.py's interface-node "
+            "derivation has drifted from the parser's.",
+            island_detection, len(interface_nodes),
+            len(bundle.parser_interface_set), n_sym_diff,
+        )
+        return False, 'schur_bfs'
+
+    return True, 'summaries'
+
+
+def _verify_summary_structural_completeness(
+    component_summaries: Optional[List[Dict[str, Any]]],
+    interface_nodes: Set[str],
+    tile_boundary_nodes: Dict[tuple, List[str]],
+) -> bool:
+    """Stage 1e finding F10: runtime guarantee that summaries structurally
+    cover every (tile, interface-port) incidence.
+
+    The Stage 1e exactness argument (pgmath.schur module docstring) ASSUMES
+    that every port a tile worker actually reports (``boundary_nodes``,
+    intersected with the finalized ``interface_nodes``) is also present as an
+    interface-candidate in that tile's own connectivity summaries.  Findings
+    F1/F5 fixed the two concrete ways this assumption could be violated;
+    this function turns the assumption into a cheap, enforced runtime check
+    (no extra worker round-trip -- ``tile_boundary_nodes`` was already
+    returned by the ``setup_from_pkl`` RPC) instead of trusting it blindly,
+    so any FUTURE regression in the pre-clean/summary machinery degrades to
+    the legacy Schur-BFS path (loudly) rather than corrupting results.
+
+    Known residuals (verification-reviewed, accepted):
+    - Split-induced-shared nodes: a node '*'-declared in only ONE tile (so
+      absent from the step-0 scan's shared set) that becomes interface only
+      because that tile was B1-split, while sitting unmarked inside a
+      DIFFERENT unsplit tile's floating fragment, can have that fragment
+      removed at parse time.  This is NOT a Stage 1e regression -- legacy
+      worker-time removal deletes the identical fragment (same single
+      cross-tile candidate, same threshold) -- and a true divergence would
+      need >=4 such split-induced-shared unmarked nodes in one fragment.
+      Removed-fragment interiors are absent from ``all_nodes``, so this
+      port-coverage check cannot (and need not) see them.
+    - Perf, not correctness: a bundle that genuinely trips this check pays
+      one extra worker re-setup and permanently runs the legacy Schur-BFS
+      (238 s proxy / ~900 s BRCM) instead of the fast union-find -- correct
+      but slow, and the INFO/WARNING logs say so.
+
+    Returns:
+        True if every tile's worker-reported ports are a subset of that
+        tile's summarized interface-candidates (or *component_summaries* is
+        None, i.e. summaries were never trusted in the first place). False on
+        any violation (caller should route the whole model to legacy).
+    """
+    if component_summaries is None:
+        return True
+
+    per_tile_candidates: Dict[tuple, Set[str]] = {}
+    for summary in component_summaries:
+        tid = summary.get('tile_id')
+        if tid is None:
+            continue
+        per_tile_candidates.setdefault(tuple(tid), set()).update(
+            summary.get('candidates', ())
+        )
+
+    ok = True
+    for tid, boundary_list in tile_boundary_nodes.items():
+        worker_ports = set(boundary_list) & interface_nodes
+        if not worker_ports:
+            continue
+        summarized = per_tile_candidates.get(tuple(tid), set())
+        missing = worker_ports - summarized
+        if missing:
+            ok = False
+            _preview = sorted(missing)[:5]
+            logger.warning(
+                "Stage 1e structural-completeness check FAILED for tile %s: "
+                "%d worker-reported port(s) not present in that tile's "
+                "summarized interface candidates (e.g. %s%s). Summaries are "
+                "structurally incomplete for this bundle -- routing the "
+                "WHOLE model to the legacy Schur-BFS island-detection path "
+                "for correctness.",
+                tid, len(missing), _preview,
+                ' ...' if len(missing) > len(_preview) else '',
+            )
+
+    return ok
+
+
 def _create_distributed_model_from_bundle(
     bundle: ParsedTileBundle,
     backend: str = 'local',
@@ -575,6 +811,7 @@ def _create_distributed_model_from_bundle(
     use_step_columns: bool = True,
     max_table_mb: float = 512.0,
     tiles_per_worker: Any = None,
+    island_detection: str = 'auto',
     **backend_kwargs,
 ) -> DistributedPowerGridModel:
     """Core factory: create model from a ParsedTileBundle.
@@ -588,17 +825,29 @@ def _create_distributed_model_from_bundle(
     # 1. Create backend
     be = _init_backend(backend, backend_kwargs, threads_per_worker=threads_per_worker)
 
-    # 2. Compute interface nodes
+    # 2. Compute interface nodes.
+    # Finding F13: single-sourced formula (tile_parsing.compute_interface_nodes),
+    # also used by DistributedNetlistParser.parse_and_dump's parser_interface_set
+    # -- must mirror it exactly or the Stage 1e trust assertion below spuriously
+    # fails and silently disables the summaries fast path.
+    from .tile_parsing import compute_interface_nodes
     die_net_map = getattr(metadata.package_data, 'die_attachment_net_map', {})
-    interface_nodes = (
-        bundle.shared_boundary_nodes
-        | set(die_net_map.keys())
-        | metadata.package_data.die_attachment_nodes
+    interface_nodes = compute_interface_nodes(
+        bundle.shared_boundary_nodes, die_net_map,
+        metadata.package_data.die_attachment_nodes,
     )
     logger.info(
         f"Interface: {len(interface_nodes)} nodes "
         f"({len(bundle.shared_boundary_nodes)} boundary + "
         f"{len(metadata.package_data.die_attachment_nodes)} die attachment)"
+    )
+
+    # 2b. Stage 1e: decide ONCE whether to trust the bundle's connectivity
+    # summaries (all-new-or-all-legacy).  Must happen here (not later, via
+    # model.settings) because the trust flag needs to reach workers'
+    # setup_from_pkl() below via the SAME configure() call as everything else.
+    island_trust, island_detection_mode = _resolve_island_detection(
+        bundle, interface_nodes, island_detection,
     )
 
     # 3. Build solver settings and per-tile setup args (needed for all paths)
@@ -616,6 +865,10 @@ def _create_distributed_model_from_bundle(
         'partial_factor_reg_ohms': get_partial_factor_reg_resistance(),
         'use_step_columns': use_step_columns,
         'max_table_mb': max_table_mb,
+        # Stage 1e: reaches TileWorker.configure() -> _build_block_system,
+        # which skips _remove_floating_islands only when BOTH this is True
+        # AND the tile's own TileData.pre_cleaned_full is True.
+        'pre_cleaned_full_trusted': island_trust,
     }
 
     pkl_path = Path(bundle.pkl_dir)
@@ -650,6 +903,29 @@ def _create_distributed_model_from_bundle(
     # 5. Collect results
     (tile_boundary_nodes, tile_interior_counts,
      island_stats, tile_kept_nonlargest_iface) = _collect_setup_results(setup_results)
+    _merge_parent_removal_diagnostics(island_stats, bundle)
+
+    # 5b. Finding F10: enforce (not just assume) that the summaries
+    # structurally cover every (tile, interface-port) incidence, now that we
+    # have the worker-reported port sets for free (no extra round-trip).
+    # Only meaningful when trust was granted (workers actually skipped
+    # _remove_floating_islands based on it); if trust already resolved to
+    # 'schur_bfs' there's nothing to double-check.  On violation, workers
+    # already ran with removal skipped based on stale trust -- re-run setup
+    # with the trust flag OFF so _remove_floating_islands actually executes,
+    # and downgrade the model to the full legacy path end-to-end (never a
+    # mix of trusted-worker-state + legacy island detection).
+    if island_trust and not _verify_summary_structural_completeness(
+        bundle.component_summaries, interface_nodes, tile_boundary_nodes,
+    ):
+        island_trust = False
+        island_detection_mode = 'schur_bfs'
+        solver_settings['pre_cleaned_full_trusted'] = False
+        be.call_all(workers, 'configure', [(solver_settings,)] * len(workers))
+        setup_results = be.call_all(workers, 'setup_from_pkl', setup_args)
+        (tile_boundary_nodes, tile_interior_counts,
+         island_stats, tile_kept_nonlargest_iface) = _collect_setup_results(setup_results)
+        _merge_parent_removal_diagnostics(island_stats, bundle)
 
     # 6. Optional: pack multiple tile workers into one physical actor (LocalBackend)
     # For RayBackend this was already done above (tiles_per_worker set to None).
@@ -662,7 +938,7 @@ def _create_distributed_model_from_bundle(
     logger.info(
         f"Model created in {t_elapsed:.3f}s: {len(workers)} tile-worker handles, "
         f"{total_interior} interior nodes, {total_boundary} boundary entries, "
-        f"{len(interface_nodes)} interface nodes"
+        f"{len(interface_nodes)} interface nodes, island_detection={island_detection_mode}"
     )
 
     return DistributedPowerGridModel(
@@ -678,4 +954,6 @@ def _create_distributed_model_from_bundle(
         coordinator_solver_config=coordinator_solver_config,
         worker_solver_config=worker_solver_config,
         pkl_dir=bundle.pkl_dir,
+        island_detection_mode=island_detection_mode,
+        component_summaries=(bundle.component_summaries if island_trust else None),
     )
