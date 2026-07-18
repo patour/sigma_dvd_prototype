@@ -37,6 +37,7 @@ from analysis.adjoint_sensitivity import (
     AdjointAttribution,
     AggressorContribution,
 )
+from .interface_iterative import filter_kept_rhs
 from .result import (
     DistributedQuasiStaticResult,
     DistributedSolveResult,
@@ -632,6 +633,13 @@ class _AdjointMixin:
         for i, (g_i, stats) in enumerate(rhs_results):
             tid = tile_configs[i].tile_id
             idx_map = ctx.tile_index_maps[tid]
+            # S2/S13 (D1 follow-up): get_adjoint_terminal_reduced_rhs returns
+            # g_i in FULL port order (may include a tile-resident pad port);
+            # filter+validate before scattering (see solve_dc's identical fix).
+            g_i = filter_kept_rhs(
+                g_i, tid, idx_map, ctx.tile_kept_port_pos, ctx.tile_port_count,
+                caller='analyze_adjoint_static',
+            )
             # Scatter-add reduced RHS
             np.add.at(global_rhs, idx_map, g_i)
             victim_stats.append(stats)
@@ -1109,10 +1117,20 @@ class _AdjointMixin:
         n_interface = len(trans_ctx.interface_nodes)
         global_rhs = np.zeros(n_interface, dtype=np.float64)
 
-        # Scatter-add reduced RHS from each tile
+        # Scatter-add reduced RHS from each tile.
+        # S2/S13 (D1 follow-up): both get_adjoint_terminal_reduced_rhs and
+        # get_adjoint_step_reduced_rhs return g_i in FULL port order (may
+        # include a tile-resident pad port); filter+validate before
+        # scattering (see solve_dc's identical fix).
+        _kept_pos_map_adj = trans_ctx.tile_kept_port_pos
+        _port_count_map_adj = trans_ctx.tile_port_count
         for i, (g_i, _stats) in enumerate(tile_rhs_results):
             tid = tile_configs[i].tile_id
             idx_map = trans_ctx.tile_index_maps[tid]
+            g_i = filter_kept_rhs(
+                g_i, tid, idx_map, _kept_pos_map_adj, _port_count_map_adj,
+                caller='analyze_adjoint',
+            )
             np.add.at(global_rhs, idx_map, g_i)
 
         if lambda_p_old is None:

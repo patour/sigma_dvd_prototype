@@ -981,6 +981,25 @@ class TileWorker(_AdjointWorkerMixin, _TimeDomainMixin):
             'schur_mem_bytes': n_p * n_p * 8,
         }
 
+    def get_port_node_list(self) -> List[str]:
+        """Return this tile's port (boundary) node NAME list, no computation.
+
+        Stage 2 item 3 ("tilewise without ever assembling S_global"): the
+        coordinator needs every tile's port name list to compute the
+        interface node ordering (unknown vs. Dirichlet split) and Dirichlet
+        RHS BEFORE it gathers any per-tile Schur VALUES -- this lightweight
+        round-trip provides exactly that, without touching G_ii/factoring/
+        Schur computation.  ``self._block_system.port_nodes`` is already
+        built by ``setup()``/``setup_from_pkl()`` (island removal + block
+        assembly), so this is a free attribute read.
+        """
+        if self._block_system is None:
+            raise RuntimeError(
+                "get_port_node_list() called before setup(); no block "
+                "system built yet."
+            )
+        return list(self._block_system.port_nodes)
+
     def get_current_injections(self) -> Dict[str, float]:
         """Return per-tile current injection dict ``{node: mA}``."""
         if self._tile_data is None:

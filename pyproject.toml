@@ -13,6 +13,7 @@ dependencies = [
     "numpy",
     "scipy>=1.12",
     "psutil",
+    "threadpoolctl",
 ]
 
 [project.optional-dependencies]

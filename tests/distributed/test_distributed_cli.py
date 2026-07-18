@@ -304,6 +304,64 @@ class TestInterfaceCGPrecedence:
         args = _load_and_apply_config(args)
         assert args.interface_cg_atol == 1e-11
 
+    def test_stage2_settings_yaml_precedence(self, tmp_path):
+        """Stage 2 additions (matvec_threads, interface_matvec_dtype,
+        interface_strict_dtype_rtol, interface_drop_s_global) follow the
+        same explicit-CLI > YAML > built-in-default precedence as the
+        Stage 1 keys."""
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text(
+            "solver:\n"
+            "  matvec_threads: 16\n"
+            "  interface_matvec_dtype: float32\n"
+            "  interface_strict_dtype_rtol: false\n"
+            "  interface_drop_s_global: true\n"
+        )
+        parser = build_parser()
+        # matvec_threads left unset on CLI -> picks up YAML.
+        # interface_matvec_dtype explicit on CLI -> beats YAML.
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+            '--interface-matvec-dtype', 'float64',
+        ])
+        args = _load_and_apply_config(args)
+        assert int(args.matvec_threads) == 16
+        assert args.interface_matvec_dtype == 'float64'
+        assert args.interface_strict_dtype_rtol is False
+        assert args.interface_drop_s_global is True
+
+    def test_interface_no_drop_s_global_overrides_yaml_true(self, tmp_path):
+        """Finding 10: --interface-no-drop-s-global must produce an
+        explicit False that beats a YAML interface_drop_s_global: true --
+        pre-fix, no CLI flag could express False for this key at all, so
+        explicit-CLI > YAML precedence was unexpressable in that direction
+        (unlike every other paired boolean flag in this group, e.g.
+        --interface-cg-strict/--interface-cg-no-strict)."""
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text(
+            "solver:\n"
+            "  interface_drop_s_global: true\n"
+        )
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+            '--interface-no-drop-s-global',
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_drop_s_global is False
+
+    def test_interface_no_drop_s_global_parses_to_false(self):
+        """Sanity: the negation flag alone (no YAML) parses to False."""
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--interface-no-drop-s-global',
+        ])
+        assert args.interface_drop_s_global is False
+
     def test_nothing_set_yields_builtin_default(self):
         """Neither CLI nor YAML set -> the built-in default is used."""
         from distributed.cli import build_parser, _load_and_apply_config
@@ -312,7 +370,9 @@ class TestInterfaceCGPrecedence:
         args = parser.parse_args(['solve', '/tmp/pkl'])
         args = _load_and_apply_config(args)
         assert args.interface_solver == 'auto'
-        assert args.interface_matvec_mode == 'assembled'
+        # Stage 2 item 8: default changed 'assembled' -> 'auto' (tilewise
+        # whenever per-tile Schur blocks are available).
+        assert args.interface_matvec_mode == 'auto'
         assert args.interface_preconditioner == 'block_jacobi'
         assert args.interface_cg_rtol == 1e-8
         assert args.interface_cg_atol == 1e-14
@@ -320,6 +380,11 @@ class TestInterfaceCGPrecedence:
         assert args.interface_cg_strict is True
         assert args.interface_factor_memory_budget == 'auto'
         assert args.interface_block_jacobi_max_bytes == 'auto'
+        # Stage 2 additions
+        assert args.matvec_threads == 'auto'
+        assert args.interface_matvec_dtype == 'float64'
+        assert args.interface_strict_dtype_rtol is True
+        assert args.interface_drop_s_global is False
 
 
 class TestDecomposeParser:
@@ -647,7 +712,7 @@ class TestDecomposeDispatch:
             # since `args` carries no interface_* attributes).
             interface_settings={
                 'interface_solver': 'auto',
-                'interface_matvec_mode': 'assembled',
+                'interface_matvec_mode': 'auto',
                 'interface_preconditioner': 'block_jacobi',
                 'interface_cg_rtol': 1e-8,
                 'interface_cg_atol': 1e-14,
@@ -655,6 +720,10 @@ class TestDecomposeDispatch:
                 'interface_cg_strict': True,
                 'interface_factor_memory_budget': 'auto',
                 'interface_block_jacobi_max_bytes': 'auto',
+                'matvec_threads': 'auto',
+                'interface_matvec_dtype': 'float64',
+                'interface_strict_dtype_rtol': True,
+                'interface_drop_s_global': False,
             },
             island_detection='auto',
         )

@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
+from .interface_iterative import filter_kept_rhs
 from .result import (
     DistributedQuasiStaticResult,
     DistributedSmoothedSources,
@@ -340,8 +341,15 @@ class _SolverTimeDomainMixin:
         # tile_index_maps[tid][j] = global interface idx for local port j.
         # This is the SCATTER index (interface nodes only, excludes pads) and
         # is correct for np.bincount. It is NOT used as the gather index.
-        tile_idx_maps_qs = [ctx.tile_index_maps[tc.tile_id] for tc in tile_configs]
+        tile_ids_qs = [tc.tile_id for tc in tile_configs]
+        tile_idx_maps_qs = [ctx.tile_index_maps[tid] for tid in tile_ids_qs]
         all_idx_qs = np.concatenate(tile_idx_maps_qs)
+        # S2/S13: cache the D1 kept-position maps once (not per step) --
+        # see filter_kept_rhs's docstring for why the pad-on-port scatter
+        # needs BOTH tile_kept_port_pos AND tile_port_count, not just a
+        # length check against idx_map.
+        _kept_pos_map_qs = ctx.tile_kept_port_pos
+        _port_count_map_qs = ctx.tile_port_count
 
         # Pre-loop: per-tile port-gather arrays + pad mask for boundary voltage
         # exchange. _precompute_port_gathers yields port_gather[j] = global
@@ -389,7 +397,18 @@ class _SolverTimeDomainMixin:
             step_total_current = 0.0
             step_eval_times: List[float] = []
             all_g_list_qs: List[np.ndarray] = []
-            for g_i, tile_current, tile_rhs_stats in rhs_results:
+            for tid, (g_i, tile_current, tile_rhs_stats) in zip(tile_ids_qs, rhs_results):
+                # S2/S13 (D1 follow-up): evaluate_and_get_reduced_rhs returns
+                # g_i in FULL port order (may include a tile-resident pad
+                # port); tile_idx_maps_qs[i] (and hence all_idx_qs) is
+                # pad-FILTERED.  Filter+validate before concatenating so a
+                # pad-on-tile-port model doesn't crash bincount (or, worse,
+                # silently misalign) -- see solve_dc's identical fix.
+                g_i = filter_kept_rhs(
+                    g_i, tid, ctx.tile_index_maps[tid],
+                    _kept_pos_map_qs, _port_count_map_qs,
+                    caller='solve_quasi_static',
+                )
                 all_g_list_qs.append(g_i)
                 step_total_current += tile_current
                 step_eval_times.append(
@@ -716,9 +735,19 @@ class _SolverTimeDomainMixin:
             dc_tile_idx_maps_ic = [
                 dc_ctx.tile_index_maps[tc.tile_id] for tc in tile_configs
             ]
-            all_g_dc_ic = np.concatenate(
-                [g_i for g_i, _cur, _stats in rhs_results]
-            )
+            # S2/S13 (D1 follow-up): g_i is FULL port order; filter+validate
+            # against dc_ctx's own kept-position maps before concatenating
+            # (see solve_dc's identical fix).
+            _dc_kept_pos_ic = dc_ctx.tile_kept_port_pos
+            _dc_port_count_ic = dc_ctx.tile_port_count
+            all_g_dc_ic = np.concatenate([
+                filter_kept_rhs(
+                    g_i, tc.tile_id, dc_ctx.tile_index_maps[tc.tile_id],
+                    _dc_kept_pos_ic, _dc_port_count_ic,
+                    caller='solve_transient(dc_initial_condition)',
+                )
+                for tc, (g_i, _cur, _stats) in zip(tile_configs, rhs_results)
+            ])
             global_rhs_init = np.bincount(
                 np.concatenate(dc_tile_idx_maps_ic),
                 weights=all_g_dc_ic,
@@ -760,10 +789,14 @@ class _SolverTimeDomainMixin:
         # tile_index_maps[tid][j] = global interface idx for local port j.
         # This is the SCATTER index (interface nodes only, excludes pads) and
         # is correct for np.bincount. It is NOT used as the gather index.
+        tile_ids_trans = [tc.tile_id for tc in tile_configs]
         tile_idx_maps_trans = [
-            trans_ctx.tile_index_maps[tc.tile_id] for tc in tile_configs
+            trans_ctx.tile_index_maps[tid] for tid in tile_ids_trans
         ]
         all_idx_trans = np.concatenate(tile_idx_maps_trans)
+        # S2/S13: cache the D1 kept-position maps once (not per step).
+        _kept_pos_map_trans = trans_ctx.tile_kept_port_pos
+        _port_count_map_trans = trans_ctx.tile_port_count
 
         # Pre-loop: per-tile port-gather arrays + pad mask for boundary voltage
         # exchange. Tiles whose port list includes pad/Dirichlet nodes must
@@ -857,7 +890,15 @@ class _SolverTimeDomainMixin:
             step_total_current = 0.0
             step_rhs_times: List[float] = []
             all_g_list_trans: List[np.ndarray] = []
-            for g_i, tile_current, tile_rhs_stats in rhs_results:
+            for tid, (g_i, tile_current, tile_rhs_stats) in zip(tile_ids_trans, rhs_results):
+                # S2/S13 (D1 follow-up): get_transient_reduced_rhs_arr
+                # returns g in FULL port order; filter+validate before
+                # concatenating (see solve_dc's identical fix).
+                g_i = filter_kept_rhs(
+                    g_i, tid, trans_ctx.tile_index_maps[tid],
+                    _kept_pos_map_trans, _port_count_map_trans,
+                    caller='solve_transient',
+                )
                 all_g_list_trans.append(g_i)
                 step_total_current += tile_current
                 step_rhs_times.append(
@@ -882,6 +923,18 @@ class _SolverTimeDomainMixin:
                 global_rhs += 2.0 * rhs_d_G
             else:
                 global_rhs += rhs_d_G
+
+            # T1 fix: island-penalty RHS is a SEPARATE vector (penalty*vdd
+            # at penalized interface-island rows), added exactly ONCE per
+            # step for BOTH BE and TR -- NOT folded into rhs_d_G above,
+            # which TR already scales by 2 (that would double-count the
+            # penalty forcing term under TR). Without this, penalized
+            # island rows carry the 1e5 mS penalty on the diagonal with no
+            # matching RHS term and decay from Vdd toward 0 within a few
+            # steps. See result_factorization.py's island detection block
+            # in _factor_transient_context for where this is built.
+            if trans_ctx.island_penalty_rhs is not None:
+                global_rhs += trans_ctx.island_penalty_rhs
 
             # Package capacitance history term: C_coeff * C_pkg_uu @ v_old
             if trans_ctx.C_package_uu is not None:

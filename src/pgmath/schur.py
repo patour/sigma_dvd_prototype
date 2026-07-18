@@ -417,6 +417,24 @@ def compute_explicit_schur(
         S = block_system.G_pp.toarray()
         return S, {'path': 'trivial', 'schur_mem_bytes': S.nbytes}
 
+    if n_ports == 0:
+        # Degenerate tile: no interface at all (e.g. every boundary node was
+        # pruned by island detection, or the tile's only boundary is a
+        # tile-resident Dirichlet pad which is not a "port").  The Schur
+        # complement is trivially empty, but interior recovery still needs a
+        # factored G_ii -- set lu_ii as a side effect (mirrors what the
+        # partial/chunked paths below would otherwise have done), then
+        # return early.  Skipping straight to _compute_schur_partial here
+        # would hit the sp.bmat() dimension mismatch fixed in
+        # pgmath/block_system.py (item 11); the chunked/splu path below would
+        # divide by a zero chunk_size (n_ports appears in a min(...) chain
+        # feeding an integer division).  Neither path is reachable for a
+        # genuinely port-less tile, so short-circuit here instead.
+        if block_system.lu_ii is None:
+            block_system.factor_interior()
+        S = np.zeros((0, 0), dtype=np.float64)
+        return S, {'path': 'trivial_zero_port', 'schur_mem_bytes': 0}
+
     use_partial = (HAS_CHOLMOD and get_use_cholmod() is not False)
 
     if use_partial:
@@ -470,6 +488,57 @@ def compute_explicit_schur(
 # assemble_schur_complement_system  (from solver/interface_assembly.py)
 # ---------------------------------------------------------------------------
 
+def compute_interface_node_split(
+    tile_port_node_lists: Dict[Any, List[str]],
+    extra_edges: Optional[List[Tuple[str, str, float]]],
+    dirichlet_nodes: Optional[Set[str]],
+    ground_node: str = '0',
+) -> Tuple[Set[str], Set[str], Set[str]]:
+    """Finding 14: shared unknown/Dirichlet node-universe split.
+
+    Extracted so :func:`assemble_schur_complement_system`'s Step 1 below and
+    ``distributed.result_factorization._compute_interface_ordering`` (the
+    "never assemble S_global" factor path's port-name-lists-only ordering
+    pre-pass) compute this split from a SINGLE implementation instead of
+    two independently-maintained copies. The never-assemble path's docstring
+    promises its ordering is "IDENTICAL to what the normal path would
+    produce" -- previously that guarantee held only by manual mirroring
+    (same set-union, same ground-node filter, same set-difference); a future
+    edit to one copy (e.g. a new node filter) could silently diverge from
+    the other, corrupting the never-assemble path's ``interface_node_to_idx``
+    with no error (tile index maps built against one ordering scattered
+    against the other).
+
+    Args:
+        tile_port_node_lists: Per-tile boundary node lists.
+        extra_edges: Package conductance edges ``(u, v, g_mS)``.
+        dirichlet_nodes: Voltage-source (pad) node names.
+        ground_node: Ground reference node name.
+
+    Returns:
+        ``(all_interface_nodes, dirichlet_set, unknown_nodes)`` -- all sets;
+        callers sort into deterministic lists themselves (they differ on
+        whether/how a Dirichlet-ordered tail is needed).
+    """
+    if dirichlet_nodes is None:
+        dirichlet_nodes = set()
+
+    all_interface_nodes: Set[str] = set()
+    for node_list in tile_port_node_lists.values():
+        all_interface_nodes.update(node_list)
+
+    if extra_edges:
+        for u, v, g in extra_edges:
+            if u != ground_node:
+                all_interface_nodes.add(u)
+            if v != ground_node:
+                all_interface_nodes.add(v)
+
+    dirichlet_set = dirichlet_nodes & all_interface_nodes
+    unknown_nodes = all_interface_nodes - dirichlet_set
+    return all_interface_nodes, dirichlet_set, unknown_nodes
+
+
 def assemble_schur_complement_system(
     tile_schur_complements: Dict[Any, np.ndarray],
     tile_port_node_lists: Dict[Any, List[str]],
@@ -507,22 +576,11 @@ def assemble_schur_complement_system(
             between DC and transient).  A shape mismatch on any tile forces a
             full rebuild and silently invalidates the cache.
     """
-    if dirichlet_nodes is None:
-        dirichlet_nodes = set()
-
-    all_interface_nodes: Set[str] = set()
-    for tile_id, node_list in tile_port_node_lists.items():
-        all_interface_nodes.update(node_list)
-
-    if extra_edges:
-        for u, v, g in extra_edges:
-            if u != ground_node:
-                all_interface_nodes.add(u)
-            if v != ground_node:
-                all_interface_nodes.add(v)
-
-    dirichlet_set = dirichlet_nodes & all_interface_nodes
-    unknown_nodes = all_interface_nodes - dirichlet_set
+    # Finding 14: shared unknown/Dirichlet node-universe split (see
+    # compute_interface_node_split's docstring).
+    all_interface_nodes, dirichlet_set, unknown_nodes = compute_interface_node_split(
+        tile_port_node_lists, extra_edges, dirichlet_nodes, ground_node,
+    )
 
     # --- A4: Check whether we can reuse cached node index maps ---------------
     # The cache stores full_node_to_idx + per-tile local_to_global arrays.

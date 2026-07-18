@@ -245,9 +245,19 @@ def extract_block_matrices(
     d_idx = np.arange(n_unknown, len(all_nodes))
     u_idx = np.arange(n_unknown)
 
+    # Zero-port / zero-interior degenerate shapes: always use the
+    # mathematically-correct (n_ports, n_interior) / (n_interior, n_ports)
+    # shape for the empty fallback, NOT (0, 0) or (n_ports, 0) collapsed on
+    # the wrong axis.  Previously, when n_ports == 0 and n_interior > 0, the
+    # G_pi/G_ip fallbacks produced (0, 0) instead of (0, n_interior) /
+    # (n_interior, 0), which made downstream sp.bmat([[G_ii, G_ip], [G_pi,
+    # G_pp]]) in _compute_schur_partial raise a block-dimension mismatch
+    # (item 11, Stage 2 "zero-port latent fix" -- flagged in Stage 1e for a
+    # tile whose entire boundary was pruned by island detection or is
+    # Dirichlet-only).
     G_pp = G_full[np.ix_(p_idx, p_idx)].tocsr() if n_ports > 0 else sp.csr_matrix((0, 0))
-    G_pi = G_full[np.ix_(p_idx, i_idx)].tocsr() if n_ports > 0 and n_interior > 0 else sp.csr_matrix((n_ports, 0))
-    G_ip = G_full[np.ix_(i_idx, p_idx)].tocsr() if n_interior > 0 and n_ports > 0 else sp.csr_matrix((0, n_ports))
+    G_pi = G_full[np.ix_(p_idx, i_idx)].tocsr() if n_ports > 0 and n_interior > 0 else sp.csr_matrix((n_ports, n_interior))
+    G_ip = G_full[np.ix_(i_idx, p_idx)].tocsr() if n_interior > 0 and n_ports > 0 else sp.csr_matrix((n_interior, n_ports))
     G_ii = G_full[np.ix_(i_idx, i_idx)].tocsr() if n_interior > 0 else sp.csr_matrix((0, 0))
 
     if n_dirichlet > 0:
@@ -391,9 +401,14 @@ def build_block_system_from_edges(
     d_idx = np.arange(n_unknown, n_total)
     u_idx = np.arange(n_unknown)
 
+    # See the matching comment in extract_block_matrices(): the empty-block
+    # fallback shape must always be (n_ports, n_interior) / (n_interior,
+    # n_ports), never collapsed to (0, 0), or sp.bmat() in
+    # _compute_schur_partial raises a block-dimension mismatch for a
+    # zero-port tile (item 11, Stage 2 "zero-port latent fix").
     G_pp = G_full[np.ix_(p_idx, p_idx)].tocsr() if n_ports > 0 else sp.csr_matrix((0, 0))
-    G_pi = G_full[np.ix_(p_idx, i_idx)].tocsr() if n_ports > 0 and n_interior > 0 else sp.csr_matrix((n_ports, 0))
-    G_ip = G_full[np.ix_(i_idx, p_idx)].tocsr() if n_interior > 0 and n_ports > 0 else sp.csr_matrix((0, n_ports))
+    G_pi = G_full[np.ix_(p_idx, i_idx)].tocsr() if n_ports > 0 and n_interior > 0 else sp.csr_matrix((n_ports, n_interior))
+    G_ip = G_full[np.ix_(i_idx, p_idx)].tocsr() if n_interior > 0 and n_ports > 0 else sp.csr_matrix((n_interior, n_ports))
     G_ii = G_full[np.ix_(i_idx, i_idx)].tocsr() if n_interior > 0 else sp.csr_matrix((0, 0))
 
     if n_dirichlet > 0:

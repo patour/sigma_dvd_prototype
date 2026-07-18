@@ -108,6 +108,15 @@ class DistributedPowerGridModel:
     #       (default 'auto' = min(32 GB, 0.4 * total RAM) via psutil)
     #   'interface_block_jacobi_max_bytes': 'auto' | int bytes
     #       (default 'auto' = min(8 GB, 0.1 * total RAM) via psutil)
+    #   'interface_drop_s_global': bool (default False) -- opt-in "never
+    #       assemble S_global" factor path (item 3). Requires explicit
+    #       interface_solver='cg', interface_matvec_mode in
+    #       ('tilewise', 'auto'), and summaries-based island detection;
+    #       falls back to the normal S_global-assembling path with a WARNING
+    #       when preconditions aren't met. Stage 2 scope: DC-only
+    #       (_factor_dc_context). Transient factor (_factor_transient_context)
+    #       always assembles S_global normally and emits a WARNING if this is
+    #       set True -- TD never-assemble lands in a later stage.
     # These affect only the coordinator; they are NOT propagated to workers
     # (Ray module-globals do not propagate -- see CLAUDE.md pitfalls).
     settings: Dict[str, Any] = field(default_factory=dict, repr=False)

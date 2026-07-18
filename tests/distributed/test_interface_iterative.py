@@ -1122,6 +1122,55 @@ class TestCGSaveLoadRefactor:
                 f"Node {k}: before={v_before[k]:.8f}, after={v_after[k]:.8f}"
             )
 
+    def test_save_load_refactor_cg_tilewise_fp32_still_works(self, tmp_path):
+        """Finding 3 regression: refactor() re-gathers tile_schur_complements
+        fresh from workers via _gather_kept_tile_schur_streaming (a brand
+        new dict each call) rather than reading any retained state on the
+        InterfaceCGSolver instance, so freeing the fp64 originals in place
+        inside one InterfaceCGSolver's __init__ (Finding 3's fix) cannot
+        leave a later refactor() with stale/missing fp64 data. This
+        exercises that re-gather path end-to-end with
+        interface_matvec_dtype='float32'.
+        """
+        from distributed.solver import DistributedDDMSolver
+
+        model = _build_dc_model(
+            interface_solver='cg', interface_cg_rtol=1e-6,
+            interface_preconditioner='block_jacobi',
+            interface_matvec_mode='tilewise',
+            interface_matvec_dtype='float32',
+        )
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare()
+        assert ctx._cg_solver is not None
+        assert ctx._cg_solver.matvec_dtype == np.dtype(np.float32)
+        v_before = solver.solve_dc(ctx).flatten()
+
+        path = str(tmp_path / 'dc_ctx_cg_bj_fp32.pkl')
+        ctx.save(path)
+        ctx.release()
+
+        ctx2 = type(ctx).load(model, path)
+        ctx2.refactor()
+        model.backend.call_all(model.workers, 'factor_and_compute_schur')
+
+        assert ctx2._cg_solver is not None
+        assert ctx2._cg_solver.matvec_dtype == np.dtype(np.float32)
+        assert ctx2._cg_solver._M is not None, (
+            "refactor() must still rebuild the block_jacobi preconditioner "
+            "with fp32 tilewise storage"
+        )
+
+        v_after = solver.solve_dc(ctx2).flatten()
+        ctx2.release()
+
+        common = set(v_before) & set(v_after)
+        assert common, "No shared nodes to compare"
+        for k in common:
+            assert abs(v_before[k] - v_after[k]) <= 1e-6, (
+                f"Node {k}: before={v_before[k]:.8f}, after={v_after[k]:.8f}"
+            )
+
     def test_save_load_refactor_transient_cg_block_jacobi_rebuilds_preconditioner(
         self, tmp_path,
     ):
@@ -1970,24 +2019,7 @@ class TestForcedCGEquivalence:
     the exact D1 scenario (interface_solve_acceleration_plan.md).
     """
 
-    @pytest.mark.parametrize('matvec_mode', [
-        'assembled',
-        pytest.param(
-            'tilewise',
-            marks=pytest.mark.xfail(
-                reason=(
-                    "D1 defect (interface_solve_acceleration_plan.md): "
-                    "tilewise matvec pairs the filtered (pad-excluded) "
-                    "tile_index_map with the FULL per-tile S_i (which "
-                    "includes pad ports) -> dimension mismatch for any tile "
-                    "with a Dirichlet pad directly on its port list (tile A "
-                    "of _build_two_tile_distributed_model). Fixed in Stage 2 "
-                    "via kept-position slicing (S_i[np.ix_(pos, pos)])."
-                ),
-                strict=False,
-            ),
-        ),
-    ])
+    @pytest.mark.parametrize('matvec_mode', ['assembled', 'tilewise'])
     def test_cg_dc_matches_direct_on_pad_on_port_fixture(self, matvec_mode):
         """Interface-solve level: CG (block_jacobi, pinned rtol=1e-12) vs
         direct on the assembled S_global from the pad-on-tile-port fixture.
@@ -2016,21 +2048,17 @@ class TestForcedCGEquivalence:
             try:
                 ctx = solver.prepare()
             except Exception:
-                # D1 (tilewise, xfail param) can raise here -- shut the
-                # model down before propagating so it never leaks even
-                # when the caller's ctx variable is never assigned.
+                # Defensive: shut the model down before propagating so it
+                # never leaks even if construction raises for an unrelated
+                # reason and the caller's ctx variable is never assigned.
                 model.shutdown()
                 raise
             return ctx, model
 
-        # Finding 15: on the tilewise xfail param, the D1 dimension
-        # mismatch can raise either inside _build_ctx('cg') (handled above)
-        # or at ctx_cg._cg_solver(rhs) below.  Without try/finally, either
-        # path would skip release()/shutdown() for whichever context(s) DID
-        # build successfully (e.g. ctx_direct always succeeds), leaking
-        # factored tile workers and coordinator factors for the rest of the
-        # pytest session.  Every run exercises this xfail param, so the
-        # leak was unconditional, not a rare edge case.
+        # Finding 15 (defensive, retained post-D1-fix): without try/finally,
+        # a raise anywhere in this block would skip release()/shutdown() for
+        # whichever context(s) DID build successfully, leaking factored tile
+        # workers and coordinator factors for the rest of the pytest session.
         ctx_direct = model_direct = None
         ctx_cg = model_cg = None
         try:

@@ -21,6 +21,7 @@ from .result import (
     DistributedSolverContext,
     TileSolveResult,
 )
+from .interface_iterative import filter_kept_rhs
 from .solver_adjoint import _AdjointMixin
 from .solver_td import _SolverTimeDomainMixin
 
@@ -135,10 +136,19 @@ class DistributedDDMSolver(_AdjointMixin, _SolverTimeDomainMixin):
         for i, (g_i, rhs_stats) in enumerate(rhs_results):
             tid = model.metadata.tile_configs[i].tile_id
             idx_map = ctx.tile_index_maps[tid]
-            # g_i has shape (n_ports,) from compute_reduced_rhs
-            assert len(g_i) == len(idx_map), (
-                f"Tile {tid}: reduced RHS length {len(g_i)} != "
-                f"index map length {len(idx_map)}"
+            # g_i has shape (n_ports,) from compute_reduced_rhs -- FULL port
+            # order (may include a Dirichlet/pad port directly on this
+            # tile's own port list), while idx_map is pad-FILTERED (D1,
+            # interface_solve_acceleration_plan.md).  Filter g_i down to the
+            # same kept positions via the shared, VALIDATING helper (S2/S13
+            # -- see filter_kept_rhs's docstring for why the validation
+            # against tile_port_count matters, not just a length-matches-
+            # kept_pos check); tiles without a tile-resident pad port
+            # already satisfy len(g_i) == len(idx_map) and take the
+            # zero-cost fast path unchanged.
+            g_i = filter_kept_rhs(
+                g_i, tid, idx_map, ctx.tile_kept_port_pos, ctx.tile_port_count,
+                caller='solve_dc',
             )
             # Vectorized scatter-add
             np.add.at(global_rhs, idx_map, g_i)

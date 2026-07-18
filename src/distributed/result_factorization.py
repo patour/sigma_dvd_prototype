@@ -20,13 +20,14 @@ The setting is read from ``model.settings.get('interface_solver', 'auto')``
 (same dict plumbed via TileWorker.configure / YAML / CLI ``--interface-solver``).
 If the model has no settings dict, the default is 'auto'.
 
-Adjoint note (v1)
------------------
-analyze_adjoint* uses ctx._interface_lu.  CG mode is compatible for DC
-adjoint because CG provides the same solve-callable interface.  Tilewise
-CG adjoint would need per-tile S_i blocks at adjoint time; that is not
-implemented in v1 -- the assembled CG mode works fine.  The context stores
-``_interface_solver_mode`` so the adjoint code can check if needed.
+Adjoint note
+------------
+``solver_adjoint.py``'s adjoint solves call ``ctx.interface_lu(global_rhs)``
+generically, with no mode check -- see the "Adjoint note" in
+``interface_iterative.py``'s module docstring for the full explanation. This
+works in direct, CG/assembled, AND CG/tilewise mode: the D1/D2 fixes make
+tilewise CG's matvec exactly correct, so there is no unsupported case to
+force to direct here.
 
 Streaming assembly (B3) vs CG tilewise matvec: non-composition
 ---------------------------------------------------------------
@@ -66,6 +67,7 @@ from __future__ import annotations
 import logging
 import os
 import pickle
+from dataclasses import dataclass
 import time as _time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
@@ -117,6 +119,138 @@ def _get_interface_solver_setting(model: Optional[Any]) -> str:
     return settings.get('interface_solver', 'auto')
 
 
+def _close_existing_cg_solver(ctx: Any) -> None:
+    """Finding 6: close() the OUTGOING InterfaceCGSolver's persistent thread
+    pool (and, in never-assemble mode, its retained per-tile Schur block
+    dict) before replacing ``ctx._cg_solver``.
+
+    The S12 lifecycle-parity fix added this close-before-replace step to
+    ``release()`` and both ``refactor()`` sites, but not to the three
+    ``factor()`` sites (``_factor_dc_context_no_s_global``,
+    ``_factor_dc_context``, ``_factor_transient_context``). A session that
+    calls ``ctx.factor()`` again on an already-factored context (no
+    ``release()`` in between -- e.g. after changing ``model.settings`` CG
+    tolerances) previously dropped the old ``InterfaceCGSolver`` into a
+    reference cycle (solver -> LinearOperator -> bound matvec/apply
+    closures -> solver), reclaimed only by an eventual cyclic-GC pass
+    (the ``weakref.finalize`` safety net, not guaranteed timing) -- keeping
+    the outgoing solver's thread pool and full ``tile_schur_complements``
+    dict alive in the meantime, doubling coordinator memory per repeated
+    ``factor()`` call.
+    """
+    _old_cg_solver = getattr(ctx, '_cg_solver', None)
+    if _old_cg_solver is not None:
+        _close = getattr(_old_cg_solver, 'close', None)
+        if callable(_close):
+            _close()
+
+
+@dataclass(frozen=True)
+class _InterfaceCgSettings:
+    """Finding 13: bundle of the ~9-key interface-CG settings block, read
+    from ``model.settings`` the same way at every call site.
+
+    See :func:`_read_interface_cg_settings`.
+    """
+
+    preconditioner: str
+    cg_rtol: float
+    cg_atol: float
+    cg_maxiter: Optional[int]
+    cg_strict: bool
+    bj_max_bytes: int
+    matvec_threads: Any
+    matvec_dtype: Any
+    strict_dtype_rtol: bool
+
+
+def _read_interface_cg_settings(model: Optional[Any]) -> '_InterfaceCgSettings':
+    """Finding 13: single source of truth for the interface-CG settings
+    block previously duplicated (with slight, drift-prone variations) at
+    five call sites: ``_factor_dc_context_no_s_global``,
+    ``_factor_dc_context``, ``_refactor_dc_context``,
+    ``_factor_transient_context``, ``_refactor_transient_context``. Each
+    site independently read/coerced ``interface_preconditioner``,
+    ``interface_cg_rtol``, ``interface_cg_atol``, ``interface_cg_maxiter``,
+    ``interface_cg_strict``, ``interface_block_jacobi_max_bytes``,
+    ``matvec_threads``, ``interface_matvec_dtype``, and
+    ``interface_strict_dtype_rtol`` -- adding a new setting (as this diff's
+    own Stage 2 additions did) meant touching all five, and missing one
+    would silently give that path a stale default.
+
+    Deliberately does NOT include ``interface_matvec_mode`` or
+    ``interface_factor_memory_budget`` -- those are read at different
+    points (or, for ``interface_matvec_mode``, not at all) by different
+    call sites: the never-assemble DC factor path forces tilewise
+    unconditionally and never reads ``interface_matvec_mode``, so folding
+    it in here would misrepresent which sites actually consume it.
+
+    Args:
+        model: The ``DistributedPowerGridModel`` (or ``None`` -- every
+            built-in default is returned in that case, matching every call
+            site's own None-model fallback).
+
+    Returns:
+        An :class:`_InterfaceCgSettings` with every field resolved to its
+        documented default when unset.
+    """
+    from .interface_iterative import resolve_block_jacobi_max_bytes
+
+    _settings = getattr(model, 'settings', None) if model is not None else None
+    _settings = _settings or {}
+    _cg_maxiter_raw = _settings.get('interface_cg_maxiter', None)
+    return _InterfaceCgSettings(
+        preconditioner=_settings.get('interface_preconditioner', 'block_jacobi'),
+        cg_rtol=float(_settings.get('interface_cg_rtol', 1e-8)),
+        cg_atol=float(_settings.get('interface_cg_atol', 1e-14)),
+        cg_maxiter=(
+            None if _cg_maxiter_raw is None
+            else _coerce_int(_cg_maxiter_raw, 'interface_cg_maxiter')
+        ),
+        cg_strict=_coerce_bool(
+            _settings.get('interface_cg_strict', True), 'interface_cg_strict',
+        ),
+        bj_max_bytes=resolve_block_jacobi_max_bytes(
+            _settings.get('interface_block_jacobi_max_bytes', 'auto')
+        ),
+        matvec_threads=_settings.get('matvec_threads', 'auto'),
+        matvec_dtype=_settings.get('interface_matvec_dtype', 'float64'),
+        strict_dtype_rtol=_coerce_bool(
+            _settings.get('interface_strict_dtype_rtol', True),
+            'interface_strict_dtype_rtol',
+        ),
+    )
+
+
+def _check_summaries_mixed_state(model: Any) -> None:
+    """Finding R6 guard: raise on the forbidden 'summaries' mixed state.
+
+    Factored out of :func:`_detect_islands_dispatch` (S6) so the "never
+    assemble S_global" factor path (:func:`_factor_dc_context_no_s_global`,
+    item 3) -- which cannot route through the full dispatch because it has
+    no ``S_global`` to hand to the Schur-BFS branch / ``apply_island_
+    penalty`` -- still gets the SAME guard instead of calling
+    ``detect_interface_islands_from_summaries`` directly and silently
+    islanding the whole interface on a corrupted model.
+
+    See :func:`_detect_islands_dispatch`'s docstring for the full rationale.
+    """
+    _mode = getattr(model, 'island_detection_mode', 'schur_bfs')
+    _summaries = getattr(model, 'component_summaries', None)
+    if _mode == 'summaries' and _summaries is None:
+        raise ValueError(
+            "_detect_islands_dispatch: forbidden mixed state -- "
+            "model.island_detection_mode == 'summaries' but "
+            "model.component_summaries is None. These two fields must only "
+            "ever be set together by model._resolve_island_detection; this "
+            "indicates a corrupted or hand-constructed DistributedPowerGridModel, "
+            "or a serialization path that dropped the non-repr summaries "
+            "field. Refusing to silently degrade to the legacy Schur-BFS "
+            "path (which would lose the tile-resident-pad rescue and could "
+            "produce silently wrong voltages)."
+        )
+
+
 def _detect_islands_dispatch(
     model: Optional[Any],
     S_global: sp.csr_matrix,
@@ -149,30 +283,10 @@ def _detect_islands_dispatch(
     _mode = getattr(model, 'island_detection_mode', 'schur_bfs')
     _summaries = getattr(model, 'component_summaries', None)
 
-    # Finding R6: island_detection_mode == 'summaries' with
-    # component_summaries is None is a FORBIDDEN mixed state -- mode
-    # resolution in model._resolve_island_detection is the only legitimate
-    # place these two fields are set, and it always sets them together
-    # (summaries iff mode == 'summaries').  Because DistributedPowerGridModel
-    # is a plain dataclass, the two fields can go out of sync via direct
-    # construction, field mutation, or a future serialization path that
-    # drops the non-repr summaries field.  Silently degrading to the legacy
-    # Schur-BFS here (the prior behaviour) would lose the tile-resident-pad
-    # rescue and produce silently wrong voltages -- exactly the bug the
-    # summaries path exists to fix -- with no warning that anything is
-    # amiss.  Raise loudly instead.
-    if _mode == 'summaries' and _summaries is None:
-        raise ValueError(
-            "_detect_islands_dispatch: forbidden mixed state -- "
-            "model.island_detection_mode == 'summaries' but "
-            "model.component_summaries is None. These two fields must only "
-            "ever be set together by model._resolve_island_detection; this "
-            "indicates a corrupted or hand-constructed DistributedPowerGridModel, "
-            "or a serialization path that dropped the non-repr summaries "
-            "field. Refusing to silently degrade to the legacy Schur-BFS "
-            "path (which would lose the tile-resident-pad rescue and could "
-            "produce silently wrong voltages)."
-        )
+    # Finding R6 (factored into _check_summaries_mixed_state, S6): raise
+    # loudly on the forbidden 'summaries' mixed state instead of silently
+    # degrading to the legacy Schur-BFS path.
+    _check_summaries_mixed_state(model)
 
     if _mode == 'summaries' and _summaries is not None:
         from pgmath.schur import apply_island_penalty, detect_interface_islands_from_summaries
@@ -260,8 +374,13 @@ def _coerce_int(value: Any, setting_name: str) -> int:
             f"a valid integer value."
         )
     try:
+        # Finding 8 (same root cause as interface_iterative.py's memory-
+        # budget/matvec_threads coercers): a '.inf' value (PyYAML parses to
+        # float('inf')) makes int(float(...)) raise OverflowError, not
+        # TypeError/ValueError -- must be caught here too, e.g. for
+        # 'interface_cg_maxiter: .inf'.
         return int(float(value))
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(
             f"Invalid integer setting {setting_name}={value!r}: expected an "
             f"integer (or numeric string)."
@@ -452,55 +571,321 @@ def _compute_rhs_dirichlet_from_edges(
     return rhs
 
 
-def _build_s_extra_coo(
-    S_global_csr: sp.csr_matrix,
-    tile_schur_complements: Dict[Any, np.ndarray],
-    tile_index_maps: Dict[Any, np.ndarray],
-    n_iface: int,
-) -> sp.csr_matrix:
-    """Vectorized S_extra = S_global - sum_i P_i^T S_i P_i (B2 follow-up).
+def _compute_interface_ordering(
+    tile_port_node_lists: Dict[Any, List[str]],
+    extra_edges: Optional[List[Tuple[str, str, float]]],
+    dirichlet_nodes: Optional[Set[str]],
+    dirichlet_voltage: float,
+    ground_node: str = '0',
+) -> Tuple[List[str], Dict[str, int], np.ndarray]:
+    """Item 3: interface unknown ordering + Dirichlet RHS from PORT NAME
+    LISTS alone -- no per-tile S_i values are touched, so this never needs
+    to gather (let alone assemble) anything Schur-related.  O(number of
+    distinct interface node names), used by the "never assemble S_global"
+    factor path (``interface_drop_s_global``).
 
-    Replaces the O(n_ports^2)-per-tile nested Python loop (LIL construction)
-    with a single vectorized COO scatter-add.  The result is the package-edge
-    contribution that is NOT captured by per-tile Schur complements and needs
-    to be added as S_extra in the tilewise CG matvec.
-
-    Args:
-        S_global_csr: Assembled global Schur matrix (CSR).
-        tile_schur_complements: {tile_id: S_i dense array}.
-        tile_index_maps: {tile_id: int32 global-index array}.
-        n_iface: Number of interface unknowns.
+    Mirrors ``assemble_schur_complement_system``'s own Step 1 (unknown vs.
+    Dirichlet node-universe split) exactly, so the resulting ordering is
+    IDENTICAL to what the normal (S_global-assembling) path would produce
+    for the same tiles/package edges/pads -- this function just stops short
+    of ever building G_full/S_global.  ``_compute_rhs_dirichlet_from_edges``
+    already provides the exact G-only Dirichlet RHS (tile Schur complements
+    never contribute to the unknown-Dirichlet coupling G_ud -- see that
+    function's docstring), so no S_i involvement is needed for the RHS
+    either.
 
     Returns:
-        Sparse CSR matrix S_extra (entries below 1e-15 eliminated).
+        ``(unknown_list, unknown_to_idx, rhs_dirichlet)``.
     """
-    # Vectorized COO assembly of sum_i P_i^T S_i P_i
-    coo_rows_parts: List[np.ndarray] = []
-    coo_cols_parts: List[np.ndarray] = []
-    coo_data_parts: List[np.ndarray] = []
+    # Finding 14: shared unknown/Dirichlet node-universe split -- see
+    # pgmath.schur.compute_interface_node_split's docstring for why this was
+    # extracted out of independently-maintained copies here and in
+    # assemble_schur_complement_system.
+    from pgmath.schur import compute_interface_node_split
 
-    for tid, S_i in tile_schur_complements.items():
-        idx = tile_index_maps[tid]
-        n_local = len(idx)
-        global_rows = np.repeat(idx, n_local)
-        global_cols = np.tile(idx, n_local)
-        coo_rows_parts.append(global_rows)
-        coo_cols_parts.append(global_cols)
-        coo_data_parts.append(np.asarray(S_i, dtype=np.float64).ravel())
+    _all_interface_nodes, dirichlet_set, unknown_nodes = compute_interface_node_split(
+        tile_port_node_lists, extra_edges, dirichlet_nodes, ground_node,
+    )
+    unknown_list = sorted(unknown_nodes)
+    unknown_to_idx = {n: i for i, n in enumerate(unknown_list)}
 
-    if coo_rows_parts:
-        all_rows = np.concatenate(coo_rows_parts).astype(np.int32)
-        all_cols = np.concatenate(coo_cols_parts).astype(np.int32)
-        all_data = np.concatenate(coo_data_parts).astype(np.float64)
-        S_tile_sum = sp.coo_matrix(
-            (all_data, (all_rows, all_cols)), shape=(n_iface, n_iface)
-        ).tocsr()
-    else:
-        S_tile_sum = sp.csr_matrix((n_iface, n_iface), dtype=np.float64)
+    rhs_dirichlet = _compute_rhs_dirichlet_from_edges(
+        extra_edges=extra_edges,
+        unknown_list=unknown_list,
+        unknown_to_idx=unknown_to_idx,
+        dirichlet_nodes=dirichlet_set,
+        dirichlet_voltage=dirichlet_voltage,
+    )
+    return unknown_list, unknown_to_idx, rhs_dirichlet
 
-    S_extra = (S_global_csr - S_tile_sum).tocsr()
+
+def _build_s_extra_direct(
+    interface_node_to_idx: Dict[str, int],
+    n_iface: int,
+    package_edges: Optional[List[Tuple[str, str, float]]],
+    dirichlet_nodes: Optional[Set[str]],
+    island_nodes: Optional[Set[str]] = None,
+    package_cap_edges: Optional[List[Tuple[str, str, float]]] = None,
+    C_coeff: float = 0.0,
+    penalty_conductance: float = 1e5,
+) -> sp.csr_matrix:
+    """D2: build S_extra by DIRECT STAMPING (package edges + island-penalty
+    diagonal), replacing the old ``S_global - sum_i P_i^T S_i P_i`` giant
+    subtraction (~25 GB temporaries at 107-tile BRCM scale, plus FP
+    cancellation residue left as spurious nnz -- interface_solve_
+    acceleration_plan.md D2).
+
+    Mode-dependent (the review-confirmed gap D2 also fixes): DC passes
+    ``package_cap_edges=None``/``C_coeff=0`` so only the resistive
+    ``package_edges`` contribute; transient passes ``package_cap_edges``
+    plus the CURRENT ``ctx.C_coeff`` (1/dt_ps BE, 2/dt_ps TR) -- S_extra^TD
+    therefore depends on dt/method and must be rebuilt inside every
+    ``prepare_transient`` call (this function is O(package-edge count) and
+    trivially cheap -- never shared with a DC-context instance).
+
+    Mathematically identical to the old subtraction (verified by the
+    equivalence tests below): :func:`pgmath.schur.build_interface_package_matrices`
+    already stamps package conductances/capacitances into EXACTLY the
+    unknown-unknown block using the same nodal-stamp convention
+    ``assemble_schur_complement_system``'s ``extra_edges`` loop uses,
+    restricted to ``interface_node_to_idx`` (unknown-only) -- an edge
+    touching a Dirichlet node contributes only to ``rhs_dirichlet``
+    (computed separately, unchanged by this function), not to S_extra.
+
+    The island-penalty diagonal is stamped here too (not just onto
+    S_global) so the tilewise operator (``sum_i S_i_kept + S_extra``)
+    matches the assembled operator (``S_global``, which DOES carry the
+    penalty via ``apply_island_penalty``) exactly -- ``sum_i S_i`` never
+    carries the penalty on its own (workers don't know about interface
+    islands, which are a coordinator-side, cross-tile concept).  This is
+    the piece the tilewise-without-S_global path (item 3) needs, since
+    there it is the ONLY place the penalty can be applied.
+
+    Args:
+        interface_node_to_idx: Unknown-only interface node ordering.
+        n_iface: Number of interface unknowns.
+        package_edges: Resistive package edges ``(u, v, g_mS)``.
+        dirichlet_nodes: Pad node set.
+        island_nodes: Interface nodes to penalize (diagonal-only), or None.
+        package_cap_edges: Package capacitor edges ``(u, v, c_fF)`` (transient
+            mode only; None/empty for DC).
+        C_coeff: Capacitance coefficient (1/dt_ps BE, 2/dt_ps TR); 0 for DC
+            (skips the capacitive term entirely, even if package_cap_edges
+            is non-empty, so callers may pass the model's cap edges
+            unconditionally and control mode purely via C_coeff).
+        penalty_conductance: Island-penalty diagonal magnitude (mS);
+            default 1e5, matching ``apply_island_penalty``.
+
+    Returns:
+        Sparse CSR matrix S_extra (entries below scipy's default zero
+        elimination threshold removed via ``eliminate_zeros()``).
+    """
+    from pgmath.schur import build_interface_package_matrices
+
+    G_pkg_uu, C_pkg_uu = build_interface_package_matrices(
+        package_edges=package_edges or [],
+        package_cap_edges=package_cap_edges or [],
+        interface_node_to_idx=interface_node_to_idx,
+        n_interface=n_iface,
+        dirichlet_nodes=dirichlet_nodes or set(),
+    )
+    S_extra = G_pkg_uu.tocsr()
+    if C_coeff and package_cap_edges:
+        S_extra = (S_extra + C_coeff * C_pkg_uu).tocsr()
+
+    if island_nodes:
+        indices = np.array(
+            [interface_node_to_idx[n] for n in island_nodes
+             if n in interface_node_to_idx],
+            dtype=np.intp,
+        )
+        if len(indices):
+            penalty_vals = np.full(len(indices), penalty_conductance, dtype=np.float64)
+            penalty_matrix = sp.coo_matrix(
+                (penalty_vals, (indices, indices)), shape=(n_iface, n_iface),
+            ).tocsr()
+            S_extra = (S_extra + penalty_matrix).tocsr()
+
+    S_extra = S_extra.tocsr()
     S_extra.eliminate_zeros()
     return S_extra
+
+
+def _gather_kept_tile_schur_streaming(
+    model: Any,
+    interface_node_to_idx: Dict[str, int],
+    *,
+    transient_dt_scaled: Optional[float] = None,
+    transient_method: Optional[str] = None,
+    dirichlet_voltage: Optional[float] = None,
+    n_iface: Optional[int] = None,
+    out_port_count: Optional[Dict[Any, int]] = None,
+) -> Tuple[
+    Dict[Any, np.ndarray], Dict[Any, np.ndarray], Dict[Any, np.ndarray],
+    Optional[np.ndarray],
+]:
+    """Re-gather D1-safe per-tile dense Schur blocks from FACTORED workers.
+
+    Streams one tile's full (unsliced) ``S_i`` in flight at a time via
+    ``call_all_streaming`` (the same protocol ``_stream_assemble_schur`` and
+    ``scripts/benchmark/microbench/bench_interface_matvec.py``'s
+    ``gather_tiles`` use) and immediately kept-position-slices it (D1 fix)
+    before fetching the next tile -- coordinator peak memory is bounded by
+    the sum of the KEPT blocks plus one in-flight full block, never all
+    unsliced blocks simultaneously.
+
+    Used by:
+      - ``refactor()`` (item 9): rebuilds tilewise CG instead of silently
+        downgrading to assembled when workers are already factored (from a
+        prior ``factor()`` call in this session) but the coordinator's own
+        ``tile_schur_complements`` was never saved (S_i is never persisted,
+        by design -- ``save()``/``load()`` only carry ``S_global``).
+      - The "never assemble S_global" factor path (item 3,
+        ``interface_drop_s_global``): the SAME streaming gather, just called
+        at initial ``factor()`` time instead of ``refactor()`` time.
+
+    Args:
+        model: Live ``DistributedPowerGridModel`` with attached (already
+            interior-factored) workers.
+        interface_node_to_idx: Unknown-only interface node ordering.
+        transient_dt_scaled: When provided (with ``transient_method``),
+            re-factors the TRANSIENT system (``A = G + C_coeff*C``) via
+            ``factor_transient_system(dt_scaled, method)`` instead of the DC
+            system via ``factor_and_compute_schur()``.  Must be provided
+            together with ``transient_method``.
+        transient_method: 'be' or 'trap'; see ``transient_dt_scaled``.
+        dirichlet_voltage: When provided (with ``n_iface``), ALSO accumulate
+            and return the Dirichlet RHS contribution from each tile's OWN
+            pad-adjacent ``S_i`` entries -- i.e. the ``-S_i[kept, dirichlet]
+            @ V_d`` term that a tile with a Dirichlet pad directly on its own
+            port list contributes to ``G_ud`` (and hence ``rhs_dirichlet``)
+            in the normal ``assemble_schur_complement_system`` path.  The
+            "never assemble S_global" factor path (item 3) needs this: its
+            ``_compute_interface_ordering`` pre-pass only sees package
+            ``extra_edges`` (no S_i values yet), so it is blind to a
+            tile-resident pad's contribution -- this streaming pass is the
+            only place that contribution is ever observable without
+            assembling G_full.  Omit (default None) when the caller doesn't
+            need it (e.g. ``refactor()``, which reuses the already-fixed
+            ``rhs_dirichlet`` from the original ``factor()`` call).
+        n_iface: Number of interface unknowns; required together with
+            ``dirichlet_voltage``.
+        out_port_count: Optional mutable dict; when provided, populated
+            in-place with ``{tid: len(port_nodes)}`` (S2/S13) -- the tile's
+            FULL port count at the moment ``kept_pos`` was built, for
+            ``ctx.tile_port_count`` / ``filter_kept_rhs`` validation.  A
+            side-channel output (not part of the return tuple) so existing
+            callers that only want the first four values are unaffected.
+
+    Returns:
+        ``(tile_schur_complements, tile_index_maps, tile_kept_port_pos,
+        rhs_dirichlet_from_tiles)`` -- the first three keyed by tile_id,
+        D1-consistent by construction (built together via
+        ``kept_position_slice``); the fourth is ``None`` unless
+        ``dirichlet_voltage``/``n_iface`` were provided.
+    """
+    from .interface_iterative import kept_position_slice
+
+    tile_schur_complements: Dict[Any, np.ndarray] = {}
+    tile_index_maps: Dict[Any, np.ndarray] = {}
+    tile_kept_port_pos: Dict[Any, np.ndarray] = {}
+
+    is_transient = transient_dt_scaled is not None
+    if is_transient != (transient_method is not None):
+        raise ValueError(
+            "_gather_kept_tile_schur_streaming: transient_dt_scaled and "
+            "transient_method must be provided together."
+        )
+    _want_tile_rhs = dirichlet_voltage is not None
+    if _want_tile_rhs != (n_iface is not None):
+        raise ValueError(
+            "_gather_kept_tile_schur_streaming: dirichlet_voltage and "
+            "n_iface must be provided together."
+        )
+    rhs_dirichlet_from_tiles = (
+        np.zeros(n_iface, dtype=np.float64) if _want_tile_rhs else None
+    )
+
+    if is_transient:
+        n_tiles = len(model.metadata.tile_configs)
+        stream = model.backend.call_all_streaming(
+            model.workers, 'factor_transient_system',
+            [(transient_dt_scaled, transient_method)] * n_tiles,
+        )
+    else:
+        stream = model.backend.call_all_streaming(
+            model.workers, 'factor_and_compute_schur',
+        )
+
+    for i, result in stream:
+        tid = model.metadata.tile_configs[i].tile_id
+        if is_transient:
+            S_i, port_nodes, _total_cap, _stats = result
+        else:
+            S_i, port_nodes, _stats = result
+        idx, S_kept, kept_pos = kept_position_slice(
+            S_i, port_nodes, interface_node_to_idx,
+        )
+        # T3 fix: kept_position_slice() treats ANY port node absent from
+        # interface_node_to_idx as "Dirichlet, drop its row/column" -- that
+        # equivalence only holds when interface_node_to_idx is the CURRENT
+        # ordering. When this function is called with a STALE ordering
+        # (refactor() re-gathering LIVE worker port lists against a
+        # checkpoint's saved interface_node_to_idx after the model was
+        # re-parsed with a different retile/topology), a genuinely-live
+        # interface port that simply isn't in the stale ordering gets
+        # silently reclassified as a pad and dropped -- corrupting the
+        # tilewise operator with no error. Any dropped port that is NOT a
+        # real Dirichlet pad (model.pad_nodes) is exactly that mismatch;
+        # fail loudly instead of silently scattering wrong voltages.
+        if len(kept_pos) < len(port_nodes):
+            _kept_pos_set = {int(p) for p in kept_pos}
+            _dropped_nodes = [
+                nd for p, nd in enumerate(port_nodes) if p not in _kept_pos_set
+            ]
+            _bad_dropped = [nd for nd in _dropped_nodes if nd not in model.pad_nodes]
+            if _bad_dropped:
+                raise ValueError(
+                    f"_gather_kept_tile_schur_streaming: tile {tid!r} has "
+                    f"port node(s) {_bad_dropped!r} missing from the "
+                    f"supplied interface_node_to_idx ordering, but "
+                    f"{'they are' if len(_bad_dropped) > 1 else 'it is'} "
+                    f"NOT a Dirichlet pad (model.pad_nodes). This indicates "
+                    f"a model/checkpoint topology mismatch -- e.g. "
+                    f"refactor() re-gathering the LIVE workers' port lists "
+                    f"against a LOADED checkpoint's STALE interface "
+                    f"ordering after the model was re-parsed with a "
+                    f"different retile. Silently dropping this port would "
+                    f"corrupt the tilewise interface operator. Call "
+                    f"factor() (not refactor()) to rebuild from the "
+                    f"model's current topology."
+                )
+        tile_schur_complements[tid] = S_kept
+        tile_index_maps[tid] = idx
+        tile_kept_port_pos[tid] = kept_pos
+        if out_port_count is not None:
+            out_port_count[tid] = len(port_nodes)
+
+        if _want_tile_rhs and len(port_nodes) > len(kept_pos):
+            # This tile has >=1 Dirichlet/pad port directly on its own port
+            # list (D1 scenario) -- every position NOT in kept_pos is
+            # Dirichlet (see kept_position_slice: "not kept" <=> "is
+            # Dirichlet" for tile ports, since a tile's port list is a
+            # subset of all_interface_nodes).  Contribute
+            # -S_i[kept, dirichlet] @ V_d to the unknown positions, exactly
+            # matching assemble_schur_complement_system's G_ud slice for
+            # this tile's own embedded S_i.
+            n_ports = len(port_nodes)
+            all_pos = np.arange(n_ports, dtype=np.int64)
+            dirichlet_pos = np.setdiff1d(all_pos, kept_pos, assume_unique=False)
+            S_arr = np.asarray(S_i, dtype=np.float64)
+            contrib = -dirichlet_voltage * S_arr[np.ix_(kept_pos, dirichlet_pos)].sum(axis=1)
+            rhs_dirichlet_from_tiles[idx] += contrib
+
+    return (
+        tile_schur_complements, tile_index_maps, tile_kept_port_pos,
+        rhs_dirichlet_from_tiles,
+    )
 
 
 def _build_csr_scatter_pattern(
@@ -613,6 +998,7 @@ def _stream_assemble_schur(
     List[str],
     Dict[str, int],
     Dict[Any, np.ndarray],  # tile_schur_complements (None — not held)
+    Dict[Any, np.ndarray],  # tile_kept_port_pos (Finding 4)
 ]:
     """Stream-assemble S_global by fetching COO shards one tile at a time.
 
@@ -658,9 +1044,15 @@ def _stream_assemble_schur(
 
     Returns:
         (S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
-         tile_index_maps)
+         tile_index_maps, tile_kept_port_pos)
     where tile_index_maps are the per-tile local->global index arrays built
-    during Step 2 (stored for downstream use: S_extra, CG solver setup, etc.).
+    during Step 2 (stored for downstream use: S_extra, CG solver setup, etc.),
+    and tile_kept_port_pos (Finding 4) are the per-tile POSITIONS within the
+    tile's full port list (``tile_port_node_lists[tid]``) that are kept
+    (non-Dirichlet) -- the streaming-path mirror of
+    ``kept_position_slice()``'s ``kept_pos`` return value, needed by
+    ``solve_dc``'s D1 reduced-RHS scatter (solver.py) whenever a tile has a
+    pad directly on its own port list and streaming assembly was used.
 
     NOTE: tile_schur_complements are NOT returned — they were never gathered.
     Callers that need them for CG tilewise mode must call factor_and_compute_schur
@@ -722,7 +1114,7 @@ def _stream_assemble_schur(
     if n_full == 0:
         empty_S = sp.csr_matrix((0, 0))
         empty_rhs = np.zeros(0, dtype=np.float64)
-        return empty_S, empty_rhs, [], {}, {}
+        return empty_S, empty_rhs, [], {}, {}, {}
 
     # Step 2: Build tile index maps (local port -> global full-matrix index)
     _cached_l2g = assembly_cache.get('tile_local_to_global', {}) if (assembly_cache and _use_cached_idx) else {}
@@ -986,12 +1378,22 @@ def _stream_assemble_schur(
     #   - Tile index map stored on the context: corrupted for save/load paths
     # The fix mirrors the bulk path exactly: filter to unknowns only, remap to
     # unknown_to_idx (which IS interface_node_to_idx after assembly).
+    # Finding 4: also compute tile_kept_port_pos -- the streaming-path mirror
+    # of kept_position_slice()'s kept_pos return, i.e. the POSITIONS within
+    # each tile's full port list (node_list, may include a tile-resident
+    # pad/Dirichlet port) that are kept (non-Dirichlet).  Populating this
+    # here (instead of leaving it empty) lets solve_dc's D1 reduced-RHS
+    # scatter (solver.py's ctx.tile_kept_port_pos lookup) recover a
+    # tile-resident pad-on-port scenario on the streaming DC path exactly
+    # as it already does on the bulk (non-streaming) path.
     interface_tile_index_maps: Dict[Any, np.ndarray] = {}
+    interface_tile_kept_port_pos: Dict[Any, np.ndarray] = {}
     for tid, node_list in tile_port_node_lists.items():
+        kept_pos_list = [p for p, nd in enumerate(node_list) if nd in unknown_to_idx]
         interface_tile_index_maps[tid] = np.array(
-            [unknown_to_idx[n] for n in node_list if n in unknown_to_idx],
-            dtype=np.int32,
+            [unknown_to_idx[node_list[p]] for p in kept_pos_list], dtype=np.int32,
         )
+        interface_tile_kept_port_pos[tid] = np.array(kept_pos_list, dtype=np.int64)
 
     # Update assembly cache (same as assemble_schur_complement_system)
     if assembly_cache is not None and _cache_valid:
@@ -1002,7 +1404,282 @@ def _stream_assemble_schur(
         assembly_cache['n_unknown'] = n_unknown
         assembly_cache['n_full'] = n_full
 
-    return S_global, rhs_dirichlet, unknown_list, unknown_to_idx, interface_tile_index_maps
+    return (
+        S_global, rhs_dirichlet, unknown_list, unknown_to_idx,
+        interface_tile_index_maps, interface_tile_kept_port_pos,
+    )
+
+
+def _get_drop_s_global_setting(model: Optional[Any]) -> bool:
+    """Read the ``interface_drop_s_global`` setting (default False)."""
+    if model is None:
+        return False
+    settings = getattr(model, 'settings', None)
+    if settings is None:
+        return False
+    return _coerce_bool(
+        settings.get('interface_drop_s_global', False), 'interface_drop_s_global',
+    )
+
+
+def _can_use_no_s_global_path(model: Any) -> Tuple[bool, str]:
+    """Check the preconditions for the "never assemble S_global" factor path
+    (item 3): ``interface_solver`` must resolve unambiguously to 'cg' (an
+    explicit 'cg', not 'auto' -- 'auto' would need S_global for its own
+    memory-estimate decision, a chicken-and-egg problem this path
+    deliberately sidesteps rather than half-solves), ``interface_matvec_mode``
+    must be 'tilewise' or 'auto', and island detection must be the Stage 1e
+    summaries union-find (the legacy Schur-BFS fundamentally needs
+    S_global's nonzero structure -- see interface_iterative.py module
+    docstring).
+
+    Returns ``(ok, reason)`` -- ``reason`` is a human-readable explanation
+    used in the fallback WARNING when ``ok`` is False.
+    """
+    settings = getattr(model, 'settings', {}) or {}
+    iface_solver = settings.get('interface_solver', 'auto')
+    matvec_mode = settings.get('interface_matvec_mode', 'auto')
+    island_mode = getattr(model, 'island_detection_mode', 'schur_bfs')
+
+    if iface_solver != 'cg':
+        return False, (
+            f"interface_solver={iface_solver!r} (must be explicit 'cg' -- "
+            f"'auto' cannot resolve without S_global)"
+        )
+    # S10: None means "use the auto default" everywhere else in this module
+    # (resolve_matvec_mode, the refactor _want_tilewise check both treat
+    # None the same as 'auto') -- a programmatically-built settings dict
+    # with interface_matvec_mode=None must not be silently rejected here,
+    # or a caller who opted into interface_drop_s_global to avoid the
+    # >190 GB S_global assembly falls back into exactly that assembly.
+    if matvec_mode is None:
+        matvec_mode = 'auto'
+    if matvec_mode not in ('tilewise', 'auto'):
+        return False, f"interface_matvec_mode={matvec_mode!r} (must be 'tilewise' or 'auto')"
+    if island_mode != 'summaries':
+        return False, (
+            f"model.island_detection_mode={island_mode!r} (must be "
+            f"'summaries' -- the legacy Schur-BFS needs S_global)"
+        )
+    return True, ''
+
+
+def _factor_dc_context_no_s_global(
+    ctx: 'DistributedSolverContext', model: Any, verbose: bool = False,
+) -> None:
+    """Item 3 (Finding 0 upgrade): factor a CG+tilewise DC context WITHOUT
+    ever assembling S_global.
+
+    Two lightweight round-trips to the (already interior-factorable)
+    workers, neither of which ever holds all per-tile Schur blocks at once:
+
+      1. ``get_port_node_list()`` (no factoring) -- just node NAMES, used to
+         compute the interface unknown ordering + G-only Dirichlet RHS via
+         :func:`_compute_interface_ordering` (no S_i involvement at all).
+      2. ``factor_and_compute_schur()`` streamed one tile at a time via
+         :func:`_gather_kept_tile_schur_streaming` -- D1-safe kept-position
+         slicing happens immediately per tile, so peak coordinator memory is
+         the sum of the KEPT blocks (Stage 0's ~26.5 GB streaming-gather
+         number at the 64-tile/167K regime) plus one in-flight full block,
+         never the >190 GB non-streaming COO-assembly peak that motivated
+         this path (Stage 0 Finding 0).
+
+    Island detection is summaries-only (:func:`_can_use_no_s_global_path`
+    is the caller's precondition check) -- the penalty's RHS contribution is
+    applied directly here (mirroring ``apply_island_penalty``'s RHS
+    formula); the penalty's DIAGONAL contribution is folded into S_extra via
+    :func:`_build_s_extra_direct`'s ``island_nodes`` parameter (item 2/D2).
+    """
+    from .result import DistributedTopologyContext
+    from .interface_iterative import build_interface_solver
+    from pgmath.schur import (
+        detect_interface_islands_from_summaries, build_interface_package_matrices,
+    )
+
+    timings: Dict[str, Any] = {}
+
+    # Round-trip 1: port name lists only.
+    t0 = _time.perf_counter()
+    port_lists_raw = model.backend.call_all(model.workers, 'get_port_node_list')
+    tile_port_node_lists: Dict[Any, List[str]] = {
+        model.metadata.tile_configs[i].tile_id: pl
+        for i, pl in enumerate(port_lists_raw)
+    }
+    timings['gather_port_lists'] = _time.perf_counter() - t0
+
+    t0 = _time.perf_counter()
+    interface_nodes, interface_node_to_idx, rhs_dirichlet = _compute_interface_ordering(
+        tile_port_node_lists=tile_port_node_lists,
+        extra_edges=model.package_data.package_edges,
+        dirichlet_nodes=model.pad_nodes,
+        dirichlet_voltage=model.vdd,
+    )
+    timings['compute_ordering'] = _time.perf_counter() - t0
+
+    # Island detection: summaries union-find only (never touches S_global).
+    # S6: route through the SAME Finding-R6 mixed-state guard
+    # _detect_islands_dispatch uses, instead of calling
+    # detect_interface_islands_from_summaries directly -- this path can't
+    # use the full dispatch (it has no S_global for the Schur-BFS branch /
+    # apply_island_penalty), but it must not skip the guard: with
+    # island_detection_mode == 'summaries' and component_summaries == None
+    # (the corrupted state the guard exists to catch),
+    # detect_interface_islands_from_summaries would iterate '(None or ())'
+    # and island nearly the whole interface silently.
+    t0 = _time.perf_counter()
+    _check_summaries_mixed_state(model)
+    island_nodes = detect_interface_islands_from_summaries(
+        component_summaries=model.component_summaries,
+        interface_node_to_idx=interface_node_to_idx,
+        pad_nodes=model.pad_nodes,
+        extra_edges=model.package_data.package_edges,
+    )
+    if island_nodes:
+        penalty_conductance = 1e5
+        idx = np.array(
+            [interface_node_to_idx[n] for n in island_nodes], dtype=np.intp,
+        )
+        rhs_dirichlet = rhs_dirichlet.copy()
+        rhs_dirichlet[idx] += penalty_conductance * model.vdd
+        logger.warning(
+            "Penalized %d interface island nodes (never-assemble path, "
+            "shorted to %.3f V)", len(island_nodes), model.vdd,
+        )
+    timings['detect_interface_islands'] = _time.perf_counter() - t0
+
+    # Round-trip 2: streaming, D1-safe per-tile Schur gather.  Also
+    # accumulates each tile's OWN Dirichlet-adjacent RHS contribution (a
+    # tile-resident pad directly on a tile's port list, D1 scenario) --
+    # invisible to the package-edges-only rhs_dirichlet computed above.
+    t0 = _time.perf_counter()
+    tile_port_count: Dict[Any, int] = {}
+    (
+        tile_schur_complements, tile_index_maps, tile_kept_port_pos,
+        rhs_dirichlet_from_tiles,
+    ) = _gather_kept_tile_schur_streaming(
+        model, interface_node_to_idx,
+        dirichlet_voltage=model.vdd, n_iface=len(interface_nodes),
+        out_port_count=tile_port_count,
+    )
+    rhs_dirichlet = rhs_dirichlet + rhs_dirichlet_from_tiles
+    timings['factor_tiles'] = _time.perf_counter() - t0
+
+    # D2: S_extra by direct stamping (package edges + island-penalty diagonal).
+    t0 = _time.perf_counter()
+    S_extra = _build_s_extra_direct(
+        interface_node_to_idx=interface_node_to_idx,
+        n_iface=len(interface_nodes),
+        package_edges=model.package_data.package_edges,
+        dirichlet_nodes=model.pad_nodes,
+        island_nodes=island_nodes,
+    )
+    timings['build_s_extra'] = _time.perf_counter() - t0
+
+    # Finding 13: shared settings-reading helper (see its docstring).
+    _cg_settings = _read_interface_cg_settings(model)
+    _preconditioner = _cg_settings.preconditioner
+    _cg_rtol = _cg_settings.cg_rtol
+    _cg_atol = _cg_settings.cg_atol
+    _cg_maxiter = _cg_settings.cg_maxiter
+    _cg_strict = _cg_settings.cg_strict
+    _bj_max_bytes = _cg_settings.bj_max_bytes
+    _matvec_threads = _cg_settings.matvec_threads
+    _matvec_dtype = _cg_settings.matvec_dtype
+    _strict_dtype_rtol = _cg_settings.strict_dtype_rtol
+
+    t0 = _time.perf_counter()
+    _cg_stats: Dict[str, Any] = {}
+    _cg_solve_callable, _resolved_mode, _cg_solver = build_interface_solver(
+        S_global=None,
+        interface_solver='cg',
+        tile_schur_complements=tile_schur_complements,
+        tile_index_maps=tile_index_maps,
+        S_extra=S_extra,
+        matvec_mode='tilewise',
+        preconditioner=_preconditioner,
+        rtol=_cg_rtol,
+        atol=_cg_atol,
+        maxiter=_cg_maxiter,
+        strict=_cg_strict,
+        block_jacobi_max_bytes=_bj_max_bytes,
+        verbose=verbose,
+        cg_stats_dict=_cg_stats,
+        n_interface=len(interface_nodes),
+        matvec_threads=_matvec_threads,
+        matvec_dtype=_matvec_dtype,
+        strict_dtype_rtol=_strict_dtype_rtol,
+    )
+    timings['factor_interface'] = _time.perf_counter() - t0
+    timings['total_prepare'] = sum(
+        v for v in timings.values() if isinstance(v, (int, float))
+    )
+
+    G_pkg_uu, _ = build_interface_package_matrices(
+        package_edges=model.package_data.package_edges,
+        package_cap_edges=model.package_data.package_cap_edges,
+        interface_node_to_idx=interface_node_to_idx,
+        n_interface=len(interface_nodes),
+        dirichlet_nodes=model.pad_nodes,
+    )
+
+    if verbose:
+        logger.info(
+            "=== Distributed DDM Prepare Statistics (never-assemble S_global) ===",
+        )
+        logger.info(
+            "Interface system: %d unknowns, %d islands penalized, "
+            "matvec_threads=%d, matvec_dtype=%s",
+            len(interface_nodes), len(island_nodes),
+            _cg_solver.matvec_threads, _cg_solver.matvec_dtype,
+        )
+        # Per-phase breakdown — the worker-side interior factor + Schur
+        # computation happens inside the streaming gather and is otherwise
+        # invisible in this path's log (the assembled path prints its own
+        # factor_tiles/assembly lines).
+        for _phase in ('gather_port_lists', 'compute_ordering',
+                       'detect_interface_islands', 'factor_tiles',
+                       'build_s_extra', 'build_cg_solver'):
+            if _phase in timings:
+                logger.info("  %-36s %.3fs", _phase, timings[_phase])
+        logger.info("=== Total Prepare: %.3fs ===", timings['total_prepare'])
+
+    ctx._interface_lu = _cg_solve_callable
+    ctx._interface_nodes = interface_nodes
+    ctx._interface_node_to_idx = interface_node_to_idx
+    ctx._rhs_dirichlet_interface = rhs_dirichlet
+    ctx._tile_index_maps = tile_index_maps
+    ctx._tile_kept_port_pos = tile_kept_port_pos
+    ctx._tile_port_count = tile_port_count
+    ctx._removed_interface_nodes = island_nodes
+    ctx._S_global = None
+    # Item 3: marks that S_global was never assembled this factor() call --
+    # save() checks this and raises with guidance (S_global is None already,
+    # but this flag distinguishes "never built" from "released after build",
+    # which matters for the error message's wording).
+    ctx._s_global_dropped = True
+    ctx.timings = timings
+    ctx._interface_solver_mode = 'cg'
+    # Finding 6: close the outgoing CG solver (if factor() is being re-run
+    # on an already-factored context) before replacing it.
+    _close_existing_cg_solver(ctx)
+    ctx._cg_solver = _cg_solver
+
+    if ctx.topology is None:
+        ctx.topology = DistributedTopologyContext(
+            interface_nodes=interface_nodes,
+            interface_node_to_idx=interface_node_to_idx,
+            tile_index_maps=tile_index_maps,
+            rhs_dirichlet_G=rhs_dirichlet,
+            G_package_uu=G_pkg_uu if G_pkg_uu.nnz > 0 else None,
+            removed_interface_nodes=island_nodes,
+            island_nodes=island_nodes,
+            tile_kept_port_pos=tile_kept_port_pos,
+            tile_port_count=tile_port_count,
+        )
+    elif getattr(ctx.topology, 'island_nodes', None) is None:
+        ctx.topology.island_nodes = island_nodes
+
+    ctx.is_factored = True
 
 
 # ---------------------------------------------------------------------------
@@ -1019,8 +1696,28 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             "Cannot factor without a model reference. "
             "Either pass model= to __init__ or set self.model."
         )
-    timings: Dict[str, Any] = {}
     model = ctx.model
+
+    # Item 3 (Finding 0 upgrade): interface_drop_s_global='never assemble
+    # S_global at all', not 'assemble then free' -- dispatch to the
+    # dedicated no-S_global factor path when its preconditions hold
+    # (explicit interface_solver='cg', matvec_mode tilewise/auto, summaries-
+    # based island detection).  Falls back to the normal path (with a
+    # WARNING) otherwise -- the setting is opt-in and must degrade
+    # gracefully rather than raise, since 'auto'-everything is still the
+    # documented default-safe configuration.
+    if _get_drop_s_global_setting(model):
+        _ok, _reason = _can_use_no_s_global_path(model)
+        if _ok:
+            _factor_dc_context_no_s_global(ctx, model, verbose)
+            return
+        logger.warning(
+            "interface_drop_s_global=True but preconditions are not met "
+            "(%s); falling back to the normal (S_global-assembling) factor "
+            "path.", _reason,
+        )
+
+    timings: Dict[str, Any] = {}
 
     # 1. Factor tiles and compute Schur complements (parallel on workers).
     #
@@ -1141,7 +1838,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
         # tile_schur_complements is empty; S_i lives on workers.
         (
             S_global, rhs_dirichlet, interface_nodes, interface_node_to_idx,
-            _streaming_tile_index_maps,
+            _streaming_tile_index_maps, _streaming_tile_kept_port_pos,
         ) = _stream_assemble_schur(
             model=model,
             tile_port_node_lists=tile_port_node_lists,
@@ -1168,6 +1865,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             )
         )
         _streaming_tile_index_maps = None  # not used in bulk path
+        _streaming_tile_kept_port_pos = None  # not used in bulk path
 
     timings['assemble_interface'] = _time.perf_counter() - t0
 
@@ -1231,22 +1929,42 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
                 len(saved),
             )
 
-    # 3. Build tile index maps (local port indices -> global interface indices).
+    # 3. Build tile index maps (local port indices -> global interface indices)
+    # AND (D1 fix, item 1) kept-position-slice tile_schur_complements so every
+    # tile's S_i dimension always agrees with its (pad-filtered) index map.
     # Must be built BEFORE step 4 (interface solver setup) so that CG tilewise
     # mode can reference tile_index_maps when constructing InterfaceCGSolver.
     # B3: When streaming was used, tile_index_maps were already built during
-    # _stream_assemble_schur (stored in _streaming_tile_index_maps).  Reuse
-    # them directly to avoid rebuilding.  For the bulk path, build as before.
+    # _stream_assemble_schur (stored in _streaming_tile_index_maps), along
+    # with tile_kept_port_pos (Finding 4: _streaming_tile_kept_port_pos --
+    # populated the same way, mirroring this bulk-path loop, so solve_dc's
+    # D1 reduced-RHS scatter can recover a tile-resident pad-on-port
+    # scenario on the streaming DC path too).  tile_schur_complements is
+    # empty (S_i was never gathered) -- nothing to slice there.  For the
+    # bulk path, build both together via kept_position_slice so the map and
+    # the (now-sliced) S_i can never disagree.
+    from .interface_iterative import kept_position_slice
+    tile_kept_port_pos: Dict[Any, np.ndarray] = {}
     if _streaming_tile_index_maps is not None:
         tile_index_maps: Dict[Tuple[int, int], np.ndarray] = _streaming_tile_index_maps
+        tile_kept_port_pos = _streaming_tile_kept_port_pos or {}
     else:
         tile_index_maps = {}
         for tid, boundary_list in tile_port_node_lists.items():
-            local_to_global = np.array(
-                [interface_node_to_idx[n] for n in boundary_list if n in interface_node_to_idx],
-                dtype=np.int32,
+            idx, S_kept, kept_pos = kept_position_slice(
+                tile_schur_complements[tid], boundary_list, interface_node_to_idx,
             )
-            tile_index_maps[tid] = local_to_global
+            tile_index_maps[tid] = idx
+            tile_schur_complements[tid] = S_kept
+            tile_kept_port_pos[tid] = kept_pos
+
+    # S2/S13: per-tile FULL port count (tile_port_node_lists already holds
+    # the full, unfiltered port list regardless of streaming vs bulk path)
+    # -- recorded alongside tile_kept_port_pos for filter_kept_rhs's
+    # drift-detection validation.
+    tile_port_count: Dict[Any, int] = {
+        tid: len(node_list) for tid, node_list in tile_port_node_lists.items()
+    }
 
     # 4. Factor (or set up iterative solver for) interface system.
     #
@@ -1285,34 +2003,36 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
     else:
         # CG mode -- routed through build_interface_solver (Stage 1d: the
         # single factory used by both DC and transient factor/refactor paths).
-        from .interface_iterative import (
-            build_interface_solver, resolve_block_jacobi_max_bytes,
-        )
-        _matvec_mode = _model_settings.get('interface_matvec_mode', 'assembled')
-        _preconditioner = _model_settings.get('interface_preconditioner', 'block_jacobi')
-        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-8))
-        _cg_atol = float(_model_settings.get('interface_cg_atol', 1e-14))
-        _cg_maxiter_raw = _model_settings.get('interface_cg_maxiter', None)
-        _cg_maxiter = (
-            None if _cg_maxiter_raw is None
-            else _coerce_int(_cg_maxiter_raw, 'interface_cg_maxiter')
-        )
-        _cg_strict = _coerce_bool(
-            _model_settings.get('interface_cg_strict', True), 'interface_cg_strict'
-        )
-        _bj_max_bytes = resolve_block_jacobi_max_bytes(
-            _model_settings.get('interface_block_jacobi_max_bytes', 'auto')
-        )
+        from .interface_iterative import build_interface_solver, resolve_matvec_mode
+        # Item 8: default changed 'assembled' -> 'auto' (tilewise whenever
+        # per-tile Schur blocks are available -- resolved below, once
+        # tile_schur_complements' post-streaming-fallback availability is known).
+        _matvec_mode_setting = _model_settings.get('interface_matvec_mode', 'auto')
+        # Finding 13: shared settings-reading helper (see its docstring).
+        _cg_settings = _read_interface_cg_settings(model)
+        _preconditioner = _cg_settings.preconditioner
+        _cg_rtol = _cg_settings.cg_rtol
+        _cg_atol = _cg_settings.cg_atol
+        _cg_maxiter = _cg_settings.cg_maxiter
+        _cg_strict = _cg_settings.cg_strict
+        _bj_max_bytes = _cg_settings.bj_max_bytes
+        _matvec_threads = _cg_settings.matvec_threads
+        _matvec_dtype = _cg_settings.matvec_dtype
+        _strict_dtype_rtol = _cg_settings.strict_dtype_rtol
 
-        # For tilewise mode, compute the package-edge contribution not included
-        # in per-tile Schur complements.  S_extra = S_global - sum_i(P_i^T S_i P_i).
-        # B2 follow-up: replaced nested Python loop (LIL) with vectorized COO.
-        # B3: When streaming was used, tile_schur_complements is empty; tilewise
-        # CG mode is not available (can't build S_extra without S_i).  Fall back
-        # to 'assembled' mode and log a warning.
+        # 'auto' resolves to 'tilewise' whenever per-tile Schur blocks are
+        # available (post-streaming-fallback -- streaming never gathers S_i).
+        _has_tile_blocks = (not _use_streaming_dc) and bool(tile_schur_complements)
+        _matvec_mode = resolve_matvec_mode(_matvec_mode_setting, _has_tile_blocks)
+
+        # D2 (item 2): direct-stamping S_extra (package edges + island-penalty
+        # diagonal) -- replaces the old S_global-minus-sum_i-S_i subtraction.
+        # B3: When streaming was used, tile_schur_complements is empty;
+        # tilewise CG mode is not available (no per-tile S_i to matvec
+        # against).  Fall back to 'assembled' mode and log a warning.
         _S_extra: Optional[sp.spmatrix] = None
         if _matvec_mode == 'tilewise':
-            if _use_streaming_dc or not tile_schur_complements:
+            if not _has_tile_blocks:
                 # Non-composition: streaming_assembly=True did not gather S_i to the
                 # coordinator, so tilewise matvec (which needs per-tile S_i blocks) is
                 # not possible.  Fall back to 'assembled' mode: CG still avoids the
@@ -1329,12 +2049,12 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
                 )
                 _matvec_mode = 'assembled'
             else:
-                # B2 follow-up: vectorized COO S_extra construction
-                _S_extra = _build_s_extra_coo(
-                    S_global_csr=S_global.tocsr(),
-                    tile_schur_complements=tile_schur_complements,
-                    tile_index_maps=tile_index_maps,
+                _S_extra = _build_s_extra_direct(
+                    interface_node_to_idx=interface_node_to_idx,
                     n_iface=len(interface_nodes),
+                    package_edges=model.package_data.package_edges,
+                    dirichlet_nodes=model.pad_nodes,
+                    island_nodes=island_nodes,
                 )
 
         _cg_solve_callable, _cg_resolved_mode, _cg_solver = build_interface_solver(
@@ -1352,6 +2072,9 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             block_jacobi_max_bytes=_bj_max_bytes,
             verbose=verbose,
             cg_stats_dict=_cg_stats,
+            matvec_threads=_matvec_threads,
+            matvec_dtype=_matvec_dtype,
+            strict_dtype_rtol=_strict_dtype_rtol,
         )
 
         # Synthetic stats object (matching SparseFactorAdapter fields used below)
@@ -1476,11 +2199,26 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
     ctx._interface_node_to_idx = interface_node_to_idx
     ctx._rhs_dirichlet_interface = rhs_dirichlet
     ctx._tile_index_maps = tile_index_maps
+    # D1 fix (item 1): always overwritten fresh (mirrors _tile_index_maps),
+    # consumed by solve_dc's RHS scatter.
+    ctx._tile_kept_port_pos = tile_kept_port_pos
+    # S2/S13: parity with tile_kept_port_pos.
+    ctx._tile_port_count = tile_port_count
     ctx._removed_interface_nodes = island_nodes
     ctx._S_global = S_global
+    # S7: this IS the normal (S_global-assembling) factor path -- reset the
+    # never-assemble flag so a context previously factored with
+    # interface_drop_s_global=True, then re-factored (not merely
+    # refactor()'d) with the setting off, can save() again.  Without this,
+    # the flag stuck True forever and save() kept raising even though
+    # ctx._S_global is now a valid, assembled matrix.
+    ctx._s_global_dropped = False
     ctx.timings = timings
     # B2: store resolved interface solver mode and optional CG solver
     ctx._interface_solver_mode = _iface_resolved_mode
+    # Finding 6: close the outgoing CG solver (if factor() is being re-run
+    # on an already-factored context) before replacing it.
+    _close_existing_cg_solver(ctx)
     ctx._cg_solver = _cg_solver  # InterfaceCGSolver or None
 
     # Build topology context (if not already provided)
@@ -1503,6 +2241,8 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             removed_interface_nodes=island_nodes,
             island_nodes=island_nodes,  # DC-mode cache
             island_nodes_td=None if _pkg_has_cap else island_nodes,  # transient cross-mode (safe when no caps)
+            tile_kept_port_pos=tile_kept_port_pos,  # D1 fix: persisted for save/load
+            tile_port_count=tile_port_count,  # S2/S13: persisted for save/load
             _assembly_cache=_asm_cache,  # A4: pass DC-populated cache
         )
     elif getattr(ctx.topology, 'island_nodes', None) is None:
@@ -1520,6 +2260,19 @@ def _save_dc_context(ctx: 'DistributedSolverContext', path: Optional[str] = None
     """Save DC context metadata (topology, S_global, timings) to disk."""
     if path is None:
         path = _default_checkpoint_path(ctx, 'dc_context.pkl')
+
+    if getattr(ctx, '_s_global_dropped', False):
+        raise RuntimeError(
+            "Cannot save: this context was factored with "
+            "interface_drop_s_global=True, which never assembles S_global "
+            "at all (not merely 'assemble then free') -- there is nothing "
+            "for save() to persist that would let load()+refactor() rebuild "
+            "the interface solve without workers.  Options: (1) don't call "
+            "save() for never-assemble contexts -- workers already hold "
+            "everything needed, so refactor() alone (no save/load) rebuilds "
+            "tilewise via a streaming re-gather; (2) re-factor with "
+            "interface_drop_s_global=False if a checkpoint is required."
+        )
 
     if ctx._S_global is None:
         raise RuntimeError(
@@ -1583,8 +2336,17 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
       tilewise mode requires a full factor() to re-obtain per-tile S_i blocks).
 
     Workers must already be factored before calling this.
+
+    Item 3: a context factored via ``interface_drop_s_global`` never has
+    ``ctx._S_global`` (by design -- that is the whole point).  Such a
+    context CAN still be refactored, but only by re-gathering S_i from
+    already-factored workers (the tilewise branch below); there is no
+    saved-S_global fallback available for it, and switching to 'direct'
+    mode is impossible without a full ``factor()``.
     """
-    if ctx._S_global is None:
+    _workers_attached_early = bool(ctx.model is not None and ctx.model.workers)
+    _was_never_assembled = getattr(ctx, '_s_global_dropped', False)
+    if ctx._S_global is None and not (_was_never_assembled and _workers_attached_early):
         raise RuntimeError(
             "Cannot refactor without S_global. Use factor() for a "
             "full factorization, or load a checkpoint that includes "
@@ -1600,8 +2362,28 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
         # Explicit setting overrides the stored mode
         _mode = _model_setting
 
+    if _mode == 'direct' and ctx._S_global is None:
+        raise RuntimeError(
+            "Cannot refactor to interface_solver='direct': S_global was "
+            "never assembled for this context (interface_drop_s_global=True "
+            "at factor() time). Call factor() for a full re-factorization, "
+            "or keep interface_solver='cg' for this refactor()."
+        )
+
     coord_config = ctx.model.coordinator_solver_config if ctx.model is not None else None
     t0 = _time.perf_counter()
+
+    # S12: close() the OUTGOING CG solver's persistent thread pool before
+    # replacing ctx._cg_solver below -- mirror release()'s handling (the
+    # lifecycle-parity checklist).  Without this, a session that alternates
+    # factor()/solve/refactor() without release() accumulates one live
+    # thread pool per refactor() call, reclaimed only by the weakref.
+    # finalize GC safety net (not guaranteed timing).
+    _old_cg_solver = getattr(ctx, '_cg_solver', None)
+    if _old_cg_solver is not None:
+        _close = getattr(_old_cg_solver, 'close', None)
+        if callable(_close):
+            _close()
 
     if _mode == 'direct':
         from pgmath.factor import _factor_conductance_matrix
@@ -1612,26 +2394,177 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
         ctx._cg_solver = None
         ctx._interface_solver_mode = 'direct'
     else:
-        # CG assembled mode (no per-tile S_i needed) -- routed through
-        # build_interface_solver (Stage 1d).
-        from .interface_iterative import (
-            build_interface_solver, resolve_block_jacobi_max_bytes,
-        )
+        # CG mode -- routed through build_interface_solver (Stage 1d).
+        from .interface_iterative import build_interface_solver
+        # Finding 13: shared settings-reading helper (see its docstring).
+        # _model_settings (raw dict) is kept alive below for the
+        # interface_matvec_mode read, which this helper deliberately
+        # excludes.
         _model_settings = getattr(ctx.model, 'settings', {}) if ctx.model is not None else {}
-        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-8))
-        _cg_atol = float(_model_settings.get('interface_cg_atol', 1e-14))
-        _cg_maxiter_raw = _model_settings.get('interface_cg_maxiter', None)
-        _cg_maxiter = (
-            None if _cg_maxiter_raw is None
-            else _coerce_int(_cg_maxiter_raw, 'interface_cg_maxiter')
+        _cg_settings = _read_interface_cg_settings(ctx.model)
+        _cg_rtol = _cg_settings.cg_rtol
+        _cg_atol = _cg_settings.cg_atol
+        _cg_maxiter = _cg_settings.cg_maxiter
+        _cg_strict = _cg_settings.cg_strict
+        _preconditioner = _cg_settings.preconditioner
+        _bj_max_bytes = _cg_settings.bj_max_bytes
+        _matvec_threads = _cg_settings.matvec_threads
+        _matvec_dtype = _cg_settings.matvec_dtype
+        _strict_dtype_rtol = _cg_settings.strict_dtype_rtol
+
+        # tile_index_maps from the (possibly stale, pre-re-gather) topology
+        # -- used for block-Jacobi ownership in the 'assembled' fallback
+        # path, and as the "was tilewise ever used" signal.
+        _topology_tile_index_maps = (
+            getattr(ctx.topology, 'tile_index_maps', None)
+            if ctx.topology is not None else None
         )
-        _cg_strict = _coerce_bool(
-            _model_settings.get('interface_cg_strict', True), 'interface_cg_strict'
+
+        # Item 9: when workers are ALREADY factored (attached to the model
+        # from a prior factor() call in this session -- refactor()'s
+        # documented precondition), re-gather D1-safe per-tile S_i via the
+        # streaming protocol and rebuild TILEWISE instead of silently
+        # downgrading to assembled.  Only S_global (not S_i) is ever saved,
+        # so this re-gather is the only way tilewise survives a
+        # save()/release()/load()/refactor() cycle within one process, or a
+        # release()-without-reload refactor() in the same session.
+        _matvec_mode_setting = _model_settings.get('interface_matvec_mode', 'auto')
+        _workers_attached = bool(ctx.model is not None and ctx.model.workers)
+        # A context whose S_global was never assembled (interface_drop_
+        # s_global) has no 'assembled' fallback available at all -- force
+        # tilewise regardless of the matvec_mode setting (the top-of-
+        # function guard already ensured workers are attached in this case,
+        # else it raised).
+        _want_tilewise = (
+            _was_never_assembled
+            or _matvec_mode_setting == 'tilewise'
+            or (_matvec_mode_setting in (None, 'auto') and _workers_attached)
         )
-        _preconditioner = _model_settings.get('interface_preconditioner', 'block_jacobi')
-        _bj_max_bytes = resolve_block_jacobi_max_bytes(
-            _model_settings.get('interface_block_jacobi_max_bytes', 'auto')
-        )
+        # Finding 5: 'auto' (the default) resolves to tilewise whenever
+        # workers are merely ATTACHED (bool(model.workers)), not whether
+        # they are actually FACTORED (refactor()'s documented precondition).
+        # The re-gather below (_gather_kept_tile_schur_streaming) calls
+        # factor_and_compute_schur() on every worker, which performs a FULL
+        # interior factorization + dense Schur computation -- the dominant
+        # cost of factor() -- not a cheap coordinator-only rebuild. This can
+        # silently turn a documented "seconds" refactor() into the same
+        # multi-minute/hour cost as factor_tiles, and is wasted work if the
+        # caller also calls factor_and_compute_schur() separately afterward
+        # (a real risk: this module's own docstrings show that pattern).
+        # Detecting "already factored" would need new per-worker RPC state
+        # this Stage doesn't otherwise track; a loud WARNING (fired only
+        # for the implicit 'auto' path, not an explicit interface_matvec_
+        # mode='tilewise' request) gives visibility without that larger,
+        # riskier change.
+        if (
+            _want_tilewise and _workers_attached and not _was_never_assembled
+            and _matvec_mode_setting in (None, 'auto')
+        ):
+            logger.warning(
+                "Refactor: interface_matvec_mode='auto' (default) resolved "
+                "to 'tilewise' because workers are attached -- this "
+                "re-gather calls factor_and_compute_schur() on every "
+                "worker (full interior factorization + dense Schur), NOT a "
+                "cheap coordinator-only rebuild. If workers were already "
+                "factored this session, this repeats that work; if they "
+                "were not, refactor()'s documented precondition (workers "
+                "already factored) was not actually met. Set "
+                "interface_matvec_mode='assembled' explicitly to force the "
+                "cheap S_global-only rebuild instead."
+            )
+
+        # S5: mirror factor()'s streaming-assembly guard (_has_tile_blocks =
+        # (not _use_streaming_dc) and bool(tile_schur_complements)).  Under
+        # streaming_assembly, factor() never gathers dense per-tile S_i to
+        # the coordinator at all -- that IS the memory bound streaming
+        # exists to provide.  Without this guard, refactor() (e.g. after
+        # save()/release()/load(), or just to change CG tolerances) would
+        # unconditionally re-gather and sum every tile's kept dense Schur
+        # block via _gather_kept_tile_schur_streaming, silently reintroducing
+        # the exact OOM risk streaming_assembly=True was set to avoid.  Skip
+        # the re-gather (fall back to 'assembled' + warning) unless this
+        # context's never-assemble path forces tilewise (that path has no
+        # 'assembled' fallback to begin with, so streaming_assembly is moot).
+        if _want_tilewise and not _was_never_assembled and _workers_attached:
+            _streaming_setting = _get_streaming_assembly_setting(ctx.model)
+            if _streaming_setting == 'auto':
+                _size_stats_raw = ctx.model.backend.call_all(
+                    ctx.model.workers, 'get_schur_size_stats'
+                )
+                _refactor_would_stream = _should_stream(ctx.model, _size_stats_raw)
+            else:
+                _refactor_would_stream = bool(_streaming_setting)
+            if _refactor_would_stream:
+                logger.warning(
+                    "Refactor: interface_matvec_mode=%r requests tilewise, "
+                    "but streaming_assembly is active for this model -- "
+                    "re-gathering dense per-tile S_i to the coordinator "
+                    "would defeat the memory bound streaming_assembly=True "
+                    "provides. Falling back to 'assembled'. Call factor() "
+                    "with streaming_assembly disabled for a full "
+                    "re-factorization if tilewise is required.",
+                    _matvec_mode_setting,
+                )
+                _want_tilewise = False
+
+        _tile_schur_complements: Optional[Dict[Any, np.ndarray]] = None
+        _tile_index_maps = _topology_tile_index_maps
+        _S_extra: Optional[sp.spmatrix] = None
+        _matvec_mode = 'assembled'
+
+        if _want_tilewise and _workers_attached:
+            _interface_node_to_idx = ctx.interface_node_to_idx
+            _fresh_port_count: Dict[Any, int] = {}
+            (
+                _tile_schur_complements, _fresh_tile_index_maps, _fresh_kept_pos, _,
+            ) = _gather_kept_tile_schur_streaming(
+                ctx.model, _interface_node_to_idx, out_port_count=_fresh_port_count,
+            )
+            _tile_index_maps = _fresh_tile_index_maps
+            # S14: keep _tile_index_maps and _tile_kept_port_pos in sync on
+            # the context, mirroring factor() (which always sets both
+            # together).  Leaving _tile_index_maps stale (pointing at the
+            # shared topology's copy) while _tile_kept_port_pos is refreshed
+            # would desync the D1-consistent pair solve_dc's RHS scatter
+            # relies on if worker port lists ever drift between factor()
+            # and refactor().
+            ctx._tile_index_maps = _fresh_tile_index_maps
+            ctx._tile_kept_port_pos = _fresh_kept_pos
+            # S2/S13: parity with _tile_kept_port_pos -- refresh the
+            # validation reference too, or filter_kept_rhs would keep
+            # comparing against a stale (or empty) port count after a
+            # refactor()-only session.
+            ctx._tile_port_count = _fresh_port_count
+            # S1: use this context's own DC-mode island set, NOT
+            # topology.removed_interface_nodes (that shared field is set
+            # once, at whichever mode -- DC or TD -- first created the
+            # topology, and is NOT updated afterward; DC and TD island sets
+            # genuinely differ when package_cap_edges exist). topology.
+            # island_nodes is the DC-mode cache, kept mode-correct
+            # independently of factor order (see _factor_dc_context).
+            _island_nodes = (
+                getattr(ctx.topology, 'island_nodes', None)
+                if ctx.topology is not None else None
+            )
+            if _island_nodes is None:
+                _island_nodes = ctx._removed_interface_nodes or set()
+            _S_extra = _build_s_extra_direct(
+                interface_node_to_idx=_interface_node_to_idx,
+                n_iface=len(_interface_node_to_idx),
+                package_edges=ctx.model.package_data.package_edges,
+                dirichlet_nodes=ctx.model.pad_nodes,
+                island_nodes=_island_nodes,
+            )
+            _matvec_mode = 'tilewise'
+        elif _matvec_mode_setting == 'tilewise' and not _workers_attached:
+            logger.warning(
+                "Refactor: interface_matvec_mode='tilewise' requested but no "
+                "workers are attached to re-gather S_i (they must already be "
+                "factored -- refactor()'s documented precondition). Falling "
+                "back to 'assembled'. Call factor() for a full "
+                "re-factorization to restore tilewise."
+            )
+
         # Finding 1: tile_index_maps is required for block_jacobi ownership
         # assignment even in 'assembled' matvec mode (InterfaceCGSolver uses
         # it to assign each interface node to an owning tile, then extracts
@@ -1642,10 +2575,6 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
         # built during the original factor().  If topology genuinely lacks
         # it (e.g. a pre-B2 checkpoint), degrade gracefully to the diagonal
         # 'jacobi' preconditioner rather than silently building none at all.
-        _tile_index_maps = (
-            getattr(ctx.topology, 'tile_index_maps', None)
-            if ctx.topology is not None else None
-        )
         if _preconditioner == 'block_jacobi' and not _tile_index_maps:
             logger.warning(
                 "Refactor: tile_index_maps unavailable on ctx.topology (missing "
@@ -1661,8 +2590,10 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
         _solve_callable, _resolved_backend, cg_solver = build_interface_solver(
             S_global=ctx._S_global,
             interface_solver='cg',
-            matvec_mode='assembled',  # tilewise needs per-tile S_i; use assembled on refactor
+            matvec_mode=_matvec_mode,
+            tile_schur_complements=_tile_schur_complements,
             tile_index_maps=_tile_index_maps,
+            S_extra=_S_extra,
             preconditioner=_preconditioner,
             rtol=_cg_rtol,
             atol=_cg_atol,
@@ -1671,10 +2602,19 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
             block_jacobi_max_bytes=_bj_max_bytes,
             verbose=verbose,
             cg_stats_dict=_cg_stats,
+            n_interface=len(ctx.interface_node_to_idx) if ctx._S_global is None else None,
+            matvec_threads=_matvec_threads,
+            matvec_dtype=_matvec_dtype,
+            strict_dtype_rtol=_strict_dtype_rtol,
         )
         ctx._interface_lu = _solve_callable
         ctx._cg_solver = cg_solver
         ctx._interface_solver_mode = 'cg'
+        # Item 3: still true after a successful tilewise re-gather refactor
+        # (S_global remains unassembled); a downgrade to 'assembled' would
+        # have raised above (no fallback exists), so reaching here with
+        # _was_never_assembled means the re-gather succeeded.
+        ctx._s_global_dropped = _was_never_assembled
 
     elapsed = _time.perf_counter() - t0
     ctx.is_factored = True
@@ -1704,6 +2644,19 @@ def _factor_transient_context(
     model = ctx.model
     tile_configs = model.metadata.tile_configs
     method = ctx.integration_method
+
+    # Item 3 scope reduction: interface_drop_s_global's "never assemble
+    # S_global" path (see _can_use_no_s_global_path / _factor_dc_context) is
+    # DC-only in Stage 2.  Transient factor always assembles S_global
+    # normally regardless of this setting -- warn instead of silently
+    # ignoring it, so opt-in users aren't surprised the memory saving
+    # doesn't apply here.
+    if _get_drop_s_global_setting(model):
+        logger.warning(
+            "interface_drop_s_global is DC-only in Stage 2; transient "
+            "prepare assembles S_global normally -- TD never-assemble "
+            "lands in a later stage."
+        )
 
     # 1. Factor transient system on all workers (parallel).
     #
@@ -1827,13 +2780,33 @@ def _factor_transient_context(
         _asm_cache = {}
 
     _streaming_tile_index_maps_td = None
+    _streaming_tile_kept_port_pos_td = None
+
+    # Finding 12 (hoisted out of the streaming-only branch, S3's own
+    # linearity trick): G_full = G_full_tiles + G_full_extra(E), where
+    # G_full_tiles depends only on the tile S_A_i data and is IDENTICAL
+    # whether E = combined_edges or E = pkg_res_edges (same tile_schur_
+    # complements either way). So rhs_dirichlet_G = rhs_dirichlet_A - (rhs
+    # contribution of the cap-only edges alone), computed via
+    # _compute_rhs_dirichlet_from_edges (package-edges-only, no tile S_i
+    # involvement) applied to combined_edges' cap-only DELTA over
+    # pkg_res_edges. This holds for BOTH the streaming and bulk assembly
+    # paths (pkg_res_edges/pkg_cap_edges/C_coeff are all already computed
+    # above, before the streaming/bulk split), so it is computed once here
+    # and reused by both branches below -- the bulk path no longer needs a
+    # second full assemble_schur_complement_system() call (a complete
+    # second global Schur COO scatter of every tile's S_A_i block) solely
+    # to obtain this vector.
+    _cap_only_edges = [
+        (u, v, C_coeff * c_fF) for u, v, c_fF in pkg_cap_edges if c_fF > 0
+    ]
 
     if _use_streaming_td:
         # B3 streaming transient: COO shards of S_A streamed tile-by-tile.
         # combined_edges includes the effective cap contribution (C_coeff * C).
         (
             S_global, rhs_dirichlet_A, interface_nodes, interface_node_to_idx,
-            _streaming_tile_index_maps_td,
+            _streaming_tile_index_maps_td, _streaming_tile_kept_port_pos_td,
         ) = _stream_assemble_schur(
             model=model,
             tile_port_node_lists=tile_port_node_lists,
@@ -1843,18 +2816,22 @@ def _factor_transient_context(
             dirichlet_voltage=model.vdd,
             assembly_cache=_asm_cache,
         )
-        # Compute G-only Dirichlet RHS from package resistive edges alone
-        # (tile S_A_i only contribute to the unknown-unknown block, not G_ud).
-        unknown_to_idx_td = {n: i for i, n in enumerate(interface_nodes)
-                             if n not in (model.pad_nodes or set())}
-        # Build sorted unknown list (interface_nodes is already unknowns only)
-        rhs_dirichlet_G = _compute_rhs_dirichlet_from_edges(
-            extra_edges=list(pkg_res_edges),
-            unknown_list=list(interface_nodes),
-            unknown_to_idx={n: i for i, n in enumerate(interface_nodes)},
-            dirichlet_nodes=model.pad_nodes,
-            dirichlet_voltage=model.vdd,
-        )
+        # S3: Compute G-only Dirichlet RHS.  _compute_rhs_dirichlet_from_edges
+        # (package resistive edges alone, as this branch used to call it
+        # directly) is WRONG on its own -- it assumes tile Schur complements
+        # never contribute to the unknown-Dirichlet coupling G_ud, but a
+        # Dirichlet pad directly on a tile's own port list (D1 scenario) DOES
+        # contribute -S_A_i[kept, pad] via that tile's own S_A_i, exactly as
+        # the bulk (non-streaming) path's rhs_dirichlet_A already captures
+        # (it re-embeds tile_schur_complements once, for combined_edges).
+        #
+        # A second _stream_assemble_schur pass can't reproduce that
+        # contribution directly: the B3 streaming protocol frees each
+        # tile's cached S_A after the FIRST get_schur_data_flat() read
+        # (bounded worker memory is the entire point of
+        # streaming_assembly=True), so the tile data is gone by the time a
+        # second pass would need it -- the linearity trick above is used
+        # here for exactly that reason.
         logger.debug(
             "Transient streaming assembly complete: S_global %dx%d, nnz=%d",
             S_global.shape[0], S_global.shape[1], S_global.nnz,
@@ -1871,17 +2848,21 @@ def _factor_transient_context(
             )
         )
 
-        # Also compute G-only Dirichlet RHS (without cap contributions)
-        # needed for correct transient RHS formulation.
-        # Reuse the same cache — the node ordering from the first call is consistent.
-        _, rhs_dirichlet_G, _, _ = assemble_schur_complement_system(
-            tile_schur_complements=tile_schur_complements,
-            tile_port_node_lists=tile_port_node_lists,
-            extra_edges=list(pkg_res_edges),
+    # Finding 12: rhs_dirichlet_G via the linearity delta above (shared by
+    # both branches), instead of a second assemble_schur_complement_system
+    # call in the bulk path (which used to re-scatter every tile's S_A_i a
+    # second time solely to obtain this vector).
+    if _cap_only_edges:
+        _rhs_from_cap_only = _compute_rhs_dirichlet_from_edges(
+            extra_edges=_cap_only_edges,
+            unknown_list=list(interface_nodes),
+            unknown_to_idx=interface_node_to_idx,
             dirichlet_nodes=model.pad_nodes,
             dirichlet_voltage=model.vdd,
-            assembly_cache=_asm_cache,
         )
+        rhs_dirichlet_G = rhs_dirichlet_A - _rhs_from_cap_only
+    else:
+        rhs_dirichlet_G = rhs_dirichlet_A.copy()
 
     # Island detection on transient system (resistive + cap extra_edges).
     # Cache lookup order:
@@ -1931,6 +2912,33 @@ def _factor_transient_context(
             "Transient: penalized %d interface island nodes",
             len(island_nodes),
         )
+        # T1 fix: build a SEPARATE per-step island-penalty RHS vector.
+        # apply_island_penalty() (called above, both the cache-hit branch
+        # and inside _detect_islands_dispatch) folds penalty*vdd into
+        # rhs_dirichlet_A only. rhs_dirichlet_A is the A-based (G + cap)
+        # Dirichlet RHS used by DC-style solves, but the transient time
+        # loop (solver_td.py) never reads rhs_dirichlet_A during stepping
+        # -- it uses rhs_dirichlet_G (BE: +1x, TR: +2x per the documented
+        # convention). So without this vector, penalized interface-island
+        # rows carry the 1e5 mS penalty on the A-diagonal but get NO
+        # matching per-step forcing term, and decay from Vdd toward 0
+        # within a few steps.
+        #
+        # Do NOT fold this into rhs_dirichlet_G either: TR scales
+        # rhs_dirichlet_G by 2 each step, so folding the penalty in there
+        # would double-count it under TR. Instead this vector is added to
+        # global_rhs EXACTLY ONCE per step, for BOTH BE and TR, in the
+        # time loop.
+        _island_pen_idx = np.array(
+            [interface_node_to_idx[n] for n in island_nodes], dtype=np.intp,
+        )
+        island_penalty_rhs = np.zeros(len(interface_nodes), dtype=np.float64)
+        # 1e5 mS: must match apply_island_penalty's penalty_conductance
+        # default (pgmath/schur.py) -- both branches above call it with
+        # default arguments, so the diagonal penalty is always 1e5.
+        island_penalty_rhs[_island_pen_idx] = 1e5 * model.vdd
+    else:
+        island_penalty_rhs = None
 
     timings['assemble_transient_interface'] = _time.perf_counter() - t0
 
@@ -1944,19 +2952,33 @@ def _factor_transient_context(
         dirichlet_nodes=model.pad_nodes,
     )
 
-    # 5. Build tile index maps (must be before step 6 so CG tilewise can use them).
-    # B3: Reuse streaming-built maps when available.
+    # 5. Build tile index maps (must be before step 6 so CG tilewise can use them)
+    # AND (D1 fix, item 1) kept-position-slice tile_schur_complements -- see
+    # the matching comment in _factor_dc_context.
+    # B3: Reuse streaming-built maps when available (tile_schur_complements
+    # is empty in that case -- nothing to slice). Finding 4: also reuse the
+    # streaming-built tile_kept_port_pos (mirrors the DC path fix) instead of
+    # leaving it empty.
+    from .interface_iterative import kept_position_slice
+    tile_kept_port_pos: Dict[Any, np.ndarray] = {}
     if _streaming_tile_index_maps_td is not None:
         tile_index_maps: Dict[Tuple[int, int], np.ndarray] = _streaming_tile_index_maps_td
+        tile_kept_port_pos = _streaming_tile_kept_port_pos_td or {}
     else:
         tile_index_maps = {}
         for tid, port_list in tile_port_node_lists.items():
-            local_to_global = np.array(
-                [interface_node_to_idx[n] for n in port_list
-                 if n in interface_node_to_idx],
-                dtype=np.int32,
+            idx, S_kept, kept_pos = kept_position_slice(
+                tile_schur_complements[tid], port_list, interface_node_to_idx,
             )
-            tile_index_maps[tid] = local_to_global
+            tile_index_maps[tid] = idx
+            tile_schur_complements[tid] = S_kept
+            tile_kept_port_pos[tid] = kept_pos
+
+    # S2/S13: per-tile FULL port count -- see the matching comment in
+    # _factor_dc_context.
+    tile_port_count: Dict[Any, int] = {
+        tid: len(node_list) for tid, node_list in tile_port_node_lists.items()
+    }
 
     # 6. Factor (or set up iterative solver for) transient interface system.
     # B2: Same auto-select logic as DC context (same model settings apply).
@@ -1989,32 +3011,38 @@ def _factor_transient_context(
     else:
         # CG mode for transient -- routed through build_interface_solver
         # (Stage 1d: the same factory used by the DC factor/refactor paths).
-        from .interface_iterative import (
-            build_interface_solver, resolve_block_jacobi_max_bytes,
-        )
-        _matvec_mode_td = _model_settings_td.get('interface_matvec_mode', 'assembled')
-        _preconditioner_td = _model_settings_td.get('interface_preconditioner', 'block_jacobi')
-        _cg_rtol_td = float(_model_settings_td.get('interface_cg_rtol', 1e-8))
-        _cg_atol_td = float(_model_settings_td.get('interface_cg_atol', 1e-14))
-        _cg_maxiter_td_raw = _model_settings_td.get('interface_cg_maxiter', None)
-        _cg_maxiter_td = (
-            None if _cg_maxiter_td_raw is None
-            else _coerce_int(_cg_maxiter_td_raw, 'interface_cg_maxiter')
-        )
-        _cg_strict_td = _coerce_bool(
-            _model_settings_td.get('interface_cg_strict', True), 'interface_cg_strict'
-        )
-        _bj_max_bytes_td = resolve_block_jacobi_max_bytes(
-            _model_settings_td.get('interface_block_jacobi_max_bytes', 'auto')
-        )
+        from .interface_iterative import build_interface_solver, resolve_matvec_mode
+        # Item 8: default 'auto' (resolved below).
+        _matvec_mode_setting_td = _model_settings_td.get('interface_matvec_mode', 'auto')
+        # Finding 13: shared settings-reading helper (see its docstring).
+        _cg_settings_td = _read_interface_cg_settings(model)
+        _preconditioner_td = _cg_settings_td.preconditioner
+        _cg_rtol_td = _cg_settings_td.cg_rtol
+        _cg_atol_td = _cg_settings_td.cg_atol
+        _cg_maxiter_td = _cg_settings_td.cg_maxiter
+        _cg_strict_td = _cg_settings_td.cg_strict
+        _bj_max_bytes_td = _cg_settings_td.bj_max_bytes
+        _matvec_threads_td = _cg_settings_td.matvec_threads
+        _matvec_dtype_td = _cg_settings_td.matvec_dtype
+        _strict_dtype_rtol_td = _cg_settings_td.strict_dtype_rtol
 
-        # For tilewise mode: compute S_extra (package-edge contribution).
-        # B2 follow-up: replaced nested Python loop (LIL) with vectorized COO.
+        _has_tile_blocks_td = (not _use_streaming_td) and bool(tile_schur_complements)
+        _matvec_mode_td = resolve_matvec_mode(_matvec_mode_setting_td, _has_tile_blocks_td)
+
+        # D2 (item 2): direct-stamping S_extra.  MODE-DEPENDENT (review-
+        # confirmed gap): transient stamps combined_edges = resistive +
+        # C_coeff*package-cap edges -- passed here as package_edges (the
+        # resistive part) + package_cap_edges/C_coeff (the capacitive part,
+        # via C_pkg_uu * C_coeff, mathematically identical to stamping
+        # (u, v, C_coeff*c_fF) triples directly -- see build_interface_
+        # package_matrices' docstring cross-reference in _build_s_extra_direct).
+        # S_extra^TD therefore depends on dt/method and is rebuilt HERE, on
+        # every prepare_transient() call -- never shared with a DC instance.
         # B3: When streaming was used, tile_schur_complements is empty; fall back.
         # See module docstring for the streaming vs CG-tilewise compatibility matrix.
         _S_extra_td: Optional[sp.spmatrix] = None
         if _matvec_mode_td == 'tilewise':
-            if _use_streaming_td or not tile_schur_complements:
+            if not _has_tile_blocks_td:
                 # Non-composition: streaming_assembly=True did not gather S_i to the
                 # coordinator, so tilewise matvec (which needs per-tile S_i) is not
                 # possible.  Fall back to 'assembled'; CG still avoids the CHOLMOD
@@ -2027,11 +3055,14 @@ def _factor_transient_context(
                 )
                 _matvec_mode_td = 'assembled'
             else:
-                _S_extra_td = _build_s_extra_coo(
-                    S_global_csr=S_global.tocsr(),
-                    tile_schur_complements=tile_schur_complements,
-                    tile_index_maps=tile_index_maps,
+                _S_extra_td = _build_s_extra_direct(
+                    interface_node_to_idx=interface_node_to_idx,
                     n_iface=len(interface_nodes),
+                    package_edges=pkg_res_edges,
+                    dirichlet_nodes=model.pad_nodes,
+                    island_nodes=island_nodes,
+                    package_cap_edges=pkg_cap_edges,
+                    C_coeff=C_coeff,
                 )
 
         _cg_solve_callable_td, _cg_resolved_mode_td, _cg_solver_td = build_interface_solver(
@@ -2049,6 +3080,9 @@ def _factor_transient_context(
             block_jacobi_max_bytes=_bj_max_bytes_td,
             verbose=verbose,
             cg_stats_dict=_cg_stats_td,
+            matvec_threads=_matvec_threads_td,
+            matvec_dtype=_matvec_dtype_td,
+            strict_dtype_rtol=_strict_dtype_rtol_td,
         )
 
         class _CGSolveResultTD:
@@ -2168,7 +3202,17 @@ def _factor_transient_context(
     ctx._interface_node_to_idx = interface_node_to_idx
     ctx.rhs_dirichlet_A = rhs_dirichlet_A
     ctx._rhs_dirichlet_G = rhs_dirichlet_G
+    # T1 fix: separate per-step island-penalty RHS (see the block above
+    # where it is built); solve_transient adds it once per step.
+    ctx.island_penalty_rhs = island_penalty_rhs
     ctx._tile_index_maps = tile_index_maps
+    # D1 fix (item 1): stored for parity with the DC context; consumed by
+    # solve_transient's D1 RHS-scatter filtering (S2 fix), and also feeds a
+    # shared topology's tile_kept_port_pos (below) whichever mode factors
+    # first, matching the existing tile_index_maps pattern.
+    ctx._tile_kept_port_pos = tile_kept_port_pos
+    # S2/S13: parity with tile_kept_port_pos.
+    ctx._tile_port_count = tile_port_count
     ctx._removed_interface_nodes = island_nodes
     ctx._S_global = S_global
     ctx.C_package_uu = C_pkg_uu if C_pkg_uu.nnz > 0 else None
@@ -2178,6 +3222,9 @@ def _factor_transient_context(
     # The transient time loop uses warm-start from v_gamma_old; the CG solver
     # retains the last solution as x0 automatically via InterfaceCGSolver.
     ctx._interface_solver_mode = _iface_resolved_mode_td
+    # Finding 6: close the outgoing CG solver (if factor() is being re-run
+    # on an already-factored context) before replacing it.
+    _close_existing_cg_solver(ctx)
     ctx._cg_solver = _cg_solver_td  # InterfaceCGSolver or None
 
     # Build topology context if not already provided.
@@ -2198,6 +3245,8 @@ def _factor_transient_context(
             removed_interface_nodes=island_nodes,
             island_nodes=None if _td_has_cap else island_nodes,  # DC cross-mode (safe when no caps)
             island_nodes_td=island_nodes,  # transient-mode cache
+            tile_kept_port_pos=tile_kept_port_pos,  # D1 fix: persisted for save/load
+            tile_port_count=tile_port_count,  # S2/S13: persisted for save/load
             _assembly_cache=_asm_cache,  # A4: pass transient-populated cache
         )
     else:
@@ -2235,6 +3284,8 @@ def _save_transient_context(
         'has_capacitance': ctx.has_capacitance,
         'rhs_dirichlet_A': ctx.rhs_dirichlet_A,
         'rhs_dirichlet_G': ctx._rhs_dirichlet_G,
+        # T1 fix: persist the separate per-step island-penalty RHS.
+        'island_penalty_rhs': ctx.island_penalty_rhs,
         'C_package_uu': ctx.C_package_uu,
         'G_package_uu': ctx._G_package_uu,
         'timings': ctx.timings,
@@ -2276,6 +3327,12 @@ def _load_transient_context(
     ctx.has_capacitance = data.get('has_capacitance', False)
     ctx.rhs_dirichlet_A = data.get('rhs_dirichlet_A')
     ctx._rhs_dirichlet_G = data.get('rhs_dirichlet_G')
+    # T1 fix: pre-fix checkpoints lack this key -- default to None, which
+    # solve_transient treats as "no island-penalty RHS to add" (matches
+    # such a checkpoint's islands, if any, being a pre-existing correctness
+    # gap in the saved rhs_dirichlet_A/G already; refactor() cannot recover
+    # it without re-running factor()).
+    ctx.island_penalty_rhs = data.get('island_penalty_rhs')
     ctx.C_package_uu = data.get('C_package_uu')
     ctx._G_package_uu = data.get('G_package_uu')
     ctx.timings = data.get('timings', {})
@@ -2315,6 +3372,18 @@ def _refactor_transient_context(
     coord_config = ctx.model.coordinator_solver_config if ctx.model is not None else None
     t0 = _time.perf_counter()
 
+    # S12: close() the OUTGOING CG solver's persistent thread pool before
+    # replacing ctx._cg_solver below -- mirror release()'s handling (the
+    # lifecycle-parity checklist).  Without this, a session that alternates
+    # factor()/solve/refactor() without release() accumulates one live
+    # thread pool per refactor() call, reclaimed only by the weakref.
+    # finalize GC safety net (not guaranteed timing).
+    _old_cg_solver = getattr(ctx, '_cg_solver', None)
+    if _old_cg_solver is not None:
+        _close = getattr(_old_cg_solver, 'close', None)
+        if callable(_close):
+            _close()
+
     if _mode == 'direct':
         from pgmath.factor import _factor_conductance_matrix
         interface_lu_result = _factor_conductance_matrix(
@@ -2324,34 +3393,145 @@ def _refactor_transient_context(
         ctx._cg_solver = None
         ctx._interface_solver_mode = 'direct'
     else:
-        # CG assembled mode -- routed through build_interface_solver (Stage 1d).
-        from .interface_iterative import (
-            build_interface_solver, resolve_block_jacobi_max_bytes,
-        )
+        # CG mode -- routed through build_interface_solver (Stage 1d).
+        from .interface_iterative import build_interface_solver
+        # Finding 13: shared settings-reading helper (see its docstring).
+        # _model_settings (raw dict) is kept alive below for the
+        # interface_matvec_mode read, which this helper deliberately
+        # excludes.
         _model_settings = getattr(ctx.model, 'settings', {}) if ctx.model is not None else {}
-        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-8))
-        _cg_atol = float(_model_settings.get('interface_cg_atol', 1e-14))
-        _cg_maxiter_raw = _model_settings.get('interface_cg_maxiter', None)
-        _cg_maxiter = (
-            None if _cg_maxiter_raw is None
-            else _coerce_int(_cg_maxiter_raw, 'interface_cg_maxiter')
+        _cg_settings = _read_interface_cg_settings(ctx.model)
+        _cg_rtol = _cg_settings.cg_rtol
+        _cg_atol = _cg_settings.cg_atol
+        _cg_maxiter = _cg_settings.cg_maxiter
+        _cg_strict = _cg_settings.cg_strict
+        _preconditioner = _cg_settings.preconditioner
+        _bj_max_bytes = _cg_settings.bj_max_bytes
+        _matvec_threads = _cg_settings.matvec_threads
+        _matvec_dtype = _cg_settings.matvec_dtype
+        _strict_dtype_rtol = _cg_settings.strict_dtype_rtol
+
+        _topology_tile_index_maps = (
+            getattr(ctx.topology, 'tile_index_maps', None)
+            if ctx.topology is not None else None
         )
-        _cg_strict = _coerce_bool(
-            _model_settings.get('interface_cg_strict', True), 'interface_cg_strict'
+
+        # Item 9: same tilewise-rebuild-via-streaming-re-gather as the DC
+        # refactor path, using the TRANSIENT Schur (A = G + C_coeff*C) via
+        # factor_transient_system(dt_scaled, method) instead of the DC Schur.
+        _matvec_mode_setting = _model_settings.get('interface_matvec_mode', 'auto')
+        _workers_attached = bool(ctx.model is not None and ctx.model.workers)
+        _want_tilewise = _matvec_mode_setting == 'tilewise' or (
+            _matvec_mode_setting in (None, 'auto') and _workers_attached
         )
-        _preconditioner = _model_settings.get('interface_preconditioner', 'block_jacobi')
-        _bj_max_bytes = resolve_block_jacobi_max_bytes(
-            _model_settings.get('interface_block_jacobi_max_bytes', 'auto')
-        )
+        # Finding 5 (transient twin): see the matching comment in
+        # _refactor_dc_context -- 'auto' resolving to tilewise whenever
+        # workers are merely ATTACHED (not verified to be FACTORED) can
+        # silently re-run the full per-worker interior factorization +
+        # dense transient Schur inside what is documented as a cheap
+        # coordinator-only rebuild.
+        if (
+            _want_tilewise and _workers_attached
+            and _matvec_mode_setting in (None, 'auto')
+        ):
+            logger.warning(
+                "Refactor: interface_matvec_mode='auto' (default) resolved "
+                "to 'tilewise' because workers are attached -- this "
+                "re-gather calls factor_transient_system() on every worker "
+                "(full interior factorization + dense transient Schur), "
+                "NOT a cheap coordinator-only rebuild. If workers were "
+                "already factored this session, this repeats that work; if "
+                "they were not, refactor()'s documented precondition "
+                "(workers already factored) was not actually met. Set "
+                "interface_matvec_mode='assembled' explicitly to force the "
+                "cheap S_global-only rebuild instead."
+            )
+
+        # S5: mirror factor()'s streaming-assembly guard -- see the matching
+        # comment in _refactor_dc_context.  interface_drop_s_global (never-
+        # assemble) is DC-only in Stage 2, so no exception is needed here.
+        if _want_tilewise and _workers_attached:
+            _streaming_setting_td_rf = _get_streaming_assembly_setting(ctx.model)
+            if _streaming_setting_td_rf == 'auto':
+                _size_stats_raw_td_rf = ctx.model.backend.call_all(
+                    ctx.model.workers, 'get_schur_size_stats'
+                )
+                _refactor_would_stream_td = _should_stream(
+                    ctx.model, _size_stats_raw_td_rf,
+                )
+            else:
+                _refactor_would_stream_td = bool(_streaming_setting_td_rf)
+            if _refactor_would_stream_td:
+                logger.warning(
+                    "Refactor: interface_matvec_mode=%r requests tilewise, "
+                    "but streaming_assembly is active for this model -- "
+                    "re-gathering dense per-tile S_A_i to the coordinator "
+                    "would defeat the memory bound streaming_assembly=True "
+                    "provides. Falling back to 'assembled'. Call factor() "
+                    "with streaming_assembly disabled for a full "
+                    "re-factorization if tilewise is required.",
+                    _matvec_mode_setting,
+                )
+                _want_tilewise = False
+
+        _tile_schur_complements: Optional[Dict[Any, np.ndarray]] = None
+        _tile_index_maps = _topology_tile_index_maps
+        _S_extra: Optional[sp.spmatrix] = None
+        _matvec_mode = 'assembled'
+
+        if _want_tilewise and _workers_attached:
+            _interface_node_to_idx = ctx.interface_node_to_idx
+            _fresh_port_count: Dict[Any, int] = {}
+            (
+                _tile_schur_complements, _fresh_tile_index_maps, _fresh_kept_pos, _,
+            ) = _gather_kept_tile_schur_streaming(
+                ctx.model, _interface_node_to_idx,
+                transient_dt_scaled=ctx.dt_scaled,
+                transient_method=ctx.integration_method,
+                out_port_count=_fresh_port_count,
+            )
+            _tile_index_maps = _fresh_tile_index_maps
+            # S14: keep the D1-consistent pair in sync (see the matching
+            # comment in _refactor_dc_context).
+            ctx._tile_index_maps = _fresh_tile_index_maps
+            ctx._tile_kept_port_pos = _fresh_kept_pos
+            # S2/S13: parity with _tile_kept_port_pos.
+            ctx._tile_port_count = _fresh_port_count
+            # S1: use this context's own TD-mode island set (topology.
+            # island_nodes_td), not the shared first-mode-wins
+            # topology.removed_interface_nodes -- see the matching comment
+            # in _refactor_dc_context. DC and TD island sets genuinely
+            # differ when package_cap_edges exist.
+            _island_nodes = (
+                getattr(ctx.topology, 'island_nodes_td', None)
+                if ctx.topology is not None else None
+            )
+            if _island_nodes is None:
+                _island_nodes = ctx._removed_interface_nodes or set()
+            _S_extra = _build_s_extra_direct(
+                interface_node_to_idx=_interface_node_to_idx,
+                n_iface=len(_interface_node_to_idx),
+                package_edges=ctx.model.package_data.package_edges,
+                dirichlet_nodes=ctx.model.pad_nodes,
+                island_nodes=_island_nodes,
+                package_cap_edges=ctx.model.package_data.package_cap_edges,
+                C_coeff=ctx.C_coeff,
+            )
+            _matvec_mode = 'tilewise'
+        elif _matvec_mode_setting == 'tilewise' and not _workers_attached:
+            logger.warning(
+                "Refactor: interface_matvec_mode='tilewise' requested but no "
+                "workers are attached to re-gather S_i (they must already be "
+                "factored -- refactor()'s documented precondition). Falling "
+                "back to 'assembled'. Call factor() for a full "
+                "re-factorization to restore tilewise."
+            )
+
         # Finding 1: see the matching comment in _refactor_dc_context -- the
         # 'block_jacobi' preconditioner needs tile_index_maps for ownership
         # assignment even in 'assembled' matvec mode; without it, CG silently
         # runs unpreconditioned.  ctx.topology is restored by load(), so it
         # is normally available; degrade gracefully with a WARNING if not.
-        _tile_index_maps = (
-            getattr(ctx.topology, 'tile_index_maps', None)
-            if ctx.topology is not None else None
-        )
         if _preconditioner == 'block_jacobi' and not _tile_index_maps:
             logger.warning(
                 "Refactor: tile_index_maps unavailable on ctx.topology (missing "
@@ -2367,8 +3547,10 @@ def _refactor_transient_context(
         _solve_callable, _resolved_backend, cg_solver = build_interface_solver(
             S_global=ctx._S_global,
             interface_solver='cg',
-            matvec_mode='assembled',
+            matvec_mode=_matvec_mode,
+            tile_schur_complements=_tile_schur_complements,
             tile_index_maps=_tile_index_maps,
+            S_extra=_S_extra,
             preconditioner=_preconditioner,
             rtol=_cg_rtol,
             atol=_cg_atol,
@@ -2377,6 +3559,9 @@ def _refactor_transient_context(
             block_jacobi_max_bytes=_bj_max_bytes,
             verbose=verbose,
             cg_stats_dict=_cg_stats,
+            matvec_threads=_matvec_threads,
+            matvec_dtype=_matvec_dtype,
+            strict_dtype_rtol=_strict_dtype_rtol,
         )
         ctx._interface_lu = _solve_callable
         ctx._cg_solver = cg_solver

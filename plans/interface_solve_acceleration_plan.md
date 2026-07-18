@@ -93,7 +93,9 @@ Gates (here and every stage): `pytest tests/distributed -m unit`; equivalence su
 
 **Gate-coverage fix (review point 7 — the standing gates exercise small *direct* solves, not the target path):** add a **forced-CG equivalence matrix** to the per-stage gates: parametrize the existing equivalence tests over `interface_solver=cg` × `{assembled, tilewise}` × `{block_jacobi, two_level}` × (Stage 4+: `{cpu, cuda}`) at pinned rtol 1e-12 on netlist_test/netlist_sampled, asserting the usual exactness tolerances. And every 107-tile proxy measurement run must report **max|ΔV| vs the direct reference** alongside timings — perf numbers without the correctness diff don't count as a passed gate.
 
-## Stage 2 — Threaded tilewise matvec + threaded block-Jacobi apply
+## Stage 2 — Threaded tilewise matvec + threaded block-Jacobi apply — **COMPLETE (2026-07-18; docs §7.8)**
+
+> Landed with the full battery (workflow + 2×/code-review xhigh --fix rounds with 30 confirmed findings fixed + Opus verification + 6 negative-tested regressions). Also fixed en route: the pre-existing transient island-penalty RHS omission (T1). Measured at the mi200k split regime: never-assemble DC prepare 145.5 s / 18.3 GB (Finding 0 closed); production iteration = matvec 176 ms (on target) + **BJ apply 701 ms (threading only 1.4×; open perf item)**; **cold BJ-CG stagnates** (rel-res 0.32→0.27 over 800 iters; κ(M⁻¹S)≳1e6 from genuine near-null ownership-block eigendirections — measured proof of the Stage 3 rationale, and direct evidence for the GenEO-lite coarse space). Scope reductions carried forward: TD never-assemble (DC-only + WARNING); BJ-apply threading perf; warm-iters-at-scale deferred to the Stage 3 head-to-head gate. New debug knob: `InterfaceCGSolver.progress_every` (true-residual progress lines).
 
 `interface_iterative.py` tilewise branch:
 - **Fix D1 first**: per-tile kept-position slicing `S_i_kept = S_i[np.ix_(pos, pos)]` at solver setup so filtered index maps and block dimensions always agree; pad-on-tile-port regression fixture.

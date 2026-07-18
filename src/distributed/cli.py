@@ -99,15 +99,21 @@ def cmd_parse(args: argparse.Namespace) -> None:
         _close_file_logging(fh)
 
 
-# Built-in defaults for the nine interface-solver settings, applied by
+# Built-in defaults for the interface-solver settings, applied by
 # _load_and_apply_config() AFTER the explicit-CLI > YAML precedence check
 # resolves to "neither was set" (finding 2).  Also used as the getattr()
 # fallback in _build_interface_settings() below for callers (tests, direct
 # analyze_distributed_decomposition() calls) that construct a bare
 # argparse.Namespace without going through _load_and_apply_config.
+#
+# Stage 2 additions: interface_matvec_mode default 'assembled' -> 'auto'
+# (item 8 -- tilewise whenever per-tile Schur blocks are available);
+# matvec_threads (no 'interface_' prefix, matching the plan's literal
+# naming), interface_matvec_dtype, interface_strict_dtype_rtol,
+# interface_drop_s_global (item 3).
 _IFACE_SETTING_DEFAULTS: Dict[str, Any] = {
     'interface_solver': 'auto',
-    'interface_matvec_mode': 'assembled',
+    'interface_matvec_mode': 'auto',
     'interface_preconditioner': 'block_jacobi',
     'interface_cg_rtol': 1e-8,
     'interface_cg_atol': 1e-14,
@@ -115,6 +121,10 @@ _IFACE_SETTING_DEFAULTS: Dict[str, Any] = {
     'interface_cg_strict': True,
     'interface_factor_memory_budget': 'auto',
     'interface_block_jacobi_max_bytes': 'auto',
+    'matvec_threads': 'auto',
+    'interface_matvec_dtype': 'float64',
+    'interface_strict_dtype_rtol': True,
+    'interface_drop_s_global': False,
 }
 
 
@@ -151,6 +161,11 @@ def _build_interface_settings(args: argparse.Namespace) -> Dict[str, Any]:
         'interface_cg_strict': _get('interface_cg_strict'),
         'interface_factor_memory_budget': _get('interface_factor_memory_budget'),
         'interface_block_jacobi_max_bytes': _get('interface_block_jacobi_max_bytes'),
+        # Stage 2
+        'matvec_threads': _get('matvec_threads'),
+        'interface_matvec_dtype': _get('interface_matvec_dtype'),
+        'interface_strict_dtype_rtol': _get('interface_strict_dtype_rtol'),
+        'interface_drop_s_global': _get('interface_drop_s_global'),
     }
 
 
@@ -767,14 +782,16 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
     )
     iface_grp.add_argument(
         '--interface-matvec-mode', type=str, default=None,
-        choices=['assembled', 'tilewise'],
+        choices=['auto', 'assembled', 'tilewise'],
         dest='interface_matvec_mode',
         help=(
             'CG matvec mode (only used when --interface-solver=cg or auto selects CG). '
+            "'auto' = tilewise when per-tile dense Schur blocks are available, "
+            "else assembled. "
             "'assembled' = matvec on assembled sparse S_global. "
             "'tilewise' = sum_i P_i^T S_i P_i x using per-tile dense Schur blocks "
             "(avoids global assembly entirely; coordinator O(n*k) memory). "
-            "(default: assembled)"
+            "(default: auto)"
         ),
     )
     iface_grp.add_argument(
@@ -844,6 +861,77 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
             "'jacobi' diagonal preconditioner (logged as a loud WARNING "
             "naming this setting and the iteration-count consequence). "
             "(default: auto)"
+        ),
+    )
+    # Stage 2: threaded tilewise matvec / block-Jacobi apply
+    iface_grp.add_argument(
+        '--matvec-threads', type=str, default=None,
+        dest='matvec_threads',
+        help=(
+            "Thread count for the tilewise CG matvec and the block-Jacobi "
+            "apply (persistent ThreadPoolExecutor, lazily built). "
+            "'auto' (default) = min(8, cpu_count, n_tiles) -- Stage 0 "
+            "measured best throughput at 8 threads on the BRCM-class proxy "
+            "(inverted scaling above 8), or an explicit positive integer."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-matvec-dtype', type=str, default=None,
+        choices=['float64', 'float32'],
+        dest='interface_matvec_dtype',
+        help=(
+            "Tilewise per-tile Schur block storage dtype (default: "
+            "float64). 'float32' roughly doubles GEMV throughput on a "
+            "CPU-only host at the cost of a ~1e-7 relative residual floor "
+            "-- must be paired with --interface-cg-rtol >= 1e-7 (enforced "
+            "unless --interface-no-strict-dtype-rtol is passed)."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-strict-dtype-rtol', dest='interface_strict_dtype_rtol',
+        action='store_true', default=None,
+        help=(
+            "Enforce the matvec_dtype='float32'/rtol>=1e-7 pairing "
+            "(default: enabled)."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-no-strict-dtype-rtol', dest='interface_strict_dtype_rtol',
+        action='store_false',
+        help=(
+            "Allow matvec_dtype='float32' with rtol < 1e-7 (not "
+            "recommended; for accuracy studies only)."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-drop-s-global', dest='interface_drop_s_global',
+        action='store_true', default=None,
+        help=(
+            "Never assemble S_global at all (item 3, Stage 0 Finding 0) -- "
+            "requires --interface-solver=cg (explicit, not auto), "
+            "--interface-matvec-mode in {tilewise, auto}, and "
+            "--island-detection resolving to the 'summaries' union-find "
+            "(the legacy Schur-BFS needs S_global's nonzero structure). "
+            "Falls back to the normal assembling path with a WARNING when "
+            "preconditions are not met. save() raises with guidance for a "
+            "context factored this way (default: disabled)."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-no-drop-s-global', dest='interface_drop_s_global',
+        action='store_false',
+        help=(
+            "Finding 10: explicit negation of --interface-drop-s-global, "
+            "matching the paired true/false flags on the other iface-group "
+            "booleans (--interface-cg-strict/-no-strict, "
+            "--interface-strict-dtype-rtol/-no-strict-dtype-rtol). Without "
+            "this, a shared solver.yaml with interface_drop_s_global: true "
+            "could never be overridden to False from the CLI -- there was "
+            "no flag that produced an explicit False for this key, so "
+            "explicit-CLI > YAML precedence was unexpressable in the False "
+            "direction. Forces the normal S_global-assembling factor path "
+            "(needed to save() a checkpoint, which never-assemble contexts "
+            "cannot do)."
         ),
     )
 
@@ -1162,6 +1250,9 @@ _VALID_SOLVER_YAML_KEYS = frozenset({
     # Stage 1: CG tolerance/budget plumbing
     'interface_cg_atol', 'interface_cg_maxiter', 'interface_cg_strict',
     'interface_factor_memory_budget', 'interface_block_jacobi_max_bytes',
+    # Stage 2: threaded tilewise matvec / fp32 / never-assemble-S_global
+    'matvec_threads', 'interface_matvec_dtype', 'interface_strict_dtype_rtol',
+    'interface_drop_s_global',
     # B3: streaming Schur assembly + A2 step-column table
     'streaming_assembly', 'use_step_columns', 'max_table_mb',
     # Stage 1e: island detection strategy
@@ -1404,6 +1495,9 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
         'interface_preconditioner', 'interface_cg_rtol',
         'interface_cg_atol', 'interface_cg_maxiter', 'interface_cg_strict',
         'interface_factor_memory_budget', 'interface_block_jacobi_max_bytes',
+        # Stage 2
+        'matvec_threads', 'interface_matvec_dtype',
+        'interface_strict_dtype_rtol', 'interface_drop_s_global',
     )
     solver_cfg_iface = (
         _raw_config.get('solver', {}) if _raw_config is not None else {}

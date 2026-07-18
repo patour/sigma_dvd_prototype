@@ -8,8 +8,9 @@ Covers:
   - Auto-rule thresholds: 'auto' triggers streaming when estimated S_i bytes
     exceed STREAMING_ASSEMBLY_AUTO_BYTES.
   - Default-off: byte-identity of S_global when streaming_assembly=False.
-  - B2 follow-ups: vectorized S_extra (COO vs LIL identical); CG tests green
-    after matvec change.
+  - D2 (Stage 2): direct-stamping S_extra matches the S_global-minus-tile-sum
+    definition (DC + transient, two dt values); CG tests green after matvec
+    change.
   - B2 tilewise matvec bincount pattern still passes CG-vs-direct tolerance.
 """
 
@@ -883,94 +884,180 @@ class TestAutoRule:
 # ---------------------------------------------------------------------------
 
 
-class TestVectorizedSExtra:
-    """B2 follow-up: _build_s_extra_coo must match the old LIL nested-loop result."""
+class TestSExtraDirectStamping:
+    """D2 (Stage 2, interface_solve_acceleration_plan.md): ``_build_s_extra_direct``
+    (direct stamping of package edges + island-penalty diagonal) must match the
+    mathematical definition ``S_extra = S_global - sum_i P_i^T S_i P_i`` --
+    verified for BOTH modes (transient fixture includes package caps, at two
+    different dt values), replacing the old giant-subtraction
+    ``_build_s_extra_coo`` (removed; see module docstring / plan D2)."""
 
     def _make_tile_schur(self, n, seed):
         rng = np.random.default_rng(seed)
         A = rng.standard_normal((n, n))
         return A @ A.T + n * np.eye(n)
 
-    def test_s_extra_coo_matches_lil(self):
-        """_build_s_extra_coo produces the same result as old LIL construction."""
-        from distributed.result_factorization import _build_s_extra_coo
+    def _build_fixture(self):
+        """Two tiles sharing node 'n1'; tile A also has a Dirichlet 'pad' port
+        directly on its own port list (the D1 scenario) so the subtraction
+        reference below must ALSO kept-slice, exercising the same logic
+        ``_build_s_extra_direct`` relies on being correct for."""
+        tile_a_ports = ['n0', 'n1', 'pad']
+        tile_b_ports = ['n1', 'n2', 'n3']
+        S_a = self._make_tile_schur(3, 1)
+        S_b = self._make_tile_schur(3, 2)
+        tile_schur = {'A': S_a, 'B': S_b}
+        tile_ports = {'A': tile_a_ports, 'B': tile_b_ports}
+        return tile_schur, tile_ports
 
-        n_iface = 6
-        rng = np.random.default_rng(42)
-
-        # Two tiles
-        S1 = self._make_tile_schur(3, 1)
-        S2 = self._make_tile_schur(4, 2)
-
-        idx1 = np.array([0, 1, 2], dtype=np.int32)
-        idx2 = np.array([2, 3, 4, 5], dtype=np.int32)  # note: shared node 2
-
-        tile_schur = {(0, 0): S1, (0, 1): S2}
-        tile_idx = {(0, 0): idx1, (0, 1): idx2}
-
-        # Build S_global as sum (simulate what assemble would produce)
-        # S_global = P1^T S1 P1 + P2^T S2 P2 + some package edges
-        S_full = np.zeros((n_iface, n_iface), dtype=np.float64)
-        for li, gi in enumerate(idx1):
-            for lj, gj in enumerate(idx1):
-                S_full[gi, gj] += S1[li, lj]
-        for li, gi in enumerate(idx2):
-            for lj, gj in enumerate(idx2):
-                S_full[gi, gj] += S2[li, lj]
-        # Add some package edge contribution
-        S_full[0, 1] += 0.5
-        S_full[1, 0] += 0.5
-        S_full[0, 0] += 0.5
-        S_full[1, 1] += 0.5
-        S_global = sp.csr_matrix(S_full)
-
-        # Old LIL path
-        S_lil = sp.lil_matrix((n_iface, n_iface), dtype=np.float64)
+    @staticmethod
+    def _subtraction_reference(S_global, tile_schur, tile_ports,
+                               interface_node_to_idx, n_iface):
+        """sum_i P_i^T S_i_kept P_i via an INDEPENDENT manual kept-slicing
+        loop (not calling kept_position_slice / _build_s_extra_direct), so
+        this is a true external ground truth for S_global - sum_i(...)."""
+        S_sum = np.zeros((n_iface, n_iface))
         for tid, S_i in tile_schur.items():
-            idx = tile_idx[tid]
-            for li, gi in enumerate(idx):
-                for lj, gj in enumerate(idx):
-                    S_lil[gi, gj] += S_i[li, lj]
-        S_extra_old = (S_global.tocsr() - S_lil.tocsr()).tocsr()
-        S_extra_old.eliminate_zeros()
+            ports = tile_ports[tid]
+            kept = [p for p, nd in enumerate(ports) if nd in interface_node_to_idx]
+            idx = [interface_node_to_idx[ports[p]] for p in kept]
+            for a, ia in zip(kept, idx):
+                for b, ib in zip(kept, idx):
+                    S_sum[ia, ib] += S_i[a, b]
+        return S_global.toarray() - S_sum
 
-        # New COO path
-        S_extra_new = _build_s_extra_coo(S_global, tile_schur, tile_idx, n_iface)
+    def test_dc_mode_matches_subtraction_reference(self):
+        """Resistive-only package edges (DC mode): direct stamping == subtraction."""
+        from pgmath.schur import assemble_schur_complement_system
+        from distributed.result_factorization import _build_s_extra_direct
 
+        tile_schur, tile_ports = self._build_fixture()
+        package_edges = [('n0', 'n3', 2.0), ('pad', 'n2', 5.0)]
+        dirichlet_nodes = {'pad'}
+
+        S_global, _rhs, interface_nodes, interface_node_to_idx = (
+            assemble_schur_complement_system(
+                tile_schur_complements=tile_schur,
+                tile_port_node_lists=tile_ports,
+                extra_edges=package_edges,
+                dirichlet_nodes=dirichlet_nodes,
+                dirichlet_voltage=1.0,
+            )
+        )
+        n_iface = len(interface_nodes)
+
+        S_extra_ref = self._subtraction_reference(
+            S_global, tile_schur, tile_ports, interface_node_to_idx, n_iface,
+        )
+        S_extra_direct = _build_s_extra_direct(
+            interface_node_to_idx=interface_node_to_idx,
+            n_iface=n_iface,
+            package_edges=package_edges,
+            dirichlet_nodes=dirichlet_nodes,
+        )
         np.testing.assert_allclose(
-            S_extra_old.toarray(), S_extra_new.toarray(),
-            atol=1e-14,
-            err_msg="COO S_extra does not match LIL S_extra",
+            S_extra_direct.toarray(), S_extra_ref, atol=1e-10,
+            err_msg="D2 direct-stamping S_extra (DC) != subtraction reference",
         )
 
-    def test_s_extra_coo_is_sparse_when_no_package_edges(self):
-        """When no package edges, S_extra should be near-zero (only floating-point residue)."""
-        from distributed.result_factorization import _build_s_extra_coo
+    def test_dc_mode_with_island_penalty(self):
+        """Island-penalty diagonal (needed since sum_i S_i never carries it)."""
+        from pgmath.schur import assemble_schur_complement_system, apply_island_penalty
+        from distributed.result_factorization import _build_s_extra_direct
 
-        n_iface = 4
-        S1 = self._make_tile_schur(2, 7)
-        S2 = self._make_tile_schur(2, 8)
+        tile_schur, tile_ports = self._build_fixture()
+        package_edges = [('n0', 'n3', 2.0)]
+        dirichlet_nodes = {'pad'}
+        island_nodes = {'n3'}
 
-        idx1 = np.array([0, 1], dtype=np.int32)
-        idx2 = np.array([2, 3], dtype=np.int32)
-
-        tile_schur = {(0, 0): S1, (0, 1): S2}
-        tile_idx = {(0, 0): idx1, (0, 1): idx2}
-
-        # S_global = exact sum of tiles (no package edges)
-        S_full = np.zeros((n_iface, n_iface), dtype=np.float64)
-        S_full[np.ix_(idx1, idx1)] += S1
-        S_full[np.ix_(idx2, idx2)] += S2
-        S_global = sp.csr_matrix(S_full)
-
-        S_extra = _build_s_extra_coo(S_global, tile_schur, tile_idx, n_iface)
-
-        # All entries should be effectively zero (floating-point residue only)
-        max_val = abs(S_extra).max() if S_extra.nnz > 0 else 0.0
-        assert max_val < 1e-12, (
-            f"S_extra has unexpected entries (max={max_val:.2e}) "
-            "when S_global = exact tile sum"
+        S_global, rhs, interface_nodes, interface_node_to_idx = (
+            assemble_schur_complement_system(
+                tile_schur_complements=tile_schur,
+                tile_port_node_lists=tile_ports,
+                extra_edges=package_edges,
+                dirichlet_nodes=dirichlet_nodes,
+                dirichlet_voltage=1.0,
+            )
         )
+        n_iface = len(interface_nodes)
+        # Mirror production: S_global (assembled mode) gets the penalty applied.
+        S_global_penalized, _rhs_penalized = apply_island_penalty(
+            S_global, rhs, island_nodes, interface_node_to_idx, dirichlet_voltage=1.0,
+        )
+
+        S_extra_ref = self._subtraction_reference(
+            S_global_penalized, tile_schur, tile_ports, interface_node_to_idx, n_iface,
+        )
+        S_extra_direct = _build_s_extra_direct(
+            interface_node_to_idx=interface_node_to_idx,
+            n_iface=n_iface,
+            package_edges=package_edges,
+            dirichlet_nodes=dirichlet_nodes,
+            island_nodes=island_nodes,
+        )
+        np.testing.assert_allclose(
+            S_extra_direct.toarray(), S_extra_ref, atol=1e-10,
+            err_msg="D2 direct-stamping S_extra with island penalty != reference",
+        )
+
+    @pytest.mark.parametrize('dt_ps,method', [(100.0, 'be'), (37.5, 'trap')])
+    def test_transient_mode_matches_subtraction_reference(self, dt_ps, method):
+        """Transient mode (package caps, C_coeff-scaled) at two different dt
+        values -- S_extra^TD depends on dt/method (D2 mode-dependent gap)."""
+        from pgmath.schur import assemble_schur_complement_system
+        from distributed.result_factorization import _build_s_extra_direct
+
+        tile_schur, tile_ports = self._build_fixture()
+        package_edges = [('n0', 'n3', 2.0)]
+        package_cap_edges = [('n1', 'n2', 40.0), ('pad', 'n0', 15.0)]
+        dirichlet_nodes = {'pad'}
+        C_coeff = (2.0 if method == 'trap' else 1.0) / dt_ps
+        combined_edges = list(package_edges) + [
+            (u, v, C_coeff * c) for u, v, c in package_cap_edges if c > 0
+        ]
+
+        S_global, _rhs, interface_nodes, interface_node_to_idx = (
+            assemble_schur_complement_system(
+                tile_schur_complements=tile_schur,
+                tile_port_node_lists=tile_ports,
+                extra_edges=combined_edges,
+                dirichlet_nodes=dirichlet_nodes,
+                dirichlet_voltage=1.0,
+            )
+        )
+        n_iface = len(interface_nodes)
+
+        S_extra_ref = self._subtraction_reference(
+            S_global, tile_schur, tile_ports, interface_node_to_idx, n_iface,
+        )
+        S_extra_direct = _build_s_extra_direct(
+            interface_node_to_idx=interface_node_to_idx,
+            n_iface=n_iface,
+            package_edges=package_edges,
+            dirichlet_nodes=dirichlet_nodes,
+            package_cap_edges=package_cap_edges,
+            C_coeff=C_coeff,
+        )
+        np.testing.assert_allclose(
+            S_extra_direct.toarray(), S_extra_ref, atol=1e-10,
+            err_msg=(
+                f"D2 direct-stamping S_extra (transient, dt={dt_ps}ps, "
+                f"method={method}) != subtraction reference"
+            ),
+        )
+
+    def test_s_extra_direct_is_sparse_when_no_package_edges(self):
+        """When no package edges/islands, S_extra should be exactly empty."""
+        from distributed.result_factorization import _build_s_extra_direct
+
+        interface_node_to_idx = {'n0': 0, 'n1': 1, 'n2': 2, 'n3': 3}
+        S_extra = _build_s_extra_direct(
+            interface_node_to_idx=interface_node_to_idx,
+            n_iface=4,
+            package_edges=[],
+            dirichlet_nodes=set(),
+        )
+        assert S_extra.nnz == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1423,7 +1510,7 @@ class TestStreamAssembleAlgorithmIdentity:
             tile_port_stream[tid] = port_list
             per_tile_stats.append(stats)
 
-        S_stream, rhs_stream, iface_stream, imap_stream, _ = _stream_assemble_schur(
+        S_stream, rhs_stream, iface_stream, imap_stream, _, _ = _stream_assemble_schur(
             model=model2,
             tile_port_node_lists=tile_port_stream,
             per_tile_stats=per_tile_stats,
@@ -1677,6 +1764,51 @@ class TestTransientStreaming:
             "factor_transient_and_cache_schur should NOT be called when streaming=False"
         )
 
+    def test_transient_bulk_path_assembles_schur_only_once(self):
+        """Finding 12: the bulk (non-streaming) prepare_transient() path
+        must compute rhs_dirichlet_G via the S3 linearity delta (like the
+        streaming path already does), NOT a second full
+        assemble_schur_complement_system() call -- a complete second global
+        Schur COO scatter of every tile's S_A_i block, solely to obtain a
+        vector the diff itself proved is derivable from rhs_dirichlet_A
+        minus a cheap package-cap-edges-only stamp."""
+        import pgmath.schur as schur_mod
+        from test_time_domain import _build_two_tile_distributed_model
+        from distributed.solver import DistributedDDMSolver
+
+        # A nonzero package cap edge is required so rhs_dirichlet_G !=
+        # rhs_dirichlet_A -- otherwise the cheap "no cap edges" branch
+        # (rhs_dirichlet_G = rhs_dirichlet_A.copy()) would trivially pass
+        # this test without actually exercising the linearity delta.
+        model = _build_two_tile_distributed_model(
+            package_cap_edges=[('pad', 'shared', 50.0)],
+        )
+        model.settings.update({'streaming_assembly': False})
+
+        call_count = [0]
+        original_assemble = schur_mod.assemble_schur_complement_system
+
+        def counting_assemble(*args, **kwargs):
+            call_count[0] += 1
+            return original_assemble(*args, **kwargs)
+
+        schur_mod.assemble_schur_complement_system = counting_assemble
+        try:
+            solver = DistributedDDMSolver(model)
+            trans_ctx = solver.prepare_transient(dt=100e-12, method='be')
+            trans_ctx.release()
+        finally:
+            schur_mod.assemble_schur_complement_system = original_assemble
+            model.shutdown()
+
+        assert call_count[0] == 1, (
+            f"assemble_schur_complement_system was called {call_count[0]} "
+            f"times in the bulk transient prepare path; expected exactly "
+            f"1 (the primary combined_edges assembly) -- a second call "
+            f"solely to derive rhs_dirichlet_G is the redundant work "
+            f"finding 12 removes."
+        )
+
     def test_transient_rhs_dirichlet_g_matches_bulk(self):
         """Transient rhs_dirichlet_G from streaming matches bulk path."""
         from distributed.solver import DistributedDDMSolver
@@ -1700,6 +1832,98 @@ class TestTransientStreaming:
 
         ctx_bulk.release()
         ctx_stream.release()
+
+    # -----------------------------------------------------------------
+    # S3 regression: streaming-transient rhs_dirichlet_G on a TILE-RESIDENT
+    # PAD-ON-PORT fixture (the D1 scenario the above test does NOT cover --
+    # _build_dc_model's boundary_nodes deliberately excludes the pad).
+    # Pre-fix, the streaming branch computed rhs_dirichlet_G from package
+    # resistive edges ALONE (_compute_rhs_dirichlet_from_edges), omitting
+    # tile (0, 0)'s own -S_A_i[kept, pad] @ V_d contribution -- present in
+    # the bulk path because its second assemble_schur_complement_system
+    # call re-embeds tile_schur_complements.
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def _build_pad_on_port_model(streaming_assembly):
+        from test_time_domain import _build_two_tile_distributed_model
+        model = _build_two_tile_distributed_model(
+            package_cap_edges=[('pad', 'shared', 50.0)],  # D1 + package cap
+        )
+        model.settings.update({'streaming_assembly': streaming_assembly})
+        return model
+
+    def test_transient_rhs_dirichlet_g_matches_bulk_on_pad_on_port_fixture(self):
+        from distributed.solver import DistributedDDMSolver
+
+        for method in ('BE', 'TR'):
+            model_bulk = self._build_pad_on_port_model(False)
+            model_stream = self._build_pad_on_port_model(True)
+
+            ctx_bulk = DistributedDDMSolver(model_bulk).prepare_transient(
+                dt=100e-12, method=method,
+            )
+            ctx_stream = DistributedDDMSolver(model_stream).prepare_transient(
+                dt=100e-12, method=method,
+            )
+
+            np.testing.assert_array_almost_equal(
+                ctx_bulk._rhs_dirichlet_G,
+                ctx_stream._rhs_dirichlet_G,
+                decimal=10,
+                err_msg=(
+                    f"[{method}] Transient rhs_dirichlet_G mismatch "
+                    f"(streaming vs bulk) on the tile-resident pad-on-port "
+                    f"fixture -- streaming is missing tile (0, 0)'s own "
+                    f"Dirichlet-adjacent S_A_i contribution."
+                ),
+            )
+
+            ctx_bulk.release()
+            ctx_stream.release()
+            model_bulk.shutdown()
+            model_stream.shutdown()
+
+    def test_transient_solve_matches_bulk_on_pad_on_port_fixture(self, tmp_path):
+        """End-to-end BE and TR solve_transient parity, streaming vs bulk,
+        on the D1 + package-cap fixture (not just the rhs_dirichlet_G
+        vector in isolation)."""
+        from distributed.solver import DistributedDDMSolver
+
+        for method in ('be', 'tr'):
+            results = {}
+            for streaming in (False, True):
+                model = self._build_pad_on_port_model(streaming)
+                for tc in model.metadata.tile_configs:
+                    tc.ckt_path = str(tmp_path / f'{method}_{streaming}' / 'dummy.ckt')
+                solver = DistributedDDMSolver(model)
+                dc_ctx = solver.prepare()
+                trans_ctx = solver.prepare_transient(dt=100e-12, method=method)
+                try:
+                    smoothed = solver.preprocess_sources(
+                        time_step=100e-12, t_start=0.0, t_end=2e-9,
+                        smooth=False,
+                    )
+                    result = solver.solve_transient(
+                        trans_ctx, dc_context=dc_ctx, t_end=2e-9,
+                        smoothed_sources=smoothed,
+                    )
+                    results[streaming] = result.as_flat()
+                finally:
+                    trans_ctx.release()
+                    dc_ctx.release()
+                    model.shutdown()
+
+            v_bulk, v_stream = results[False], results[True]
+            common = set(v_bulk) & set(v_stream)
+            assert common, f"[{method}] fixture produced no comparable nodes"
+            for node in common:
+                drop_bulk, _t_b = v_bulk[node]
+                drop_stream, _t_s = v_stream[node]
+                assert abs(drop_bulk - drop_stream) < 1e-6, (
+                    f"[{method}] node {node}: bulk drop={drop_bulk!r} vs "
+                    f"streaming drop={drop_stream!r}"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -2087,7 +2311,8 @@ class TestFinding8StreamingPadBoundaryNode:
 
         When inject_pad_in_port_list=True, manually add the pad node to tile (0,0)'s
         port list to simulate the scenario described in Finding 8.  Returns
-        (S_global, unknown_list, unknown_to_idx, iface_tile_index_maps).
+        (S_global, unknown_list, unknown_to_idx, iface_tile_index_maps,
+        iface_tile_kept_port_pos).
         """
         import os
         import pickle
@@ -2165,7 +2390,7 @@ class TestFinding8StreamingPadBoundaryNode:
             # be filtered out of the returned interface_tile_index_maps.
             tile_port_node_lists[(0, 0)] = list(tile_port_node_lists[(0, 0)]) + ['pad_v']
 
-        S_global, rhs, unknown_list, unknown_to_idx, iface_tile_index_maps = (
+        S_global, rhs, unknown_list, unknown_to_idx, iface_tile_index_maps, iface_tile_kept_port_pos = (
             _stream_assemble_schur(
                 model=model,
                 tile_port_node_lists=tile_port_node_lists,
@@ -2176,7 +2401,10 @@ class TestFinding8StreamingPadBoundaryNode:
                 assembly_cache={},
             )
         )
-        return S_global, unknown_list, unknown_to_idx, iface_tile_index_maps
+        return (
+            S_global, unknown_list, unknown_to_idx, iface_tile_index_maps,
+            iface_tile_kept_port_pos, tile_port_node_lists,
+        )
 
     def test_streaming_tile_index_maps_filter_pad_nodes_from_port_list(self):
         """interface_tile_index_maps must exclude pad nodes via unknown_to_idx filter.
@@ -2360,7 +2588,7 @@ class TestFinding8StreamingPadBoundaryNode:
 
     def test_streaming_tile_index_maps_without_pad_injection_correct(self):
         """Normal case (no pad in port list): streaming tile_index_maps match unknown_to_idx."""
-        S_global, unknown_list, unknown_to_idx, iface_tile_index_maps = (
+        S_global, unknown_list, unknown_to_idx, iface_tile_index_maps, _, _ = (
             self._make_minimal_streaming_context(inject_pad_in_port_list=False)
         )
 
@@ -2373,6 +2601,35 @@ class TestFinding8StreamingPadBoundaryNode:
             bad = idx_arr[idx_arr >= n_unknown]
             assert len(bad) == 0, (
                 f"tile {tid}: index map contains out-of-range indices {bad}"
+            )
+
+    def test_streaming_tile_kept_port_pos_populated_no_pad_injection(self):
+        """Finding 4: _stream_assemble_schur must populate tile_kept_port_pos
+        (positions within each tile's FULL port list that are kept/non-
+        Dirichlet), mirroring kept_position_slice()'s kept_pos on the bulk
+        path -- not leave it as an empty dict.  (The real tile-resident
+        pad-on-port end-to-end regression, exercised through solve_dc(), is
+        TestD1StreamingSolveDcRegression in test_interface_iterative_stage2.py
+        -- this fixture has no tile-resident pad port, so every kept_pos
+        here is simply range(len(port_list)).)
+        """
+        (
+            S_global, unknown_list, unknown_to_idx, iface_tile_index_maps,
+            iface_tile_kept_port_pos, tile_port_node_lists,
+        ) = self._make_minimal_streaming_context(inject_pad_in_port_list=False)
+
+        assert iface_tile_kept_port_pos, "sanity: tiles present"
+        for tid, idx_arr in iface_tile_index_maps.items():
+            kept_pos = iface_tile_kept_port_pos.get(tid)
+            assert kept_pos is not None, f"tile {tid}: missing tile_kept_port_pos entry"
+            assert len(kept_pos) == len(idx_arr), (
+                f"tile {tid}: kept_pos length {len(kept_pos)} != "
+                f"index map length {len(idx_arr)}"
+            )
+            port_list = tile_port_node_lists[tid]
+            assert list(kept_pos) == list(range(len(port_list))), (
+                f"tile {tid}: no pad on this fixture's ports, so kept_pos "
+                f"should be the identity range, got {list(kept_pos)}"
             )
 
     def test_streaming_s_global_matches_bulk_with_pad_filter(self):

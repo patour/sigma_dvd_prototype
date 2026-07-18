@@ -39,6 +39,27 @@ it takes to cover a new Phase-A optimisation flag.
 Phase-A flags implemented (A2 landed):
   pytest.param({"use_step_columns": True}, id="step_cols_on")
   pytest.param({"use_step_columns": False}, id="step_cols_off")
+
+S15 cross-reference (interface_solve_acceleration_plan.md Stage 2)
+--------------------------------------------------------------------
+The interface_matvec_mode default flip ('assembled' -> 'auto', which
+resolves to 'tilewise' whenever tile Schur blocks are available) changes
+the default CG operator, but its forced-CG equivalence coverage does NOT
+live in SOLVER_VARIANTS above: solver_kw entries here are splatted as
+**kwargs directly into solve_dc/solve_quasi_static/solve_transient/
+analyze_adjoint_static calls, so only flags those functions literally
+accept (e.g. use_step_columns) fit this mechanism.
+interface_solver/interface_matvec_mode/interface_matvec_dtype/
+interface_drop_s_global are MODEL SETTINGS (model.settings[...]), not
+solve-call kwargs -- adding them here raises TypeError at every call site
+that doesn't expect them, and this module's fixtures are session/module
+scoped (built once per file), making a per-test model.settings override
+awkward without duplicating fixture setup.  The forced-CG matrix
+({assembled, tilewise(auto)} x {fp64} x {with S_global, never-assemble}
+vs direct at pinned rtol=1e-12, plus one fp32 case) instead lives in
+``tests/distributed/test_interface_iterative_stage2.py::
+TestS15ForcedCGEquivalenceMatrix``, which builds a fresh model per
+parametrized case.
 """
 
 import logging

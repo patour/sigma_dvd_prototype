@@ -124,6 +124,20 @@ class DistributedTopologyContext:
     Cross-mode reuse is suppressed by ``_factor_transient_context``.
     """
 
+    tile_kept_port_pos: Dict[tuple, np.ndarray] = field(default_factory=dict)
+    """Stage 2 (D1 fix, item 1): per-tile POSITIONS (int64) within the tile's
+    full port-order arrays (``get_reduced_rhs()``'s return value,
+    ``bs.port_nodes``) that are kept (non-Dirichlet) -- i.e. the positions
+    that were sliced INTO ``S_i`` (via ``kept_position_slice``) and into
+    ``tile_index_maps[tid]``.  Consumed by ``solve_dc``'s RHS scatter
+    (``solver.py``) to filter a full-port-length reduced-RHS vector down to
+    the same length as ``tile_index_maps[tid]`` for tiles with a Dirichlet
+    pad among their own ports (the D1 RHS-scatter manifestation).  Absent
+    (empty dict) on pre-Stage-2 checkpoints -- callers must use
+    ``getattr(topology, 'tile_kept_port_pos', {})`` and fall back to
+    unfiltered behaviour when a tile id is missing.
+    """
+
     _assembly_cache: Optional[Dict[str, Any]] = field(default=None)
     """A4: Mutable assembly-pattern cache for ``assemble_schur_complement_system``.
 
@@ -138,6 +152,25 @@ class DistributedTopologyContext:
     Initialised lazily as an empty ``{}`` on the first ``_factor_dc_context``
     or ``_factor_transient_context`` call; ``None`` means "not yet
     initialised".
+    """
+
+    tile_port_count: Dict[tuple, int] = field(default_factory=dict)
+    """S2/S13: per-tile FULL port count (``len(tile's port node list)`` --
+    including any Dirichlet/pad ports -- as recorded at the same
+    ``kept_position_slice``/streaming-gather call that produced
+    ``tile_kept_port_pos[tid]``), i.e. the expected length of a full-port-
+    order reduced-RHS vector (``get_reduced_rhs()``/``evaluate_and_get_
+    reduced_rhs()``/adjoint terminal-RHS return values) for that tile.
+
+    Used by ``interface_iterative.filter_kept_rhs`` to VALIDATE a live
+    worker's returned vector length against what was recorded when
+    ``tile_kept_port_pos``/``tile_index_maps`` were built, before slicing
+    with ``kept_pos`` -- catching a drifted/stale context (e.g. worker
+    re-setup or retile between factor() and a scatter call) with a loud
+    error instead of ``g_i[kept_pos]`` silently indexing into the wrong
+    positions whenever the lengths happen to coincide.  Empty dict on
+    pre-Stage-2 checkpoints -- callers must fall back to the length-only
+    fast-path check when a tile id is missing.
     """
 
 
@@ -171,6 +204,10 @@ class DistributedSolverContext:
         self._S_global: Optional[sp.csc_matrix] = None  # saved for potential re-factor
         # B2: CG solver handle (InterfaceCGSolver or None); set by factor(), cleared by release().
         self._cg_solver = None
+        # Item 3: True iff the most recent factor() used the "never assemble
+        # S_global" path (interface_drop_s_global).  save() checks this and
+        # raises with guidance instead of silently saving nothing useful.
+        self._s_global_dropped: bool = False
 
         # Direct field storage (populated by factor() or backward-compat constructor)
         self._interface_lu: Optional[Callable] = interface_lu
@@ -178,6 +215,15 @@ class DistributedSolverContext:
         self._interface_node_to_idx: Optional[Dict[str, int]] = interface_node_to_idx
         self._rhs_dirichlet_interface: Optional[np.ndarray] = rhs_dirichlet_interface
         self._tile_index_maps: Optional[Dict[tuple, np.ndarray]] = tile_index_maps
+        # Stage 2 (D1 fix, item 1): always freshly overwritten by factor()
+        # (mirrors _tile_index_maps -- the CONTEXT's own last-factor() value
+        # wins over the shared topology's, which is only set at first
+        # construction).  Not part of the backward-compat constructor kwargs
+        # (no pre-Stage-2 caller could have passed it).
+        self._tile_kept_port_pos: Dict[tuple, np.ndarray] = {}
+        # S2/S13: parity with _tile_kept_port_pos -- see
+        # DistributedTopologyContext.tile_port_count.
+        self._tile_port_count: Dict[tuple, int] = {}
         self._removed_interface_nodes: Set[str] = (
             removed_interface_nodes if removed_interface_nodes is not None else set()
         )
@@ -208,6 +254,15 @@ class DistributedSolverContext:
         self._S_global = None
         # B2: CG solver holds S_global + preconditioner factors — free it too
         # so that release() actually reclaims memory in CG mode.
+        # Stage 2 lifecycle-parity checklist: close its persistent matvec/
+        # BJ-apply thread pool BEFORE dropping the reference, or repeated
+        # prepare()/release() cycles accumulate live thread pools (a
+        # weakref.finalize safety net exists too, but is not the primary
+        # release path -- GC timing is not guaranteed).
+        if self._cg_solver is not None:
+            _close = getattr(self._cg_solver, 'close', None)
+            if callable(_close):
+                _close()
         self._cg_solver = None
         self.is_factored = False
         # Clear worker DC factorizations if we have a model reference
@@ -331,6 +386,34 @@ class DistributedSolverContext:
             return self._tile_index_maps
         if self.topology is not None:
             return self.topology.tile_index_maps
+        return {}
+
+    @property
+    def tile_kept_port_pos(self) -> Dict[tuple, np.ndarray]:
+        """Stage 2 (D1 fix): see ``DistributedTopologyContext.tile_kept_port_pos``.
+
+        Prefers the context's own last-``factor()`` value; falls back to the
+        (possibly stale, from a different mode's first construction) value
+        cached on the shared topology, then to ``{}`` for pre-Stage-2
+        checkpoints/backward-compat direct construction.
+        """
+        if self._tile_kept_port_pos:
+            return self._tile_kept_port_pos
+        if self.topology is not None:
+            return getattr(self.topology, 'tile_kept_port_pos', {})
+        return {}
+
+    @property
+    def tile_port_count(self) -> Dict[tuple, int]:
+        """S2/S13: see ``DistributedTopologyContext.tile_port_count``.
+
+        Same precedence as ``tile_kept_port_pos``: context's own last-
+        ``factor()`` value, then the shared topology's, then ``{}``.
+        """
+        if self._tile_port_count:
+            return self._tile_port_count
+        if self.topology is not None:
+            return getattr(self.topology, 'tile_port_count', {})
         return {}
 
     @property
@@ -465,6 +548,7 @@ class DistributedTransientContext:
         G_package_uu: Optional[sp.csr_matrix] = None,
         removed_interface_nodes: Optional[Set[str]] = None,
         timings: Optional[Dict[str, Any]] = None,
+        island_penalty_rhs: Optional[np.ndarray] = None,
     ):
         self.model = model
         self.topology: Optional[DistributedTopologyContext] = topology
@@ -488,6 +572,14 @@ class DistributedTransientContext:
         self._rhs_dirichlet_G: Optional[np.ndarray] = rhs_dirichlet_G
         self.C_package_uu: Optional[sp.csr_matrix] = C_package_uu
         self._G_package_uu: Optional[sp.csr_matrix] = G_package_uu
+        # T1 fix: separate per-step island-penalty RHS vector (penalty *
+        # vdd at penalized interface-island rows, zero elsewhere). Must be
+        # added EXACTLY ONCE per time step (both BE and TR) -- NOT folded
+        # into rhs_dirichlet_G, which TR scales by 2 (that would double the
+        # penalty forcing term under TR). None when there are no islands
+        # (or on pre-fix checkpoints -- solve_transient degrades gracefully
+        # to the old omission for those, same as before this fix).
+        self.island_penalty_rhs: Optional[np.ndarray] = island_penalty_rhs
 
         self._S_global: Optional[sp.csc_matrix] = None
         # B2: CG solver handle (InterfaceCGSolver or None); set by factor(), cleared by release().
@@ -498,6 +590,13 @@ class DistributedTransientContext:
         self._interface_nodes: Optional[List[str]] = interface_nodes
         self._interface_node_to_idx: Optional[Dict[str, int]] = interface_node_to_idx
         self._tile_index_maps: Optional[Dict[tuple, np.ndarray]] = tile_index_maps
+        # Stage 2 (D1 fix): parity with DistributedSolverContext; see the
+        # matching comment there.  Consumed by solve_quasi_static/
+        # solve_transient's D1 RHS-scatter filtering (S2 fix).
+        self._tile_kept_port_pos: Dict[tuple, np.ndarray] = {}
+        # S2/S13: parity with _tile_kept_port_pos -- see
+        # DistributedTopologyContext.tile_port_count.
+        self._tile_port_count: Dict[tuple, int] = {}
         self._removed_interface_nodes: Set[str] = (
             removed_interface_nodes if removed_interface_nodes is not None else set()
         )
@@ -529,9 +628,16 @@ class DistributedTransientContext:
         self._S_global = None
         # B2: CG solver holds S_global + preconditioner factors — free it too
         # so that release() actually reclaims memory in CG mode.
+        # Stage 2 lifecycle-parity checklist: see the matching comment in
+        # DistributedSolverContext.release().
+        if self._cg_solver is not None:
+            _close = getattr(self._cg_solver, 'close', None)
+            if callable(_close):
+                _close()
         self._cg_solver = None
         self.rhs_dirichlet_A = None
         self._rhs_dirichlet_G = None
+        self.island_penalty_rhs = None
         self.C_package_uu = None
         self._G_package_uu = None
         self.is_factored = False
@@ -674,6 +780,30 @@ class DistributedTransientContext:
             return self._tile_index_maps
         if self.topology is not None:
             return self.topology.tile_index_maps
+        return {}
+
+    @property
+    def tile_kept_port_pos(self) -> Dict[tuple, np.ndarray]:
+        """Stage 2 (D1 fix): see ``DistributedTopologyContext.tile_kept_port_pos``.
+
+        Same precedence as the DC context's property: context's own last-
+        ``factor()`` value, then the shared topology's, then ``{}``.
+        Consumed by ``solve_quasi_static``/``solve_transient``'s D1 RHS-
+        scatter filtering (S2 fix) via ``interface_iterative.filter_kept_rhs``.
+        """
+        if self._tile_kept_port_pos:
+            return self._tile_kept_port_pos
+        if self.topology is not None:
+            return getattr(self.topology, 'tile_kept_port_pos', {})
+        return {}
+
+    @property
+    def tile_port_count(self) -> Dict[tuple, int]:
+        """S2/S13: see ``DistributedTopologyContext.tile_port_count``."""
+        if self._tile_port_count:
+            return self._tile_port_count
+        if self.topology is not None:
+            return getattr(self.topology, 'tile_port_count', {})
         return {}
 
     @property

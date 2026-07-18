@@ -717,6 +717,56 @@ one. Node count **undecided** — Stage 5 remains gated; the realistic CPU-only 
 re-assessed after Stage 3 measures the coarse-space iteration cut (warm iters ≤5–10 is now the
 make-or-break number for the CPU path).
 
+### 7.8 Stage 1–2 landed + split-regime measurements (2026-07-18, dev host)
+
+**Stage 1 landed** (1a–1d: `ea6d329`; 1e: `6791891`). Island-detection redesign measured at scale:
+the Stage 1e parser re-parse of the mi200k proxy costs **+5.3%** (172.6 s vs 163.9 s legacy) and
+emits 177,796 component summaries; union-find island detection replaces the Schur-BFS at **59×**
+on the 18-tile fixture (0.635 s → 0.011 s) with identical island sets, projected to eliminate the
+238 s (proxy) / ~900 s (BRCM) prepare cost. rtol default is 1e-8 everywhere per the §7.7 sweep.
+
+**Stage 2 landed** (this commit): D1 pad-port fix (all seven RHS-scatter sites via the validating
+`filter_kept_rhs`), D2 S_extra direct stamping (mode-dependent C_coeff package caps, rebuilt per
+`prepare_transient`), threaded tilewise matvec + threaded block-Jacobi, fp32 storage path
+(fp64 originals freed; 1.7–2.0× at the matvec level on the BLAS fast path), **never-assemble
+S_global DC mode**, refactor tilewise re-gather, zero-port-tile fix, and the transient
+island-penalty RHS fix (a pre-existing production bug: penalized islands decayed from Vdd within a
+few steps because `apply_island_penalty` wrote only the A-based RHS the time loop never reads;
+now a separate once-per-step penalty vector — notebooks bit-identical, no fixture exercises it).
+Review battery: stage workflow (2 Opus reviews) + 2 `/code-review xhigh --fix` rounds (15 + 15
+confirmed findings, all fixed) + Opus fix-verification + negative-tested regression tests
+(F1/R1/S1/S2/T1/T3 each proven to fail against its reintroduced bug).
+
+**Split-regime measurements (mi200k_v2, 64 tiles / 167,659 interface + 927 taps = 168,586 unknowns):**
+
+| Measurement | Result |
+|---|---|
+| Never-assemble DC prepare | **145.5 s, 18.3 GB driver RSS** (vs >190 GB watchdog-killed pre-Stage-2 — Finding 0 closed) |
+| Direct reference at this regime | **infeasible on 251 GB host** (workers + S_global CSR + supernodal factor > 195 GB) |
+| DC + TD CG contexts simultaneously | also does not fit (two S_globals + two block sets) → TD never-assemble is the open memory item (currently DC-only, WARNs) |
+| Production CG iteration (probe-reconciled) | **878 ms = matvec 176 + BJ apply 701 + vec ops ~1** (solver-measured ~850 ms) |
+| Tilewise matvec (production, 8 threads) | 176 ms — on the Stage 0 target |
+| Threaded BJ apply | **701 ms — only 1.4× over the 990 ms serial baseline** (design assumed ~8×); Stage 3-adjacent perf item |
+| Cold BJ-CG convergence @1e-12 | **stagnates**: rel-res 0.32 → 0.27 over iters 200 → 1000 (~0.85 s/iter) — cold solves unusable at this regime |
+| Operator diagnostics | symmetric to 7e-16, SPD, tap/die/boundary rows correctly stamped — **not a bug** |
+| Preconditioner diagnostics | x·Mx / x·Ax ~10⁶: ordinary cho-factored ownership blocks have genuine ~1e-10-relative near-null eigendirections (weakly-grounded port subsets) — **block-Jacobi intrinsically collapses at split-regime granularity**, κ(M⁻¹S) ≳ 10⁶ |
+
+**Interpretation.** The Stage 2 machinery (memory, exactness, matvec cost) delivers, but BJ-CG
+alone cannot carry the split regime: cold solves stagnate and warm-step counts will inflate for
+the same spectral reason. This is the quantified, measured version of the plan's Stage 3
+rationale — the per-tile-constant slow modes plus PDN heterogeneity are exactly what the
+two-level coarse space (and specifically the **GenEO-lite enrichment**: the lowest eigenvectors
+of each tile's already-factored BJ block, which these measurements prove exist and are already
+computed by the eigh fallback path) is designed to remove. Warm iters/step at the split regime is
+deliberately deferred to the Stage 3 gate, measured head-to-head two-level vs BJ. Contextual note
+for the 130-iters intuition: §7.7's 130/step was *warm transient* at 36 tiles; cold-from-zero DC
+at 64 tiles is a different quantity and the DC IC can be seeded from a coarser-tiling direct solve
+(`make_dc_ic_36tile.py`) when needed.
+
+Scripts: `run_stage2_proxy_measurement.py`, `probe_iter_decomposition.py` (+ per-iteration CG
+progress logging via `InterfaceCGSolver.progress_every`), raw JSONs
+`results_iter_decomp_mi200k.json` in `scripts/benchmark/microbench/`.
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |
