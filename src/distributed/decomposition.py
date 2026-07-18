@@ -371,6 +371,7 @@ def analyze_distributed_decomposition(
     coordinator_solver_config: Optional[SolverBackendConfig] = None,
     worker_solver_config: Optional[SolverBackendConfig] = None,
     threads_per_worker: Optional[Any] = None,
+    interface_settings: Optional[Dict[str, Any]] = None,
 ) -> Tuple[DecompositionResult, Any, Any]:
     """Run distributed near/far IR-drop decomposition analysis.
 
@@ -430,6 +431,17 @@ def analyze_distributed_decomposition(
             safety-net targeted transient.  Increase if the safety net
             fires repeatedly.
         verbose: Log progress.
+        interface_settings: Optional dict of ``interface_*`` model.settings
+            keys (``interface_solver``, ``interface_matvec_mode``,
+            ``interface_preconditioner``, ``interface_cg_rtol/atol/maxiter/
+            strict``, ``interface_factor_memory_budget``,
+            ``interface_block_jacobi_max_bytes``) applied to ``model.settings``
+            right after model creation, before any solve.  The CLI's
+            ``cmd_decompose`` builds this via the same
+            ``cli._build_interface_settings()`` helper used by
+            ``cmd_solve``/``cmd_run`` so all three subcommands push the six
+            interface-CG flags identically.  ``None`` (default) leaves
+            ``model.settings`` at its factory defaults.
 
     Returns:
         ``(result, solver, model)`` -- the ``DecompositionResult``,
@@ -461,6 +473,8 @@ def analyze_distributed_decomposition(
         worker_solver_config=worker_solver_config,
         threads_per_worker=threads_per_worker,
     )
+    if interface_settings:
+        model.settings.update(interface_settings)
     solver = DistributedDDMSolver(model)
     timings['load_model'] = time_module.perf_counter() - t0
 

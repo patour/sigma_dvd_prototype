@@ -358,7 +358,13 @@ class _SolverTimeDomainMixin:
         cum_rhs_time = 0.0
         cum_asm_solve_time = 0.0
         cum_recovery_time = 0.0
+        # Stage 1a: finer split of the "Assemble + solve" timer.  These are
+        # ADDITIVE new accumulators -- cum_asm_solve_time keeps its exact
+        # existing meaning (pure interface_lu/CG call time in the QS loop).
+        cum_rhs_final_time = 0.0  # RHS finalization (Dirichlet add)
+        cum_solve_time = 0.0      # pure interface_lu/CG call
         all_step_eval_times: List[List[float]] = []
+        cg_iters_per_step: List[int] = []
 
         t0_loop = time.perf_counter()
         _qs_pass_step_idx = use_step_columns and bool(_qs_step_col_infos)
@@ -397,13 +403,30 @@ class _SolverTimeDomainMixin:
             )
             cum_rhs_time += time.perf_counter() - t0_rhs
 
+            # 5c. RHS finalization (Dirichlet add) -- Stage 1a: timed separately.
+            t0_rhs_final = time.perf_counter()
             global_rhs += ctx.rhs_dirichlet_interface
             total_currents[step_idx] = step_total_current
+            cum_rhs_final_time += time.perf_counter() - t0_rhs_final
 
-            # 5c. Coordinator: solve interface
+            # Coordinator: solve interface (pure interface_lu/CG call).
+            # t0_asm starts here (post-Dirichlet-add), preserving the
+            # pre-Stage-1a meaning of cum_asm_solve_time_s in the QS loop
+            # (pure solve time only -- unlike the transient loop below,
+            # where cum_asm_solve_time_s has always bundled rhs_final +
+            # solve). See rhs_final_total_s / solve_total_s for the new
+            # additive split that is consistent across both loops.
             t0_asm = time.perf_counter()
+            t0_solve = time.perf_counter()
             v_gamma = ctx.interface_lu(global_rhs)
+            cum_solve_time += time.perf_counter() - t0_solve
             cum_asm_solve_time += time.perf_counter() - t0_asm
+
+            # Stage 1a: capture per-step CG iteration count when CG is active.
+            if ctx._cg_solver is not None:
+                cg_iters_per_step.append(
+                    int(ctx._cg_solver.stats.get('last_cg_iters', 0))
+                )
 
             # 5d. Gather per-tile boundary voltage arrays (replacing dict exchange).
             # v_arr[j] = v_gamma[port_gather[j]] for interface ports; vdd for
@@ -423,10 +446,14 @@ class _SolverTimeDomainMixin:
             max_drops[step_idx] = max(step_max_drops) if step_max_drops else 0.0
 
             if verbose and (step_idx % 10 == 0 or step_idx == len(t_array) - 1):
+                _cg_str = (
+                    f", cg_iters={cg_iters_per_step[-1]}"
+                    if cg_iters_per_step else ""
+                )
                 logger.info(
-                    "Step %d/%d (t=%.3e s): max_drop=%.4f V, total_I=%.2f mA",
+                    "Step %d/%d (t=%.3e s): max_drop=%.4f V, total_I=%.2f mA%s",
                     step_idx + 1, len(t_array), t_val,
-                    max_drops[step_idx], step_total_current,
+                    max_drops[step_idx], step_total_current, _cg_str,
                 )
 
         timings['time_loop'] = time.perf_counter() - t0_loop
@@ -466,7 +493,17 @@ class _SolverTimeDomainMixin:
             'cum_asm_solve_time_s': cum_asm_solve_time,
             'cum_recovery_time_s': cum_recovery_time,
             'per_tile_eval_time': {'min': elo, 'mean': eavg, 'max': ehi},
+            # Stage 1a: additive fine-grained split of the "Assemble + solve"
+            # timer (cum_asm_solve_time_s keeps its exact existing meaning).
+            'rhs_final_total_s': cum_rhs_final_time,
+            'solve_total_s': cum_solve_time,
         }
+        if cg_iters_per_step:
+            loop_stats['cg_iters_per_step'] = cg_iters_per_step
+            loop_stats['cg_iters_mean'] = float(
+                sum(cg_iters_per_step) / len(cg_iters_per_step)
+            )
+            loop_stats['cg_iters_max'] = int(max(cg_iters_per_step))
         timings['loop_stats'] = loop_stats
 
         if verbose:
@@ -482,9 +519,17 @@ class _SolverTimeDomainMixin:
             logger.info("  Evaluate + RHS:    %.3fs/step (per-tile: %.3f / %.3f / %.3f)",
                         rhs_per, elo, eavg, ehi)
             asm_per = cum_asm_solve_time / max(n_steps, 1)
-            logger.info("  Assemble + solve:  %.3fs/step", asm_per)
+            logger.info("  Assemble + solve:  %.3fs/step "
+                        "(rhs_final: %.4fs/step, pure solve: %.4fs/step)",
+                        asm_per, cum_rhs_final_time / max(n_steps, 1),
+                        cum_solve_time / max(n_steps, 1))
             rec_per = cum_recovery_time / max(n_steps, 1)
             logger.info("  Recovery + peaks:   %.3fs/step", rec_per)
+            if cg_iters_per_step:
+                logger.info(
+                    "  CG iterations:      mean=%.1f, max=%d",
+                    loop_stats['cg_iters_mean'], loop_stats['cg_iters_max'],
+                )
             logger.info("Peak IR-drop: %.4f V at t=%.3fns",
                         peak_ir_drop, peak_time * 1e9)
 
@@ -780,7 +825,13 @@ class _SolverTimeDomainMixin:
         cum_rhs_time = 0.0
         cum_asm_solve_time = 0.0
         cum_recovery_time = 0.0
+        # Stage 1a: finer split of the "Assemble + solve" timer.  These are
+        # ADDITIVE new accumulators -- cum_asm_solve_time keeps its exact
+        # existing meaning (RHS finalization + interface_lu/CG call bundled).
+        cum_rhs_final_time = 0.0  # Dirichlet + package cap/G history terms
+        cum_solve_time = 0.0      # pure interface_lu/CG call
         all_step_rhs_times: List[List[float]] = []
+        cg_iters_per_step: List[int] = []
 
         t0_loop = time.perf_counter()
         # A2: whether to pass step_idx to workers (enables table lookup)
@@ -825,6 +876,7 @@ class _SolverTimeDomainMixin:
             # Dirichlet RHS: use G-only (no cap contribution from ud block)
             # BE: + rhs_dirichlet_G, TR: + 2 * rhs_dirichlet_G
             t0_asm = time.perf_counter()
+            t0_rhs_final = time.perf_counter()
             rhs_d_G = trans_ctx.rhs_dirichlet_G
             if method == 'trap':
                 global_rhs += 2.0 * rhs_d_G
@@ -840,10 +892,19 @@ class _SolverTimeDomainMixin:
             # Trapezoidal: subtract package G_uu contribution from old step
             if method == 'trap' and trans_ctx.G_package_uu is not None:
                 global_rhs -= trans_ctx.G_package_uu @ v_gamma_old
+            cum_rhs_final_time += time.perf_counter() - t0_rhs_final
 
-            # 7d. Coordinator: solve transient interface
+            # 7d. Coordinator: solve transient interface (pure interface_lu/CG call)
+            t0_solve = time.perf_counter()
             v_gamma_new = trans_ctx.interface_lu(global_rhs)
+            cum_solve_time += time.perf_counter() - t0_solve
             cum_asm_solve_time += time.perf_counter() - t0_asm
+
+            # Stage 1a: capture per-step CG iteration count when CG is active.
+            if trans_ctx._cg_solver is not None:
+                cg_iters_per_step.append(
+                    int(trans_ctx._cg_solver.stats.get('last_cg_iters', 0))
+                )
 
             # 7e. Gather per-tile boundary voltage arrays for new step.
             # np.where(pad_mask, vdd, v_gamma_new[port_gather]) fills pads
@@ -872,10 +933,14 @@ class _SolverTimeDomainMixin:
             bv_old_arr_list = bv_new_arr_list  # cache for next step
 
             if verbose and (step_idx % 10 == 0 or step_idx == len(t_array) - 1):
+                _cg_str = (
+                    f", cg_iters={cg_iters_per_step[-1]}"
+                    if cg_iters_per_step else ""
+                )
                 logger.info(
-                    "Step %d/%d (t=%.3e s): max_drop=%.4f V, total_I=%.2f mA",
+                    "Step %d/%d (t=%.3e s): max_drop=%.4f V, total_I=%.2f mA%s",
                     step_idx + 1, len(t_array), t_val,
-                    max_drops[step_idx], step_total_current,
+                    max_drops[step_idx], step_total_current, _cg_str,
                 )
 
         timings['time_loop'] = time.perf_counter() - t0_loop
@@ -915,7 +980,17 @@ class _SolverTimeDomainMixin:
             'cum_asm_solve_time_s': cum_asm_solve_time,
             'cum_recovery_time_s': cum_recovery_time,
             'per_tile_rhs_time': {'min': rlo, 'mean': ravg, 'max': rhi},
+            # Stage 1a: additive fine-grained split of the "Assemble + solve"
+            # timer (cum_asm_solve_time_s keeps its exact existing meaning).
+            'rhs_final_total_s': cum_rhs_final_time,
+            'solve_total_s': cum_solve_time,
         }
+        if cg_iters_per_step:
+            loop_stats['cg_iters_per_step'] = cg_iters_per_step
+            loop_stats['cg_iters_mean'] = float(
+                sum(cg_iters_per_step) / len(cg_iters_per_step)
+            )
+            loop_stats['cg_iters_max'] = int(max(cg_iters_per_step))
         timings['loop_stats'] = loop_stats
 
         if verbose:
@@ -934,9 +1009,17 @@ class _SolverTimeDomainMixin:
             logger.info("  Transient RHS:     %.3fs/step (per-tile: %.3f / %.3f / %.3f)",
                         rhs_per, rlo, ravg, rhi)
             asm_per = cum_asm_solve_time / max(n_steps, 1)
-            logger.info("  Assemble + solve:  %.3fs/step", asm_per)
+            logger.info("  Assemble + solve:  %.3fs/step "
+                        "(rhs_final: %.4fs/step, pure solve: %.4fs/step)",
+                        asm_per, cum_rhs_final_time / max(n_steps, 1),
+                        cum_solve_time / max(n_steps, 1))
             rec_per = cum_recovery_time / max(n_steps, 1)
             logger.info("  Interior recovery:  %.3fs/step", rec_per)
+            if cg_iters_per_step:
+                logger.info(
+                    "  CG iterations:      mean=%.1f, max=%d",
+                    loop_stats['cg_iters_mean'], loop_stats['cg_iters_max'],
+                )
             logger.info("Peak IR-drop: %.4f V at t=%.3fns",
                         peak_ir_drop, peak_time * 1e9)
 

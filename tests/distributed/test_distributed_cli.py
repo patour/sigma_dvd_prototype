@@ -126,6 +126,201 @@ class TestBuildParser:
         assert not hasattr(args, 'mode')
         assert not hasattr(args, 'dt')
 
+    def test_interface_cg_rtol_argparse_level_default_is_none(self):
+        """Finding 2: bare argparse defaults are None (unresolved sentinel);
+        the real default (1e-8) is only resolved by _load_and_apply_config()
+        AFTER the YAML merge, so explicit-CLI-vs-YAML precedence is
+        unambiguous (see TestInterfaceCGPrecedence below)."""
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        assert args.interface_cg_rtol is None
+
+    def test_interface_cg_rtol_default_is_1e8(self):
+        """Stage 1b: --interface-cg-rtol resolves to 1e-8 once
+        _load_and_apply_config() has applied the built-in default."""
+        from distributed.cli import _load_and_apply_config
+
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        args = _load_and_apply_config(args)
+        assert args.interface_cg_rtol == 1e-8
+
+    def test_interface_cg_rtol_explicit_override(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--interface-cg-rtol', '1e-10',
+        ])
+        assert args.interface_cg_rtol == 1e-10
+
+    def test_interface_cg_new_flag_defaults(self):
+        """Stage 1b/1c: new interface CG flags resolve to their documented
+        defaults once _load_and_apply_config() has run."""
+        from distributed.cli import _load_and_apply_config
+
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        args = _load_and_apply_config(args)
+        assert args.interface_cg_atol == 1e-14
+        assert args.interface_cg_maxiter is None
+        assert args.interface_cg_strict is True
+        assert args.interface_factor_memory_budget == 'auto'
+        assert args.interface_block_jacobi_max_bytes == 'auto'
+
+    def test_interface_cg_new_flags_explicit(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl',
+            '--interface-cg-atol', '1e-12',
+            '--interface-cg-maxiter', '500',
+            '--interface-cg-no-strict',
+            '--interface-factor-memory-budget', '1073741824',
+            '--interface-block-jacobi-max-bytes', '2147483648',
+        ])
+        assert args.interface_cg_atol == 1e-12
+        assert args.interface_cg_maxiter == 500
+        assert args.interface_cg_strict is False
+        assert args.interface_factor_memory_budget == '1073741824'
+        assert args.interface_block_jacobi_max_bytes == '2147483648'
+
+    def test_interface_cg_new_flags_present_on_run(self):
+        """The run subcommand shares the same interface-solver flag group,
+        resolving to the same defaults once _load_and_apply_config() runs."""
+        from distributed.cli import _load_and_apply_config
+
+        parser = build_parser()
+        args = parser.parse_args(['run', '/tmp/netlist'])
+        args = _load_and_apply_config(args)
+        assert args.interface_cg_rtol == 1e-8
+        assert args.interface_cg_atol == 1e-14
+        assert args.interface_cg_strict is True
+        assert args.interface_factor_memory_budget == 'auto'
+        assert args.interface_block_jacobi_max_bytes == 'auto'
+
+
+class TestInterfaceCGYamlConfig:
+    """Stage 1: `solver:` YAML section plumbs the new interface CG settings
+    through `_load_and_apply_config` (used by `cmd_solve` / `cmd_run`)."""
+
+    def test_yaml_interface_cg_settings_applied(self, tmp_path):
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        # Note: PyYAML only parses bare-mantissa exponents (e.g. "1.0e-10")
+        # as floats -- "1e-10" (no decimal point) parses as a string.
+        config_path.write_text(
+            "solver:\n"
+            "  interface_solver: cg\n"
+            "  interface_matvec_mode: tilewise\n"
+            "  interface_preconditioner: jacobi\n"
+            "  interface_cg_rtol: 1.0e-10\n"
+            "  interface_cg_atol: 1.0e-11\n"
+            "  interface_cg_maxiter: 250\n"
+            "  interface_cg_strict: false\n"
+            "  interface_factor_memory_budget: 1073741824\n"
+            "  interface_block_jacobi_max_bytes: 2147483648\n"
+        )
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+        ])
+        args = _load_and_apply_config(args)
+
+        assert args.interface_solver == 'cg'
+        assert args.interface_matvec_mode == 'tilewise'
+        assert args.interface_preconditioner == 'jacobi'
+        assert args.interface_cg_rtol == 1e-10
+        assert args.interface_cg_atol == 1e-11
+        assert args.interface_cg_maxiter == 250
+        assert args.interface_cg_strict is False
+        assert args.interface_factor_memory_budget == 1073741824
+        assert args.interface_block_jacobi_max_bytes == 2147483648
+
+    def test_yaml_interface_cg_cli_override_takes_precedence(self, tmp_path):
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text(
+            "solver:\n"
+            "  interface_cg_rtol: 1.0e-10\n"
+        )
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+            '--interface-cg-rtol', '1e-9',
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_cg_rtol == 1e-9
+
+
+class TestInterfaceCGPrecedence:
+    """Finding 2: explicit-CLI > YAML > built-in-default precedence, tested
+    per the four scenarios that broke under the old shared-sentinel-tuple
+    check (a single tuple of "any key's default" values, so an explicit CLI
+    value equal to ANY key's default -- not just its own -- was misread as
+    "unset")."""
+
+    def test_explicit_flag_equal_to_own_default_beats_yaml(self, tmp_path):
+        """--interface-cg-strict (value True, which is also the built-in
+        default) must beat a YAML interface_cg_strict: false -- previously
+        it could not, because True was in the shared default-sentinel set."""
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text("solver:\n  interface_cg_strict: false\n")
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+            '--interface-cg-strict',
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_cg_strict is True
+
+    def test_explicit_flag_equal_to_another_keys_default_beats_yaml(self, tmp_path):
+        """--interface-cg-maxiter 1 (1 == True in Python, and True is the
+        default for the UNRELATED interface_cg_strict flag) must not be
+        misread as "unset" and overridden by a YAML interface_cg_maxiter."""
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text("solver:\n  interface_cg_maxiter: 999\n")
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+            '--interface-cg-maxiter', '1',
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_cg_maxiter == 1
+
+    def test_unset_flag_yields_yaml_value(self, tmp_path):
+        """A flag left unset on the CLI picks up the YAML value."""
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text("solver:\n  interface_cg_atol: 1.0e-11\n")
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_cg_atol == 1e-11
+
+    def test_nothing_set_yields_builtin_default(self):
+        """Neither CLI nor YAML set -> the built-in default is used."""
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        args = _load_and_apply_config(args)
+        assert args.interface_solver == 'auto'
+        assert args.interface_matvec_mode == 'assembled'
+        assert args.interface_preconditioner == 'block_jacobi'
+        assert args.interface_cg_rtol == 1e-8
+        assert args.interface_cg_atol == 1e-14
+        assert args.interface_cg_maxiter is None
+        assert args.interface_cg_strict is True
+        assert args.interface_factor_memory_budget == 'auto'
+        assert args.interface_block_jacobi_max_bytes == 'auto'
+
 
 class TestDecomposeParser:
     """Tests for decompose subcommand argument parsing."""
@@ -447,10 +642,74 @@ class TestDecomposeDispatch:
             coordinator_solver_config=None,
             worker_solver_config=None,
             threads_per_worker=None,
+            # Finding 3: cmd_decompose now pushes the same interface_*
+            # settings dict as cmd_solve/cmd_run (built-in defaults here
+            # since `args` carries no interface_* attributes).
+            interface_settings={
+                'interface_solver': 'auto',
+                'interface_matvec_mode': 'assembled',
+                'interface_preconditioner': 'block_jacobi',
+                'interface_cg_rtol': 1e-8,
+                'interface_cg_atol': 1e-14,
+                'interface_cg_maxiter': None,
+                'interface_cg_strict': True,
+                'interface_factor_memory_budget': 'auto',
+                'interface_block_jacobi_max_bytes': 'auto',
+            },
         )
         mock_print.assert_called_once()
         mock_result.save_json.assert_called_once()
         mock_model.shutdown.assert_called_once()
+
+    @patch('analysis.dynamic_irdrop_decomposition.generate_plots')
+    @patch('analysis.dynamic_irdrop_decomposition.print_results')
+    @patch('analysis.dynamic_irdrop_decomposition.Logger')
+    @patch('distributed.decomposition.analyze_distributed_decomposition')
+    @patch('distributed.cli._load_and_apply_config', side_effect=lambda a: a)
+    @patch('distributed.cli._setup_logging')
+    def test_decompose_propagates_interface_settings(
+        self, mock_log, mock_config, mock_analyze,
+        mock_logger_cls, mock_print, mock_gen_plots, tmp_path,
+    ):
+        """Finding 3: a representative --interface-cg-* flag reaches
+        model.settings via the interface_settings= kwarg passed into
+        analyze_distributed_decomposition -- previously these flags were
+        accepted by the decompose subparser and silently dropped."""
+        from distributed.cli import cmd_decompose
+
+        mock_result = MagicMock()
+        mock_result.worst_instances = []
+        mock_analyze.return_value = (mock_result, MagicMock(), MagicMock())
+        mock_logger_cls.return_value = MagicMock()
+
+        pkl_subdir = tmp_path / 'distributed_pkl'
+        pkl_subdir.mkdir()
+        (pkl_subdir / 'tile_0_0.pkl').touch()
+
+        args = argparse.Namespace(
+            netlist_dir=str(tmp_path), net=None,
+            backend='local', verbose=False,
+            output=str(tmp_path / 'out'), no_plot=True,
+            t_start=0.0, t_end=100e-9, dt=0.1e-9,
+            top_k=5, window_percent=10.0, instances=None,
+            method='be', smooth=True,
+            aggressor_top_k=0, adjoint_method='dynamic',
+            adjoint_memory_window=20,
+            qs_candidate_factor=3000,
+            max_qs_candidates=10000,
+            plot_layers=None, max_stripes=500,
+            # Representative interface_* overrides (as if the user passed
+            # --interface-cg-no-strict --interface-cg-maxiter 200)
+            interface_cg_strict=False,
+            interface_cg_maxiter=200,
+        )
+
+        cmd_decompose(args)
+
+        call_kwargs = mock_analyze.call_args[1]
+        assert 'interface_settings' in call_kwargs
+        assert call_kwargs['interface_settings']['interface_cg_strict'] is False
+        assert call_kwargs['interface_settings']['interface_cg_maxiter'] == 200
 
     @patch('analysis.dynamic_irdrop_decomposition.generate_plots')
     @patch('analysis.dynamic_irdrop_decomposition.print_results')

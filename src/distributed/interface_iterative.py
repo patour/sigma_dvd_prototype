@@ -95,6 +95,15 @@ AUTO_CG_N_INTERFACE_THRESHOLD: int = 200_000
 # CHOLMOD supernodal factor is roughly 5-10x S_global memory.
 # At 50 GB S_global (138K interface) CHOLMOD factor = 100-300 GB.
 # We use a 32 GB budget as the auto cutover (conservative for coordinator).
+#
+# This module-level constant is the FALLBACK used when no settings dict is
+# available (e.g. direct calls to auto_select_interface_solver() without an
+# explicit factor_memory_budget_bytes).  When a model.settings dict IS
+# available, the ``interface_factor_memory_budget`` setting (Stage 1c)
+# resolves to ``min(AUTO_CG_FACTOR_MEMORY_BUDGET_BYTES, 0.4 * total_RAM)``
+# via ``resolve_factor_memory_budget_bytes()`` and is passed explicitly by
+# callers (result_factorization.py).  See that function for the host-aware
+# 'auto' default.
 # ---------------------------------------------------------------------------
 AUTO_CG_FACTOR_MEMORY_BUDGET_BYTES: int = 32 * 1024 ** 3  # 32 GB
 
@@ -115,8 +124,130 @@ AUTO_CG_FACTOR_MEMORY_BUDGET_BYTES: int = 32 * 1024 ** 3  # 32 GB
 # multi-GB danger zone while still allowing block_jacobi on all realistic
 # netlist_sampled / BRCM-class systems where n_interface is 2-140K.
 # (Measured 5.9 MB on netlist_sampled 2015-interface max-block-478 system.)
+#
+# This module-level constant is the FALLBACK used by InterfaceCGSolver
+# instances that don't receive an explicit ``block_jacobi_max_bytes``
+# constructor argument (preserves legacy/monkeypatch-based test behaviour).
+# When a model.settings dict IS available, the
+# ``interface_block_jacobi_max_bytes`` setting (Stage 1c) resolves to
+# ``min(8 GB, 0.1 * total_RAM)`` via ``resolve_block_jacobi_max_bytes()``
+# and is passed explicitly through the ``block_jacobi_max_bytes`` constructor
+# argument by callers (result_factorization.py).
 # ---------------------------------------------------------------------------
 BLOCK_JACOBI_MAX_FACTOR_BYTES: int = 4 * 1024 ** 3  # 4 GB
+
+# Host-aware 'auto' caps (Stage 1c) — independent of the legacy module
+# constants above so that changing these does not alter the fallback path
+# monkeypatched by existing tests.
+_AUTO_FACTOR_MEMORY_BUDGET_CAP_BYTES: int = 32 * 1024 ** 3   # 32 GB
+_AUTO_FACTOR_MEMORY_BUDGET_FRACTION: float = 0.4              # of total RAM
+_AUTO_BLOCK_JACOBI_MAX_BYTES_CAP: int = 8 * 1024 ** 3          # 8 GB
+_AUTO_BLOCK_JACOBI_MAX_BYTES_FRACTION: float = 0.1             # of total RAM
+
+
+_warned_no_psutil = False
+
+
+def _get_total_ram_bytes() -> int:
+    """Return total system RAM in bytes via psutil.
+
+    Falls back to a conservative 64 GB assumption (logging a WARNING once)
+    if psutil is unavailable, so host-aware 'auto' sizing degrades
+    gracefully rather than crashing.
+    """
+    global _warned_no_psutil
+    try:
+        import psutil  # lazy import; declared in pyproject.toml [project] deps
+        return int(psutil.virtual_memory().total)
+    except Exception:
+        if _warned_no_psutil:
+            return 64 * 1024 ** 3
+        _warned_no_psutil = True
+        logger.warning(
+            "psutil unavailable; falling back to a conservative 64 GB RAM "
+            "assumption for interface-solver memory-budget auto-sizing. "
+            "Install psutil or set interface_factor_memory_budget / "
+            "interface_block_jacobi_max_bytes explicitly."
+        )
+        return 64 * 1024 ** 3
+
+
+def _resolve_memory_budget_bytes(
+    setting: Any,
+    auto_cap_bytes: int,
+    auto_fraction: float,
+    floor_bytes: int = 0,
+) -> int:
+    """Resolve a 'auto' | int | float | numeric-string memory-budget setting.
+
+    'auto' (or None) -> max(floor_bytes, min(auto_cap_bytes,
+    auto_fraction * total_RAM_bytes)) via psutil.  ``floor_bytes`` lets a
+    caller enforce a legacy minimum so the host-aware auto formula never
+    regresses below a previously-fixed constant (finding 9: the block-Jacobi
+    budget must never auto-resolve below the legacy 4 GB floor).
+
+    Any other value is coerced via ``int(float(setting))`` so plausible
+    numeric strings (including exponent notation like '2e9', which PyYAML
+    1.1 parses as a *string* rather than a float) are accepted the same way
+    an actual float would be.  Bools are rejected explicitly BEFORE this
+    coercion: Python's ``bool`` is a subclass of ``int``, so
+    ``int(float(True))`` would silently resolve to 1 byte instead of
+    raising -- a classic YAML-1.1 pitfall (``interface_factor_memory_budget:
+    yes`` parses to Python ``True``).
+    """
+    if setting is None or (
+        isinstance(setting, str) and setting.strip().lower() == 'auto'
+    ):
+        total_ram = _get_total_ram_bytes()
+        return max(floor_bytes, min(auto_cap_bytes, int(auto_fraction * total_ram)))
+    if isinstance(setting, bool):
+        raise ValueError(
+            f"Invalid memory-budget setting {setting!r}: expected 'auto' or "
+            f"an integer byte count (bool is not a valid byte count)."
+        )
+    try:
+        return int(float(setting))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid memory-budget setting {setting!r}: expected 'auto' or "
+            f"an integer byte count."
+        ) from exc
+
+
+def resolve_factor_memory_budget_bytes(setting: Any = 'auto') -> int:
+    """Resolve the ``interface_factor_memory_budget`` setting to bytes.
+
+    'auto' (default) = min(32 GB, 0.4 * total system RAM), computed via
+    psutil.  Consumed by ``auto_select_interface_solver`` to decide between
+    'direct' and 'cg'.
+    """
+    return _resolve_memory_budget_bytes(
+        setting,
+        _AUTO_FACTOR_MEMORY_BUDGET_CAP_BYTES,
+        _AUTO_FACTOR_MEMORY_BUDGET_FRACTION,
+    )
+
+
+def resolve_block_jacobi_max_bytes(setting: Any = 'auto') -> int:
+    """Resolve the ``interface_block_jacobi_max_bytes`` setting to bytes.
+
+    'auto' (default) = max(4 GB legacy floor, min(8 GB, 0.1 * total system
+    RAM)), computed via psutil.  The legacy 4 GB floor (the fixed
+    pre-Stage-1c ``BLOCK_JACOBI_MAX_FACTOR_BYTES`` constant) ensures the
+    host-aware auto formula never resolves to a SMALLER budget than the
+    previously-hardcoded value on hosts with <40 GB RAM -- i.e. 'auto' can
+    only ever be as-good-or-better than the legacy behaviour, never a
+    silent downgrade of block_jacobi -> diagonal jacobi on modest hosts.
+    Consumed by ``InterfaceCGSolver._build_block_jacobi`` to decide whether
+    to fall back from 'block_jacobi' to the 'jacobi' diagonal
+    preconditioner.
+    """
+    return _resolve_memory_budget_bytes(
+        setting,
+        _AUTO_BLOCK_JACOBI_MAX_BYTES_CAP,
+        _AUTO_BLOCK_JACOBI_MAX_BYTES_FRACTION,
+        floor_bytes=BLOCK_JACOBI_MAX_FACTOR_BYTES,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +279,9 @@ class InterfaceCGSolver:
     preconditioner : str
         'block_jacobi' (default), 'jacobi', 'none', 'amg'.
     rtol : float
-        Relative tolerance for CG convergence (default 1e-10).
+        Relative tolerance for CG convergence (default 1e-8, validated by the
+        Stage 0 sweep: 166 nV max error vs direct on the BRCM-class proxy —
+        see docs §7.7).
     maxiter : int or None
         Maximum CG iterations.  None = 3 * n_interface.
     x0 : np.ndarray or None
@@ -156,6 +289,14 @@ class InterfaceCGSolver:
     stats_dict : dict or None
         If provided, iteration counts and timing are written here.
         Updated in-place on each solve call.
+    block_jacobi_max_bytes : int or None
+        Per-instance override for the block-Jacobi factor-memory budget
+        (bytes).  ``None`` (default) falls back to the module-level
+        ``BLOCK_JACOBI_MAX_FACTOR_BYTES`` constant (read dynamically, so
+        test monkeypatches of that module attribute still work).  Callers
+        that have a ``model.settings['interface_block_jacobi_max_bytes']``
+        value should resolve it via ``resolve_block_jacobi_max_bytes()``
+        and pass the result here.
     """
 
     def __init__(
@@ -167,12 +308,13 @@ class InterfaceCGSolver:
         tile_index_maps: Optional[Dict[Any, np.ndarray]] = None,
         S_extra: Optional[sp.spmatrix] = None,
         preconditioner: str = 'block_jacobi',
-        rtol: float = 1e-12,
+        rtol: float = 1e-8,
         atol: float = 1e-14,
         maxiter: Optional[int] = None,
         x0: Optional[np.ndarray] = None,
         stats_dict: Optional[Dict[str, Any]] = None,
         strict: bool = True,
+        block_jacobi_max_bytes: Optional[int] = None,
     ) -> None:
         """
         Parameters
@@ -223,12 +365,22 @@ class InterfaceCGSolver:
         self.tile_index_maps = tile_index_maps
         self.S_extra = S_extra  # package-edge contribution (tilewise mode)
         self.preconditioner = preconditioner
+        # The originally-requested preconditioner, kept even if a runtime
+        # memory-budget downgrade (see _build_block_jacobi) replaces
+        # self.preconditioner with a weaker one.  Callers/logs that need to
+        # know what the USER asked for (as opposed to what is actually
+        # active) should read this attribute (finding 11).
+        self.requested_preconditioner = preconditioner
         self.rtol = rtol
         self.atol = atol
         self.strict = strict
         self.maxiter = maxiter if maxiter is not None else max(3 * n_interface, 100)
         self._x0: Optional[np.ndarray] = x0
         self._stats: Dict[str, Any] = stats_dict if stats_dict is not None else {}
+        # Stage 1c: per-instance block-Jacobi memory budget override.  None
+        # means "use the module-level BLOCK_JACOBI_MAX_FACTOR_BYTES constant
+        # dynamically" (preserves monkeypatch-based test behaviour).
+        self.block_jacobi_max_bytes: Optional[int] = block_jacobi_max_bytes
 
         # Build operator + preconditioner
         self._linear_op: spla.LinearOperator = self._build_linear_op()
@@ -378,25 +530,44 @@ class InterfaceCGSolver:
         # Sum(k_i^2) * 8 bytes = total dense Cholesky factor memory.
         # Each k_i is the number of nodes owned by tile i.  Use the
         # owned-count dict (already built) to estimate without allocating.
+        #
+        # Stage 1c: use the per-instance override when provided (resolved
+        # from the 'interface_block_jacobi_max_bytes' setting), else fall
+        # back to the module-level constant (read dynamically so test
+        # monkeypatches of the module attribute keep working).
+        _max_bytes = (
+            self.block_jacobi_max_bytes
+            if self.block_jacobi_max_bytes is not None
+            else BLOCK_JACOBI_MAX_FACTOR_BYTES
+        )
         est_factor_bytes = sum(
             len(owned) * len(owned) * 8 for owned in tile_owned.values()
         )
-        if est_factor_bytes > BLOCK_JACOBI_MAX_FACTOR_BYTES:
+        if est_factor_bytes > _max_bytes:
             max_block = max(len(v) for v in tile_owned.values()) if tile_owned else 0
             logger.warning(
                 "Block-Jacobi: estimated factor memory %.1f GB exceeds budget "
-                "%.1f GB (n_interface=%d, T=%d tiles, max_block=%d). "
+                "%.1f GB (setting 'interface_block_jacobi_max_bytes', "
+                "n_interface=%d, T=%d tiles, max_block=%d). Downgrading "
+                "requested preconditioner 'block_jacobi' -> 'jacobi' "
+                "(diagonal) for this solve -- expect MORE CG iterations per "
+                "solve than block_jacobi would have needed (diagonal is a "
+                "strictly weaker preconditioner). "
                 "Scaling: Sum(k_i^2)*8 bytes ~ n^2/T*8; at n=1M, T=1000 this "
-                "is ~8 GB. Falling back to 'jacobi' (diagonal) preconditioner. "
-                "To keep block_jacobi, reduce interface size via B1 tile splitting "
-                "or set BLOCK_JACOBI_MAX_FACTOR_BYTES higher.",
+                "is ~8 GB. To keep block_jacobi, reduce interface size via B1 "
+                "tile splitting or raise 'interface_block_jacobi_max_bytes'.",
                 est_factor_bytes / 1024 ** 3,
-                BLOCK_JACOBI_MAX_FACTOR_BYTES / 1024 ** 3,
+                _max_bytes / 1024 ** 3,
                 n,
                 len(tile_owned),
                 max_block,
             )
-            # Fall back to diagonal preconditioner (cheap, always safe)
+            # Fall back to diagonal preconditioner (cheap, always safe).
+            # Keep self.requested_preconditioner == 'block_jacobi' (set in
+            # __init__) so callers/logs can distinguish "asked for" from
+            # "actually in use"; downgrade self.preconditioner so every
+            # downstream report (backend_info, verbose logs) reflects reality.
+            self.preconditioner = 'jacobi'
             return self._build_jacobi_fallback()
 
         logger.debug(
@@ -693,6 +864,11 @@ def auto_select_interface_solver(
     Returns:
         'direct' or 'cg'.
     """
+    # Finding 4 (SKIPPED -- host-RAM-dependent auto selection is intended
+    # Stage 1c behaviour) is mitigated by always logging the resolved
+    # budget and resulting mode at INFO level, regardless of which branch
+    # is taken, so a host-dependent flip from 'direct' to 'cg' (or vice
+    # versa) is visible in the log rather than silent.
     if n_interface < n_interface_threshold:
         if S_global is not None:
             # Rough factor memory: nnz * bytes_per_double * fill_ratio
@@ -701,17 +877,36 @@ def auto_select_interface_solver(
             if est_bytes > factor_memory_budget_bytes:
                 logger.info(
                     "auto_select: n_interface=%d < threshold but estimated "
-                    "factor memory %.1f GB > budget %.1f GB; using CG.",
+                    "factor memory %.1f GB > budget %d bytes (%.1f GB); "
+                    "resolved_mode=cg.",
                     n_interface,
                     est_bytes / 1024 ** 3,
+                    factor_memory_budget_bytes,
                     factor_memory_budget_bytes / 1024 ** 3,
                 )
                 return 'cg'
+            logger.info(
+                "auto_select: n_interface=%d < threshold %d, estimated "
+                "factor memory %.1f GB fits budget %d bytes (%.1f GB); "
+                "resolved_mode=direct.",
+                n_interface, n_interface_threshold,
+                est_bytes / 1024 ** 3,
+                factor_memory_budget_bytes,
+                factor_memory_budget_bytes / 1024 ** 3,
+            )
+        else:
+            logger.info(
+                "auto_select: n_interface=%d < threshold %d (no S_global "
+                "for memory estimate); resolved_mode=direct.",
+                n_interface, n_interface_threshold,
+            )
         return 'direct'
 
     logger.info(
-        "auto_select: n_interface=%d >= threshold %d; using CG.",
+        "auto_select: n_interface=%d >= threshold %d; budget=%d bytes "
+        "(%.1f GB); resolved_mode=cg.",
         n_interface, n_interface_threshold,
+        factor_memory_budget_bytes, factor_memory_budget_bytes / 1024 ** 3,
     )
     return 'cg'
 
@@ -726,26 +921,56 @@ def build_interface_solver(
     interface_solver: str = 'auto',
     tile_schur_complements: Optional[Dict[Any, np.ndarray]] = None,
     tile_index_maps: Optional[Dict[Any, np.ndarray]] = None,
+    S_extra: Optional[sp.spmatrix] = None,
     matvec_mode: str = 'assembled',
     preconditioner: str = 'block_jacobi',
-    rtol: float = 1e-12,
+    rtol: float = 1e-8,
+    atol: float = 1e-14,
+    maxiter: Optional[int] = None,
+    strict: bool = True,
+    x0: Optional[np.ndarray] = None,
+    block_jacobi_max_bytes: Optional[int] = None,
+    factor_memory_budget_bytes: Optional[int] = None,
+    n_interface_threshold: int = AUTO_CG_N_INTERFACE_THRESHOLD,
     coordinator_solver_config: Optional[Any] = None,
     verbose: bool = False,
     cg_stats_dict: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Callable, str, Optional['InterfaceCGSolver']]:
     """Build an interface solve callable (direct LU or CG).
 
-    This is the single entry point called by _factor_dc_context and
-    _factor_transient_context after S_global is assembled.
+    Stage 1d: this is the single entry point for constructing an
+    ``InterfaceCGSolver`` (or a direct factor).  ``_factor_dc_context``,
+    ``_factor_transient_context``, ``_refactor_dc_context``, and
+    ``_refactor_transient_context`` (all in ``result_factorization.py``) are
+    routed through this factory so there is exactly one place that builds
+    the CG solve callable.
 
     Args:
         S_global: Assembled sparse Schur matrix (CSR or CSC).
         interface_solver: 'direct', 'cg', or 'auto'.
         tile_schur_complements: Per-tile dense Schur blocks (for tilewise).
-        tile_index_maps: Per-tile index maps (for tilewise).
+        tile_index_maps: Per-tile index maps (for tilewise and block_jacobi
+            ownership).
+        S_extra: Package-edge contribution not captured by per-tile Schur
+            complements (tilewise mode only; ignored otherwise).
         matvec_mode: 'assembled' or 'tilewise' (only used when cg selected).
         preconditioner: 'block_jacobi', 'jacobi', 'none', or 'amg'.
-        rtol: CG convergence tolerance.
+        rtol: CG relative convergence tolerance (default 1e-8).
+        atol: CG absolute convergence tolerance floor (default 1e-14).
+        maxiter: Max CG iterations (default None -> 3 * n_interface).
+        strict: Raise on CG non-convergence (default True).
+        x0: Optional initial warm-start guess.
+        block_jacobi_max_bytes: Resolved block-Jacobi memory budget (bytes);
+            None falls back to the module-level constant.
+        factor_memory_budget_bytes: Direct-factor memory budget (bytes),
+            used only when ``interface_solver='auto'``.  May be a resolved
+            byte count, ``'auto'``, or ``None`` -- all are routed through
+            ``resolve_factor_memory_budget_bytes()`` so the factory's own
+            'auto' branch is host-aware (matches the host-aware resolution
+            already performed by callers), not the raw module-level
+            ``AUTO_CG_FACTOR_MEMORY_BUDGET_BYTES`` constant.
+        n_interface_threshold: Cutover size used only when
+            ``interface_solver='auto'``.
         coordinator_solver_config: SolverBackendConfig (for direct path).
         verbose: Log the resolved backend.
         cg_stats_dict: Mutable dict for CG statistics.
@@ -757,9 +982,24 @@ def build_interface_solver(
     """
     n = S_global.shape[0]
 
-    # Resolve 'auto'
+    # Resolve 'auto'.  Route through resolve_factor_memory_budget_bytes()
+    # (host-aware: min(32 GB, 0.4*RAM) via psutil) rather than the raw
+    # AUTO_CG_FACTOR_MEMORY_BUDGET_BYTES constant, so the factory's own
+    # 'auto' branch behaves identically to callers that pre-resolve the
+    # budget externally (finding 12).  factor_memory_budget_bytes may
+    # already be a resolved int (idempotent through this call) or an
+    # unresolved 'auto'/None passthrough.
     if interface_solver == 'auto':
-        resolved = auto_select_interface_solver(n, S_global)
+        _budget = resolve_factor_memory_budget_bytes(
+            factor_memory_budget_bytes
+            if factor_memory_budget_bytes is not None
+            else 'auto'
+        )
+        resolved = auto_select_interface_solver(
+            n, S_global,
+            n_interface_threshold=n_interface_threshold,
+            factor_memory_budget_bytes=_budget,
+        )
     else:
         resolved = interface_solver
 
@@ -799,9 +1039,15 @@ def build_interface_solver(
         S_global=S_global,
         tile_schur_complements=tile_schur_complements,
         tile_index_maps=tile_index_maps,
+        S_extra=S_extra,
         preconditioner=preconditioner,
         rtol=rtol,
+        atol=atol,
+        maxiter=maxiter,
+        x0=x0,
         stats_dict=cg_stats_dict,
+        strict=strict,
+        block_jacobi_max_bytes=block_jacobi_max_bytes,
     )
     elapsed = time.perf_counter() - t0
     if verbose:

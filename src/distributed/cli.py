@@ -22,7 +22,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,80 @@ def cmd_parse(args: argparse.Namespace) -> None:
         _close_file_logging(fh)
 
 
+# Built-in defaults for the nine interface-solver settings, applied by
+# _load_and_apply_config() AFTER the explicit-CLI > YAML precedence check
+# resolves to "neither was set" (finding 2).  Also used as the getattr()
+# fallback in _build_interface_settings() below for callers (tests, direct
+# analyze_distributed_decomposition() calls) that construct a bare
+# argparse.Namespace without going through _load_and_apply_config.
+_IFACE_SETTING_DEFAULTS: Dict[str, Any] = {
+    'interface_solver': 'auto',
+    'interface_matvec_mode': 'assembled',
+    'interface_preconditioner': 'block_jacobi',
+    'interface_cg_rtol': 1e-8,
+    'interface_cg_atol': 1e-14,
+    'interface_cg_maxiter': None,
+    'interface_cg_strict': True,
+    'interface_factor_memory_budget': 'auto',
+    'interface_block_jacobi_max_bytes': 'auto',
+}
+
+
+def _build_interface_settings(args: argparse.Namespace) -> Dict[str, Any]:
+    """Build the ``interface_*`` model.settings dict from parsed CLI args.
+
+    Shared by ``cmd_solve``, ``cmd_run``, and ``cmd_decompose`` so all three
+    subcommands push the same six interface-CG flags (plus
+    interface_solver/matvec_mode/preconditioner/rtol) into model.settings
+    identically.  Previously ``cmd_decompose`` accepted these flags on its
+    subparser (via ``_add_config_and_solver_args``) but never pushed them
+    anywhere -- ``analyze_distributed_decomposition`` built the model without
+    them, so they were silently ignored (finding 3).  Factoring the push
+    into one helper (used via ``analyze_distributed_decomposition``'s
+    ``interface_settings=`` kwarg for decompose, and directly on
+    ``model.settings`` for solve/run) avoids re-duplicating the same nine
+    keys a third time.
+
+    ``interface_cg_maxiter`` is the one key whose real default (``None``)
+    is indistinguishable from "unset" -- that is correct (``None`` IS the
+    default), so it is read as-is rather than substituted.
+    """
+    def _get(key: str) -> Any:
+        val = getattr(args, key, None)
+        return val if val is not None else _IFACE_SETTING_DEFAULTS[key]
+
+    return {
+        'interface_solver': _get('interface_solver'),
+        'interface_matvec_mode': _get('interface_matvec_mode'),
+        'interface_preconditioner': _get('interface_preconditioner'),
+        'interface_cg_rtol': _get('interface_cg_rtol'),
+        'interface_cg_atol': _get('interface_cg_atol'),
+        'interface_cg_maxiter': getattr(args, 'interface_cg_maxiter', None),
+        'interface_cg_strict': _get('interface_cg_strict'),
+        'interface_factor_memory_budget': _get('interface_factor_memory_budget'),
+        'interface_block_jacobi_max_bytes': _get('interface_block_jacobi_max_bytes'),
+    }
+
+
+def _push_interface_settings(
+    model: Any, args: argparse.Namespace, verbose: bool = False,
+) -> Dict[str, Any]:
+    """Push interface-solver settings into ``model.settings`` (coordinator-side).
+
+    Returns the settings dict that was pushed (callers that want the
+    resolved values for logging can reuse it instead of re-reading args).
+    """
+    settings = _build_interface_settings(args)
+    model.settings.update(settings)
+    if verbose:
+        logger.info(
+            "Interface solver: %s (matvec=%s, precond=%s, rtol=%.2e)",
+            settings['interface_solver'], settings['interface_matvec_mode'],
+            settings['interface_preconditioner'], settings['interface_cg_rtol'],
+        )
+    return settings
+
+
 def cmd_solve(args: argparse.Namespace) -> None:
     """Load .pkl partitions and run DDM solver."""
     from .model import create_distributed_model, load_distributed_partitions
@@ -127,22 +201,8 @@ def cmd_solve(args: argparse.Namespace) -> None:
         ),
     )
 
-    # B2: Push interface-solver settings into model.settings (coordinator-side)
-    _iface_solver = getattr(args, 'interface_solver', 'auto')
-    _iface_matvec = getattr(args, 'interface_matvec_mode', 'assembled')
-    _iface_precond = getattr(args, 'interface_preconditioner', 'block_jacobi')
-    _iface_rtol = getattr(args, 'interface_cg_rtol', 1e-12)
-    model.settings.update({
-        'interface_solver': _iface_solver,
-        'interface_matvec_mode': _iface_matvec,
-        'interface_preconditioner': _iface_precond,
-        'interface_cg_rtol': _iface_rtol,
-    })
-    if args.verbose:
-        logger.info(
-            "Interface solver: %s (matvec=%s, precond=%s, rtol=%.2e)",
-            _iface_solver, _iface_matvec, _iface_precond, _iface_rtol,
-        )
+    # B2/Stage 1: Push interface-solver settings into model.settings (coordinator-side)
+    _push_interface_settings(model, args, verbose=args.verbose)
 
     # B3: Push streaming_assembly / use_step_columns / max_table_mb into model.settings
     _push_b3_settings(model, args)
@@ -414,13 +474,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         ),
     )
 
-    # B2: Push interface-solver settings into model.settings (coordinator-side)
-    model.settings.update({
-        'interface_solver': getattr(args, 'interface_solver', 'auto'),
-        'interface_matvec_mode': getattr(args, 'interface_matvec_mode', 'assembled'),
-        'interface_preconditioner': getattr(args, 'interface_preconditioner', 'block_jacobi'),
-        'interface_cg_rtol': getattr(args, 'interface_cg_rtol', 1e-12),
-    })
+    # B2/Stage 1: Push interface-solver settings into model.settings (coordinator-side)
+    _push_interface_settings(model, args, verbose=args.verbose)
 
     # B3: Push streaming_assembly / use_step_columns / max_table_mb into model.settings
     _push_b3_settings(model, args)
@@ -543,6 +598,11 @@ def cmd_decompose(args: argparse.Namespace) -> None:
             threads_per_worker=_parse_threads_per_worker(
                 getattr(args, 'threads_per_worker', None)
             ),
+            # B2/Stage 1 (finding 3): push the same interface_* settings as
+            # cmd_solve/cmd_run so --interface-cg-* flags actually reach the
+            # decompose-side model instead of being silently accepted and
+            # dropped.
+            interface_settings=_build_interface_settings(args),
         )
 
         elapsed = time.perf_counter() - t0
@@ -653,9 +713,24 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
     )
 
     # B2: Interface solver selection
+    #
+    # NOTE on defaults: every flag in this group defaults to None at the
+    # argparse level, NOT its real default value (documented in each --help
+    # string below).  This is required for correct YAML-vs-CLI precedence
+    # (finding 2): _load_and_apply_config() distinguishes "the user passed
+    # this flag" (argparse value is not None) from "the user left it unset"
+    # (argparse value is None) and only then falls through to YAML, then to
+    # the real built-in default (see _IFACE_SETTING_DEFAULTS below).  A
+    # fixed default value (e.g. True for interface_cg_strict) would be
+    # indistinguishable from an explicit CLI flag equal to that same value,
+    # which previously let YAML silently override explicit flags whenever
+    # the explicit value happened to equal the argparse default (or, worse,
+    # equal ANY other key's default -- 1 == True in Python, so
+    # --interface-cg-maxiter 1 collided with the interface_cg_strict
+    # default).
     iface_grp = parser.add_argument_group('interface solver (B2)')
     iface_grp.add_argument(
-        '--interface-solver', type=str, default='auto',
+        '--interface-solver', type=str, default=None,
         choices=['direct', 'cg', 'auto'],
         dest='interface_solver',
         help=(
@@ -668,7 +743,7 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     iface_grp.add_argument(
-        '--interface-matvec-mode', type=str, default='assembled',
+        '--interface-matvec-mode', type=str, default=None,
         choices=['assembled', 'tilewise'],
         dest='interface_matvec_mode',
         help=(
@@ -680,7 +755,7 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     iface_grp.add_argument(
-        '--interface-preconditioner', type=str, default='block_jacobi',
+        '--interface-preconditioner', type=str, default=None,
         choices=['block_jacobi', 'jacobi', 'none', 'amg'],
         dest='interface_preconditioner',
         help=(
@@ -691,9 +766,62 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     iface_grp.add_argument(
-        '--interface-cg-rtol', type=float, default=1e-12,
+        '--interface-cg-rtol', type=float, default=None,
         dest='interface_cg_rtol',
-        help='CG convergence tolerance (default: 1e-12)',
+        help=(
+            'CG relative convergence tolerance (default: 1e-8; validated by '
+            'the Stage 0 rtol sweep -- 166 nV max error vs direct on the '
+            'BRCM-class proxy, see docs Sec 7.7).'
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-cg-atol', type=float, default=None,
+        dest='interface_cg_atol',
+        help=(
+            'CG absolute convergence tolerance floor (default: 1e-14). '
+            'Prevents CG from burning maxiter iterations when the RHS is '
+            'near-zero (e.g. early transient steps with no active sources).'
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-cg-maxiter', type=int, default=None,
+        dest='interface_cg_maxiter',
+        help='Max CG iterations (default: None -> 3 * n_interface).',
+    )
+    iface_grp.add_argument(
+        '--interface-cg-strict', dest='interface_cg_strict',
+        action='store_true', default=None,
+        help='Raise RuntimeError on CG non-convergence (default: enabled).',
+    )
+    iface_grp.add_argument(
+        '--interface-cg-no-strict', dest='interface_cg_strict',
+        action='store_false',
+        help=(
+            'Demote CG non-convergence to a warning instead of raising '
+            '(not recommended for production).'
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-factor-memory-budget', type=str, default=None,
+        dest='interface_factor_memory_budget',
+        help=(
+            "Coordinator direct-factor memory budget used by "
+            "--interface-solver=auto ('auto' = min(32 GB, 0.4x total RAM) "
+            "via psutil, or an explicit integer byte count). "
+            "(default: auto)"
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-block-jacobi-max-bytes', type=str, default=None,
+        dest='interface_block_jacobi_max_bytes',
+        help=(
+            "Block-Jacobi preconditioner factor-memory budget "
+            "('auto' = min(8 GB, 0.1x total RAM) via psutil, or an "
+            "explicit integer byte count).  Exceeding it downgrades to the "
+            "'jacobi' diagonal preconditioner (logged as a loud WARNING "
+            "naming this setting and the iteration-count consequence). "
+            "(default: auto)"
+        ),
     )
 
     # B3: streaming Schur assembly
@@ -976,6 +1104,9 @@ _VALID_SOLVER_YAML_KEYS = frozenset({
     # B2: interface solver settings
     'interface_solver', 'interface_matvec_mode',
     'interface_preconditioner', 'interface_cg_rtol',
+    # Stage 1: CG tolerance/budget plumbing
+    'interface_cg_atol', 'interface_cg_maxiter', 'interface_cg_strict',
+    'interface_factor_memory_budget', 'interface_block_jacobi_max_bytes',
     # B3: streaming Schur assembly + A2 step-column table
     'streaming_assembly', 'use_step_columns', 'max_table_mb',
 })
@@ -1192,18 +1323,37 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
     if args.threads_per_worker is not None:
         logger.info("threads_per_worker: %s", args.threads_per_worker)
 
-    # -- B2: interface_solver (YAML first; CLI flags take precedence) ---------
+    # -- B2/Stage 1: interface_solver settings -------------------------------
+    # Precedence: explicit CLI flag > YAML > built-in default (finding 2).
+    #
+    # All nine argparse flags default to None (see _add_config_and_solver_args),
+    # so "getattr(args, k) is not None" means exactly "the user passed this
+    # flag on the command line" -- there is no longer any ambiguity between an
+    # explicit CLI value and some OTHER key's default (the old shared-tuple
+    # sentinel check let e.g. --interface-cg-maxiter 1 collide with the
+    # interface_cg_strict default of True, since 1 == True in Python), nor
+    # between an explicit CLI value that happens to equal its OWN default
+    # (e.g. --interface-cg-strict, whose value True is also the default,
+    # could never beat a YAML interface_cg_strict: false).
     _iface_yaml_keys = (
         'interface_solver', 'interface_matvec_mode',
         'interface_preconditioner', 'interface_cg_rtol',
+        'interface_cg_atol', 'interface_cg_maxiter', 'interface_cg_strict',
+        'interface_factor_memory_budget', 'interface_block_jacobi_max_bytes',
     )
-    if _raw_config is not None:
-        solver_cfg_iface = _raw_config.get('solver', {})
-        for _k in _iface_yaml_keys:
-            _yaml_val = solver_cfg_iface.get(_k)
-            if _yaml_val is not None and getattr(args, _k, None) in (None, 'auto', 'assembled', 'block_jacobi', 1e-12):
-                # Apply YAML default only when CLI left at argparse default
-                setattr(args, _k, _yaml_val)
+    solver_cfg_iface = (
+        _raw_config.get('solver', {}) if _raw_config is not None else {}
+    )
+    for _k in _iface_yaml_keys:
+        _cli_val = getattr(args, _k, None)
+        if _cli_val is not None:
+            # Explicit CLI flag always wins, regardless of YAML.
+            continue
+        _yaml_val = solver_cfg_iface.get(_k)
+        setattr(
+            args, _k,
+            _yaml_val if _yaml_val is not None else _IFACE_SETTING_DEFAULTS[_k],
+        )
 
     # -- B3: streaming_assembly, use_step_columns, max_table_mb (YAML first) --
     # These map directly into model.settings; store on args so cmd_solve /

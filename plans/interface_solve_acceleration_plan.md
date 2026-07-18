@@ -22,7 +22,7 @@ Per-matvec traffic at 190,867 unknowns: dense S_i blocks fp64 12.5 GB (fp32 6.2 
 - **GPU (RESOLVED 2026-07-18):** BRCM host is **CPU-only** — CPU threaded path is the critical path, **fp32 tilewise matvec promoted to critical path** (Stage 2), Stage 3 coarse-space iteration cut is make-or-break. GPU (Stage 4) remains an *optional* backend (cupy, lazy import, CPU fallback mandatory) — validated on the dev GPU, deployable only where a GPU exists.
 - **Multi-node (updated 2026-07-18):** undecided for BRCM production → Stage 5 stays gated; re-assess after Stage 3 lands the measured CPU-only s/step.
 - **Scope:** core CG acceleration + worker-side/s-step CG + island-detection persistence. Decompose multi-RHS lockstep OUT of scope.
-- **Process:** Stages 1–4 implemented via Workflow orchestration — coding agents: **Sonnet 5 (`claude-sonnet-5`), 1M context, effort xhigh**; reviewers: **Opus 4.8 (`claude-opus-4-8`), 1M context, effort xhigh**; spec-compliance review THEN code-quality review by two distinct reviewer agents, fix loop until both clean. No senior-engineer/principal-code-reviewer custom agents.
+- **Process:** Stages 1–4 implemented via Workflow orchestration — coding agents: **Sonnet 5 (`claude-sonnet-5`), 1M context, effort xhigh**; reviewers: **Opus 4.8 (`claude-opus-4-8`), 1M context, effort xhigh**; spec-compliance review THEN code-quality review by two distinct reviewer agents, fix loop until both clean. No senior-engineer/principal-code-reviewer custom agents. **After each stage** (workflow clean + gates green): run `/code-review xhigh --fix` on the stage's changes, apply surviving findings, fold fixes in before pushing (user-mandated 2026-07-18).
 
 ### Current-state anchors (verified)
 

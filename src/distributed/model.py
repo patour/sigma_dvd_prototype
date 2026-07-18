@@ -66,13 +66,21 @@ class DistributedPowerGridModel:
     coordinator_solver_config: Optional[SolverBackendConfig] = field(default=None, repr=False)
     worker_solver_config: Optional[SolverBackendConfig] = field(default=None, repr=False)
 
-    # B2: Coordinator-side solver settings dict.
+    # B2/Stage 1: Coordinator-side solver settings dict.
     # Keys recognised:
     #   'interface_solver': 'direct' | 'cg' | 'auto' (default 'auto')
     #   'interface_matvec_mode': 'assembled' | 'tilewise' (default 'assembled')
     #   'interface_preconditioner': 'block_jacobi' | 'jacobi' | 'none' | 'amg'
-    #   'interface_cg_rtol': float (default 1e-10)
-    # These affect only the coordinator; they are NOT propagated to workers.
+    #   'interface_cg_rtol': float (default 1e-8; Stage 0 sweep validated)
+    #   'interface_cg_atol': float (default 1e-14)
+    #   'interface_cg_maxiter': int | None (default None -> 3 * n_interface)
+    #   'interface_cg_strict': bool (default True)
+    #   'interface_factor_memory_budget': 'auto' | int bytes
+    #       (default 'auto' = min(32 GB, 0.4 * total RAM) via psutil)
+    #   'interface_block_jacobi_max_bytes': 'auto' | int bytes
+    #       (default 'auto' = min(8 GB, 0.1 * total RAM) via psutil)
+    # These affect only the coordinator; they are NOT propagated to workers
+    # (Ray module-globals do not propagate -- see CLAUDE.md pitfalls).
     settings: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     # Internal: temp pkl_dir created by legacy shim (cleaned up in shutdown)

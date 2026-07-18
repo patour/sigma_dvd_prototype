@@ -17,12 +17,29 @@ Captured timings schema::
         "per_step": {
             "rhs":       float,   # Cumulative RHS time / n_steps (s/step)
             "solve":     float,   # Cumulative assemble+solve time / n_steps (s/step)
-            "recovery":  float    # Cumulative recovery time / n_steps (s/step)
+            "recovery":  float,   # Cumulative recovery time / n_steps (s/step)
+            "rhs_final": float,   # [Stage 1a] RHS finalization (Dirichlet/pkg
+                                   # history) time / n_steps (s/step) -- subset
+                                   # of "solve" above, timed separately
+            "solve_pure": float,  # [Stage 1a] pure interface_lu/CG call time
+                                   # / n_steps (s/step) -- subset of "solve"
         },
         "n_steps":       int,
+        "cg_iters_mean": float,  # [Stage 1a] mean per-step CG iterations
+                                 # (0.0 when interface_solver != 'cg')
+        "cg_iters_max":  int,    # [Stage 1a] max per-step CG iterations
         "peak_ir_drop_mV": float,
         "peak_time_ns":  float
     }
+
+Stage 1a note: ``rhs_final`` / ``solve_pure`` / ``cg_iters_*`` are ADDITIVE --
+they are read from new ``loop_stats`` keys (``rhs_final_total_s``,
+``solve_total_s``, ``cg_iters_mean``, ``cg_iters_max``) that do not change the
+meaning of any existing key (``solve`` / ``cum_asm_solve_time_s`` still bundle
+RHS finalization + the interface solve call, exactly as before).  Old baseline
+JSONs lack these keys; ``compare_timings()`` treats a baseline value of 0.0 as
+"no baseline" (SKIP, not FAIL), so comparing a new run against an old baseline
+still passes cleanly.
 
 [*] ``vcs`` and ``smooth`` are extracted from the ``timings`` attribute on
 ``DistributedSmoothedSources`` (``result.py``), which records ``init_vcs`` and
@@ -174,8 +191,14 @@ def run_benchmark(
             'rhs':      loop_stats.get('cum_rhs_time_s', 0.0)      / n_steps,
             'solve':    loop_stats.get('cum_asm_solve_time_s', 0.0) / n_steps,
             'recovery': loop_stats.get('cum_recovery_time_s', 0.0)  / n_steps,
+            # [Stage 1a] additive fine-grained split of 'solve' above.
+            'rhs_final':  loop_stats.get('rhs_final_total_s', 0.0) / n_steps,
+            'solve_pure': loop_stats.get('solve_total_s', 0.0)     / n_steps,
         }
         timings['n_steps']         = int(n_steps)
+        # [Stage 1a] CG iteration stats (0.0 / 0 when interface_solver != 'cg')
+        timings['cg_iters_mean']   = float(loop_stats.get('cg_iters_mean', 0.0))
+        timings['cg_iters_max']    = int(loop_stats.get('cg_iters_max', 0))
         timings['peak_ir_drop_mV'] = float(result.peak_ir_drop * 1000)
         timings['peak_time_ns']    = float(result.peak_ir_drop_time * 1e9)
 
@@ -207,6 +230,16 @@ def compare_timings(current: dict, baseline: dict, max_regress_pct: float) -> bo
     """
     # Phase keys to compare (skip nested dicts for now)
     top_keys = ['load', 'vcs', 'smooth', 'dc_prepare', 'trans_prepare', 'loop_total']
+    # [Stage 1a] rhs_final / solve_pure are recorded in the JSON (see
+    # run_benchmark()) but are NOT regression-gated here (finding 10):
+    # they are microsecond-scale sub-phases of 'solve' (a single vector add
+    # / a single interface-solver call per step on netlist_sampled's ~2K
+    # interface), so an ordinary re-run's scheduler/cache jitter easily
+    # swings them by tens of percent with no real regression -- gating them
+    # at the same --max-regress percentage as multi-millisecond phases like
+    # 'rhs'/'solve'/'recovery' makes the perf gate flaky.  They are printed
+    # as informational-only figures below the table (see the cg_iters_*
+    # precedent), the same treatment as cg_iters_mean/max.
     step_keys = ['rhs', 'solve', 'recovery']
 
     all_pass = True
@@ -253,6 +286,31 @@ def compare_timings(current: dict, baseline: dict, max_regress_pct: float) -> bo
     if base_drop:
         diff_mv = abs(cur_drop - base_drop)
         print(f"\npeak_ir_drop: baseline={base_drop:.4f} mV, current={cur_drop:.4f} mV, diff={diff_mv:.4f} mV")
+
+    # [Stage 1a] CG iteration stats are informational only (not a regression
+    # gate -- an iteration count is not a wall-clock time).
+    cur_cg_mean = current.get('cg_iters_mean', 0.0)
+    if cur_cg_mean:
+        print(
+            f"cg_iters: mean={cur_cg_mean:.1f}, max={current.get('cg_iters_max', 0)} "
+            f"(informational; not regression-gated)"
+        )
+
+    # [Finding 10] rhs_final / solve_pure: microsecond-scale sub-phases of
+    # 'solve', printed informationally (like cg_iters_* above) rather than
+    # regression-gated -- see the step_keys comment for why.
+    base_rf = base_ps.get('rhs_final', 0.0)
+    cur_rf = cur_ps.get('rhs_final', 0.0)
+    base_sp = base_ps.get('solve_pure', 0.0)
+    cur_sp = cur_ps.get('solve_pure', 0.0)
+    if cur_rf or cur_sp:
+        print(
+            f"per_step/rhs_final: baseline={base_rf * 1e6:.2f}us, "
+            f"current={cur_rf * 1e6:.2f}us; "
+            f"per_step/solve_pure: baseline={base_sp * 1e6:.2f}us, "
+            f"current={cur_sp * 1e6:.2f}us "
+            f"(informational; not regression-gated)"
+        )
 
     return all_pass
 

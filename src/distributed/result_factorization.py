@@ -117,6 +117,76 @@ def _get_interface_solver_setting(model: Optional[Any]) -> str:
     return settings.get('interface_solver', 'auto')
 
 
+def _coerce_bool(value: Any, setting_name: str) -> bool:
+    """Coerce a YAML/CLI-sourced value to bool, rejecting garbage loudly.
+
+    Real Python bools pass through unchanged.  Strings are matched
+    case-insensitively against common true/false tokens.  This avoids the
+    classic ``bool(x)`` pitfall where ``bool('false')`` is ``True`` because
+    any non-empty string is truthy -- a real risk here because YAML often
+    delivers quoted strings for booleans (e.g. ``interface_cg_strict:
+    "false"``).
+
+    Args:
+        value: The raw settings value.
+        setting_name: Name of the setting, used in the error message.
+
+    Returns:
+        The coerced bool.
+
+    Raises:
+        ValueError: If ``value`` cannot be unambiguously interpreted as a
+            bool.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ('true', '1', 'yes', 'on'):
+            return True
+        if v in ('false', '0', 'no', 'off'):
+            return False
+    raise ValueError(
+        f"Invalid boolean setting {setting_name}={value!r}: expected a bool "
+        f"or one of 'true'/'false'/'1'/'0'/'yes'/'no'/'on'/'off' "
+        f"(case-insensitive)."
+    )
+
+
+def _coerce_int(value: Any, setting_name: str) -> int:
+    """Coerce a YAML/CLI-sourced numeric setting to int, rejecting garbage.
+
+    Accepts real ints/floats and numeric strings (including exponent
+    notation, e.g. '500', '5e2') via ``int(float(value))`` -- PyYAML 1.1
+    parses bare-exponent floats like ``1e-10`` as strings, so this mirrors
+    the defensive ``float()`` coercion already used for rtol/atol.  Bools
+    are rejected explicitly (Python's ``bool`` is an ``int`` subclass, so
+    ``int(float(True))`` would silently resolve to 1 instead of raising).
+
+    Args:
+        value: The raw settings value.
+        setting_name: Name of the setting, used in the error message.
+
+    Returns:
+        The coerced int.
+
+    Raises:
+        ValueError: If ``value`` cannot be interpreted as an int.
+    """
+    if isinstance(value, bool):
+        raise ValueError(
+            f"Invalid integer setting {setting_name}={value!r}: bool is not "
+            f"a valid integer value."
+        )
+    try:
+        return int(float(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid integer setting {setting_name}={value!r}: expected an "
+            f"integer (or numeric string)."
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -1115,9 +1185,15 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
 
     # Resolve 'auto' here (before branching) so we can log it
     if _iface_solver_setting == 'auto':
-        from .interface_iterative import auto_select_interface_solver
+        from .interface_iterative import (
+            auto_select_interface_solver, resolve_factor_memory_budget_bytes,
+        )
+        _resolved_budget_bytes = resolve_factor_memory_budget_bytes(
+            _model_settings.get('interface_factor_memory_budget', 'auto')
+        )
         _iface_resolved_mode = auto_select_interface_solver(
-            len(interface_nodes), S_global
+            len(interface_nodes), S_global,
+            factor_memory_budget_bytes=_resolved_budget_bytes,
         )
     else:
         _iface_resolved_mode = _iface_solver_setting
@@ -1128,11 +1204,26 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             S_global, verbose=False, config=model.coordinator_solver_config,
         )
     else:
-        # CG mode
-        from .interface_iterative import InterfaceCGSolver
+        # CG mode -- routed through build_interface_solver (Stage 1d: the
+        # single factory used by both DC and transient factor/refactor paths).
+        from .interface_iterative import (
+            build_interface_solver, resolve_block_jacobi_max_bytes,
+        )
         _matvec_mode = _model_settings.get('interface_matvec_mode', 'assembled')
         _preconditioner = _model_settings.get('interface_preconditioner', 'block_jacobi')
-        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-12))
+        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-8))
+        _cg_atol = float(_model_settings.get('interface_cg_atol', 1e-14))
+        _cg_maxiter_raw = _model_settings.get('interface_cg_maxiter', None)
+        _cg_maxiter = (
+            None if _cg_maxiter_raw is None
+            else _coerce_int(_cg_maxiter_raw, 'interface_cg_maxiter')
+        )
+        _cg_strict = _coerce_bool(
+            _model_settings.get('interface_cg_strict', True), 'interface_cg_strict'
+        )
+        _bj_max_bytes = resolve_block_jacobi_max_bytes(
+            _model_settings.get('interface_block_jacobi_max_bytes', 'auto')
+        )
 
         # For tilewise mode, compute the package-edge contribution not included
         # in per-tile Schur complements.  S_extra = S_global - sum_i(P_i^T S_i P_i).
@@ -1167,16 +1258,21 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
                     n_iface=len(interface_nodes),
                 )
 
-        _cg_solver = InterfaceCGSolver(
-            n_interface=len(interface_nodes),
-            matvec_mode=_matvec_mode,
+        _cg_solve_callable, _cg_resolved_mode, _cg_solver = build_interface_solver(
             S_global=S_global,
+            interface_solver='cg',
             tile_schur_complements=tile_schur_complements if not _use_streaming_dc else None,
             tile_index_maps=tile_index_maps,
             S_extra=_S_extra,
+            matvec_mode=_matvec_mode,
             preconditioner=_preconditioner,
             rtol=_cg_rtol,
-            stats_dict=_cg_stats,
+            atol=_cg_atol,
+            maxiter=_cg_maxiter,
+            strict=_cg_strict,
+            block_jacobi_max_bytes=_bj_max_bytes,
+            verbose=verbose,
+            cg_stats_dict=_cg_stats,
         )
 
         # Synthetic stats object (matching SparseFactorAdapter fields used below)
@@ -1187,7 +1283,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
                 f"precond={_cg_solver.preconditioner}"
             )
             resolved_mode = 'cg'
-            solve = _cg_solver
+            solve = _cg_solve_callable
 
         interface_lu_result = _CGSolveResult()
         if verbose:
@@ -1437,21 +1533,67 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
         ctx._cg_solver = None
         ctx._interface_solver_mode = 'direct'
     else:
-        # CG assembled mode (no per-tile S_i needed)
-        from .interface_iterative import InterfaceCGSolver
+        # CG assembled mode (no per-tile S_i needed) -- routed through
+        # build_interface_solver (Stage 1d).
+        from .interface_iterative import (
+            build_interface_solver, resolve_block_jacobi_max_bytes,
+        )
         _model_settings = getattr(ctx.model, 'settings', {}) if ctx.model is not None else {}
-        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-12))
+        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-8))
+        _cg_atol = float(_model_settings.get('interface_cg_atol', 1e-14))
+        _cg_maxiter_raw = _model_settings.get('interface_cg_maxiter', None)
+        _cg_maxiter = (
+            None if _cg_maxiter_raw is None
+            else _coerce_int(_cg_maxiter_raw, 'interface_cg_maxiter')
+        )
+        _cg_strict = _coerce_bool(
+            _model_settings.get('interface_cg_strict', True), 'interface_cg_strict'
+        )
         _preconditioner = _model_settings.get('interface_preconditioner', 'block_jacobi')
+        _bj_max_bytes = resolve_block_jacobi_max_bytes(
+            _model_settings.get('interface_block_jacobi_max_bytes', 'auto')
+        )
+        # Finding 1: tile_index_maps is required for block_jacobi ownership
+        # assignment even in 'assembled' matvec mode (InterfaceCGSolver uses
+        # it to assign each interface node to an owning tile, then extracts
+        # that tile's principal submatrix from the assembled S_global).
+        # ctx.topology is restored from the saved checkpoint by load(), so
+        # tile_index_maps is normally available here -- pass it through so
+        # the preconditioner rebuilt on refactor() actually matches the one
+        # built during the original factor().  If topology genuinely lacks
+        # it (e.g. a pre-B2 checkpoint), degrade gracefully to the diagonal
+        # 'jacobi' preconditioner rather than silently building none at all.
+        _tile_index_maps = (
+            getattr(ctx.topology, 'tile_index_maps', None)
+            if ctx.topology is not None else None
+        )
+        if _preconditioner == 'block_jacobi' and not _tile_index_maps:
+            logger.warning(
+                "Refactor: tile_index_maps unavailable on ctx.topology (missing "
+                "or predates this field), so the 'block_jacobi' preconditioner "
+                "cannot be rebuilt after load()+refactor(). Degrading to "
+                "'jacobi' (diagonal) for this refactor -- expect MORE CG "
+                "iterations per solve than block_jacobi would need. Call "
+                "factor() (not just refactor()) to restore full block_jacobi "
+                "support."
+            )
+            _preconditioner = 'jacobi'
         _cg_stats: Dict[str, Any] = {}
-        cg_solver = InterfaceCGSolver(
-            n_interface=ctx._S_global.shape[0],
-            matvec_mode='assembled',  # tilewise needs per-tile S_i; use assembled on refactor
+        _solve_callable, _resolved_backend, cg_solver = build_interface_solver(
             S_global=ctx._S_global,
+            interface_solver='cg',
+            matvec_mode='assembled',  # tilewise needs per-tile S_i; use assembled on refactor
+            tile_index_maps=_tile_index_maps,
             preconditioner=_preconditioner,
             rtol=_cg_rtol,
-            stats_dict=_cg_stats,
+            atol=_cg_atol,
+            maxiter=_cg_maxiter,
+            strict=_cg_strict,
+            block_jacobi_max_bytes=_bj_max_bytes,
+            verbose=verbose,
+            cg_stats_dict=_cg_stats,
         )
-        ctx._interface_lu = cg_solver
+        ctx._interface_lu = _solve_callable
         ctx._cg_solver = cg_solver
         ctx._interface_solver_mode = 'cg'
 
@@ -1749,9 +1891,15 @@ def _factor_transient_context(
     _cg_solver_td = None
 
     if _iface_solver_setting_td == 'auto':
-        from .interface_iterative import auto_select_interface_solver
+        from .interface_iterative import (
+            auto_select_interface_solver, resolve_factor_memory_budget_bytes,
+        )
+        _resolved_budget_bytes_td = resolve_factor_memory_budget_bytes(
+            _model_settings_td.get('interface_factor_memory_budget', 'auto')
+        )
         _iface_resolved_mode_td = auto_select_interface_solver(
-            len(interface_nodes), S_global
+            len(interface_nodes), S_global,
+            factor_memory_budget_bytes=_resolved_budget_bytes_td,
         )
     else:
         _iface_resolved_mode_td = _iface_solver_setting_td
@@ -1762,11 +1910,26 @@ def _factor_transient_context(
             S_global, verbose=verbose, config=model.coordinator_solver_config,
         )
     else:
-        # CG mode for transient
-        from .interface_iterative import InterfaceCGSolver
+        # CG mode for transient -- routed through build_interface_solver
+        # (Stage 1d: the same factory used by the DC factor/refactor paths).
+        from .interface_iterative import (
+            build_interface_solver, resolve_block_jacobi_max_bytes,
+        )
         _matvec_mode_td = _model_settings_td.get('interface_matvec_mode', 'assembled')
         _preconditioner_td = _model_settings_td.get('interface_preconditioner', 'block_jacobi')
-        _cg_rtol_td = float(_model_settings_td.get('interface_cg_rtol', 1e-12))
+        _cg_rtol_td = float(_model_settings_td.get('interface_cg_rtol', 1e-8))
+        _cg_atol_td = float(_model_settings_td.get('interface_cg_atol', 1e-14))
+        _cg_maxiter_td_raw = _model_settings_td.get('interface_cg_maxiter', None)
+        _cg_maxiter_td = (
+            None if _cg_maxiter_td_raw is None
+            else _coerce_int(_cg_maxiter_td_raw, 'interface_cg_maxiter')
+        )
+        _cg_strict_td = _coerce_bool(
+            _model_settings_td.get('interface_cg_strict', True), 'interface_cg_strict'
+        )
+        _bj_max_bytes_td = resolve_block_jacobi_max_bytes(
+            _model_settings_td.get('interface_block_jacobi_max_bytes', 'auto')
+        )
 
         # For tilewise mode: compute S_extra (package-edge contribution).
         # B2 follow-up: replaced nested Python loop (LIL) with vectorized COO.
@@ -1794,16 +1957,21 @@ def _factor_transient_context(
                     n_iface=len(interface_nodes),
                 )
 
-        _cg_solver_td = InterfaceCGSolver(
-            n_interface=len(interface_nodes),
-            matvec_mode=_matvec_mode_td,
+        _cg_solve_callable_td, _cg_resolved_mode_td, _cg_solver_td = build_interface_solver(
             S_global=S_global,
+            interface_solver='cg',
             tile_schur_complements=tile_schur_complements if not _use_streaming_td else None,
             tile_index_maps=tile_index_maps,
             S_extra=_S_extra_td,
+            matvec_mode=_matvec_mode_td,
             preconditioner=_preconditioner_td,
             rtol=_cg_rtol_td,
-            stats_dict=_cg_stats_td,
+            atol=_cg_atol_td,
+            maxiter=_cg_maxiter_td,
+            strict=_cg_strict_td,
+            block_jacobi_max_bytes=_bj_max_bytes_td,
+            verbose=verbose,
+            cg_stats_dict=_cg_stats_td,
         )
 
         class _CGSolveResultTD:
@@ -1813,7 +1981,7 @@ def _factor_transient_context(
                 f"precond={_cg_solver_td.preconditioner}"
             )
             resolved_mode = 'cg'
-            solve = _cg_solver_td
+            solve = _cg_solve_callable_td
 
         interface_lu_result = _CGSolveResultTD()
         if verbose:
@@ -2079,20 +2247,61 @@ def _refactor_transient_context(
         ctx._cg_solver = None
         ctx._interface_solver_mode = 'direct'
     else:
-        from .interface_iterative import InterfaceCGSolver
+        # CG assembled mode -- routed through build_interface_solver (Stage 1d).
+        from .interface_iterative import (
+            build_interface_solver, resolve_block_jacobi_max_bytes,
+        )
         _model_settings = getattr(ctx.model, 'settings', {}) if ctx.model is not None else {}
-        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-12))
+        _cg_rtol = float(_model_settings.get('interface_cg_rtol', 1e-8))
+        _cg_atol = float(_model_settings.get('interface_cg_atol', 1e-14))
+        _cg_maxiter_raw = _model_settings.get('interface_cg_maxiter', None)
+        _cg_maxiter = (
+            None if _cg_maxiter_raw is None
+            else _coerce_int(_cg_maxiter_raw, 'interface_cg_maxiter')
+        )
+        _cg_strict = _coerce_bool(
+            _model_settings.get('interface_cg_strict', True), 'interface_cg_strict'
+        )
         _preconditioner = _model_settings.get('interface_preconditioner', 'block_jacobi')
+        _bj_max_bytes = resolve_block_jacobi_max_bytes(
+            _model_settings.get('interface_block_jacobi_max_bytes', 'auto')
+        )
+        # Finding 1: see the matching comment in _refactor_dc_context -- the
+        # 'block_jacobi' preconditioner needs tile_index_maps for ownership
+        # assignment even in 'assembled' matvec mode; without it, CG silently
+        # runs unpreconditioned.  ctx.topology is restored by load(), so it
+        # is normally available; degrade gracefully with a WARNING if not.
+        _tile_index_maps = (
+            getattr(ctx.topology, 'tile_index_maps', None)
+            if ctx.topology is not None else None
+        )
+        if _preconditioner == 'block_jacobi' and not _tile_index_maps:
+            logger.warning(
+                "Refactor: tile_index_maps unavailable on ctx.topology (missing "
+                "or predates this field), so the 'block_jacobi' preconditioner "
+                "cannot be rebuilt after load()+refactor(). Degrading to "
+                "'jacobi' (diagonal) for this refactor -- expect MORE CG "
+                "iterations per solve than block_jacobi would need. Call "
+                "factor() (not just refactor()) to restore full block_jacobi "
+                "support."
+            )
+            _preconditioner = 'jacobi'
         _cg_stats: Dict[str, Any] = {}
-        cg_solver = InterfaceCGSolver(
-            n_interface=ctx._S_global.shape[0],
-            matvec_mode='assembled',
+        _solve_callable, _resolved_backend, cg_solver = build_interface_solver(
             S_global=ctx._S_global,
+            interface_solver='cg',
+            matvec_mode='assembled',
+            tile_index_maps=_tile_index_maps,
             preconditioner=_preconditioner,
             rtol=_cg_rtol,
-            stats_dict=_cg_stats,
+            atol=_cg_atol,
+            maxiter=_cg_maxiter,
+            strict=_cg_strict,
+            block_jacobi_max_bytes=_bj_max_bytes,
+            verbose=verbose,
+            cg_stats_dict=_cg_stats,
         )
-        ctx._interface_lu = cg_solver
+        ctx._interface_lu = _solve_callable
         ctx._cg_solver = cg_solver
         ctx._interface_solver_mode = 'cg'
 
