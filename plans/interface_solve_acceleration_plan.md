@@ -67,7 +67,9 @@ Deliverable: docs §7.7 measurement table.
 - fp32 CPU probe invalid (mixed-dtype GEMV fell off BLAS); redo in Stage 2 only if BRCM host is CPU-only.
 - User input received (2026-07-18): BRCM host **CPU-only** (fp32 CPU study → critical path; GPU optional), node count **undecided** (Stage 5 stays gated).
 
-## Stage 1 — Instrumentation, plumbing, small fixes
+## Stage 1 — Instrumentation, plumbing, small fixes — **COMPLETE (1a-1d: ea6d329; 1e: 6791891, 2026-07-18)**
+
+> Landed with the full review battery (stage workflow + /code-review xhigh --fix rounds + Opus fix-verification + negative-tested regression tests). Island detection measured 59× faster at 18-tile scale with exact parity. New latents flagged for Stage 2: D1 also manifests in solve_dc RHS scatter for tile-resident-pad ports; sp.bmat crash in `_compute_schur_partial` for zero-port tiles. Stage 0's Finding 0 (S_global COO assembly >190 GB at split regime) upgrades the Stage 2 memory work: CG-tilewise must be able to run WITHOUT ever assembling S_global (BJ from tile blocks, S_extra by direct stamping), not merely free it afterwards.
 
 - **1a Timer split + CG iters logging** (`solver_td.py`): split :827-846 into `cum_rhs_final_time` and pure `cum_solve_time` (same for QS :398-406); per-step `_cg_solver.stats['last_cg_iters']` → `loop_stats` (`cg_iters_mean/max`, per-step list) + periodic INFO line. `run_perf_baseline.py` schema extended additively (existing keys keep meaning).
 - **1b Plumb `atol/maxiter/strict`; rtol default → 1e-8**: new settings + CLI flags; change default at interface_iterative.py:171, factory :731, CLI, and the four `settings.get('interface_cg_rtol', …)` fallbacks. Tests: pin `rtol=1e-12` in all tight CG-vs-direct assertions (unit + equivalence suite); add `test_rtol_1e8_dc_error_below_1uV` (sampled marker).
