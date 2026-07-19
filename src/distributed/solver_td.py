@@ -27,6 +27,140 @@ from .result import (
 logger = logging.getLogger(__name__)
 
 
+def _check_worker_transient_stamp(
+    model: Any, trans_ctx: DistributedTransientContext, caller: str = 'solve_transient',
+) -> None:
+    """Finding 1/2/3 (round 2 review): shared worker dt/method transient-
+    factor stamp guard.
+
+    Workers are shared, single-owner state for the whole model -- only ONE
+    (dt_scaled, method) transient factorization
+    (``factor_transient_system()`` / ``factor_transient_and_cache_schur()``)
+    can be resident on them at a time, but multiple ``DistributedTransientContext``
+    objects (each with its own dt_scaled/integration_method) can be alive
+    simultaneously. Both ``solve_transient()`` (this module) and
+    ``analyze_adjoint()`` (``solver_adjoint.py``) consume the workers'
+    CURRENT transient factorization via per-step RHS / interior recovery /
+    lambda-recovery RPCs -- neither one may proceed if that factorization
+    does not match the calling context's own (dt_scaled, method). Call this
+    at the top of both, before any per-step or backward-sweep work.
+
+    Finding 1: ``model._worker_transient_factor_key`` is written by
+    ``_stamp_worker_transient_factor`` (``result_factorization.py``) ONLY
+    AFTER every worker has finished a ``factor_transient_system()`` RPC --
+    it is reset to None BEFORE dispatching that RPC at all three call sites
+    (factor, never-assemble factor, never-assembled refactor's tilewise
+    re-gather). A mid-gather worker failure therefore leaves the stamp at
+    None (some tiles may already hold the NEW dt/method, others the old
+    one -- an inconsistent, unknown mix), never at a stale-but-consistent
+    old value. None is therefore treated here as "workers' transient
+    factorization state is unknown or absent", NOT "no information yet,
+    assume OK" -- it raises exactly like a hard mismatch, converting what
+    used to be a silent wrong-voltage/wrong-sensitivity result (a mid-
+    gather failure leaving a stale, mismatched-but-nonNone stamp that used
+    to pass this guard) into a loud, actionable error.
+
+    Finding 3: the method string is canonicalized via ``.lower()`` on BOTH
+    sides of the comparison (mirroring ``_stamp_worker_transient_factor``,
+    which canonicalizes the same way when WRITING the stamp) -- every
+    numeric consumer treats any value other than ``'trap'`` as Backward
+    Euler (``C_coeff = 2.0 if method == 'trap' else 1.0``), so ``'be'`` and
+    ``'BE'`` (both documented spellings -- see root CLAUDE.md vs this
+    module's own docstrings) are numerically IDENTICAL configurations and
+    must not raise a spurious mismatch.
+
+    Raises:
+        RuntimeError: If the workers' transient factorization state is
+            unknown/absent (stamp is None) or does not match this
+            context's own (dt_scaled, method).
+    """
+    _worker_key = getattr(model, '_worker_transient_factor_key', None)
+    _ctx_key = (trans_ctx.dt_scaled, trans_ctx.integration_method.lower())
+    _dt_seconds = trans_ctx.dt_scaled / 1e12
+
+    if _worker_key is None:
+        raise RuntimeError(
+            f"{caller}: this model's workers' transient factorization "
+            f"state is unknown or absent (no stamp on record), but this "
+            f"context was prepared for dt_scaled={_ctx_key[0]!r} ps, "
+            f"method={_ctx_key[1]!r}. This happens when: (a) a mid-gather "
+            f"worker failure during a prepare_transient()/refactor() call "
+            f"(this context's own, or a DIFFERENT live "
+            f"DistributedTransientContext's for the SAME model) left the "
+            f"workers in an inconsistent, unknown dt/method mix -- the "
+            f"stamp is invalidated to None BEFORE dispatching the "
+            f"worker-side factor RPC and only restored after EVERY worker "
+            f"completes, precisely so a partial failure cannot leave a "
+            f"stale-but-plausible stamp behind; or (b) this context (or "
+            f"another live context sharing these workers) was release()'d, "
+            f"which clears both the workers' transient factorization and "
+            f"this stamp. Fix: call solver.prepare_transient("
+            f"dt={_dt_seconds!r}, method={trans_ctx.integration_method!r}) "
+            f"again for this context, or this context's own factor(), "
+            f"before {caller}()."
+        )
+
+    if _worker_key != _ctx_key:
+        # Finding 5: refactor()'s ability to re-stamp the workers depends on
+        # this context's resolved interface-solver mode -- only a CG
+        # context whose refactor() actually re-gathers tiles (never-
+        # assembled, forced tilewise; or assembled+CG resolving to
+        # tilewise) re-stamps. A direct-mode context, or a CG context
+        # refactored with 'assembled' matvec, never calls
+        # factor_transient_system() during refactor() and so never
+        # re-stamps -- prescribing refactor() as a remedy there is a dead
+        # end (the identical error reproduces). Determine this the same
+        # way _refactor_transient_context's own `_want_tilewise` does.
+        _never_assembled = getattr(trans_ctx, '_s_global_dropped', False)
+        _solver_mode = getattr(trans_ctx, '_interface_solver_mode', 'direct')
+        _model_settings = getattr(model, 'settings', {}) or {}
+        _matvec_setting = _model_settings.get('interface_matvec_mode', 'auto')
+        if _matvec_setting is None:
+            _matvec_setting = 'auto'
+        _workers_attached = bool(model is not None and getattr(model, 'workers', None))
+        _would_be_tilewise = (
+            _never_assembled
+            or _matvec_setting == 'tilewise'
+            or (_matvec_setting == 'auto' and _workers_attached)
+        )
+        _refactor_would_restamp = _solver_mode == 'cg' and _would_be_tilewise
+
+        if _refactor_would_restamp:
+            _remedy2 = (
+                " or call this context's own refactor() to re-stamp the "
+                "workers at its own dt/method"
+            )
+        else:
+            _remedy2 = (
+                " (calling this context's own refactor() will NOT fix "
+                "this -- for a direct-mode context, or a CG context whose "
+                "refactor() resolves to 'assembled' matvec, refactor() "
+                "never re-runs factor_transient_system() on the workers "
+                "and so never re-stamps; re-running prepare_transient() "
+                "or this context's own factor() are the only fixes)"
+            )
+
+        raise RuntimeError(
+            f"{caller}: this model's workers are currently "
+            f"factored for a transient dt_scaled={_worker_key[0]!r} ps, "
+            f"method={_worker_key[1]!r}, but this context was prepared "
+            f"for dt_scaled={_ctx_key[0]!r} ps, method={_ctx_key[1]!r}. "
+            f"This happens when a DIFFERENT DistributedTransientContext "
+            f"for the SAME model ran factor()/refactor() at a "
+            f"different dt/method after this context's own "
+            f"factor()/refactor() -- workers are shared, single-owner "
+            f"state, so the most recently factored dt/method wins and "
+            f"invalidates every other live transient context's "
+            f"worker-side state (per-step RHS and interior recovery use "
+            f"the workers' CURRENT factorization, not this context's "
+            f"dt_scaled/method). Fix: call "
+            f"solver.prepare_transient(dt={_dt_seconds!r}, "
+            f"method={trans_ctx.integration_method!r}) "
+            f"again for this context immediately before "
+            f"{caller}(){_remedy2}."
+        )
+
+
 class _SolverTimeDomainMixin:
     """Mixin providing coordinator-side time-domain methods.
 
@@ -649,6 +783,16 @@ class _SolverTimeDomainMixin:
             ValueError: If context is not factored, if neither dc_context
                 nor ic_voltages is provided, or if both are provided
                 (they are mutually exclusive).
+            RuntimeError: If the model's workers are currently factored
+                for a different (dt, method) than this context -- i.e.
+                another DistributedTransientContext for the same model ran
+                factor()/refactor() at a different dt/method after this
+                context's own factor()/refactor() -- or if the workers'
+                transient factorization state is unknown/absent (e.g. a
+                mid-gather failure during some prepare_transient()/
+                refactor() call, or a release()) (see
+                `_check_worker_transient_stamp` / Finding 1). Re-run this
+                context's own prepare_transient() or factor() first.
         """
         if not context.is_factored:
             raise ValueError(
@@ -673,6 +817,16 @@ class _SolverTimeDomainMixin:
         trans_ctx = context
         dt = trans_ctx.dt_scaled / 1e12  # Convert back to seconds
         method = trans_ctx.integration_method
+
+        # Finding 1/2/3/5 (round 2 review): shared worker dt/method
+        # transient-factor stamp guard -- see _check_worker_transient_stamp's
+        # docstring. Checked BEFORE any per-step work (and before the DC/IC
+        # initial-condition step, which doesn't need this context's
+        # worker-side transient factorization, but failing fast here avoids
+        # wasted work either way). Also used by analyze_adjoint()
+        # (solver_adjoint.py), which consumes the identical shared
+        # worker-side state.
+        _check_worker_transient_stamp(model, trans_ctx, caller='solve_transient')
 
         n_interface = len(trans_ctx.interface_nodes)
 

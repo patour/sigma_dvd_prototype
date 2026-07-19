@@ -38,6 +38,7 @@ from analysis.adjoint_sensitivity import (
     AggressorContribution,
 )
 from .interface_iterative import filter_kept_rhs
+from .solver_td import _check_worker_transient_stamp
 from .result import (
     DistributedQuasiStaticResult,
     DistributedSolveResult,
@@ -199,6 +200,16 @@ class _AdjointMixin:
                 "trans_context is not factored. Call context.factor() or use "
                 "solver.prepare_transient() to obtain a factored context."
             )
+        # Finding 2 (round 2 review): analyze_adjoint's backward sweep
+        # consumes the SAME shared, single-owner worker-side transient
+        # factorization solve_transient() does (tile_worker_adjoint's
+        # lambda-recovery RPCs require factor_transient_system() to have
+        # already run on the workers) -- guard it identically, BEFORE the
+        # backward sweep, so a stale/mismatched/unknown worker factorization
+        # raises loudly here too instead of silently producing wrong
+        # sensitivities/blame attributions. analyze_adjoint_static (DC-only,
+        # no transient context) does not need this guard.
+        _check_worker_transient_stamp(self.model, trans_context, caller='analyze_adjoint')
         if initial_condition == 'dc' and dc_context is None:
             raise ValueError(
                 "initial_condition='dc' requires dc_context to be provided"

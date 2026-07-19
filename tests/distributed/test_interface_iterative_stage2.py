@@ -1664,11 +1664,15 @@ class TestInterfaceDropSGlobal:
             ctx.release()
             model.shutdown()
 
-    def test_transient_warns_that_drop_s_global_is_dc_only(self, tmp_path, caplog):
-        """Finding 2: interface_drop_s_global=True is DC-only in Stage 2 --
-        prepare_transient() must never silently ignore it; it must assemble
-        S_global normally AND emit a clear WARNING explaining the scope
-        reduction."""
+    def test_transient_also_never_assembles_s_global(self, tmp_path, caplog):
+        """TD never-assemble work package: interface_drop_s_global=True now
+        means "never assemble in BOTH modes" -- prepare_transient() must
+        dispatch to _factor_transient_context_no_s_global exactly like
+        prepare() dispatches to _factor_dc_context_no_s_global, with no
+        DC-only scope-reduction warning (that limitation is gone). See
+        tests/distributed/test_td_never_assemble.py for the full exactness/
+        lifecycle coverage of this path; this test only guards the
+        dispatch-point regression."""
         import logging
         from distributed.solver import DistributedDDMSolver
 
@@ -1684,14 +1688,88 @@ class TestInterfaceDropSGlobal:
         with caplog.at_level(logging.WARNING):
             trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
         try:
+            assert trans_ctx._S_global is None, (
+                "interface_drop_s_global=True must never assemble S_global "
+                "for the transient factor too (no longer DC-only)"
+            )
+            assert getattr(trans_ctx, '_s_global_dropped', False) is True
+            assert trans_ctx._cg_solver.matvec_mode == 'tilewise'
+            assert not any(
+                'DC-only' in rec.message for rec in caplog.records
+            ), "the old DC-only scope-reduction warning must no longer fire"
+        finally:
+            trans_ctx.release()
+            model.shutdown()
+
+    def test_transient_falls_back_with_warning_when_preconditions_unmet(
+        self, tmp_path, caplog,
+    ):
+        """Finding 3: the transient-side twin of
+        ``test_falls_back_with_warning_when_preconditions_unmet`` (DC-only,
+        above) -- exercises ``_factor_transient_context``'s fallback branch
+        (``interface_drop_s_global=True`` but preconditions unmet,
+        result_factorization.py's ``_can_use_no_s_global_path`` check),
+        which had ZERO coverage: replacing
+        ``test_transient_warns_that_drop_s_global_is_dc_only`` with
+        ``test_transient_also_never_assembles_s_global`` above covers only
+        the dispatch-SUCCESS path, never the fallback."""
+        import logging
+        from distributed.solver import DistributedDDMSolver
+
+        model = self._build_summaries_model(tmp_path)
+        model.settings.update({
+            'interface_solver': 'auto',  # precondition requires explicit 'cg'
+            'interface_drop_s_global': True,
+        })
+        solver = DistributedDDMSolver(model)
+        with caplog.at_level(logging.WARNING):
+            trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+        try:
             assert trans_ctx._S_global is not None, (
-                "transient factor must assemble S_global normally even "
-                "when interface_drop_s_global=True (DC-only in Stage 2)"
+                "must fall back to the normal (S_global-assembling) "
+                "transient factor path"
+            )
+            assert getattr(trans_ctx, '_s_global_dropped', False) is False
+            assert any(
+                'preconditions are not met' in rec.message
+                for rec in caplog.records
+            )
+        finally:
+            trans_ctx.release()
+            model.shutdown()
+
+    def test_transient_falls_back_when_island_detection_not_summaries(
+        self, tmp_path, caplog,
+    ):
+        """Finding 3 (second precondition): ``island_detection_mode !=
+        'summaries'`` (the default, ``'schur_bfs'``) must ALSO trigger the
+        fallback -- the never-assemble TD factor can only use the Stage 1e
+        summaries union-find, never the legacy Schur-BFS (which needs
+        ``S_global``'s nonzero structure)."""
+        import logging
+        from distributed.solver import DistributedDDMSolver
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        # island_detection_mode defaults to 'schur_bfs' -- do NOT force
+        # 'summaries' here (that is exactly the unmet precondition under
+        # test).
+        model.settings.update({
+            'interface_solver': 'cg',
+            'interface_matvec_mode': 'tilewise',
+            'interface_drop_s_global': True,
+        })
+        solver = DistributedDDMSolver(model)
+        with caplog.at_level(logging.WARNING):
+            trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+        try:
+            assert trans_ctx._S_global is not None, (
+                "must fall back to the normal (S_global-assembling) "
+                "transient factor path"
             )
             assert any(
-                'interface_drop_s_global is DC-only' in rec.message
+                'preconditions are not met' in rec.message
                 for rec in caplog.records
-            ), "expected a clear WARNING that transient never-assemble is not implemented"
+            )
         finally:
             trans_ctx.release()
             model.shutdown()
@@ -2159,6 +2237,65 @@ class TestS15ForcedCGEquivalenceMatrix:
                 f"{v_cg[node]!r} diff={diff:.3e} (fp32 tilewise matvec has "
                 f"a ~1e-7 relative residual floor; looser tolerance than "
                 f"the fp64 cases is expected and documented)"
+            )
+
+    def test_transient_tilewise_never_assemble_matches_direct(self, tmp_path):
+        """TD never-assemble work package: extend the forced-CG equivalence
+        matrix with a TRANSIENT never-assemble row -- the DC-only rows above
+        cover solve_dc; this covers solve_transient via
+        _factor_transient_context_no_s_global, compared against the direct/
+        assembled transient oracle on the same pad-on-port two-tile fixture
+        (package caps included, so S_extra^TD's dt-dependence is exercised)."""
+        from distributed.solver import DistributedDDMSolver
+
+        def _run(interface_solver, matvec_mode, drop_s_global, summaries):
+            model = _build_two_tile_distributed_model(
+                package_cap_edges=[('pad', 'shared', 50.0)],
+            )
+            for tc in model.metadata.tile_configs:
+                tc.ckt_path = str(tmp_path / f'{interface_solver}_{drop_s_global}' / 'dummy.ckt')
+            if summaries:
+                model.island_detection_mode = 'summaries'
+                model.component_summaries = []
+            settings = {
+                'interface_solver': interface_solver,
+                'interface_matvec_mode': matvec_mode,
+                'interface_cg_rtol': 1e-12,
+                'interface_cg_atol': 1e-16,
+            }
+            if drop_s_global:
+                settings['interface_drop_s_global'] = True
+            model.settings.update(settings)
+            solver = DistributedDDMSolver(model)
+            dc_ctx = solver.prepare()
+            trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+            try:
+                smoothed = solver.preprocess_sources(
+                    time_step=1e-10, t_start=0.0, t_end=2e-9, smooth=False,
+                    pkl_dir=str(tmp_path / f'{interface_solver}_{drop_s_global}'),
+                )
+                result = solver.solve_transient(
+                    trans_ctx, dc_context=dc_ctx, t_end=2e-9,
+                    smoothed_sources=smoothed,
+                )
+                return result.as_flat(), trans_ctx._S_global is None
+            finally:
+                trans_ctx.release()
+                dc_ctx.release()
+                model.shutdown()
+
+        v_direct, _ = _run('direct', 'assembled', False, summaries=False)
+        v_na, was_never_assembled = _run('cg', 'tilewise', True, summaries=True)
+        assert was_never_assembled, "sanity: never-assemble path must have run"
+
+        common = set(v_direct) & set(v_na)
+        assert common, "fixture produced no comparable nodes"
+        for node in common:
+            drop_d, _t_d = v_direct[node]
+            drop_n, _t_n = v_na[node]
+            assert abs(drop_d - drop_n) < 1e-8, (
+                f"node {node}: direct drop={drop_d!r} vs transient "
+                f"never-assemble drop={drop_n!r}"
             )
 
 
@@ -2899,6 +3036,50 @@ class TestFinding6FactorClosesOutgoingCgSolver:
             )
         finally:
             ctx.release()
+            model.shutdown()
+
+    def test_transient_never_assemble_repeated_factor_closes_outgoing_cg_solver_pool(
+        self, tmp_path,
+    ):
+        """Fourth factor() site (TD never-assemble work package):
+        _factor_transient_context_no_s_global -- the transient twin of the
+        DC never-assemble test directly above."""
+        from distributed.solver import DistributedDDMSolver
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        model.island_detection_mode = 'summaries'
+        model.component_summaries = []
+        model.settings.update({
+            'interface_solver': 'cg',
+            'interface_matvec_mode': 'tilewise',
+            'interface_preconditioner': 'block_jacobi',
+            'interface_cg_rtol': 1e-10,
+            'interface_drop_s_global': True,
+            'matvec_threads': 2,
+        })
+        solver = DistributedDDMSolver(model)
+        trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+        try:
+            assert trans_ctx._S_global is None, "sanity: never-assemble path"
+            first_solver = trans_ctx._cg_solver
+            assert first_solver is not None
+            first_solver(np.ones(first_solver.n))
+            assert first_solver._pool is not None, (
+                "sanity: matvec_threads=2 + block_jacobi must build a "
+                "persistent thread pool to begin with"
+            )
+
+            trans_ctx.factor()
+            second_solver = trans_ctx._cg_solver
+            assert second_solver is not None
+            assert second_solver is not first_solver
+            assert first_solver._pool is None, (
+                "the OUTGOING never-assemble transient CG solver's thread "
+                "pool must be closed when factor() replaces "
+                "trans_ctx._cg_solver on an already-factored context."
+            )
+        finally:
+            trans_ctx.release()
             model.shutdown()
 
 

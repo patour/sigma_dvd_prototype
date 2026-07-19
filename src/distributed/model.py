@@ -130,10 +130,14 @@ class DistributedPowerGridModel:
     #       interface_solver='cg', interface_matvec_mode in
     #       ('tilewise', 'auto'), and summaries-based island detection;
     #       falls back to the normal S_global-assembling path with a WARNING
-    #       when preconditions aren't met. Stage 2 scope: DC-only
-    #       (_factor_dc_context). Transient factor (_factor_transient_context)
-    #       always assembles S_global normally and emits a WARNING if this is
-    #       set True -- TD never-assemble lands in a later stage.
+    #       when preconditions aren't met. Applies to BOTH DC (_factor_dc_
+    #       context / _factor_dc_context_no_s_global) and transient factor
+    #       (_factor_transient_context / _factor_transient_context_no_
+    #       s_global) -- each mode retains its own dense per-tile Schur
+    #       block set (S_G for DC, S_A for transient); the two never share
+    #       or alias blocks, so having both a never-assemble DC context and
+    #       a never-assemble transient context alive simultaneously costs
+    #       the SUM of both block sets.
     # These affect only the coordinator; they are NOT propagated to workers
     # (Ray module-globals do not propagate -- see CLAUDE.md pitfalls).
     settings: Dict[str, Any] = field(default_factory=dict, repr=False)
@@ -146,6 +150,33 @@ class DistributedPowerGridModel:
     # sub-tile VCS caches land in the PKL output dir, NOT in the source netlist dir.
     # None when created from legacy paths that don't have an output dir concept.
     pkl_dir: Optional[str] = field(default=None, repr=False)
+
+    # Finding 1 (TD never-assemble review): (dt_scaled, integration_method)
+    # the model's WORKERS are currently factored for -- i.e. the last
+    # (dt_scaled, method) pair passed to a worker-side
+    # factor_transient_system() RPC (via a DistributedTransientContext's
+    # factor() or a never-assembled refactor()'s tilewise re-gather; see
+    # `_stamp_worker_transient_factor` in result_factorization.py).
+    #
+    # Workers are shared, single-owner state for the whole model: only ONE
+    # (dt, method) transient factorization can be resident on them at a
+    # time, but multiple DistributedTransientContext objects (each with its
+    # OWN dt_scaled/integration_method) can be alive simultaneously (e.g.
+    # ctx1 = prepare_transient(dt=100ps); ctx2 = prepare_transient(dt=50ps)).
+    # Re-factoring the workers for ctx2 silently invalidates ctx1's
+    # worker-side state even though ctx1.is_factored remains True and
+    # ctx1's own coordinator-side vectors are unchanged.
+    #
+    # solve_transient() (solver_td.py) checks this stamp against its own
+    # context's (dt_scaled, integration_method) before doing any per-step
+    # work and raises RuntimeError on mismatch, converting what used to be
+    # a silent wrong-voltage result into a loud, actionable error.
+    # None means "workers have never run factor_transient_system this
+    # session" (no live transient context has ever been factored) --
+    # solve_transient treats None as "no information yet", not a mismatch.
+    _worker_transient_factor_key: Optional[Tuple[float, str]] = field(
+        default=None, repr=False,
+    )
 
     @property
     def tile_ids(self) -> List[tuple]:

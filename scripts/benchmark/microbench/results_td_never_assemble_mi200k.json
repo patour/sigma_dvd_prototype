@@ -1,0 +1,72 @@
+{
+  "pkl_dir": "netlist/netlist_brcm_sampled/distributed_pkl_mi200k_v2",
+  "dt": 5e-12,
+  "t_end": 1e-10,
+  "runs": {
+    "dc_two_level": {
+      "prepare_s": 127.22239904099843,
+      "precond_info": {
+        "preconditioner": "two_level",
+        "label": "two_level(jacobi+geneo k=0, T'=65, rank=65)",
+        "n_pou_cols": 65,
+        "n_geneo_cols": 0,
+        "rank": 65,
+        "n_dropped_cols": 0
+      },
+      "cold_solve_1e12_s": 28.452569262008183,
+      "cold_iters_1e12": 118,
+      "dc_1e12_failed": null,
+      "cold_solve_1e8_s": 18.009638431001804,
+      "cold_iters_1e8": 70,
+      "max_dV_V_1e8_vs_1e12": 1.4730215980307548e-07,
+      "rss_gb": 22.856290304
+    },
+    "tr_two_level_1e-12_reference": {
+      "tr_prepare_s": 125.28136362700025,
+      "precond_info": {
+        "preconditioner": "two_level",
+        "label": "two_level(jacobi+geneo k=0, T'=65, rank=65)",
+        "n_pou_cols": 65,
+        "n_geneo_cols": 0,
+        "rank": 65,
+        "n_dropped_cols": 0
+      },
+      "loop_s": 323.6991344269918,
+      "loop_s_per_step": 16.18495672134959,
+      "solve_total_s": null,
+      "cg_iters_mean": null,
+      "cg_iters_max": null,
+      "peak_mV": 76.16114133662278,
+      "peak_node": null,
+      "rss_gb": 39.838302208
+    },
+    "tr_two_level_1e-8": {
+      "loop_s": 124.97030862800602,
+      "loop_s_per_step": 6.2485154314003015,
+      "solve_total_s": null,
+      "cg_iters_per_step": 23.6,
+      "cg_iters_mean": null,
+      "cg_iters_max": null,
+      "max_dV_V": 2.527551978825926e-07,
+      "peak_mV": 76.16115386572442,
+      "peak_delta_mV": 1.25291016450646e-05,
+      "peak_node_match": true,
+      "rss_gb": 39.839358976
+    },
+    "tr_block_jacobi_1e-8": {
+      "tr_prepare_s": 125.3561926149996,
+      "precond_info": {
+        "preconditioner": "jacobi",
+        "label": "jacobi"
+      },
+      "loop_s": 154.9077559349971,
+      "loop_s_per_step": 7.7453877967498554,
+      "solve_total_s": null,
+      "cg_iters_per_step": 29.25,
+      "cg_iters_mean": null,
+      "cg_iters_max": null,
+      "max_dV_V": 2.4735253634222687e-07,
+      "rss_gb": 58.532868096
+    }
+  }
+}

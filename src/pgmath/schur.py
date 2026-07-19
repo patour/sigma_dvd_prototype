@@ -110,6 +110,18 @@ from pgmath.factor import (
 
 logger = logging.getLogger(__name__)
 
+# Finding 6 (distributed TD never-assemble review): single canonical source
+# for the island-penalty diagonal magnitude (mS). Previously hand-copied as
+# a bare ``1e5`` literal at 5+ call sites across this module and
+# ``distributed/result_factorization.py`` (DC/TD never-assemble factor
+# paths, TD refactor path, ``_build_s_extra_direct``'s default) that must
+# all stay numerically identical -- a penalized island row's steady-state
+# voltage is ``(penalty_conductance_used_for_S) / (penalty_conductance_used_
+# for_RHS) * vdd``, so any drift between two copies silently produces a
+# wrong (not vdd) voltage with no error. Import this constant everywhere
+# instead of re-typing the literal.
+ISLAND_PENALTY_CONDUCTANCE = 1e5
+
 
 # ---------------------------------------------------------------------------
 # _make_partial_interior_solve
@@ -957,7 +969,7 @@ def apply_island_penalty(
     island_nodes: Set[str],
     interface_node_to_idx: Dict[str, int],
     dirichlet_voltage: float,
-    penalty_conductance: float = 1e5,
+    penalty_conductance: float = ISLAND_PENALTY_CONDUCTANCE,
 ) -> Tuple[sp.csr_matrix, np.ndarray]:
     """Apply a diagonal penalty to island nodes to make S_global non-singular."""
     if not island_nodes:
@@ -994,7 +1006,7 @@ def detect_interface_islands(
     extra_edges: Optional[List[Tuple[str, str, float]]] = None,
     *,
     dirichlet_voltage: float,
-    penalty_conductance: float = 1e5,
+    penalty_conductance: float = ISLAND_PENALTY_CONDUCTANCE,
 ) -> Tuple[sp.csr_matrix, np.ndarray, Set[str]]:
     """Detect interface islands and apply diagonal penalty in one call.
 

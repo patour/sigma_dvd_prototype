@@ -843,6 +843,49 @@ projected/deflated form (A-DEF2) rather than the additive one — recorded as a 
 not scheduled. Raw JSONs: `stage3_h2h.json` (production default), `stage3_h2h_bj16.log`
 (variant failure) — summarized here; scripts: `run_stage3_head_to_head.py`.
 
+### 7.10 TD never-assemble landed — transient tilewise CG without S_global (2026-07-19, dev host)
+
+**Landed** (branch `distributed-10x`): `interface_drop_s_global=True` now covers the transient
+factor path. New `_factor_transient_context_no_s_global` retains the dense per-tile transient
+Schur blocks via the same streaming slice-and-copy gather as DC (extended with a tile-cap
+side-channel), reproduces the Dirichlet vectors per-tile — `rhs_dirichlet_A` = package
+combined-edges term + tile-embedded term, `rhs_dirichlet_G` via the linearity delta computed
+from the PRE-penalty `rhs_dirichlet_A` with the island penalty applied only afterwards (the
+implementation agent's own regression test caught a penalty-before-delta double-count on the
+first draft: BE settled islands at ~2×Vdd, TR at ~3×Vdd) — stamps `S_extra^TD` directly, and
+wires the tilewise CG + Stage 3 two_level auto default. Lifecycle parity throughout: TD
+`save()` raises with guidance, `refactor()` re-gathers with mode-correct `island_nodes_td` and
+port-drift errors, DC+TD contexts coexist (distinct block sets). **New safety guard**: workers
+hold ONE transient factorization; a model-level `(dt, method)` stamp (invalidate-then-stamp,
+canonicalized method) is checked by `solve_transient` AND `analyze_adjoint`, converting the
+stale-context hazard — including the PRE-EXISTING assembled-path variant, where a second
+`prepare_transient(dt2)` silently corrupted a live dt1 context's solves (demonstrated: 4.2 mV
+silent error) — into a loud RuntimeError. Battery: implementation workflow clean on first
+pass (both Opus reviews), 2 × `/code-review xhigh --fix` rounds (15 + 11 verified findings
+fixed, negative-tested), Opus fix-verification CLEAN-FOR-COMMIT. 1099 distributed unit tests
+(+35), validation 225, perf baseline flat, 4/4 parity notebooks bit-identical; two-tile
+exactness vs assembled: Dirichlet vectors bit-for-bit, results ≤ 3.3e-16 V across BE/TR × dt;
+netlist_multi_tile end-to-end max|dV| = 1.3e-10 V.
+
+**mi200k_v2 measurement** (64 tiles / 168,586 unknowns, Ray tiles_per_worker=4, BE dt=5 ps,
+20 steps; DC phase reproduced §7.9 exactly — 118/70 cold iters, 147 nV):
+
+| Quantity | assembled (§7.9) | **never-assemble (this)** | gain |
+|---|---|---|---|
+| TR prepare | 489 s / 93 GB RSS | **125 s / 39.6 GB** (incl. live DC ctx) | 3.9× / 2.3× |
+| Transient @1e-12 (ref) | 85.0 s/step | **16.2 s/step** | 5.3× |
+| **Transient @1e-8 (production)** | 31.1 s/step | **6.25 s/step** | **5.0×** |
+| @1e-8 iters/step / accuracy | 23.6 / 253 nV | 23.6 / 253 nV | identical |
+| Ablation: jacobi no-coarse @1e-8 | 38.2 s/step | 7.75 s/step (29.2 iters) | 4.9× |
+
+The 6.25 s/step decomposes as ~23.6 iters × ~0.19 s tilewise iteration + ~1.5 s RHS + ~0.35 s
+recovery — the transient loop now runs the same fast path as DC, and the interface solve is
+once again the dominant term but at 5× lower absolute cost. Remaining gap to the §7.4 BRCM
+target (≤0.3–0.5 s/step interface solve) requires the warm-iteration count to drop toward
+~5–10 (A-DEF2/deflation contingency) and/or the Stage 4 GPU matvec — both remain optional
+next steps; at the current numbers the projected BRCM-host transient loop is already in the
+~1.5 + ~15 s/step class vs the 329 s/step CG baseline of §7.4.
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |

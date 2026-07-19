@@ -69,10 +69,17 @@ import os
 import pickle
 from dataclasses import dataclass
 import time as _time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import scipy.sparse as sp
+
+# Finding 6: single canonical island-penalty-conductance constant (pgmath.schur
+# owns it; safe at module level -- pgmath never imports distributed/, so no
+# circular-import risk). Used as both a function default value (needs a
+# module-level import, not the lazy per-function style used elsewhere in this
+# file) and inline at every never-assemble/refactor stamping site.
+from pgmath.schur import ISLAND_PENALTY_CONDUCTANCE
 
 if TYPE_CHECKING:
     from .model import DistributedPowerGridModel
@@ -778,8 +785,9 @@ def _build_s_extra_direct(
     island_nodes: Optional[Set[str]] = None,
     package_cap_edges: Optional[List[Tuple[str, str, float]]] = None,
     C_coeff: float = 0.0,
-    penalty_conductance: float = 1e5,
-) -> sp.csr_matrix:
+    penalty_conductance: float = ISLAND_PENALTY_CONDUCTANCE,
+    return_package_matrices: bool = False,
+) -> Union[sp.csr_matrix, Tuple[sp.csr_matrix, Tuple[sp.csr_matrix, sp.csr_matrix]]]:
     """D2: build S_extra by DIRECT STAMPING (package edges + island-penalty
     diagonal), replacing the old ``S_global - sum_i P_i^T S_i P_i`` giant
     subtraction (~25 GB temporaries at 107-tile BRCM scale, plus FP
@@ -825,11 +833,22 @@ def _build_s_extra_direct(
             is non-empty, so callers may pass the model's cap edges
             unconditionally and control mode purely via C_coeff).
         penalty_conductance: Island-penalty diagonal magnitude (mS);
-            default 1e5, matching ``apply_island_penalty``.
+            default ``ISLAND_PENALTY_CONDUCTANCE``, matching
+            ``apply_island_penalty``.
+        return_package_matrices: Finding 12: when True, also return the
+            ``(G_pkg_uu, C_pkg_uu)`` pair this function stamps internally
+            (via ``build_interface_package_matrices``), so a caller that
+            ALSO needs them afterward (e.g. for
+            ``ctx.C_package_uu``/``ctx._G_package_uu``, the transient
+            RHS history terms) can reuse this single stamping pass
+            instead of calling ``build_interface_package_matrices`` a
+            second time with identical arguments.
 
     Returns:
         Sparse CSR matrix S_extra (entries below scipy's default zero
-        elimination threshold removed via ``eliminate_zeros()``).
+        elimination threshold removed via ``eliminate_zeros()``), or, if
+        ``return_package_matrices``, the tuple
+        ``(S_extra, (G_pkg_uu, C_pkg_uu))``.
     """
     from pgmath.schur import build_interface_package_matrices
 
@@ -859,6 +878,8 @@ def _build_s_extra_direct(
 
     S_extra = S_extra.tocsr()
     S_extra.eliminate_zeros()
+    if return_package_matrices:
+        return S_extra, (G_pkg_uu, C_pkg_uu)
     return S_extra
 
 
@@ -871,6 +892,7 @@ def _gather_kept_tile_schur_streaming(
     dirichlet_voltage: Optional[float] = None,
     n_iface: Optional[int] = None,
     out_port_count: Optional[Dict[Any, int]] = None,
+    out_tile_cap: Optional[Dict[Any, float]] = None,
 ) -> Tuple[
     Dict[Any, np.ndarray], Dict[Any, np.ndarray], Dict[Any, np.ndarray],
     Optional[np.ndarray],
@@ -927,6 +949,16 @@ def _gather_kept_tile_schur_streaming(
             ``ctx.tile_port_count`` / ``filter_kept_rhs`` validation.  A
             side-channel output (not part of the return tuple) so existing
             callers that only want the first four values are unaffected.
+        out_tile_cap: Optional mutable dict; when provided AND
+            ``transient_dt_scaled`` is set, populated in-place with
+            ``{tid: total_cap_fF}`` -- the per-tile total capacitance
+            ``factor_transient_system`` already computes and returns as its
+            3rd tuple element (silently discarded otherwise).  Used by the
+            TD "never assemble S_global" factor path
+            (:func:`_factor_transient_context_no_s_global`) to derive
+            ``ctx.has_capacitance`` without a separate round-trip.  Ignored
+            in DC mode (``transient_dt_scaled is None``) -- there is no
+            per-tile cap total to report.
 
     Returns:
         ``(tile_schur_complements, tile_index_maps, tile_kept_port_pos,
@@ -972,6 +1004,8 @@ def _gather_kept_tile_schur_streaming(
         tid = model.metadata.tile_configs[i].tile_id
         if is_transient:
             S_i, port_nodes, _total_cap, _stats = result
+            if out_tile_cap is not None:
+                out_tile_cap[tid] = _total_cap
         else:
             S_i, port_nodes, _stats = result
         idx, S_kept, kept_pos = kept_position_slice(
@@ -1643,9 +1677,7 @@ def _factor_dc_context_no_s_global(
     """
     from .result import DistributedTopologyContext
     from .interface_iterative import build_interface_solver
-    from pgmath.schur import (
-        detect_interface_islands_from_summaries, build_interface_package_matrices,
-    )
+    from pgmath.schur import detect_interface_islands_from_summaries
 
     timings: Dict[str, Any] = {}
 
@@ -1677,16 +1709,40 @@ def _factor_dc_context_no_s_global(
     # (the corrupted state the guard exists to catch),
     # detect_interface_islands_from_summaries would iterate '(None or ())'
     # and island nearly the whole interface silently.
+    #
+    # Finding 10 (round 2 review): mirror the assembled DC path's topology
+    # island cache (a few hundred lines below, in _factor_dc_context) --
+    # a second DC prepare() on this model reuses ctx.topology (cached on
+    # solver.py's self._topology and passed back in), so a cache hit here
+    # skips the summaries union-find entirely, exactly like the assembled
+    # path already does. Without this, every DC never-assemble prepare()
+    # pays a full summaries union-find over the whole interface even when
+    # island_nodes was already computed and cached by a prior prepare() on
+    # this same solver -- growing with the 100M-node target scale this
+    # path exists for. (DC-mode cache only: resistive-only extra_edges,
+    # same as the assembled path's cache key -- the TD never-assemble path
+    # has its own independent, mode-correct island_nodes_td cache.)
     t0 = _time.perf_counter()
-    _check_summaries_mixed_state(model)
-    island_nodes = detect_interface_islands_from_summaries(
-        component_summaries=model.component_summaries,
-        interface_node_to_idx=interface_node_to_idx,
-        pad_nodes=model.pad_nodes,
-        extra_edges=model.package_data.package_edges,
+    _cached_islands_dc: Optional[Set[str]] = (
+        getattr(ctx.topology, 'island_nodes', None)
+        if ctx.topology is not None else None
     )
+    if _cached_islands_dc is not None:
+        island_nodes = _cached_islands_dc
+        logger.debug(
+            "DC island detection (never-assemble path): cache hit (%d "
+            "islands), union-find skipped.", len(island_nodes),
+        )
+    else:
+        _check_summaries_mixed_state(model)
+        island_nodes = detect_interface_islands_from_summaries(
+            component_summaries=model.component_summaries,
+            interface_node_to_idx=interface_node_to_idx,
+            pad_nodes=model.pad_nodes,
+            extra_edges=model.package_data.package_edges,
+        )
     if island_nodes:
-        penalty_conductance = 1e5
+        penalty_conductance = ISLAND_PENALTY_CONDUCTANCE
         idx = np.array(
             [interface_node_to_idx[n] for n in island_nodes], dtype=np.intp,
         )
@@ -1716,13 +1772,25 @@ def _factor_dc_context_no_s_global(
     timings['factor_tiles'] = _time.perf_counter() - t0
 
     # D2: S_extra by direct stamping (package edges + island-penalty diagonal).
+    # Finding 8 (round 2 review): request return_package_matrices=True (the
+    # Finding-12 pattern already used by the TD paths) instead of a second,
+    # separate build_interface_package_matrices() call below with
+    # identical arguments -- G_pkg_uu doesn't depend on C_coeff/
+    # package_cap_edges (build_interface_package_matrices computes G and C
+    # independently), so passing package_cap_edges here (C_coeff stays 0.0,
+    # the DC default, so the capacitive term is never added to S_extra) is
+    # safe and yields the SAME G_pkg_uu the old second call built, from one
+    # stamping pass instead of two -- and removes the risk of the two call
+    # sites' arguments silently drifting apart.
     t0 = _time.perf_counter()
-    S_extra = _build_s_extra_direct(
+    S_extra, (G_pkg_uu, _C_pkg_uu_unused) = _build_s_extra_direct(
         interface_node_to_idx=interface_node_to_idx,
         n_iface=len(interface_nodes),
         package_edges=model.package_data.package_edges,
         dirichlet_nodes=model.pad_nodes,
         island_nodes=island_nodes,
+        package_cap_edges=model.package_data.package_cap_edges,
+        return_package_matrices=True,
     )
     timings['build_s_extra'] = _time.perf_counter() - t0
 
@@ -1773,14 +1841,6 @@ def _factor_dc_context_no_s_global(
     timings['factor_interface'] = _time.perf_counter() - t0
     timings['total_prepare'] = sum(
         v for v in timings.values() if isinstance(v, (int, float))
-    )
-
-    G_pkg_uu, _ = build_interface_package_matrices(
-        package_edges=model.package_data.package_edges,
-        package_cap_edges=model.package_data.package_cap_edges,
-        interface_node_to_idx=interface_node_to_idx,
-        n_interface=len(interface_nodes),
-        dirichlet_nodes=model.pad_nodes,
     )
 
     if verbose:
@@ -2927,6 +2987,567 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
 # ---------------------------------------------------------------------------
 
 
+def _stamp_worker_transient_factor(
+    model: Optional['DistributedPowerGridModel'], dt_scaled: float, method: str,
+) -> None:
+    """Finding 1: record the ``(dt_scaled, method)`` the model's WORKERS are
+    currently factored for (worker-side transient block system
+    ``A = G + C_coeff*C``, set by a ``factor_transient_system()`` RPC).
+
+    Workers are shared, single-owner state across every live
+    ``DistributedTransientContext`` for this model -- whichever context most
+    recently ran ``factor_transient_system()`` on the workers (via its own
+    ``factor()``, or a never-assembled ``refactor()``'s tilewise re-gather)
+    wins, silently invalidating every OTHER live transient context's
+    worker-side factorization: per-step RHS (``get_transient_reduced_rhs_arr``)
+    and interior recovery (``recover_transient_and_update_peaks_arr``) both
+    use whatever the workers are CURRENTLY factored for, not whichever
+    dt/method the calling context was originally prepared with.
+
+    ``solve_transient()`` (``solver_td.py``) reads this stamp and compares
+    it against its own context's ``(dt_scaled, integration_method)`` before
+    doing any per-step work, raising a loud ``RuntimeError`` on mismatch
+    instead of silently solving with mismatched coordinator/worker state.
+
+    Call this at every site that runs ``factor_transient_system()`` (or
+    ``factor_transient_and_cache_schur()``) on the workers:
+    ``_factor_transient_context`` (assembled path, both the streaming and
+    bulk branches), ``_factor_transient_context_no_s_global`` (never-assemble
+    factor path, via its ``_gather_kept_tile_schur_streaming`` call), and
+    ``_refactor_transient_context``'s tilewise re-gather branch (both the
+    assembled-context 'auto'-resolved-to-tilewise case and the
+    never-assembled case).
+
+    Finding 1 (round 2 review): callers MUST invalidate the stamp to None
+    (``model._worker_transient_factor_key = None``) BEFORE dispatching the
+    worker-side ``factor_transient_system()`` RPC, and only call THIS
+    function (writing the real key) after every worker has completed. A
+    mid-gather failure then leaves the stamp at None -- "workers'
+    transient factorization state unknown/absent" -- instead of a stale
+    value that could pass a naive not-None guard while some tiles hold the
+    NEW dt/method and others the OLD one.
+
+    Finding 3 (round 2 review): ``method`` is canonicalized via
+    ``.lower()`` here (and independently by the guard,
+    ``_check_worker_transient_stamp`` in ``solver_td.py``, on its own
+    context-side key) since every numeric consumer treats any value other
+    than ``'trap'`` as Backward Euler -- ``'be'`` and ``'BE'`` are
+    numerically identical configurations and must compare equal.
+    """
+    if model is not None:
+        model._worker_transient_factor_key = (dt_scaled, method.lower())
+
+
+def _invalidate_worker_transient_stamp(
+    model: Optional['DistributedPowerGridModel'],
+) -> None:
+    """Finding 1 (round 2 review): reset the worker transient-factor stamp
+    to None BEFORE dispatching a ``factor_transient_system()`` /
+    ``factor_transient_and_cache_schur()`` RPC to the workers.
+
+    Call this immediately before EVERY dispatch site that
+    :func:`_stamp_worker_transient_factor` documents (factor, never-
+    assemble factor, never-assembled refactor's tilewise re-gather); pair
+    it with a :func:`_stamp_worker_transient_factor` call written only
+    after that same dispatch's gather/``call_all`` returns successfully.
+    If the dispatch raises partway through (e.g. some tiles already
+    re-factored at the new dt/method, others not yet reached), the stamp
+    is left at None -- "workers' transient factorization state unknown/
+    absent" -- rather than the stale pre-call value, which could otherwise
+    describe an inconsistent mix of old- and new-dt tiles as if it were a
+    single valid factorization. See ``_check_worker_transient_stamp``
+    (``solver_td.py``) for how None is treated by the guard.
+    """
+    if model is not None:
+        model._worker_transient_factor_key = None
+
+
+def _build_td_package_edge_sets(
+    pkg_res_edges: List[Tuple[str, str, float]],
+    pkg_cap_edges: List[Tuple[str, str, float]],
+    C_coeff: float,
+) -> Tuple[List[Tuple[str, str, float]], List[Tuple[str, str, float]]]:
+    """Finding 9 (round 2 review): shared C_coeff-weighted, c_fF>0-filtered
+    package-cap edge construction -- the "combined_edges = resistive +
+    C_coeff-weighted package caps" pattern used by the TD interface
+    ordering, S_extra^TD stamping, and the rhs_dirichlet_G linearity delta.
+
+    Previously this exact three-line filter+weight (`c_fF > 0` then
+    `C_coeff * c_fF`) was hand-duplicated at four sites
+    (:func:`_derive_td_dirichlet_vectors`, the never-assemble factor's
+    combined_edges construction, the assembled factor's cap-only-edges
+    construction, and the refactor's never-assembled-branch cap-only-edges
+    reconstruction) and had to be edited in lockstep -- exactly the drift
+    risk :func:`_derive_td_dirichlet_vectors`'s docstring describes for the
+    derivation itself: a future edit to the filter or weighting applied to
+    only one copy would make a ``release()``-``refactor()``'d never-
+    assembled context numerically diverge from a freshly ``factor()``'d
+    one with no error.
+
+    Args:
+        pkg_res_edges: Resistive package edges ``(u, v, g_mS)`` (pass ``[]``
+            when only ``cap_only_edges`` is needed).
+        pkg_cap_edges: Package capacitor edges ``(u, v, c_fF)``.
+        C_coeff: Capacitance coefficient (1/dt_ps BE, 2/dt_ps TR).
+
+    Returns:
+        ``(combined_edges, cap_only_edges)`` -- ``combined_edges`` is
+        ``pkg_res_edges`` with the weighted cap-only edges appended (the TD
+        node universe for the interface ordering / S_extra^TD stamping);
+        ``cap_only_edges`` is the weighted-cap-only subset alone (consumed
+        by the rhs_dirichlet_G linearity delta).
+    """
+    cap_only_edges = [
+        (u, v, C_coeff * c_fF) for u, v, c_fF in pkg_cap_edges if c_fF > 0
+    ]
+    combined_edges = list(pkg_res_edges) + cap_only_edges
+    return combined_edges, cap_only_edges
+
+
+def _derive_td_dirichlet_vectors(
+    *,
+    model: 'DistributedPowerGridModel',
+    interface_nodes: List[str],
+    interface_node_to_idx: Dict[str, int],
+    rhs_dirichlet_pkg: np.ndarray,
+    rhs_dirichlet_from_tiles: np.ndarray,
+    pkg_cap_edges: List[Tuple[str, str, float]],
+    C_coeff: float,
+    island_nodes: Optional[Set[str]],
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """Finding 7: shared TD Dirichlet-vector derivation, used identically by
+    :func:`_factor_transient_context_no_s_global` (factor) and
+    :func:`_refactor_transient_context`'s never-assembled branch (refactor).
+
+    Previously ~35 lines of this derivation were hand-duplicated between the
+    two functions and had to be patched TWICE in lockstep during this work
+    package's implementation (see the "Major finding (review round 1/2)"
+    comments each call site used to carry) -- exactly the drift risk this
+    extraction removes: a future edit to the delta ordering, the cap-edge
+    filter, or the penalty formula that touches only one copy would make a
+    ``release()``-``refactor()``'d context silently diverge from a freshly
+    ``factor()``'d one.
+
+    Given the package-edges-only Dirichlet contribution
+    (``rhs_dirichlet_pkg``, computed from ``combined_edges`` = resistive +
+    C_coeff-weighted package caps -- via ``_compute_interface_ordering`` in
+    the factor path, or ``_compute_rhs_dirichlet_from_edges`` directly in
+    the refactor path, since refactor must NOT re-derive the already-fixed
+    interface ordering) and the tile-embedded ("D1") contribution
+    (``rhs_dirichlet_from_tiles``, from a streaming factor/re-gather), this
+    derives:
+
+      1. The PRE-penalty A-based Dirichlet RHS: ``rhs_dirichlet_pkg +
+         rhs_dirichlet_from_tiles``.
+      2. ``rhs_dirichlet_G`` via the Finding-12-style linearity delta: exact
+         because the tile-embedded contribution does not depend on which
+         package ``extra_edges`` set fixed the (already-final) interface
+         ordering -- only the PACKAGE-edge term changes between
+         ``combined_edges`` and the resistive-only set. This MUST run
+         before the island penalty is folded into ``rhs_dirichlet_A``
+         (step 3), or ``rhs_dirichlet_G`` would inherit the penalty too and
+         the separate per-step ``island_penalty_rhs`` vector (step 3) would
+         double-count it every time-loop step.
+      3. The POST-penalty ``rhs_dirichlet_A`` (island rows get
+         ``+ISLAND_PENALTY_CONDUCTANCE * vdd``) and the separate per-step
+         ``island_penalty_rhs`` vector (T1 fix), which the time loop adds
+         EXACTLY ONCE per step for both BE and TR (never folded into
+         ``rhs_dirichlet_G``, which TR scales by 2 -- that would double the
+         penalty forcing term under TR).
+
+    Args:
+        model: For ``pad_nodes``/``vdd``.
+        interface_nodes: Ordered interface-unknown node list (already
+            fixed -- NOT recomputed here).
+        interface_node_to_idx: ``{node: index}`` for the same ordering.
+        rhs_dirichlet_pkg: Package-edges-only Dirichlet contribution (from
+            ``combined_edges``), computed by the caller.
+        rhs_dirichlet_from_tiles: Tile-embedded ("D1") Dirichlet
+            contribution, from a streaming factor/re-gather.
+        pkg_cap_edges: Package capacitor edges ``(u, v, c_fF)``.
+        C_coeff: Capacitance coefficient (1/dt_ps BE, 2/dt_ps TR).
+        island_nodes: Interface nodes to penalize, or None/empty.
+
+    Returns:
+        ``(rhs_dirichlet_A, rhs_dirichlet_G, island_penalty_rhs)`` --
+        ``island_penalty_rhs`` is ``None`` when there are no islands.
+    """
+    # Finding 9: shared combined/cap-only edge construction (see
+    # _build_td_package_edge_sets's docstring) -- only cap_only_edges is
+    # needed here, so pkg_res_edges is passed as [] (combined_edges would
+    # just equal cap_only_edges then, and is discarded).
+    _, cap_only_edges = _build_td_package_edge_sets([], pkg_cap_edges, C_coeff)
+    rhs_dirichlet_A = rhs_dirichlet_pkg + rhs_dirichlet_from_tiles
+
+    if cap_only_edges:
+        rhs_from_cap_only = _compute_rhs_dirichlet_from_edges(
+            extra_edges=cap_only_edges,
+            unknown_list=interface_nodes,
+            unknown_to_idx=interface_node_to_idx,
+            dirichlet_nodes=model.pad_nodes,
+            dirichlet_voltage=model.vdd,
+        )
+        rhs_dirichlet_G = rhs_dirichlet_A - rhs_from_cap_only
+    else:
+        rhs_dirichlet_G = rhs_dirichlet_A.copy()
+
+    island_penalty_rhs: Optional[np.ndarray] = None
+    if island_nodes:
+        island_pen_idx = np.array(
+            [interface_node_to_idx[n] for n in island_nodes
+             if n in interface_node_to_idx],
+            dtype=np.intp,
+        )
+        rhs_dirichlet_A = rhs_dirichlet_A.copy()
+        rhs_dirichlet_A[island_pen_idx] += ISLAND_PENALTY_CONDUCTANCE * model.vdd
+        island_penalty_rhs = np.zeros(len(interface_node_to_idx), dtype=np.float64)
+        island_penalty_rhs[island_pen_idx] = ISLAND_PENALTY_CONDUCTANCE * model.vdd
+
+    return rhs_dirichlet_A, rhs_dirichlet_G, island_penalty_rhs
+
+
+def _factor_transient_context_no_s_global(
+    ctx: 'DistributedTransientContext', model: Any, verbose: bool = False,
+) -> None:
+    """TD extension of item 3: factor a CG+tilewise TRANSIENT context
+    WITHOUT ever assembling S_global^TD.
+
+    Mirrors :func:`_factor_dc_context_no_s_global`'s two-round-trip
+    streaming design (port-name-lists-only ordering pre-pass, then one
+    streamed factor-and-gather pass with immediate kept-position slicing),
+    extended for the transient system the way :func:`_factor_transient_context`
+    extends the assembled DC path:
+
+      - The interface ordering (and the package-edges-only piece of the
+        Dirichlet RHS) is computed from ``combined_edges`` = resistive +
+        C_coeff-weighted package caps, NOT DC's resistive-only
+        ``package_edges`` -- cap-edge endpoints can add unknown nodes to the
+        interface universe that DC's ordering never sees (see
+        ``compute_interface_node_split``).
+      - Island detection uses ``combined_edges`` too (TD-mode, cap-aware),
+        via the same summaries union-find as the DC never-assemble path --
+        never the DC-mode resistive-only set (:func:`_can_use_no_s_global_path`
+        is the caller's precondition check, same as DC).
+      - The tile-embedded ("D1", a Dirichlet pad directly on a tile's own
+        port list) contribution to the Dirichlet RHS is gathered from the
+        TRANSIENT per-tile Schur (``factor_transient_system``, A = G +
+        C_coeff*C), not the DC one -- :func:`_gather_kept_tile_schur_streaming`'s
+        ``transient_dt_scaled``/``transient_method`` kwargs route the
+        streamed RPC to the transient worker method.
+      - ``rhs_dirichlet_G`` (the vector the time loop actually reads -- see
+        the "Transient Dirichlet RHS in time loop" CLAUDE.md pitfall) is
+        derived from ``rhs_dirichlet_A`` by the SAME linearity delta
+        :func:`_factor_transient_context`'s Finding 12 uses: for a FIXED
+        interface ordering, the tile-embedded contribution to the
+        Dirichlet-unknown coupling does not depend on which package
+        ``extra_edges`` set was used to fix that ordering (only the
+        PACKAGE-edge piece does) -- so
+        ``rhs_dirichlet_G = rhs_dirichlet_A - rhs_from_cap_only_edges``,
+        where the subtracted term is computed from the cap-only edges alone
+        (no S_i involvement, via :func:`_compute_rhs_dirichlet_from_edges`).
+        This needs only ONE tile-gather pass, not two -- the same reasoning
+        the streaming branch of the assembled path already relies on, now
+        extended one level further (never gathering S_global at all).
+      - ``S_extra^TD`` is built by :func:`_build_s_extra_direct`'s
+        mode-dependent TD branch (resistive package edges + C_coeff-weighted
+        package caps + island-penalty diagonal) -- rebuilt on every
+        ``prepare_transient()`` call, exactly as the assembled path's
+        S_extra^TD is (dt/method-dependent, never shared with a DC
+        instance).
+
+    The per-step ``island_penalty_rhs`` vector (T1 fix) is built directly
+    here from the same island index array used for the diagonal stamp,
+    instead of via ``apply_island_penalty`` (which operates on an assembled
+    S_global this path never builds).
+    """
+    from .result import DistributedTopologyContext
+    from .interface_iterative import build_interface_solver
+    # Finding 12: build_interface_package_matrices is no longer imported
+    # directly here -- _build_s_extra_direct(return_package_matrices=True)
+    # below returns the (G_pkg_uu, C_pkg_uu) pair from its own single
+    # stamping pass.
+    from pgmath.schur import detect_interface_islands_from_summaries
+
+    timings: Dict[str, Any] = {}
+    tile_configs = model.metadata.tile_configs
+    method = ctx.integration_method
+    dt_scaled = ctx.dt_scaled
+    C_coeff = ctx.C_coeff
+
+    pkg_res_edges = model.package_data.package_edges
+    pkg_cap_edges = model.package_data.package_cap_edges
+    # Finding 9: shared combined/cap-only edge construction (see
+    # _build_td_package_edge_sets's docstring).
+    combined_edges, _cap_only_edges_f = _build_td_package_edge_sets(
+        pkg_res_edges, pkg_cap_edges, C_coeff,
+    )
+    has_cap = bool(_cap_only_edges_f)
+    # Note: the cap-only-edges list (package caps alone, weighted) used by
+    # the rhs_dirichlet_G linearity delta is independently rebuilt by
+    # _derive_td_dirichlet_vectors (Finding 7) via the same helper, from
+    # pkg_cap_edges/C_coeff.
+
+    # Round-trip 1: port name lists only (no factoring).
+    t0 = _time.perf_counter()
+    port_lists_raw = model.backend.call_all(model.workers, 'get_port_node_list')
+    tile_port_node_lists: Dict[Any, List[str]] = {
+        tile_configs[i].tile_id: pl for i, pl in enumerate(port_lists_raw)
+    }
+    timings['gather_port_lists'] = _time.perf_counter() - t0
+
+    # Interface ordering + package-edges-only Dirichlet RHS, from
+    # combined_edges (the TD node universe -- may include cap-edge
+    # endpoints DC's resistive-only ordering never sees).
+    t0 = _time.perf_counter()
+    interface_nodes, interface_node_to_idx, rhs_dirichlet_pkg = _compute_interface_ordering(
+        tile_port_node_lists=tile_port_node_lists,
+        extra_edges=combined_edges,
+        dirichlet_nodes=model.pad_nodes,
+        dirichlet_voltage=model.vdd,
+    )
+    timings['compute_ordering'] = _time.perf_counter() - t0
+
+    # Island detection: summaries union-find, TD-mode (combined_edges) --
+    # same guard as the DC never-assemble path (S6).  Detection ONLY here
+    # (island_nodes set) -- penalty APPLICATION is deferred until after
+    # rhs_dirichlet_G is derived below (see the comment there for why: this
+    # mirrors _factor_transient_context's exact ordering, where Finding 12's
+    # linearity delta runs BEFORE apply_island_penalty).
+    #
+    # Finding 11: mirror the assembled path's topology island cache (A7 --
+    # islands computed once, not re-run every prepare_transient) instead of
+    # unconditionally re-detecting. Cache lookup order, identical to the
+    # assembled path's (see its "Island detection on transient system"
+    # comment a few hundred lines below in _factor_transient_context):
+    #   1. island_nodes_td  -- transient-mode cache (always mode-correct).
+    #   2. island_nodes     -- DC-mode cache; ONLY reused when
+    #                          package_cap_edges is empty (cap edges can
+    #                          bridge components that are resistively
+    #                          disconnected, making the transient island set
+    #                          a strict subset of the DC set -- reusing the
+    #                          DC result when caps exist would
+    #                          over-penalise cap-bridged interface nodes).
+    t0 = _time.perf_counter()
+    _td_has_cap = bool(pkg_cap_edges)
+    _cached_islands_td: Optional[Set[str]] = None
+    if ctx.topology is not None:
+        _cached_islands_td = getattr(ctx.topology, 'island_nodes_td', None)
+        if _cached_islands_td is None and not _td_has_cap:
+            _cached_islands_td = getattr(ctx.topology, 'island_nodes', None)
+
+    if _cached_islands_td is not None:
+        island_nodes = _cached_islands_td
+        logger.debug(
+            "Transient (never-assemble) island detection: cache hit (%d "
+            "islands), union-find skipped.", len(island_nodes),
+        )
+    else:
+        _check_summaries_mixed_state(model)
+        island_nodes = detect_interface_islands_from_summaries(
+            component_summaries=model.component_summaries,
+            interface_node_to_idx=interface_node_to_idx,
+            pad_nodes=model.pad_nodes,
+            extra_edges=combined_edges,
+        )
+    timings['detect_interface_islands'] = _time.perf_counter() - t0
+
+    # Round-trip 2: streaming TRANSIENT factor + D1-safe kept-slice gather,
+    # plus each tile's own pad-adjacent RHS contribution to rhs_dirichlet_A
+    # and its total capacitance (for ctx.has_capacitance).
+    t0 = _time.perf_counter()
+    tile_port_count: Dict[Any, int] = {}
+    tile_cap: Dict[Any, float] = {}
+    # Finding 1 (round 2 review): invalidate the stamp to None BEFORE
+    # dispatching factor_transient_system() to the workers, not just before
+    # writing the real key after -- a failure partway through this streamed
+    # per-tile gather (some tiles already re-factored at dt_scaled/method,
+    # others not yet reached) must leave the stamp at None ("state unknown")
+    # rather than the stale pre-call value, which could describe a mix of
+    # old- and new-dt tiles as if it were a single consistent factorization.
+    _invalidate_worker_transient_stamp(model)
+    (
+        tile_schur_complements, tile_index_maps, tile_kept_port_pos,
+        rhs_dirichlet_from_tiles,
+    ) = _gather_kept_tile_schur_streaming(
+        model, interface_node_to_idx,
+        transient_dt_scaled=dt_scaled, transient_method=method,
+        dirichlet_voltage=model.vdd, n_iface=len(interface_nodes),
+        out_port_count=tile_port_count, out_tile_cap=tile_cap,
+    )
+    # Finding 1: every worker just successfully ran
+    # factor_transient_system(dt_scaled, method) -- stamp the model so
+    # solve_transient()/analyze_adjoint() (any context, this one or
+    # another) can detect a stale worker/coordinator dt/method pairing.
+    # Only reached if the gather above completed without raising.
+    _stamp_worker_transient_factor(model, dt_scaled, method)
+    timings['factor_transient_tiles'] = _time.perf_counter() - t0
+    if sum(tile_cap.values()) > 0:
+        has_cap = True
+
+    # Finding 7: shared derivation (linearity delta + penalty ordering) --
+    # see _derive_td_dirichlet_vectors's docstring for why the ordering
+    # matters and why this used to be independently duplicated in
+    # _refactor_transient_context.
+    rhs_dirichlet_A, rhs_dirichlet_G, island_penalty_rhs = _derive_td_dirichlet_vectors(
+        model=model,
+        interface_nodes=interface_nodes,
+        interface_node_to_idx=interface_node_to_idx,
+        rhs_dirichlet_pkg=rhs_dirichlet_pkg,
+        rhs_dirichlet_from_tiles=rhs_dirichlet_from_tiles,
+        pkg_cap_edges=pkg_cap_edges,
+        C_coeff=C_coeff,
+        island_nodes=island_nodes,
+    )
+    if island_nodes:
+        logger.warning(
+            "Transient: penalized %d interface island nodes (never-assemble "
+            "path, shorted to %.3f V)", len(island_nodes), model.vdd,
+        )
+
+    # D2: S_extra^TD by direct stamping -- mode-dependent (resistive package
+    # edges + C_coeff-weighted package caps + island-penalty diagonal).
+    # Finding 12: request the (G_pkg_uu, C_pkg_uu) pair this already stamps
+    # internally so the separate build_interface_package_matrices() call
+    # below (for ctx.C_package_uu/_G_package_uu) doesn't repeat the same
+    # package-edge stamping pass a second time.
+    t0 = _time.perf_counter()
+    S_extra, (G_pkg_uu, C_pkg_uu) = _build_s_extra_direct(
+        interface_node_to_idx=interface_node_to_idx,
+        n_iface=len(interface_nodes),
+        package_edges=pkg_res_edges,
+        dirichlet_nodes=model.pad_nodes,
+        island_nodes=island_nodes,
+        package_cap_edges=pkg_cap_edges,
+        C_coeff=C_coeff,
+        return_package_matrices=True,
+    )
+    timings['build_s_extra'] = _time.perf_counter() - t0
+
+    # Finding 13: shared settings-reading helper.
+    _cg_settings = _read_interface_cg_settings(model)
+    _preconditioner = _cg_settings.preconditioner
+    _cg_rtol = _cg_settings.cg_rtol
+    _cg_atol = _cg_settings.cg_atol
+    _cg_maxiter = _cg_settings.cg_maxiter
+    _cg_strict = _cg_settings.cg_strict
+    _bj_max_bytes = _cg_settings.bj_max_bytes
+    _matvec_threads = _cg_settings.matvec_threads
+    _matvec_dtype = _cg_settings.matvec_dtype
+    _strict_dtype_rtol = _cg_settings.strict_dtype_rtol
+    _island_idx = _island_idx_array(island_nodes, interface_node_to_idx)
+
+    t0 = _time.perf_counter()
+    _cg_stats: Dict[str, Any] = {}
+    _cg_solve_callable, _resolved_mode, _cg_solver = build_interface_solver(
+        S_global=None,
+        interface_solver='cg',
+        tile_schur_complements=tile_schur_complements,
+        tile_index_maps=tile_index_maps,
+        S_extra=S_extra,
+        matvec_mode='tilewise',
+        preconditioner=_preconditioner,
+        rtol=_cg_rtol,
+        atol=_cg_atol,
+        maxiter=_cg_maxiter,
+        strict=_cg_strict,
+        block_jacobi_max_bytes=_bj_max_bytes,
+        verbose=verbose,
+        cg_stats_dict=_cg_stats,
+        n_interface=len(interface_nodes),
+        matvec_threads=_matvec_threads,
+        matvec_dtype=_matvec_dtype,
+        strict_dtype_rtol=_strict_dtype_rtol,
+        island_idx=_island_idx,
+        interface_coarse_geneo_k=_cg_settings.geneo_k,
+        interface_coarse_geneo_tol=_cg_settings.geneo_tol,
+        interface_coarse_eps_rank=_cg_settings.eps_rank,
+        interface_coarse_max_cols=_cg_settings.max_cols,
+        interface_coarse_max_bytes=_cg_settings.max_bytes,
+    )
+    timings['factor_transient_interface'] = _time.perf_counter() - t0
+    timings['total_prepare_transient'] = sum(
+        v for v in timings.values() if isinstance(v, (int, float))
+    )
+
+    # Finding 12: G_pkg_uu/C_pkg_uu already came back from the
+    # _build_s_extra_direct(return_package_matrices=True) call above -- no
+    # second build_interface_package_matrices() pass needed here.
+
+    if verbose:
+        logger.info(
+            "=== Distributed DDM Prepare Transient Statistics "
+            "(never-assemble S_global) ===",
+        )
+        logger.info(
+            "Method: %s  |  dt: %.1f ps  |  C_coeff: %.4f", method, dt_scaled, C_coeff,
+        )
+        logger.info(
+            "Transient interface: %d unknowns, %d islands penalized, "
+            "matvec_threads=%d, matvec_dtype=%s",
+            len(interface_nodes), len(island_nodes),
+            _cg_solver.matvec_threads, _cg_solver.matvec_dtype,
+        )
+        for _phase in ('gather_port_lists', 'compute_ordering',
+                       'detect_interface_islands', 'factor_transient_tiles',
+                       'build_s_extra', 'factor_transient_interface'):
+            if _phase in timings:
+                logger.info("  %-36s %.3fs", _phase, timings[_phase])
+        logger.info("=== Total Prepare: %.3fs ===", timings['total_prepare_transient'])
+
+    # Populate context fields (mirrors _factor_transient_context's field set).
+    ctx._interface_lu = _cg_solve_callable
+    ctx._interface_nodes = interface_nodes
+    ctx._interface_node_to_idx = interface_node_to_idx
+    ctx.rhs_dirichlet_A = rhs_dirichlet_A
+    ctx._rhs_dirichlet_G = rhs_dirichlet_G
+    ctx.island_penalty_rhs = island_penalty_rhs
+    ctx._tile_index_maps = tile_index_maps
+    ctx._tile_kept_port_pos = tile_kept_port_pos
+    ctx._tile_port_count = tile_port_count
+    ctx._removed_interface_nodes = island_nodes
+    ctx._S_global = None
+    # Item 3 (TD extension): marks that S_global^TD was never assembled this
+    # factor() call -- save() checks this and raises with guidance.
+    ctx._s_global_dropped = True
+    ctx.has_capacitance = has_cap
+    ctx.C_package_uu = C_pkg_uu if C_pkg_uu.nnz > 0 else None
+    ctx._G_package_uu = G_pkg_uu if G_pkg_uu.nnz > 0 else None
+    ctx.timings = timings
+    ctx._interface_solver_mode = 'cg'
+    # Finding 6: close the outgoing CG solver (if factor() is being re-run
+    # on an already-factored context) before replacing it.
+    _close_existing_cg_solver(ctx)
+    ctx._cg_solver = _cg_solver
+
+    # Finding 11: mirror the assembled path's cross-mode cache population
+    # (see its "Build topology context if not already provided" comment) --
+    # when package_cap_edges is empty, DC and transient BFS/union-find
+    # produce identical results, so pre-populate island_nodes (the DC-mode
+    # field) too, letting a subsequent DC prepare() skip its own detection.
+    # When cap edges are present, leave island_nodes unset so DC still runs
+    # its own mode-correct detection.
+    if ctx.topology is None:
+        ctx.topology = DistributedTopologyContext(
+            interface_nodes=interface_nodes,
+            interface_node_to_idx=interface_node_to_idx,
+            tile_index_maps=tile_index_maps,
+            rhs_dirichlet_G=rhs_dirichlet_G,
+            G_package_uu=G_pkg_uu if G_pkg_uu.nnz > 0 else None,
+            removed_interface_nodes=island_nodes,
+            island_nodes=None if _td_has_cap else island_nodes,  # DC cross-mode (safe when no caps)
+            island_nodes_td=island_nodes,
+            tile_kept_port_pos=tile_kept_port_pos,
+            tile_port_count=tile_port_count,
+        )
+    else:
+        if getattr(ctx.topology, 'island_nodes_td', None) is None:
+            ctx.topology.island_nodes_td = island_nodes
+        if not _td_has_cap and getattr(ctx.topology, 'island_nodes', None) is None:
+            ctx.topology.island_nodes = island_nodes
+
+    ctx.is_factored = True
+
+
 def _factor_transient_context(
     ctx: 'DistributedTransientContext', verbose: bool = False
 ) -> None:
@@ -2943,17 +3564,22 @@ def _factor_transient_context(
     tile_configs = model.metadata.tile_configs
     method = ctx.integration_method
 
-    # Item 3 scope reduction: interface_drop_s_global's "never assemble
-    # S_global" path (see _can_use_no_s_global_path / _factor_dc_context) is
-    # DC-only in Stage 2.  Transient factor always assembles S_global
-    # normally regardless of this setting -- warn instead of silently
-    # ignoring it, so opt-in users aren't surprised the memory saving
-    # doesn't apply here.
+    # Item 3 (TD extension): interface_drop_s_global's "never assemble
+    # S_global" path now covers BOTH DC and transient factor -- dispatch to
+    # the dedicated no-S_global transient factor path when its preconditions
+    # hold (same check as DC: explicit interface_solver='cg', matvec_mode
+    # tilewise/auto, summaries-based island detection). Falls back to the
+    # normal (S_global-assembling) path with a WARNING otherwise, mirroring
+    # _factor_dc_context's dispatch exactly.
     if _get_drop_s_global_setting(model):
+        _ok, _reason = _can_use_no_s_global_path(model)
+        if _ok:
+            _factor_transient_context_no_s_global(ctx, model, verbose)
+            return
         logger.warning(
-            "interface_drop_s_global is DC-only in Stage 2; transient "
-            "prepare assembles S_global normally -- TD never-assemble "
-            "lands in a later stage."
+            "interface_drop_s_global=True but preconditions are not met "
+            "(%s); falling back to the normal (S_global-assembling) factor "
+            "path.", _reason,
         )
 
     # 1. Factor transient system on all workers (parallel).
@@ -2990,6 +3616,11 @@ def _factor_transient_context(
     total_tile_cap = 0.0
     per_tile_stats: List[Dict[str, Any]] = []
 
+    # Finding 1 (round 2 review): invalidate BEFORE dispatching either
+    # branch's factor_transient_*() call_all -- see
+    # _invalidate_worker_transient_stamp's docstring.
+    _invalidate_worker_transient_stamp(model)
+
     if _use_streaming_td:
         # Streaming path: S_A stays on workers.
         cache_results = model.backend.call_all(
@@ -3016,6 +3647,11 @@ def _factor_transient_context(
             tile_port_node_lists[tid] = port_list
             total_tile_cap += tile_cap
             per_tile_stats.append(tile_stats)
+
+    # Finding 1: workers just ran factor_transient_system/
+    # factor_transient_and_cache_schur(dt_scaled, method) -- stamp the model
+    # so solve_transient() can detect a stale worker/coordinator pairing.
+    _stamp_worker_transient_factor(model, dt_scaled, method)
 
     # Coordinator-side DEBUG: per-tile transient factor details
     from pgmath.block_system import _format_bytes
@@ -3046,12 +3682,14 @@ def _factor_transient_context(
     pkg_res_edges = model.package_data.package_edges
     pkg_cap_edges = model.package_data.package_cap_edges
 
-    combined_edges = list(pkg_res_edges)
-    has_cap = total_tile_cap > 0
-    for u, v, c_fF in pkg_cap_edges:
-        if c_fF > 0:
-            combined_edges.append((u, v, C_coeff * c_fF))
-            has_cap = True
+    # Finding 9: shared combined/cap-only edge construction (see
+    # _build_td_package_edge_sets's docstring) -- _cap_only_edges is reused
+    # below (~ the Finding-12 linearity-delta comment) instead of being
+    # rebuilt a second time with the same filter/weighting.
+    combined_edges, _cap_only_edges = _build_td_package_edge_sets(
+        pkg_res_edges, pkg_cap_edges, C_coeff,
+    )
+    has_cap = total_tile_cap > 0 or bool(_cap_only_edges)
     ctx.has_capacitance = has_cap
 
     # 3. Assemble transient interface system
@@ -3094,10 +3732,8 @@ def _factor_transient_context(
     # and reused by both branches below -- the bulk path no longer needs a
     # second full assemble_schur_complement_system() call (a complete
     # second global Schur COO scatter of every tile's S_A_i block) solely
-    # to obtain this vector.
-    _cap_only_edges = [
-        (u, v, C_coeff * c_fF) for u, v, c_fF in pkg_cap_edges if c_fF > 0
-    ]
+    # to obtain this vector. (_cap_only_edges itself was already built
+    # above, step 2, via _build_td_package_edge_sets -- Finding 9.)
 
     if _use_streaming_td:
         # B3 streaming transient: COO shards of S_A streamed tile-by-tile.
@@ -3231,10 +3867,11 @@ def _factor_transient_context(
             [interface_node_to_idx[n] for n in island_nodes], dtype=np.intp,
         )
         island_penalty_rhs = np.zeros(len(interface_nodes), dtype=np.float64)
-        # 1e5 mS: must match apply_island_penalty's penalty_conductance
-        # default (pgmath/schur.py) -- both branches above call it with
-        # default arguments, so the diagonal penalty is always 1e5.
-        island_penalty_rhs[_island_pen_idx] = 1e5 * model.vdd
+        # Finding 6: ISLAND_PENALTY_CONDUCTANCE (pgmath.schur) is the single
+        # canonical source for this magnitude -- must match
+        # apply_island_penalty's penalty_conductance default, since both
+        # branches above call it with default arguments.
+        island_penalty_rhs[_island_pen_idx] = ISLAND_PENALTY_CONDUCTANCE * model.vdd
     else:
         island_penalty_rhs = None
 
@@ -3523,6 +4160,12 @@ def _factor_transient_context(
     ctx._tile_port_count = tile_port_count
     ctx._removed_interface_nodes = island_nodes
     ctx._S_global = S_global
+    # S7 (TD extension, mirrors _factor_dc_context): this IS the normal
+    # (S_global-assembling) factor path -- reset the never-assemble flag so
+    # a context previously factored with interface_drop_s_global=True, then
+    # re-factored (not merely refactor()'d) with the setting off, can
+    # save() again.
+    ctx._s_global_dropped = False
     ctx.C_package_uu = C_pkg_uu if C_pkg_uu.nnz > 0 else None
     ctx._G_package_uu = G_pkg_uu if G_pkg_uu.nnz > 0 else None
     ctx.timings = timings
@@ -3575,6 +4218,19 @@ def _save_transient_context(
     """Save transient context metadata (topology, S_global, integration params) to disk."""
     if path is None:
         path = _default_checkpoint_path(ctx, 'transient_context.pkl')
+
+    if getattr(ctx, '_s_global_dropped', False):
+        raise RuntimeError(
+            "Cannot save: this transient context was factored with "
+            "interface_drop_s_global=True, which never assembles S_global^TD "
+            "at all (not merely 'assemble then free') -- there is nothing "
+            "for save() to persist that would let load()+refactor() rebuild "
+            "the interface solve without workers.  Options: (1) don't call "
+            "save() for never-assemble contexts -- workers already hold "
+            "everything needed, so refactor() alone (no save/load) rebuilds "
+            "tilewise via a streaming re-gather; (2) re-factor with "
+            "interface_drop_s_global=False if a checkpoint is required."
+        )
 
     if ctx._S_global is None:
         raise RuntimeError(
@@ -3661,11 +4317,41 @@ def _refactor_transient_context(
     """Rebuild coordinator solve callable from saved S_global (transient).
 
     For direct mode: rebuilds the CHOLMD/SuperLU LU factorization.
-    For CG mode: reconstructs the InterfaceCGSolver (assembled matvec only).
+    For CG mode: reconstructs the InterfaceCGSolver (assembled matvec only,
+      unless this context was never-assembled -- see below).
 
     Workers must already be factored before calling this.
+
+    Item 3 (TD extension): a context factored via ``interface_drop_s_global``
+    never has ``ctx._S_global`` (by design).  Such a context CAN still be
+    refactored, but only by re-gathering S_A_i from already-factored workers
+    (the tilewise branch below); there is no saved-S_global fallback
+    available for it, and switching to 'direct' mode is impossible without a
+    full ``factor()`` -- mirrors ``_refactor_dc_context``'s Item 3 handling
+    exactly.
     """
-    if ctx._S_global is None:
+    _workers_attached_early = bool(ctx.model is not None and ctx.model.workers)
+    _was_never_assembled = getattr(ctx, '_s_global_dropped', False)
+    if ctx._S_global is None and not (_was_never_assembled and _workers_attached_early):
+        if _was_never_assembled:
+            # Finding 9: for a never-assembled context, "load a checkpoint
+            # that includes S_global" is a dead end by construction --
+            # save() unconditionally refuses to persist a never-assembled
+            # context (see its error message), so no such checkpoint can
+            # ever exist. Tell the user the actual recovery path directly
+            # instead of pointing at an impossible route.
+            raise RuntimeError(
+                "Cannot refactor: this transient context was factored with "
+                "interface_drop_s_global=True (S_global^TD was never "
+                "assembled), and its workers are not attached "
+                "(ctx.model is None or ctx.model.workers is empty) -- "
+                "refactor()'s only recovery path for a never-assembled "
+                "context (a streaming re-gather from already-factored "
+                "workers) is unavailable. There is NO checkpoint route: "
+                "save() refuses to persist a never-assembled context. The "
+                "only way to recover is a full prepare_transient()/"
+                "factor() call with live, attached workers."
+            )
         raise RuntimeError(
             "Cannot refactor without S_global. Use factor() for a "
             "full factorization, or load a checkpoint that includes "
@@ -3677,8 +4363,23 @@ def _refactor_transient_context(
     if _model_setting != 'auto':
         _mode = _model_setting
 
+    if _mode == 'direct' and ctx._S_global is None:
+        raise RuntimeError(
+            "Cannot refactor to interface_solver='direct': S_global was "
+            "never assembled for this context (interface_drop_s_global=True "
+            "at factor() time). Call factor() for a full re-factorization, "
+            "or keep interface_solver='cg' for this refactor()."
+        )
+
     coord_config = ctx.model.coordinator_solver_config if ctx.model is not None else None
     t0 = _time.perf_counter()
+    # Finding 7 (round 2 review): tracks whether the CG branch's tilewise
+    # re-gather actually ran (factor_transient_system() re-run on every
+    # attached worker) vs a rebuild from saved S_global -- read at the end
+    # of this function to log the accurate completion message. Stays False
+    # for the direct-mode branch (always "from saved S_global") and the
+    # CG branch's 'assembled' sub-case.
+    _did_tilewise_regather = False
 
     # S12: close() the OUTGOING CG solver's persistent thread pool before
     # replacing ctx._cg_solver below -- mirror release()'s handling (the
@@ -3729,8 +4430,15 @@ def _refactor_transient_context(
         # factor_transient_system(dt_scaled, method) instead of the DC Schur.
         _matvec_mode_setting = _model_settings.get('interface_matvec_mode', 'auto')
         _workers_attached = bool(ctx.model is not None and ctx.model.workers)
-        _want_tilewise = _matvec_mode_setting == 'tilewise' or (
-            _matvec_mode_setting in (None, 'auto') and _workers_attached
+        # Item 3 (TD extension): a never-assembled context has no
+        # 'assembled' fallback at all (no S_global) -- force tilewise
+        # regardless of the matvec_mode setting, mirroring
+        # _refactor_dc_context's identical guard.  The top-of-function guard
+        # already ensured workers are attached in this case, else it raised.
+        _want_tilewise = (
+            _was_never_assembled
+            or _matvec_mode_setting == 'tilewise'
+            or (_matvec_mode_setting in (None, 'auto') and _workers_attached)
         )
         # Finding 5 (transient twin): see the matching comment in
         # _refactor_dc_context -- 'auto' resolving to tilewise whenever
@@ -3738,27 +4446,95 @@ def _refactor_transient_context(
         # silently re-run the full per-worker interior factorization +
         # dense transient Schur inside what is documented as a cheap
         # coordinator-only rebuild.
+        #
+        # Finding 1 (round 2): PREVIOUSLY this warning was suppressed for a
+        # never-assembled context (`... and not _was_never_assembled`) on
+        # the premise that "tilewise there is intentional/unconditional,
+        # not an implicit 'auto' surprise" -- but that premise misses the
+        # actual hazard: regardless of WHY tilewise was chosen, this
+        # re-gather unconditionally re-factors EVERY attached worker's
+        # transient block system at THIS context's (dt_scaled,
+        # integration_method), silently clobbering the worker-side
+        # transient factorization any OTHER live DistributedTransientContext
+        # for this model (prepared at a different dt/method) depends on --
+        # and for a never-assembled context this can ALSO silently override
+        # an explicit interface_matvec_mode='assembled' setting, since a
+        # never-assembled context has no 'assembled' fallback at all. The
+        # warning is now un-suppressed for the never-assembled branch (it
+        # already fires for the assembled-path implicit-'auto' case).
+        # solve_transient() (solver_td.py) independently guards the actual
+        # silent-wrong-voltage consequence via a worker dt/method stamp
+        # check (raises RuntimeError on mismatch, converting the
+        # pre-existing silent hazard into a loud error) -- this warning is
+        # the proactive heads-up at refactor() time; the RuntimeError is the
+        # backstop at solve_transient() time.
         if (
             _want_tilewise and _workers_attached
-            and _matvec_mode_setting in (None, 'auto')
+            and (_was_never_assembled or _matvec_mode_setting in (None, 'auto'))
         ):
+            _extra_never_assembled_note = ""
+            if _was_never_assembled:
+                _extra_never_assembled_note = (
+                    " This context was factored with "
+                    "interface_drop_s_global=True: it has no 'assembled' "
+                    "fallback at all, so tilewise is forced unconditionally"
+                )
+                if _matvec_mode_setting == 'assembled':
+                    _extra_never_assembled_note += (
+                        ", OVERRIDING the explicit "
+                        "interface_matvec_mode='assembled' setting"
+                    )
+                _extra_never_assembled_note += "."
+            # Finding 6 (round 2 review): restore the actionable remedy for
+            # the assembled-context-under-'auto' case -- explicitly setting
+            # interface_matvec_mode='assembled' is still the only way to
+            # avoid this full per-worker re-factorization on every
+            # refactor() call for such a context (it has no equivalent
+            # remedy: a never-assembled context has no 'assembled' fallback
+            # to opt into at all, so this sentence is omitted there).
+            _assembled_remedy_note = (
+                "" if _was_never_assembled else (
+                    " Set interface_matvec_mode='assembled' explicitly to "
+                    "force the cheap S_global-only rebuild instead."
+                )
+            )
             logger.warning(
-                "Refactor: interface_matvec_mode='auto' (default) resolved "
-                "to 'tilewise' because workers are attached -- this "
-                "re-gather calls factor_transient_system() on every worker "
-                "(full interior factorization + dense transient Schur), "
-                "NOT a cheap coordinator-only rebuild. If workers were "
-                "already factored this session, this repeats that work; if "
-                "they were not, refactor()'s documented precondition "
-                "(workers already factored) was not actually met. Set "
-                "interface_matvec_mode='assembled' explicitly to force the "
-                "cheap S_global-only rebuild instead."
+                "Refactor: %s -- this re-gather calls "
+                "factor_transient_system(dt_scaled=%.6g, method=%r) on "
+                "EVERY attached worker (full interior factorization + "
+                "dense transient Schur), NOT a cheap coordinator-only "
+                "rebuild. This SILENTLY INVALIDATES the worker-side "
+                "transient factorization of any OTHER live "
+                "DistributedTransientContext for this model prepared at a "
+                "different (dt, method) -- a subsequent solve_transient() "
+                "on that other context now raises a loud RuntimeError "
+                "(dt/method stamp mismatch) instead of silently solving "
+                "with mismatched coordinator/worker state.%s If workers "
+                "were already factored at this dt/method this session, "
+                "this repeats that work for no benefit; if they were not, "
+                "refactor()'s documented precondition (workers already "
+                "factored) was not actually met.%s",
+                (
+                    "interface_matvec_mode='auto' (default) resolved to "
+                    "'tilewise' because workers are attached"
+                    if not _was_never_assembled else
+                    "this is a never-assembled (interface_drop_s_global=True) "
+                    "context's refactor()"
+                ),
+                ctx.dt_scaled, ctx.integration_method,
+                _extra_never_assembled_note,
+                _assembled_remedy_note,
             )
 
         # S5: mirror factor()'s streaming-assembly guard -- see the matching
-        # comment in _refactor_dc_context.  interface_drop_s_global (never-
-        # assemble) is DC-only in Stage 2, so no exception is needed here.
-        if _want_tilewise and _workers_attached:
+        # comment in _refactor_dc_context.  Excluded for a never-assembled
+        # context (mirrors the DC guard's `not _was_never_assembled`): such
+        # a context has no 'assembled' fallback to downgrade to, so the
+        # streaming_assembly OOM-avoidance this guard exists for is moot --
+        # the never-assemble path's own streaming re-gather already provides
+        # the same memory bound regardless of the model's streaming_assembly
+        # setting.
+        if _want_tilewise and not _was_never_assembled and _workers_attached:
             _streaming_setting_td_rf = _get_streaming_assembly_setting(ctx.model)
             if _streaming_setting_td_rf == 'auto':
                 _size_stats_raw_td_rf = ctx.model.backend.call_all(
@@ -3801,14 +4577,50 @@ def _refactor_transient_context(
         _island_idx = _island_idx_array(_island_nodes, _interface_node_to_idx)
 
         if _want_tilewise and _workers_attached:
+            # Finding 7 (round 2 review): remember that this branch actually
+            # re-ran factor_transient_system() on the workers (a tilewise
+            # re-gather, NOT a rebuild from saved S_global) -- read at the
+            # end of this function to log the correct completion message.
+            _did_tilewise_regather = True
             _fresh_port_count: Dict[Any, int] = {}
+            # Finding 1 (round 2 review): invalidate BEFORE dispatching the
+            # re-gather's factor_transient_system() RPCs -- see
+            # _invalidate_worker_transient_stamp's docstring. A failure
+            # partway through this re-gather must leave the stamp at None,
+            # not the stale pre-refactor value (which could describe a mix
+            # of tiles re-factored at THIS context's dt/method and tiles
+            # still at whatever the previous stamp claimed).
+            _invalidate_worker_transient_stamp(ctx.model)
             (
-                _tile_schur_complements, _fresh_tile_index_maps, _fresh_kept_pos, _,
+                _tile_schur_complements, _fresh_tile_index_maps, _fresh_kept_pos,
+                _rhs_dirichlet_from_tiles_rf,
             ) = _gather_kept_tile_schur_streaming(
                 ctx.model, _interface_node_to_idx,
                 transient_dt_scaled=ctx.dt_scaled,
                 transient_method=ctx.integration_method,
                 out_port_count=_fresh_port_count,
+                # Major finding (review round 2): a never-assembled
+                # context's rhs_dirichlet_A/_rhs_dirichlet_G were cleared
+                # by release() (result.py) -- unlike an assembled context,
+                # which reuses its already-fixed rhs_dirichlet_A from the
+                # original factor() call (or a load()'d checkpoint), a
+                # never-assembled context has no other refactor-time
+                # source for the tile-embedded ("D1") Dirichlet
+                # contribution. Request it from this same streaming
+                # re-gather instead of a second round-trip. None for an
+                # assembled context (unused there -- see the docstring).
+                dirichlet_voltage=ctx.model.vdd if _was_never_assembled else None,
+                n_iface=len(_interface_node_to_idx) if _was_never_assembled else None,
+            )
+            # Finding 1: this re-gather just re-ran
+            # factor_transient_system(dt_scaled, method) on every attached
+            # worker at THIS context's dt/method -- stamp the model (see the
+            # un-suppressed warning right above this branch and
+            # _stamp_worker_transient_factor's docstring for why this can
+            # invalidate OTHER live transient contexts' worker-side state).
+            # Only reached if the re-gather above completed without raising.
+            _stamp_worker_transient_factor(
+                ctx.model, ctx.dt_scaled, ctx.integration_method,
             )
             _tile_index_maps = _fresh_tile_index_maps
             # S14: keep the D1-consistent pair in sync (see the matching
@@ -3817,7 +4629,13 @@ def _refactor_transient_context(
             ctx._tile_kept_port_pos = _fresh_kept_pos
             # S2/S13: parity with _tile_kept_port_pos.
             ctx._tile_port_count = _fresh_port_count
-            _S_extra = _build_s_extra_direct(
+            # Finding 12: always request the (G_pkg_uu, C_pkg_uu) pair this
+            # already stamps internally -- free when not needed (the
+            # assembled-context tilewise-refactor branch below just
+            # discards it), and removes the second
+            # build_interface_package_matrices() pass the never-assembled
+            # branch used to make with IDENTICAL arguments.
+            _S_extra, (_G_pkg_uu_rf, _C_pkg_uu_rf) = _build_s_extra_direct(
                 interface_node_to_idx=_interface_node_to_idx,
                 n_iface=len(_interface_node_to_idx),
                 package_edges=ctx.model.package_data.package_edges,
@@ -3825,8 +4643,87 @@ def _refactor_transient_context(
                 island_nodes=_island_nodes,
                 package_cap_edges=ctx.model.package_data.package_cap_edges,
                 C_coeff=ctx.C_coeff,
+                return_package_matrices=True,
             )
             _matvec_mode = 'tilewise'
+            if _was_never_assembled:
+                # Major finding (review round 1): a never-assembled context
+                # has no save()/load() route to persist C_package_uu /
+                # _G_package_uu / island_penalty_rhs -- release() clears all
+                # three to None (result.py) and this tilewise re-gather is
+                # its ONLY refactor path (unlike an assembled context, which
+                # only ever reaches refactor() with S_global intact or via
+                # load(), both of which already carry these vectors).
+                # Without rebuilding them here, a post-refactor
+                # solve_transient silently drops the package-cap history
+                # term, the TR package-G term, and the island-penalty
+                # forcing term (solver_td.py's time loop only guards each
+                # with `if ... is not None`, so the omission is silent, not
+                # an error). Rebuild identically to _factor_transient_context
+                # (~:3581 for the package matrices, ~:3566-3573 for the
+                # penalty vector) so a refactored context is numerically
+                # identical to the original factor().
+                ctx.C_package_uu = _C_pkg_uu_rf if _C_pkg_uu_rf.nnz > 0 else None
+                ctx._G_package_uu = _G_pkg_uu_rf if _G_pkg_uu_rf.nnz > 0 else None
+
+                # Major finding (review round 2): release() (result.py)
+                # clears BOTH ctx.rhs_dirichlet_A and ctx._rhs_dirichlet_G
+                # to None, and unlike C_package_uu/_G_package_uu/
+                # island_penalty_rhs above, nothing below used to rebuild
+                # them -- the rhs_dirichlet_G property (result.py) then
+                # silently fell back to ctx.topology.rhs_dirichlet_G, which
+                # is only correct for a TD-created topology. In the
+                # documented DC-first lifecycle (CLAUDE.md: dc_ctx =
+                # solver.prepare(); prepare_transient() shares that same
+                # topology object), the fallback instead returns the DC
+                # context's rhs_dirichlet_G -- the DC never-assemble value
+                # already has the island penalty folded in (G-based, not
+                # A-based) -- so the time loop's separate
+                # `+island_penalty_rhs` term (solver_td.py) would double
+                # -count the penalty, and any package-cap Dirichlet term
+                # would be silently wrong. Rebuild EXACTLY as
+                # _factor_transient_context_no_s_global does: package-edges
+                # -only contribution (from combined_edges, the resistive +
+                # C_coeff-weighted-cap set fixing this same ordering) --
+                # computed here (refactor must NOT re-derive the
+                # already-fixed interface ordering, unlike the factor path's
+                # _compute_interface_ordering call) -- plus the
+                # tile-embedded ("D1") contribution just re-gathered above.
+                # Finding 7: the linearity delta + penalty-ordering
+                # derivation itself is shared with
+                # _factor_transient_context_no_s_global via
+                # _derive_td_dirichlet_vectors (see its docstring for why
+                # the ordering matters).
+                _pkg_res_edges_rf = ctx.model.package_data.package_edges
+                _pkg_cap_edges_rf = ctx.model.package_data.package_cap_edges
+                # Finding 9: shared combined/cap-only edge construction (see
+                # _build_td_package_edge_sets's docstring).
+                _combined_edges_rf, _cap_only_edges_rf = _build_td_package_edge_sets(
+                    _pkg_res_edges_rf, _pkg_cap_edges_rf, ctx.C_coeff,
+                )
+                _interface_nodes_rf = ctx.interface_nodes
+                _rhs_dirichlet_pkg_rf = _compute_rhs_dirichlet_from_edges(
+                    extra_edges=_combined_edges_rf,
+                    unknown_list=_interface_nodes_rf,
+                    unknown_to_idx=_interface_node_to_idx,
+                    dirichlet_nodes=ctx.model.pad_nodes,
+                    dirichlet_voltage=ctx.model.vdd,
+                )
+                (
+                    _rhs_dirichlet_A_rf, _rhs_dirichlet_G_rf, _island_penalty_rhs_rf,
+                ) = _derive_td_dirichlet_vectors(
+                    model=ctx.model,
+                    interface_nodes=_interface_nodes_rf,
+                    interface_node_to_idx=_interface_node_to_idx,
+                    rhs_dirichlet_pkg=_rhs_dirichlet_pkg_rf,
+                    rhs_dirichlet_from_tiles=_rhs_dirichlet_from_tiles_rf,
+                    pkg_cap_edges=_pkg_cap_edges_rf,
+                    C_coeff=ctx.C_coeff,
+                    island_nodes=_island_nodes,
+                )
+                ctx.island_penalty_rhs = _island_penalty_rhs_rf
+                ctx.rhs_dirichlet_A = _rhs_dirichlet_A_rf
+                ctx._rhs_dirichlet_G = _rhs_dirichlet_G_rf
         elif _matvec_mode_setting == 'tilewise' and not _workers_attached:
             logger.warning(
                 "Refactor: interface_matvec_mode='tilewise' requested but no "
@@ -3856,6 +4753,10 @@ def _refactor_transient_context(
             tile_schur_complements=_tile_schur_complements,
             tile_index_maps=_tile_index_maps,
             S_extra=_S_extra,
+            # Item 3 (TD extension): S_global is None for a never-assembled
+            # context -- build_interface_solver requires n_interface
+            # explicitly in that case (mirrors _refactor_dc_context).
+            n_interface=len(ctx.interface_node_to_idx) if ctx._S_global is None else None,
             island_idx=_island_idx,
             interface_coarse_geneo_k=_cg_settings.geneo_k,
             interface_coarse_geneo_tol=_cg_settings.geneo_tol,
@@ -3877,10 +4778,34 @@ def _refactor_transient_context(
         ctx._interface_lu = _solve_callable
         ctx._cg_solver = cg_solver
         ctx._interface_solver_mode = 'cg'
+        # Item 3 (TD extension): still true after a successful tilewise
+        # re-gather refactor (S_global remains unassembled); a downgrade to
+        # 'assembled' would have raised above (no fallback exists for a
+        # never-assembled context), so reaching here with
+        # _was_never_assembled means the re-gather succeeded. Mirrors
+        # _refactor_dc_context's identical assignment.
+        ctx._s_global_dropped = _was_never_assembled
 
     elapsed = _time.perf_counter() - t0
     ctx.is_factored = True
-    logger.info(
-        "Refactored transient coordinator solve (%s) from saved S_global "
-        "in %.3fs", _mode, elapsed,
-    )
+    # Finding 7 (round 2 review): branch the completion log -- "from saved
+    # S_global" is only true when this refactor rebuilt from ctx._S_global
+    # (direct mode, or the CG branch's 'assembled' matvec sub-case); the
+    # tilewise re-gather sub-case (_did_tilewise_regather) re-ran
+    # factor_transient_system() on every attached worker instead and never
+    # touched a saved S_global (there may not even be one -- a never-
+    # assembled context has none by construction), which directly
+    # contradicts the "from saved S_global" wording and the loud
+    # tilewise-re-gather WARNING already logged moments earlier.
+    if _did_tilewise_regather:
+        logger.info(
+            "Refactored transient coordinator solve (%s) via tilewise "
+            "re-gather from workers (factor_transient_system() re-run on "
+            "every attached worker; no saved S_global was read or exists) "
+            "in %.3fs", _mode, elapsed,
+        )
+    else:
+        logger.info(
+            "Refactored transient coordinator solve (%s) from saved S_global "
+            "in %.3fs", _mode, elapsed,
+        )

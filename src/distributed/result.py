@@ -584,6 +584,11 @@ class DistributedTransientContext:
         self._S_global: Optional[sp.csc_matrix] = None
         # B2: CG solver handle (InterfaceCGSolver or None); set by factor(), cleared by release().
         self._cg_solver = None
+        # Item 3 (TD extension): True iff the most recent factor() used the
+        # "never assemble S_global" path (interface_drop_s_global). save()
+        # checks this and raises with guidance instead of silently saving
+        # nothing useful. Mirrors DistributedSolverContext's identical field.
+        self._s_global_dropped: bool = False
 
         # Direct field storage (populated by factor() or backward-compat constructor)
         self._interface_lu: Optional[Callable] = interface_lu
@@ -646,6 +651,20 @@ class DistributedTransientContext:
             self.model.backend.call_all(
                 self.model.workers, 'clear_transient_factorization'
             )
+            # Finding 4 (round 2 review): this call_all just cleared EVERY
+            # worker's transient factorization unconditionally (regardless
+            # of which context's dt/method the model's stamp currently
+            # names) -- clear the stamp alongside it, or a subsequent
+            # solve_transient()/analyze_adjoint() on some OTHER live
+            # context would read a stamp claiming the workers are still
+            # factored for a (dt, method) they no longer hold at all,
+            # producing a misleading "currently factored for dt=..."
+            # diagnostic instead of the accurate "state unknown/absent"
+            # one (see _check_worker_transient_stamp in solver_td.py --
+            # None is what makes that context raise loudly here instead of
+            # either passing silently or dying later with a confusing
+            # worker-side "requires factor_transient_system()" error).
+            self.model._worker_transient_factor_key = None
 
     # --- Checkpoint: save / load / refactor ---
 
@@ -695,20 +714,65 @@ class DistributedTransientContext:
         return _load_transient_context(cls, model, path)
 
     def refactor(self, verbose: bool = False) -> None:
-        """Rebuild coordinator-side LU from saved S_global.
+        """Rebuild the coordinator-side interface solve.
+
+        Two supported contracts, selected automatically by how this
+        context was last ``factor()``'d (``ctx._s_global_dropped``):
+
+        **Assembled contract** (``factor()`` ran with
+        ``interface_drop_s_global`` off/unmet, or a checkpoint was
+        ``load()``'d): ``ctx._S_global`` must be present. Workers must
+        already have their transient block systems factored (e.g. from a
+        prior ``factor()`` call in this session, or a subsequent
+        ``factor()`` on workers after ``load()``) if
+        ``interface_matvec_mode`` resolves to ``'tilewise'``; the
+        ``'assembled'`` matvec mode needs no worker involvement at all. If
+        workers are fresh or have been released and tilewise is needed,
+        call ``factor()`` instead for a full factorization.
+
+        **Never-assembled contract** (``factor()`` ran with
+        ``interface_drop_s_global=True`` and its preconditions were met):
+        ``ctx._S_global`` is never assembled at all (by design), so there
+        is no saved-S_global fallback -- ``save()`` refuses to persist
+        such a context (see its error message). The ONLY supported
+        recovery path is ``release()`` -> ``refactor()`` with workers
+        still attached (``ctx.model.workers`` non-empty): this
+        unconditionally re-runs ``factor_transient_system(dt, method)`` on
+        every attached worker (a streaming re-gather of the dense
+        transient Schur blocks, NOT a cheap coordinator-only rebuild) and
+        rebuilds ``S_extra``/Dirichlet vectors/island penalty from
+        scratch. If workers are detached, this cannot be recovered by
+        ``refactor()`` at all -- only a fresh ``prepare_transient()`` /
+        ``factor()`` with live, attached workers can rebuild it.
 
         .. warning::
-            This only rebuilds the coordinator interface LU. Workers must
-            already have their transient block systems factored (e.g.,
-            from a prior ``factor()`` call in this session). If workers
-            are fresh or have been released, call ``factor()`` instead
-            for a full factorization that includes worker-side setup.
+            **Cross-context worker clobbering**: because workers are
+            shared, single-owner state for the whole model, a
+            never-assembled ``refactor()`` call re-factors ALL workers at
+            *this* context's ``(dt_scaled, integration_method)`` --
+            silently invalidating the worker-side transient factorization
+            any OTHER live ``DistributedTransientContext`` (prepared at a
+            different dt/method on the same model) depends on. A
+            subsequent ``solve_transient()`` on that other context now
+            raises a loud ``RuntimeError`` naming the dt/method mismatch
+            (see ``solve_transient``'s dt-stamp guard in ``solver_td.py``)
+            instead of silently mixing mismatched coordinator/worker
+            state. This is a deliberate behavior change: the same hazard
+            exists for the assembled contract's implicit-tilewise 'auto'
+            resolution (see the WARNING logged in that branch), but there
+            it degrades an existing footgun into a documented one rather
+            than converting it into a hard error.
 
         Args:
             verbose: Log timing info.
 
         Raises:
-            RuntimeError: If S_global is not available.
+            RuntimeError: If S_global is not available (assembled
+                contract) and this is not a never-assembled context with
+                workers still attached; or if refactoring to
+                ``interface_solver='direct'`` is requested for a
+                never-assembled context (impossible -- no S_global was
+                ever built).
         """
         from .result_factorization import _refactor_transient_context
         _refactor_transient_context(self, verbose)

@@ -205,7 +205,8 @@ own serial, ~9-10x over the OLD design's threaded number). See
 ``_build_block_jacobi``'s ``_bj_perm``/``_bj_offsets``/``_bj_solve_threaded``
 for the implementation.
 
-Tilewise without ever assembling S_global (Finding 0 upgrade)
+Tilewise without ever assembling S_global (Finding 0 upgrade; extended to the
+transient factor path by the TD never-assemble work package)
     ``interface_drop_s_global`` (bool, default False) changes the CG+tilewise
     factor path from "assemble S_global then optionally free it" to "never
     assemble it at all": interface node ordering + Dirichlet RHS are derived
@@ -222,6 +223,12 @@ Tilewise without ever assembling S_global (Finding 0 upgrade)
     WARNING, since that BFS fundamentally needs S_global's nonzero
     structure.  ``save()`` raises with guidance when S_global was never
     assembled; ``refactor()`` re-gathers via the same streaming protocol.
+    Applies identically to the DC factor (``_factor_dc_context_no_s_global``)
+    and the transient factor (``_factor_transient_context_no_s_global``) --
+    each keeps its own dense per-tile Schur block set (DC's S_i are
+    G-based, transient's are A = G + C_coeff*C based; never shared or
+    aliased), so both never-assemble contexts can be alive simultaneously
+    at the cost of the sum of both block sets.
 """
 
 from __future__ import annotations

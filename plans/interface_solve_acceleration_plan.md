@@ -135,6 +135,21 @@ Tests: threaded-vs-serial ≤1e-13 rel (two-tile + randomized ~30-tile synthetic
 > on the DC-style tilewise path would be ~6 s/step → TD never-assemble + tilewise is the next
 > work package (ahead of Stage 4 GPU on priority).
 
+## TD never-assemble work package — **COMPLETE (2026-07-19; docs §7.10)**
+
+> `interface_drop_s_global` now covers the transient factor: `_factor_transient_context_no_s_global`
+> (streaming gather of transient tile blocks, per-tile Dirichlet reproduction with the
+> penalty-AFTER-linearity-delta ordering, direct-stamped S_extra^TD, tilewise CG + two_level).
+> Full battery: workflow clean first-pass, 2×/code-review xhigh (15+11 findings fixed,
+> negative-tested), Opus CLEAN-FOR-COMMIT, 1099 unit tests. New model-level worker
+> `(dt, method)` stamp guard (invalidate-then-stamp) checked by solve_transient AND
+> analyze_adjoint — converts the stale-transient-context hazard (incl. the PRE-EXISTING
+> assembled-path variant, demonstrated 4.2 mV silent error) into a loud RuntimeError.
+> **mi200k_v2: TR prepare 489→125 s, RSS 93→39.6 GB, transient @1e-8 31.1→6.25 s/step (5.0×)
+> at identical 23.6 iters/step and 253 nV.** Loop = 23.6×0.19 s solve + 1.5 s RHS + 0.35 s
+> recovery. Remaining gap to ≤0.3–0.5 s/step BRCM interface-solve target needs warm iters
+> →5–10 (A-DEF2 contingency) and/or Stage 4 GPU — both optional next steps.
+
 New `src/distributed/interface_coarse.py`.
 
 **Why it's needed (the algorithmic gap):** CG iterations ≈ √κ(M⁻¹S). Block-Jacobi is a *local* preconditioner — each application corrects error only within a tile's own port block, so a die-spanning smooth error mode is corrected one tile-hop per iteration. Spectrally, M_BJ⁻¹S carries a cluster of ~O(T) small eigenvalues whose eigenvectors are near-constant per tile; CG resolves them essentially one at a time. This is the measured ~180 warm iters at 107 tiles (κ ~ 1/H² in DDM terms), and it worsens with further splitting. Relaxing rtol truncates the tail but cannot remove the cluster. The fix is a second, tiny *global* correction that solves exactly those per-tile-constant modes directly; with it, condition (and iteration count) becomes essentially independent of tile count (Nicolaides coarse space; additive Schwarz two-level theory, Toselli–Widlund).
