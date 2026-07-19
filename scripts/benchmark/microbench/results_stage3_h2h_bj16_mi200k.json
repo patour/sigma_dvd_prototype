@@ -1,0 +1,5 @@
+{
+  "pkl_dir": "netlist/netlist_brcm_sampled/distributed_pkl_mi200k_v2",
+  "bj_max_bytes": 17179869184,
+  "note": "two_level(bj+geneo) variant: DC prepare 221.1s rss=26.4GB, coarse build 97s, precond two_level(bj+geneo k=61, T-prime=126, rank=126, S_c cond~1.3e6). COLD DC STAGNATES: rel_residual 9.696e-2 after 4000 iters (~0.32 s/iter, 1289s) at BOTH rtol 1e-12 and a fresh cold 1e-8 attempt (strict RuntimeError). Additive coarse term cannot remove M_BJ^-1 near-null-block amplification; jacobi+PoU (the default byte-budget-guard configuration) is the production design."
+}

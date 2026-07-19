@@ -676,6 +676,49 @@ class TestInterfaceCGSolverBasics:
             f"got records: {[r.message for r in caplog.records]}"
         )
 
+    def test_preflight_estimate_includes_materialization_peak(self):
+        """Finding 10 (round 1, PLAUSIBLE) / Finding 8 (round 2): the
+        pre-flight memory guard (est_factor_bytes = Sum(k_i^2)*8) modeled
+        only the cho-factor storage, but the Stage 3 materialization loop
+        transiently holds FOUR k x k arrays at once while symmetrizing the
+        block being processed (the not-yet-replaced cho factor, the fresh
+        cho_solve inverse, the `Sinv + Sinv.T` temporary, and the `0.5 *
+        (...)` result) -- three arrays beyond the counted cho factor, not
+        two -- a peak the pre-Stage-3 apply-time cho_solve design never had.
+
+        Single k=100 block: Sum(k^2)*8 = 80,000 bytes (old estimate).
+        New estimate adds 3*k_max^2*8 = 240,000 bytes -> 320,000 total.
+        A budget of 100,000 sits strictly between the old and new totals --
+        old code would NOT downgrade (80,000 <= 100,000); the fixed code
+        MUST downgrade (320,000 > 100,000).
+        """
+        from distributed.interface_iterative import InterfaceCGSolver
+
+        n = 100
+        S = self._make_spd_matrix(n, seed=17)
+
+        cg = InterfaceCGSolver(
+            n_interface=n,
+            matvec_mode='assembled',
+            S_global=S,
+            tile_schur_complements={(0, 0): S.toarray()},
+            tile_index_maps={(0, 0): np.arange(n, dtype=np.int32)},
+            preconditioner='block_jacobi',
+            rtol=1e-10,
+            block_jacobi_max_bytes=100_000,
+        )
+        try:
+            assert cg.preconditioner == 'jacobi', (
+                f"expected the pre-flight guard (now including the "
+                f"materialization peak) to downgrade block_jacobi -> "
+                f"jacobi at this budget; got preconditioner="
+                f"{cg.preconditioner!r} (pre-fix: the old Sum(k_i^2)*8-only "
+                f"estimate of 80,000 bytes sits under the 100,000 budget, "
+                f"so no downgrade would fire)"
+            )
+        finally:
+            cg.close()
+
 
 # ──────────────────────────────────────────────────────────────────────
 # 2. CG vs direct on two-tile fixture (DC and transient)

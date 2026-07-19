@@ -182,6 +182,36 @@ class TestBuildParser:
         assert args.interface_factor_memory_budget == '1073741824'
         assert args.interface_block_jacobi_max_bytes == '2147483648'
 
+    def test_interface_preconditioner_accepts_explicit_auto(self):
+        """Finding 11 regression: 'auto' is the new documented default for
+        --interface-preconditioner (Stage 3) but was missing from the
+        argparse choices list, so a user could not explicitly pass 'auto'
+        on the command line (e.g. to override an explicit value set in a
+        YAML config -- explicit CLI flags always win per _load_and_apply_
+        config's precedence). Before the fix this raised
+        `argparse.ArgumentTypeError`/SystemExit ("invalid choice: 'auto'")."""
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--interface-preconditioner', 'auto',
+        ])
+        assert args.interface_preconditioner == 'auto'
+
+    def test_interface_coarse_max_bytes_default_and_explicit(self):
+        """Finding 5: new interface_coarse_max_bytes setting resolves to
+        'auto' by default and accepts an explicit byte count."""
+        from distributed.cli import _load_and_apply_config
+
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        args = _load_and_apply_config(args)
+        assert args.interface_coarse_max_bytes == 'auto'
+
+        parser2 = build_parser()
+        args2 = parser2.parse_args([
+            'solve', '/tmp/pkl', '--interface-coarse-max-bytes', '1073741824',
+        ])
+        assert args2.interface_coarse_max_bytes == '1073741824'
+
     def test_interface_cg_new_flags_present_on_run(self):
         """The run subcommand shares the same interface-solver flag group,
         resolving to the same defaults once _load_and_apply_config() runs."""
@@ -373,7 +403,10 @@ class TestInterfaceCGPrecedence:
         # Stage 2 item 8: default changed 'assembled' -> 'auto' (tilewise
         # whenever per-tile Schur blocks are available).
         assert args.interface_matvec_mode == 'auto'
-        assert args.interface_preconditioner == 'block_jacobi'
+        # Stage 3: default changed 'block_jacobi' -> 'auto' (resolves to
+        # 'two_level' for CG+tilewise, else 'block_jacobi' -- see
+        # interface_iterative.resolve_preconditioner).
+        assert args.interface_preconditioner == 'auto'
         assert args.interface_cg_rtol == 1e-8
         assert args.interface_cg_atol == 1e-14
         assert args.interface_cg_maxiter is None
@@ -385,6 +418,13 @@ class TestInterfaceCGPrecedence:
         assert args.interface_matvec_dtype == 'float64'
         assert args.interface_strict_dtype_rtol is True
         assert args.interface_drop_s_global is False
+        # Stage 3 additions
+        assert args.interface_coarse_geneo_k == 4
+        assert args.interface_coarse_geneo_tol == 1e-6
+        assert args.interface_coarse_eps_rank == 1e-12
+        assert args.interface_coarse_max_cols == 4096
+        # Finding 5 (Stage 3): new byte-based coarse-build guard.
+        assert args.interface_coarse_max_bytes == 'auto'
 
 
 class TestDecomposeParser:
@@ -713,7 +753,8 @@ class TestDecomposeDispatch:
             interface_settings={
                 'interface_solver': 'auto',
                 'interface_matvec_mode': 'auto',
-                'interface_preconditioner': 'block_jacobi',
+                # Stage 3: default changed 'block_jacobi' -> 'auto'.
+                'interface_preconditioner': 'auto',
                 'interface_cg_rtol': 1e-8,
                 'interface_cg_atol': 1e-14,
                 'interface_cg_maxiter': None,
@@ -724,6 +765,12 @@ class TestDecomposeDispatch:
                 'interface_matvec_dtype': 'float64',
                 'interface_strict_dtype_rtol': True,
                 'interface_drop_s_global': False,
+                'interface_coarse_geneo_k': 4,
+                'interface_coarse_geneo_tol': 1e-6,
+                'interface_coarse_eps_rank': 1e-12,
+                'interface_coarse_max_cols': 4096,
+                # Finding 5 (Stage 3): new byte-based coarse-build guard.
+                'interface_coarse_max_bytes': 'auto',
             },
             island_detection='auto',
         )

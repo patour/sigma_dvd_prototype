@@ -111,10 +111,18 @@ def cmd_parse(args: argparse.Namespace) -> None:
 # matvec_threads (no 'interface_' prefix, matching the plan's literal
 # naming), interface_matvec_dtype, interface_strict_dtype_rtol,
 # interface_drop_s_global (item 3).
+#
+# Stage 3: interface_preconditioner default 'block_jacobi' -> 'auto' (same
+# pattern as the Stage 2 matvec_mode change above) -- 'auto' resolves to
+# 'two_level' whenever CG + tilewise matvec is selected (the regime Stage 2
+# measured plain block_jacobi CG stagnating in), else the legacy
+# 'block_jacobi' default (see interface_iterative.resolve_preconditioner,
+# the ONE place 'auto' is resolved). New interface_coarse_* knobs control
+# the coarse-space build; see InterfaceCGSolver's docstring.
 _IFACE_SETTING_DEFAULTS: Dict[str, Any] = {
     'interface_solver': 'auto',
     'interface_matvec_mode': 'auto',
-    'interface_preconditioner': 'block_jacobi',
+    'interface_preconditioner': 'auto',
     'interface_cg_rtol': 1e-8,
     'interface_cg_atol': 1e-14,
     'interface_cg_maxiter': None,
@@ -125,7 +133,56 @@ _IFACE_SETTING_DEFAULTS: Dict[str, Any] = {
     'interface_matvec_dtype': 'float64',
     'interface_strict_dtype_rtol': True,
     'interface_drop_s_global': False,
+    # Finding 15: these four literals are resolved lazily from
+    # interface_coarse.py's own DEFAULT_GENEO_K/DEFAULT_GENEO_TOL/
+    # DEFAULT_EPS_RANK/DEFAULT_MAX_COLS by _iface_default() below, NOT
+    # re-hardcoded here -- see that function's docstring for why this stays
+    # a lazy (not module-level) import.
+    'interface_coarse_geneo_k': None,
+    'interface_coarse_geneo_tol': None,
+    'interface_coarse_eps_rank': None,
+    'interface_coarse_max_cols': None,
+    'interface_coarse_max_bytes': 'auto',
 }
+
+# Finding 15: keys whose real default is resolved lazily via
+# interface_coarse.py's own DEFAULT_* constants (see _iface_default()) --
+# the corresponding _IFACE_SETTING_DEFAULTS entries above are placeholder
+# Nones, never read directly.
+_COARSE_DEFAULT_KEYS = frozenset((
+    'interface_coarse_geneo_k', 'interface_coarse_geneo_tol',
+    'interface_coarse_eps_rank', 'interface_coarse_max_cols',
+))
+
+
+def _iface_default(key: str) -> Any:
+    """Resolve an ``_IFACE_SETTING_DEFAULTS`` entry (Finding 15).
+
+    The four Stage-3 coarse-space column/rank knobs are resolved from
+    ``interface_coarse.DEFAULT_GENEO_K`` et al. (the single canonical
+    source) instead of being re-hardcoded a third time here.
+    ``interface_iterative.py``'s own ``InterfaceCGSolver.__init__``/
+    ``build_interface_solver`` signatures use ``None``-sentinel defaults and
+    resolve from the SAME canonical source dynamically, at call time
+    (Finding 9, round 2) -- not a def-time-bound copy, which would defeat
+    ``monkeypatch.setattr(interface_coarse, 'DEFAULT_GENEO_K', ...)``.  The
+    import here is lazy
+    (function-local, not module-level) to preserve cli.py's existing
+    convention of deferring every internal-package import so a plain
+    ``--help``/argparse-only invocation doesn't pay for pulling in
+    numpy/scipy (``interface_coarse.py`` imports both) -- see every other
+    ``from .xxx import ...`` in this file, all function-local for the same
+    reason.
+    """
+    if key in _COARSE_DEFAULT_KEYS:
+        from . import interface_coarse
+        return {
+            'interface_coarse_geneo_k': interface_coarse.DEFAULT_GENEO_K,
+            'interface_coarse_geneo_tol': interface_coarse.DEFAULT_GENEO_TOL,
+            'interface_coarse_eps_rank': interface_coarse.DEFAULT_EPS_RANK,
+            'interface_coarse_max_cols': interface_coarse.DEFAULT_MAX_COLS,
+        }[key]
+    return _IFACE_SETTING_DEFAULTS[key]
 
 
 def _build_interface_settings(args: argparse.Namespace) -> Dict[str, Any]:
@@ -149,7 +206,7 @@ def _build_interface_settings(args: argparse.Namespace) -> Dict[str, Any]:
     """
     def _get(key: str) -> Any:
         val = getattr(args, key, None)
-        return val if val is not None else _IFACE_SETTING_DEFAULTS[key]
+        return val if val is not None else _iface_default(key)
 
     return {
         'interface_solver': _get('interface_solver'),
@@ -166,6 +223,12 @@ def _build_interface_settings(args: argparse.Namespace) -> Dict[str, Any]:
         'interface_matvec_dtype': _get('interface_matvec_dtype'),
         'interface_strict_dtype_rtol': _get('interface_strict_dtype_rtol'),
         'interface_drop_s_global': _get('interface_drop_s_global'),
+        # Stage 3: two-level coarse-space preconditioner knobs.
+        'interface_coarse_geneo_k': _get('interface_coarse_geneo_k'),
+        'interface_coarse_geneo_tol': _get('interface_coarse_geneo_tol'),
+        'interface_coarse_eps_rank': _get('interface_coarse_eps_rank'),
+        'interface_coarse_max_cols': _get('interface_coarse_max_cols'),
+        'interface_coarse_max_bytes': _get('interface_coarse_max_bytes'),
     }
 
 
@@ -796,13 +859,20 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
     )
     iface_grp.add_argument(
         '--interface-preconditioner', type=str, default=None,
-        choices=['block_jacobi', 'jacobi', 'none', 'amg'],
+        choices=['auto', 'block_jacobi', 'jacobi', 'none', 'amg', 'two_level'],
         dest='interface_preconditioner',
         help=(
-            'CG preconditioner (only used when CG is selected). '
-            "'block_jacobi' (default) = block-diagonal from per-tile Schur submatrices. "
+            'CG preconditioner (only used when CG is selected).  Default '
+            "(omit this flag) resolves to 'two_level' when CG + tilewise "
+            "matvec is selected (Stage 3 -- fixes block_jacobi CG "
+            "stagnation at large split regimes), else 'block_jacobi'. "
+            "'block_jacobi' = block-diagonal from per-tile Schur submatrices. "
             "'jacobi' = diagonal of S_global.  'none' = identity.  "
-            "'amg' = algebraic multigrid via pyamg (requires pyamg)."
+            "'amg' = algebraic multigrid via pyamg (requires pyamg).  "
+            "'two_level' = block_jacobi PLUS an additive partition-of-unity "
+            "+ GenEO-lite coarse-space correction -- see "
+            "--interface-coarse-geneo-k/-tol/--interface-coarse-eps-rank/"
+            "--interface-coarse-max-cols."
         ),
     )
     iface_grp.add_argument(
@@ -861,6 +931,60 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
             "'jacobi' diagonal preconditioner (logged as a loud WARNING "
             "naming this setting and the iteration-count consequence). "
             "(default: auto)"
+        ),
+    )
+    # Stage 3: two-level coarse-space preconditioner knobs (only used when
+    # the resolved preconditioner is 'two_level').
+    iface_grp.add_argument(
+        '--interface-coarse-geneo-k', type=int, default=None,
+        dest='interface_coarse_geneo_k',
+        help=(
+            "Max GenEO-lite eigenpairs enriched per block-Jacobi ownership "
+            "block (default: 4; 0 disables GenEO, leaving a partition-of-"
+            "unity-only coarse space)."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-coarse-geneo-tol', type=float, default=None,
+        dest='interface_coarse_geneo_tol',
+        help=(
+            "Relative eigenvalue threshold (fraction of a block's own "
+            "lambda_max) below which an eigenpair is GenEO-enriched "
+            "(default: 1e-6)."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-coarse-eps-rank', type=float, default=None,
+        dest='interface_coarse_eps_rank',
+        help=(
+            "S_c eigenvalues <= this fraction of S_c's own lambda_max are "
+            "treated as structural rank deficiency (e.g. the checkerboard "
+            "null space of an even-multiplicity partition-of-unity basis) "
+            "and dropped from the coarse pseudo-inverse (default: 1e-12; "
+            "distinct knob from --interface-coarse-geneo-tol)."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-coarse-max-cols', type=int, default=None,
+        dest='interface_coarse_max_cols',
+        help=(
+            "Hard cap on the coarse-space column count T' (default: 4096); "
+            "exceeding it first falls back to a PoU-only coarse space "
+            "(WARNING, GenEO columns dropped) -- the coarse space is "
+            "disabled entirely (degrades to plain block_jacobi) only if "
+            "the PoU-only column count ALONE still exceeds the cap."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-coarse-max-bytes', type=str, default=None,
+        dest='interface_coarse_max_bytes',
+        help=(
+            "Byte-based guard on the two dense (n x T') fp64 arrays the "
+            "coarse build allocates ('auto' = min(8 GB, 0.1x total RAM) "
+            "via psutil, or an explicit integer byte count).  Distinct "
+            "from --interface-coarse-max-cols (a column-count cap that "
+            "does not scale with n); same two-rung degradation (PoU-only, "
+            "then disable) when exceeded. (default: auto)"
         ),
     )
     # Stage 2: threaded tilewise matvec / block-Jacobi apply
@@ -1253,6 +1377,10 @@ _VALID_SOLVER_YAML_KEYS = frozenset({
     # Stage 2: threaded tilewise matvec / fp32 / never-assemble-S_global
     'matvec_threads', 'interface_matvec_dtype', 'interface_strict_dtype_rtol',
     'interface_drop_s_global',
+    # Stage 3: two-level coarse-space preconditioner knobs
+    'interface_coarse_geneo_k', 'interface_coarse_geneo_tol',
+    'interface_coarse_eps_rank', 'interface_coarse_max_cols',
+    'interface_coarse_max_bytes',
     # B3: streaming Schur assembly + A2 step-column table
     'streaming_assembly', 'use_step_columns', 'max_table_mb',
     # Stage 1e: island detection strategy
@@ -1498,6 +1626,10 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
         # Stage 2
         'matvec_threads', 'interface_matvec_dtype',
         'interface_strict_dtype_rtol', 'interface_drop_s_global',
+        # Stage 3
+        'interface_coarse_geneo_k', 'interface_coarse_geneo_tol',
+        'interface_coarse_eps_rank', 'interface_coarse_max_cols',
+        'interface_coarse_max_bytes',
     )
     solver_cfg_iface = (
         _raw_config.get('solver', {}) if _raw_config is not None else {}
@@ -1510,7 +1642,7 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
         _yaml_val = solver_cfg_iface.get(_k)
         setattr(
             args, _k,
-            _yaml_val if _yaml_val is not None else _IFACE_SETTING_DEFAULTS[_k],
+            _yaml_val if _yaml_val is not None else _iface_default(_k),
         )
 
     # -- B3: streaming_assembly, use_step_columns, max_table_mb (YAML first) --

@@ -1,0 +1,71 @@
+{
+  "pkl_dir": "netlist/netlist_brcm_sampled/distributed_pkl_mi200k_v2",
+  "dt": 5e-12,
+  "t_end": 1e-10,
+  "runs": {
+    "dc_two_level": {
+      "prepare_s": 126.47060594600043,
+      "precond_info": {
+        "preconditioner": "two_level",
+        "label": "two_level(jacobi+geneo k=0, T'=65, rank=65)",
+        "n_pou_cols": 65,
+        "n_geneo_cols": 0,
+        "rank": 65,
+        "n_dropped_cols": 0
+      },
+      "cold_solve_1e12_s": 29.969829780005966,
+      "cold_iters_1e12": 118,
+      "cold_solve_1e8_s": 18.09467280500394,
+      "cold_iters_1e8": 70,
+      "max_dV_V_1e8_vs_1e12": 1.4730215980307548e-07,
+      "rss_gb": 22.856667136
+    },
+    "tr_two_level_1e-12_reference": {
+      "tr_prepare_s": 488.8802673790051,
+      "precond_info": {
+        "preconditioner": "two_level",
+        "label": "two_level(jacobi+geneo k=0, T'=65, rank=65)",
+        "n_pou_cols": 65,
+        "n_geneo_cols": 0,
+        "rank": 65,
+        "n_dropped_cols": 0
+      },
+      "loop_s": 1699.6101877680048,
+      "loop_s_per_step": 84.98050938840024,
+      "solve_total_s": null,
+      "cg_iters_mean": null,
+      "cg_iters_max": null,
+      "peak_mV": 76.16114133662455,
+      "peak_node": null,
+      "rss_gb": 93.07758592
+    },
+    "tr_two_level_1e-8": {
+      "loop_s": 622.8577012259921,
+      "loop_s_per_step": 31.1428850612996,
+      "solve_total_s": null,
+      "cg_iters_per_step": 23.6,
+      "cg_iters_mean": null,
+      "cg_iters_max": null,
+      "max_dV_V": 2.527551765663105e-07,
+      "peak_mV": 76.16115386572642,
+      "peak_delta_mV": 1.2529101867109205e-05,
+      "peak_node_match": true,
+      "rss_gb": 93.077856256
+    },
+    "tr_block_jacobi_1e-8": {
+      "tr_prepare_s": 253.37379332398996,
+      "precond_info": {
+        "preconditioner": "jacobi",
+        "label": "jacobi"
+      },
+      "loop_s": 762.9370576810034,
+      "loop_s_per_step": 38.14685288405017,
+      "solve_total_s": null,
+      "cg_iters_per_step": 29.25,
+      "cg_iters_mean": null,
+      "cg_iters_max": null,
+      "max_dV_V": 2.473524479684741e-07,
+      "rss_gb": 114.092609536
+    }
+  }
+}

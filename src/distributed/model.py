@@ -98,8 +98,25 @@ class DistributedPowerGridModel:
     # B2/Stage 1: Coordinator-side solver settings dict.
     # Keys recognised:
     #   'interface_solver': 'direct' | 'cg' | 'auto' (default 'auto')
-    #   'interface_matvec_mode': 'assembled' | 'tilewise' (default 'assembled')
-    #   'interface_preconditioner': 'block_jacobi' | 'jacobi' | 'none' | 'amg'
+    #   'interface_matvec_mode': 'auto' | 'assembled' | 'tilewise' (default
+    #       'auto' -- resolves to 'tilewise' whenever per-tile dense Schur
+    #       blocks are available, else 'assembled'; see
+    #       interface_iterative.resolve_matvec_mode). This is also the
+    #       precondition the 'interface_preconditioner' default below keys
+    #       off (two_level only activates for CG + tilewise).
+    #   'interface_preconditioner': 'auto' | 'block_jacobi' | 'jacobi' |
+    #       'none' | 'amg' | 'two_level' (default 'auto' -- Stage 3: resolves
+    #       to 'two_level' for CG+tilewise, else 'block_jacobi'; see
+    #       interface_iterative.resolve_preconditioner)
+    #   'interface_coarse_geneo_k': int (default 4; Stage 3 two_level knob)
+    #   'interface_coarse_geneo_tol': float (default 1e-6)
+    #   'interface_coarse_eps_rank': float (default 1e-12)
+    #   'interface_coarse_max_cols': int (default 4096)
+    #   'interface_coarse_max_bytes': 'auto' | int bytes (default 'auto' =
+    #       min(8 GB, 0.1 * total RAM) via psutil) -- byte-based guard on the
+    #       coarse build's dense (n x T') arrays, distinct from
+    #       interface_coarse_max_cols (a column-count cap that does not
+    #       scale with n)
     #   'interface_cg_rtol': float (default 1e-8; Stage 0 sweep validated)
     #   'interface_cg_atol': float (default 1e-14)
     #   'interface_cg_maxiter': int | None (default None -> 3 * n_interface)

@@ -42,6 +42,18 @@ Preconditioners (pluggable, via ``preconditioner`` keyword):
   'none'                    -- identity (no preconditioning).
   'amg'                     -- algebraic multigrid via pyamg (lazy import,
                               skipped gracefully when pyamg is not installed).
+  'two_level'               -- Stage 3: block_jacobi PLUS an additive coarse-
+                              space correction (partition-of-unity + GenEO-
+                              lite columns) -- fixes the block_jacobi CG
+                              stagnation Stage 2 measured at large split
+                              regimes (genuine near-null eigendirections in
+                              the cho-factored ownership blocks).  See
+                              ``interface_coarse.py`` and this class's
+                              "Stage 3" docstring section below.  'auto' (the
+                              resolved default for CG+tilewise, see
+                              :func:`resolve_preconditioner`) picks this
+                              automatically; small/'assembled' systems keep
+                              the legacy 'block_jacobi' default.
 
 Save / load semantics for CG mode
 -----------------------------------
@@ -141,6 +153,58 @@ SPD-safe block-Jacobi fallback
     ``>= eps_rel * lambda_max``, and applies ``V @ diag(1/w_clipped) @ V.T``
     -- guaranteed PSD (in fact SPD after clipping away non-positive modes).
 
+Stage 3 -- two-level coarse-space preconditioner ('two_level')
+-------------------------------------------------------------------
+``preconditioner='two_level'`` layers an additive coarse-space correction on
+top of block-Jacobi: ``M^-1 = M_bj^-1 + Z S_c^+ Z^T`` (see
+``interface_coarse.py`` for the full derivation/motivation -- Stage 2
+measured cold block-Jacobi CG STAGNATING at the mi200k_v2 split regime due to
+genuine near-null eigendirections in the cho-factored ownership blocks). The
+coarse space (``Z``, partition-of-unity + GenEO-lite columns; ``S_c``, its
+small eigh-factored pseudo-inverse) is built AFTER ``self._linear_op`` exists
+(``_augment_with_coarse_space``, called from ``__init__`` right after
+``_build_linear_op()``) because ``S Z`` uses the solver's own matmat --
+building the block-Jacobi component first (as for plain ``'block_jacobi'``)
+and layering the coarse term on second avoids disturbing the existing
+fp64-read-before-fp32-cast ordering invariant documented above. Never
+persisted (rebuilt on every ``factor()``/``refactor()``, like the per-tile
+Schur blocks it derives from). If T' (PoU + GenEO columns) exceeds ``interface_coarse_max_cols``, falls
+back to the PoU-only rung first (WARNING, GenEO columns dropped for this
+solve -- PoU-only is a strictly smaller space and typically still fits).
+Degrades further to the plain (possibly memory-budget-downgraded-to-'jacobi')
+base preconditioner with a WARNING -- never raises prepare() -- only when the
+coarse build itself fails outright (PoU-only T' ALSO exceeds
+``interface_coarse_max_cols``, no usable ``tile_index_maps``, or ``S_c`` has
+no positive spectrum).
+
+BJ-apply perf fix (permuted-contiguous GEMV)
+-------------------------------------------------------------------
+Stage 2 measured the threaded block-Jacobi apply at only 1.4x speedup (701 ms
+vs 990 ms serial, 64 blocks / n=167,659) despite ``cho_solve`` itself
+releasing the GIL (LAPACK ``dpotrs``): the PER-BLOCK fancy-index gather
+(``x[global_idx]``) and scatter (``result[global_idx] = ...``) do NOT release
+the GIL and are RANDOM-access (cache-miss-bound) at a cost comparable to the
+O(k^2) solve itself at these block sizes -- serializing across threads even
+though the solve itself parallelizes fine. The fix: do exactly ONE gather and
+ONE scatter per ``apply()`` call (not one per block) via a single global
+permutation array (block-Jacobi ownership is a partition, so concatenating
+every block's global index array is a valid partial permutation of
+``[0, n)``), and materialize each block's dense (pseudo-)inverse ONCE at
+build time (replacing -- not duplicating -- the cho factor payload, so total
+memory stays the same order as before) so each block's apply is a single
+contiguous-slice GEMV (BLAS-2, releases the GIL) instead of two triangular
+solves plus scattered indexing. Measured on a synthetic proportional to the
+mi200k_v2 regime (64 blocks, ~2674 avg block size, n~171K, 8 threads, BLAS
+pinned to 1 thread throughout via ``threadpool_limits``): the OLD design's
+own threading is NEGATIVE (serial ~255 ms, 8-thread ~470-490 ms -- concurrent
+``cho_solve`` calls across threads contend rather than parallelize, even
+with per-thread disjoint data); the fix is faster BOTH serially (~120 ms,
+~2.1x -- a streaming GEMV beats two triangular-solve passes even
+single-threaded) AND when threaded (~47-52 ms, a further ~2.3-2.5x over its
+own serial, ~9-10x over the OLD design's threaded number). See
+``_build_block_jacobi``'s ``_bj_perm``/``_bj_offsets``/``_bj_solve_threaded``
+for the implementation.
+
 Tilewise without ever assembling S_global (Finding 0 upgrade)
     ``interface_drop_s_global`` (bool, default False) changes the CG+tilewise
     factor path from "assemble S_global then optionally free it" to "never
@@ -175,6 +239,8 @@ import scipy.linalg as la
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 import threadpoolctl
+
+from . import interface_coarse
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +322,25 @@ _AUTO_FACTOR_MEMORY_BUDGET_CAP_BYTES: int = 32 * 1024 ** 3   # 32 GB
 _AUTO_FACTOR_MEMORY_BUDGET_FRACTION: float = 0.4              # of total RAM
 _AUTO_BLOCK_JACOBI_MAX_BYTES_CAP: int = 8 * 1024 ** 3          # 8 GB
 _AUTO_BLOCK_JACOBI_MAX_BYTES_FRACTION: float = 0.1             # of total RAM
+
+# Finding 5 (Stage 3): host-aware 'auto' cap/fraction for
+# interface_coarse_max_bytes -- same order as the block-Jacobi budget above
+# (both guard coordinator-resident dense arrays), no legacy floor (brand
+# new setting, no pre-existing fixed constant to never regress below).
+_AUTO_COARSE_MAX_BYTES_CAP: int = 8 * 1024 ** 3                # 8 GB
+_AUTO_COARSE_MAX_BYTES_FRACTION: float = 0.1                   # of total RAM
+# Finding 9 (round 2): NO module-level COARSE_MAX_BYTES_DEFAULT constant
+# here -- a prior version snapshotted interface_coarse.DEFAULT_MAX_BYTES at
+# IMPORT time (a plain module-level assignment), which defeats
+# `monkeypatch.setattr(interface_coarse, 'DEFAULT_MAX_BYTES', ...)` despite
+# a comment on the old constant claiming the opposite ("read dynamically so
+# test monkeypatches keep working" -- it did not).  The fallback used when
+# InterfaceCGSolver receives no explicit interface_coarse_max_bytes now
+# reads ``interface_coarse.DEFAULT_MAX_BYTES`` directly at the point of use
+# (``_augment_with_coarse_space``, below) -- genuinely dynamic, mirroring
+# BLOCK_JACOBI_MAX_FACTOR_BYTES's role for block_jacobi (that constant IS
+# safe to snapshot at module level because it is defined in THIS module, so
+# tests monkeypatch it directly with no import-time-copy indirection).
 
 
 _warned_no_psutil = False
@@ -368,6 +453,26 @@ def resolve_block_jacobi_max_bytes(setting: Any = 'auto') -> int:
     )
 
 
+def resolve_coarse_max_bytes(setting: Any = 'auto') -> int:
+    """Resolve the ``interface_coarse_max_bytes`` setting to bytes (Finding 5).
+
+    'auto' (default) = min(8 GB, 0.1 * total system RAM), computed via
+    psutil -- same cap/fraction as :func:`resolve_block_jacobi_max_bytes`
+    (both bound coordinator-resident dense-array allocations of the same
+    order). Guards the two dense ``(n, T')`` fp64 arrays
+    ``interface_coarse.build_coarse_space`` allocates (``Z_dense`` + ``SZ``)
+    -- unlike ``interface_coarse_max_cols`` (a column-count cap), this scales
+    with ``n`` too, so it is the guard that actually bounds coordinator
+    memory at the "never assemble S_global" / large-n regime this feature
+    must not regress.
+    """
+    return _resolve_memory_budget_bytes(
+        setting,
+        _AUTO_COARSE_MAX_BYTES_CAP,
+        _AUTO_COARSE_MAX_BYTES_FRACTION,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stage 2 helpers: thread-count / dtype / matvec-mode resolution, LPT
 # partitioning, kept-position (D1) slicing, SPD-safe pseudo-inverse.
@@ -466,6 +571,41 @@ def resolve_matvec_mode(setting: Any, has_tile_blocks: bool) -> str:
             f"'assembled', or 'tilewise'."
         )
     return setting
+
+
+def resolve_preconditioner(
+    setting: Any, interface_solver_resolved: str, matvec_mode_resolved: str,
+) -> str:
+    """Resolve the ``interface_preconditioner`` setting -- 'auto' | explicit.
+
+    Stage 3 resolved default: 'auto' (or ``None``) resolves to 'two_level'
+    when the resolved interface solver is 'cg' AND the resolved matvec mode
+    is 'tilewise' (the regime Stage 2 measured block-Jacobi CG stagnating
+    in); otherwise ('assembled' CG, or -- moot, since this is only called
+    from the CG branch -- 'direct') it resolves to the legacy 'block_jacobi'
+    default. An explicit (non-'auto') value is always honoured verbatim, so
+    small systems that already resolve to 'direct' (never reaching this
+    function) and any caller/YAML/CLI setting that names a preconditioner
+    explicitly are completely unaffected -- this is the ONLY place 'auto' is
+    resolved (see ``build_interface_solver``'s docstring).
+    """
+    # Finding 12: normalize (strip + lower) EVERY string value before
+    # validation, not just the 'auto' sentinel -- the pre-fix code left an
+    # inconsistent-coercion trap where 'auto'/' AUTO ' was silently accepted
+    # but an equivalently-sloppy explicit value (e.g. 'Two_Level ', a
+    # trailing space from a quoted YAML scalar) raised ValueError deep
+    # inside prepare()/factor() at solve time.
+    _norm = setting.strip().lower() if isinstance(setting, str) else setting
+    if _norm is None or _norm == 'auto':
+        if interface_solver_resolved == 'cg' and matvec_mode_resolved == 'tilewise':
+            return 'two_level'
+        return 'block_jacobi'
+    if _norm not in ('block_jacobi', 'jacobi', 'none', 'amg', 'two_level'):
+        raise ValueError(
+            f"Invalid interface_preconditioner {setting!r}: expected 'auto', "
+            f"'block_jacobi', 'jacobi', 'none', 'amg', or 'two_level'."
+        )
+    return _norm
 
 
 def _lpt_partition(costs: List[float], n_bins: int) -> List[List[int]]:
@@ -676,16 +816,46 @@ def _spd_safe_pseudo_solve_factor(
     is not actually PSD -- silently voiding CG's convergence guarantee
     (a valid preconditioner for SPD CG must itself be SPD).
 
-    Eigendecomposes ``sub`` (assumed symmetric -- BJ blocks are principal
-    submatrices of a symmetric Schur complement), clips eigenvalues to
-    ``>= eps_rel * lambda_max``, and returns ``(V, inv_w_clipped)`` such
-    that the apply is ``y = V @ (inv_w_clipped * (V.T @ x))``.  This is
-    guaranteed SPD (all returned "eigenvalues" of the inverse are strictly
-    positive after clipping).
+    Thin wrapper over :func:`_spd_safe_pseudo_solve_factor_ex` that drops
+    its third return value (the raw, unclipped spectrum ``w``).  Kept as a
+    separate name -- rather than inlined at call sites -- because it is
+    directly unit-tested (``TestSPDSafeFallback``) against the 2-tuple
+    ``(V, inv_w)`` contract; production (``_build_block_jacobi``) calls the
+    ``_ex`` form directly so it can reuse ``w`` for GenEO-lite enrichment
+    without a second eigendecomposition of the same block. Because this is
+    a thin wrapper, it is NOT on `_build_block_jacobi`'s call path -- tests
+    that need to intercept the eigh-fallback failure mode in that path must
+    monkeypatch :func:`_spd_safe_pseudo_solve_factor_ex`, not this function.
 
     Returns ``None`` only if the block has no positive spectrum at all
     (``lambda_max <= 0``) -- callers should skip the block (identity
     fallback) in that degenerate case.
+    """
+    result = _spd_safe_pseudo_solve_factor_ex(sub, eps_rel=eps_rel)
+    if result is None:
+        return None
+    V, inv_w, _w = result
+    return V, inv_w
+
+
+def _spd_safe_pseudo_solve_factor_ex(
+    sub: np.ndarray, eps_rel: float = 1e-10,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Same as :func:`_spd_safe_pseudo_solve_factor` but also returns the
+    raw (unclipped) eigenvalues ``w``.
+
+    A separate function -- not a change to the original's return contract --
+    because :func:`_spd_safe_pseudo_solve_factor` is directly unit-tested
+    (``TestSPDSafeFallback``) against a 2-tuple ``(V, inv_w)`` return, and
+    :func:`_spd_safe_pseudo_solve_factor` now delegates HERE (dropping
+    ``w``) so there is exactly one implementation.  Stage 3's GenEO-lite
+    enrichment needs the block's full spectrum to pick its lowest eigenpairs
+    WITHOUT a second eigendecomposition of the same block (the "don't
+    recompute" requirement -- a block that already fell into this
+    indefinite-block fallback path has already paid for a full ``eigh``);
+    ``_build_block_jacobi`` calls THIS ``_ex`` form directly (always, not
+    only when GenEO reuse is needed) so there is exactly one eigh call per
+    indefinite block either way.
     """
     sub_sym = 0.5 * (sub + sub.T)
     w, V = np.linalg.eigh(sub_sym)
@@ -695,7 +865,7 @@ def _spd_safe_pseudo_solve_factor(
     eps = eps_rel * lam_max
     w_clipped = np.clip(w, eps, None)
     inv_w = 1.0 / w_clipped
-    return V, inv_w
+    return V, inv_w, w
 
 
 def _finalize_pool(pool: ThreadPoolExecutor) -> None:
@@ -778,10 +948,55 @@ class InterfaceCGSolver:
         matvec_threads: Any = 'auto',
         matvec_dtype: Any = 'float64',
         strict_dtype_rtol: bool = True,
+        island_idx: Optional[np.ndarray] = None,
+        # Finding 9: None-sentinel defaults, NOT interface_coarse.DEFAULT_*
+        # bound at def time (module-import time) -- resolved dynamically in
+        # the constructor body instead, so
+        # monkeypatch.setattr(interface_coarse, 'DEFAULT_GENEO_K', ...)
+        # (etc.) actually takes effect for callers that don't pass these
+        # explicitly. See the constructor body's Finding 9 comment.
+        interface_coarse_geneo_k: Optional[int] = None,
+        interface_coarse_geneo_tol: Optional[float] = None,
+        interface_coarse_eps_rank: Optional[float] = None,
+        interface_coarse_max_cols: Optional[int] = None,
+        interface_coarse_max_bytes: Optional[int] = None,
     ) -> None:
         """
         Parameters
         ----------
+        island_idx : np.ndarray, optional
+            Stage 3: global interface indices of interface-island nodes
+            (penalized via ``S_extra``'s 1e5 mS diagonal).  Only consumed by
+            ``preconditioner='two_level'`` -- zeroed out of every coarse-
+            space column (PoU and GenEO alike) so the penalty does not leak
+            into ``S_c``.  See ``interface_coarse.py``'s module docstring.
+        interface_coarse_geneo_k : int
+            Stage 3: max GenEO-lite eigenpairs enriched per block-Jacobi
+            ownership block (default 4; 0 disables GenEO, leaving a PoU-only
+            coarse space).  Only used by ``preconditioner='two_level'``.
+        interface_coarse_geneo_tol : float
+            Stage 3: relative eigenvalue threshold (fraction of the block's
+            own ``lambda_max``) below which an eigenpair is enriched
+            (default 1e-6).
+        interface_coarse_eps_rank : float
+            Stage 3: ``S_c`` eigenvalues <= this fraction of ``S_c``'s
+            ``lambda_max`` are treated as structural rank deficiency (e.g.
+            the checkerboard null space of an even-multiplicity PoU basis)
+            and dropped from the pseudo-inverse (default 1e-12) -- distinct
+            knob from ``interface_coarse_geneo_tol``.
+        interface_coarse_max_cols : int
+            Stage 3: hard cap on T' (default 4096); exceeding it first
+            falls back to a PoU-only coarse space (WARNING, GenEO columns
+            dropped) -- the coarse space is disabled entirely (degrades to
+            plain block-Jacobi) only if the PoU-only column count ALONE
+            still exceeds the cap.
+        interface_coarse_max_bytes : int
+            Stage 3 (Finding 5): byte-based guard on the two dense
+            ``(n, T')`` fp64 arrays the coarse build allocates (default
+            'auto' -> ``resolve_coarse_max_bytes``, min(8 GB, 0.1x total
+            RAM)); same two-rung PoU-only-then-disable degradation as
+            ``interface_coarse_max_cols`` above, since a large-n/modest-T'
+            system can exceed it even when comfortably under the column cap.
         S_extra : sp.spmatrix, optional
             Additional sparse contribution to the matvec, added on top of the
             per-tile Schur sum.  For ``matvec_mode='tilewise'`` this carries the
@@ -836,10 +1051,12 @@ class InterfaceCGSolver:
                 "matvec_mode='tilewise' requires tile_schur_complements "
                 "and tile_index_maps"
             )
-        if preconditioner not in ('block_jacobi', 'jacobi', 'none', 'amg'):
+        if preconditioner not in (
+            'block_jacobi', 'jacobi', 'none', 'amg', 'two_level',
+        ):
             raise ValueError(
                 f"preconditioner must be one of 'block_jacobi', 'jacobi', "
-                f"'none', 'amg'; got {preconditioner!r}"
+                f"'none', 'amg', 'two_level'; got {preconditioner!r}"
             )
 
         # D1 (item 1): fail loudly, HERE, if a caller passed a tile Schur
@@ -887,6 +1104,77 @@ class InterfaceCGSolver:
         # means "use the module-level BLOCK_JACOBI_MAX_FACTOR_BYTES constant
         # dynamically" (preserves monkeypatch-based test behaviour).
         self.block_jacobi_max_bytes: Optional[int] = block_jacobi_max_bytes
+
+        # --- Stage 3: two-level coarse-space state --------------------------
+        # ``_two_level_requested`` is captured BEFORE _build_block_jacobi()
+        # runs because that builder may itself downgrade self.preconditioner
+        # 'block_jacobi' -> 'jacobi' (memory budget) -- the coarse-space
+        # augmentation step (after _build_linear_op(), below) must still
+        # fire in that case (diagonal + coarse is a valid, useful
+        # combination), so it cannot key off self.preconditioner alone.
+        self._two_level_requested: bool = preconditioner == 'two_level'
+        self._island_idx: Optional[np.ndarray] = (
+            np.asarray(island_idx, dtype=np.int64)
+            if island_idx is not None and len(island_idx) else None
+        )
+        # Finding 9: None-sentinel constructor defaults (see the signature
+        # above) resolved HERE, via a live attribute lookup on
+        # interface_coarse, rather than binding interface_coarse.DEFAULT_*
+        # as def-time default parameter values -- def-time defaults are
+        # evaluated exactly once, at module-import time, so
+        # `monkeypatch.setattr(interface_coarse, 'DEFAULT_GENEO_K', ...)`
+        # would have no effect on them.
+        self._geneo_k: int = int(
+            interface_coarse_geneo_k if interface_coarse_geneo_k is not None
+            else interface_coarse.DEFAULT_GENEO_K
+        )
+        self._geneo_tol: float = float(
+            interface_coarse_geneo_tol if interface_coarse_geneo_tol is not None
+            else interface_coarse.DEFAULT_GENEO_TOL
+        )
+        self._eps_rank: float = float(
+            interface_coarse_eps_rank if interface_coarse_eps_rank is not None
+            else interface_coarse.DEFAULT_EPS_RANK
+        )
+        self._max_cols: int = int(
+            interface_coarse_max_cols if interface_coarse_max_cols is not None
+            else interface_coarse.DEFAULT_MAX_COLS
+        )
+        # Stage 1c-style per-instance override (Finding 5): None means "use
+        # interface_coarse.DEFAULT_MAX_BYTES dynamically" (read at the point
+        # of use in _augment_with_coarse_space, mirrors
+        # block_jacobi_max_bytes above -- also a None-sentinel).
+        self._coarse_max_bytes: Optional[int] = interface_coarse_max_bytes
+        # Whether _build_block_jacobi() should pay for GenEO eigendecomposition
+        # at all -- both a 'two_level' request AND a nonzero k are required
+        # (k=0 is the documented "GenEO disabled, PoU-only" knob).
+        self._want_geneo: bool = self._two_level_requested and self._geneo_k > 0
+        # Per-block GenEO eigenpairs, ``[(global_idx, V_k, w_k), ...]`` --
+        # populated by _build_block_jacobi() (only when
+        # self._two_level_requested and self._geneo_k > 0), consumed by
+        # _augment_with_coarse_space() after _build_linear_op() runs.
+        self._geneo_pairs: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        self._coarse: Optional[interface_coarse.CoarseSpace] = None
+        # Set True inside _build_block_jacobi() iff the 'two_level' base
+        # component itself downgraded to the diagonal 'jacobi' fallback
+        # (memory budget) -- used only for the human-readable
+        # preconditioner_label below.
+        self._bj_downgraded: bool = False
+        # Finding 8: set inside _augment_with_coarse_space() to whether the
+        # base (pre-coarse) preconditioner builder returned None outright
+        # (e.g. all block-Jacobi blocks failed) -- distinct from
+        # _bj_downgraded (block_jacobi -> jacobi); used so the degrade
+        # path/label never mislabels a truly unpreconditioned base as
+        # 'block_jacobi'.
+        self._bj_was_none: bool = False
+        # Finding 13: the base component's ACTUAL name ('none' | 'jacobi' |
+        # 'block_jacobi'), derived ONCE from _bj_was_none/_bj_downgraded in
+        # _augment_with_coarse_space (the only place both flags are known)
+        # instead of being independently re-derived by the same if/elif
+        # chain in both the degrade-path warning and preconditioner_label.
+        # Placeholder default here; always overwritten before being read
+        # (both consumers only run after _augment_with_coarse_space has).
+        self._base_precond_label: str = 'block_jacobi'
 
         # --- Stage 2: threaded matvec/BJ-apply state -----------------------
         self.matvec_dtype: np.dtype = resolve_matvec_dtype(matvec_dtype)
@@ -940,6 +1228,14 @@ class InterfaceCGSolver:
         # Build operator (tilewise mode: converts/frees tile_schur_complements
         # to matvec_dtype in place -- see _prepare_tilewise_matvec_state).
         self._linear_op: spla.LinearOperator = self._build_linear_op()
+
+        # Stage 3: layer the coarse-space correction on top of the just-built
+        # base (block_jacobi, or its jacobi downgrade) preconditioner -- must
+        # run AFTER self._linear_op exists (S @ Z uses its matmat).  Degrades
+        # to the plain base preconditioner (WARNING, never raises) if the
+        # coarse build itself fails.
+        if self._two_level_requested:
+            self._M = self._augment_with_coarse_space()
 
         # Track cumulative iteration stats
         self._total_iters: int = 0
@@ -1269,10 +1565,159 @@ class InterfaceCGSolver:
         if self.preconditioner == 'block_jacobi':
             return self._build_block_jacobi()
 
+        if self.preconditioner == 'two_level':
+            # Stage 3: the coarse-space TERM is layered on top AFTER
+            # self._linear_op exists (see _augment_with_coarse_space, called
+            # from __init__ right after _build_linear_op()) -- this builder
+            # only produces the BASE component here, identical to
+            # 'block_jacobi' (including its own memory-budget downgrade to
+            # 'jacobi', which self._build_block_jacobi() applies to
+            # self.preconditioner directly; _two_level_requested -- captured
+            # before this call -- is what the post-linear-op step keys off
+            # of, not self.preconditioner, so the coarse term still gets
+            # added even after a downgrade).
+            return self._build_block_jacobi()
+
         if self.preconditioner == 'amg':
             return self._build_amg()
 
         return None
+
+    def _augment_with_coarse_space(self) -> Optional[spla.LinearOperator]:
+        """Stage 3: layer ``Z S_c^+ Z^T`` on top of the already-built base
+        (block_jacobi, or its jacobi memory-budget downgrade) preconditioner.
+
+        Must run AFTER ``self._linear_op`` exists (the coarse build's
+        ``S @ Z`` matmat needs the fully-prepared tilewise/assembled matvec
+        state -- see the module docstring's Stage 3 ordering note).
+        ``build_coarse_space`` itself falls back to a PoU-only coarse space
+        (still returned here, not ``None``) when GenEO pushes T' over the
+        cap/byte budget; this method only degrades to the plain base
+        preconditioner (``self._M``, already built) with a WARNING -- NEVER
+        RAISES -- both when ``build_coarse_space`` returns ``None`` (PoU-only
+        T'/bytes ALSO exceed budget, no usable ``tile_index_maps``, ``S_c``
+        has no positive spectrum, ...) and (Finding 6) when it raises ANY
+        exception outright (e.g. ``MemoryError``/``LinAlgError`` from the
+        dense ``Z.toarray()``/``eigh(S_c)`` calls) -- a pathological S_c must
+        degrade this (new-default, 'auto'-resolved) code path the same way
+        the sibling block-Jacobi eigh fallback degrades (see the "Finding 7"
+        comment in ``_build_block_jacobi`` for the matching precedent).
+        """
+        base_M = self._M
+        # Finding 8: remember whether the base builder returned None
+        # OUTRIGHT (e.g. every block-Jacobi block failed) -- distinct from
+        # self._bj_downgraded (block_jacobi -> jacobi) -- so the degrade
+        # path/label below can report 'none' instead of falsely claiming
+        # 'block_jacobi' is active.
+        self._bj_was_none = base_M is None
+        # Finding 13: derive the base label ONCE here (the only place
+        # _bj_was_none and _bj_downgraded are both known) -- see
+        # self._base_precond_label's docstring in __init__.
+        if self._bj_was_none:
+            self._base_precond_label = 'none'
+        elif self._bj_downgraded:
+            self._base_precond_label = 'jacobi'
+        else:
+            self._base_precond_label = 'block_jacobi'
+        base_apply = base_M.matvec if base_M is not None else (lambda r: r.copy())
+
+        # Finding 9: read interface_coarse.DEFAULT_MAX_BYTES dynamically
+        # (attribute lookup at call time), NOT a module-level snapshot --
+        # see the removed COARSE_MAX_BYTES_DEFAULT constant's comment.
+        _max_bytes = (
+            self._coarse_max_bytes if self._coarse_max_bytes is not None
+            else interface_coarse.DEFAULT_MAX_BYTES
+        )
+        # Finding 7: matvec_dtype only actually affects the matmat's fp
+        # precision in 'tilewise' mode (S9 -- 'assembled' mode's sparse
+        # matvec on S_global is always fp64 regardless of the dtype
+        # setting), so only floor eps_rank when that matmat is genuinely
+        # running in fp32.
+        _coarse_matvec_dtype = (
+            self.matvec_dtype if self.matvec_mode == 'tilewise'
+            else np.dtype(np.float64)
+        )
+        try:
+            coarse = interface_coarse.build_coarse_space(
+                matmat=self._linear_op.matmat,
+                tile_index_maps=self.tile_index_maps or {},
+                n=self.n,
+                island_idx=self._island_idx,
+                geneo_pairs=self._geneo_pairs,
+                max_cols=self._max_cols,
+                eps_rank=self._eps_rank,
+                max_bytes=_max_bytes,
+                matvec_dtype=_coarse_matvec_dtype,
+            )
+        except Exception as exc:
+            # Finding 6: build_coarse_space is documented "never raises" at
+            # this call site, but its own dense allocation/eigh calls can
+            # raise MemoryError/LinAlgError/ValueError on a pathological S_c
+            # -- catch-all here (matching the sibling block-Jacobi eigh
+            # fallback's convention) so a coarse-build failure degrades to
+            # the base preconditioner instead of aborting prepare()/factor()
+            # entirely.
+            logger.warning(
+                "InterfaceCGSolver: two_level coarse-space build raised "
+                "%s: %s; degrading to the plain base preconditioner for "
+                "this solve.",
+                type(exc).__name__, exc,
+            )
+            coarse = None
+
+        if coarse is None:
+            # The base component's ACTUAL name -- self.preconditioner is
+            # still 'two_level' at this point (only the success path below
+            # overwrites it; _build_block_jacobi() only ever rewrites it to
+            # 'jacobi' on a memory-budget downgrade, never back to
+            # 'block_jacobi'), so use self._base_precond_label (Finding 13:
+            # derived once, above) rather than trusting self.preconditioner
+            # (Finding 8: must not claim 'block_jacobi' when the base
+            # builder actually returned None).
+            _actual = self._base_precond_label
+            logger.warning(
+                "InterfaceCGSolver: two_level coarse-space build failed or "
+                "was disabled (see preceding WARNING); degrading to the "
+                "plain %r preconditioner for this solve.",
+                _actual,
+            )
+            self._coarse = None
+            self.preconditioner = _actual
+            return base_M
+
+        self._coarse = coarse
+        self.preconditioner = 'two_level'
+        n = self.n
+
+        def _msolve(r: np.ndarray) -> np.ndarray:
+            return base_apply(r) + coarse.apply(r)
+
+        logger.info(
+            "InterfaceCGSolver: two_level preconditioner active -- %s",
+            self.preconditioner_label,
+        )
+        return spla.LinearOperator(shape=(n, n), matvec=_msolve, dtype=np.float64)
+
+    @property
+    def preconditioner_label(self) -> str:
+        """Human-readable preconditioner description for stats/logs, e.g.
+        ``"two_level(bj+geneo k=4, T'=321, rank=320)"``.  Falls back to the
+        plain ``self.preconditioner`` string when no coarse space is active
+        (including a degraded two_level request)."""
+        if self._coarse is not None:
+            # Finding 13: self._base_precond_label (derived once in
+            # _augment_with_coarse_space -- see its docstring) is 'none' |
+            # 'jacobi' | 'block_jacobi'; the label uses the short 'bj' form
+            # for the 'block_jacobi' case only (Finding 8: 'none' must not
+            # fall through to 'bj' when the base builder returned None
+            # outright -- coarse-only correction, no block/diagonal base at
+            # all).
+            base = (
+                'bj' if self._base_precond_label == 'block_jacobi'
+                else self._base_precond_label
+            )
+            return f"two_level({base}+geneo k={self._coarse.n_geneo_cols}, T'={self._coarse.n_cols}, rank={self._coarse.rank})"
+        return self.preconditioner
 
     def _build_block_jacobi(self) -> Optional[spla.LinearOperator]:
         """Block-Jacobi preconditioner.
@@ -1340,19 +1785,48 @@ class InterfaceCGSolver:
             if self.block_jacobi_max_bytes is not None
             else BLOCK_JACOBI_MAX_FACTOR_BYTES
         )
+        _max_block_pre = max(len(v) for v in tile_owned.values()) if tile_owned else 0
         est_factor_bytes = sum(
             len(owned) * len(owned) * 8 for owned in tile_owned.values()
         )
+        # Finding 10 (round 1) / Finding 8 (round 2): the materialization
+        # loop below (section 4) transiently holds, for the block currently
+        # being symmetrized (`Sinv = 0.5 * (Sinv + Sinv.T)`), FOUR k x k
+        # arrays at once: the not-yet-replaced cho factor (`payload`,
+        # already counted in est_factor_bytes above), the freshly-built
+        # dense inverse from cho_solve (`Sinv`), the `Sinv + Sinv.T` sum
+        # temporary, and the `0.5 * (...)` result array that `Sinv` gets
+        # reassigned to (the OLD Sinv object from cho_solve is not
+        # reclaimed until this expression finishes evaluating) -- three
+        # arrays BEYOND the counted cho factor, not two.  Add the
+        # worst-case extra (the single largest block's three transient
+        # arrays) so this pre-flight estimate does not underestimate the
+        # actual build-time peak.
+        est_factor_bytes += 3 * _max_block_pre * _max_block_pre * 8
         if est_factor_bytes > _max_bytes:
-            max_block = max(len(v) for v in tile_owned.values()) if tile_owned else 0
+            max_block = _max_block_pre
+            # Finding 5: this builder also serves preconditioner='two_level'
+            # requests (dispatched from _build_preconditioner's two_level
+            # branch, which calls this method to build the BASE component --
+            # see that branch's comment) -- name the ACTUAL requested
+            # preconditioner (self.requested_preconditioner), not a
+            # hardcoded 'block_jacobi', and -- when the request was
+            # 'two_level' -- say so explicitly: this fallback path
+            # (_build_jacobi_fallback) never reaches the per-block
+            # cho_factor loop below, so no blocks get cho-factored and
+            # GenEO enrichment is silently skipped entirely for this factor
+            # (self._geneo_pairs stays empty); the coarse space built
+            # afterward by _augment_with_coarse_space is PoU-only, not
+            # PoU+GenEO.
+            _is_two_level = self.requested_preconditioner == 'two_level'
             logger.warning(
                 "Block-Jacobi: estimated factor memory %.1f GB exceeds budget "
                 "%.1f GB (setting 'interface_block_jacobi_max_bytes', "
                 "n_interface=%d, T=%d tiles, max_block=%d). Downgrading "
-                "requested preconditioner 'block_jacobi' -> 'jacobi' "
+                "requested preconditioner %r -> 'jacobi' "
                 "(diagonal) for this solve -- expect MORE CG iterations per "
                 "solve than block_jacobi would have needed (diagonal is a "
-                "strictly weaker preconditioner). "
+                "strictly weaker preconditioner).%s "
                 "Scaling: Sum(k_i^2)*8 bytes ~ n^2/T*8; at n=1M, T=1000 this "
                 "is ~8 GB. To keep block_jacobi, reduce interface size via B1 "
                 "tile splitting or raise 'interface_block_jacobi_max_bytes'.",
@@ -1361,6 +1835,14 @@ class InterfaceCGSolver:
                 n,
                 len(tile_owned),
                 max_block,
+                self.requested_preconditioner,
+                (
+                    " GenEO enrichment is SKIPPED for this factor (no "
+                    "blocks are cho-factored on this fallback path); the "
+                    "two_level coarse space -- if it can still be built at "
+                    "all -- will be PoU-only, not PoU+GenEO."
+                    if _is_two_level else ""
+                ),
             )
             # Fall back to diagonal preconditioner (cheap, always safe).
             # Keep self.requested_preconditioner == 'block_jacobi' (set in
@@ -1368,6 +1850,7 @@ class InterfaceCGSolver:
             # "actually in use"; downgrade self.preconditioner so every
             # downstream report (backend_info, verbose logs) reflects reality.
             self.preconditioner = 'jacobi'
+            self._bj_downgraded = True
             return self._build_jacobi_fallback()
 
         logger.debug(
@@ -1376,7 +1859,7 @@ class InterfaceCGSolver:
             est_factor_bytes / 1024 ** 2,
             n,
             len(tile_owned),
-            max(len(v) for v in tile_owned.values()) if tile_owned else 0,
+            _max_block_pre,
         )
 
         # ---- 3. Extract submatrices and build Cholesky factors ----
@@ -1426,9 +1909,20 @@ class InterfaceCGSolver:
             # Regularize to ensure SPD
             sub += 1e-12 * np.eye(sub.shape[0])
 
+            # Finding 3: local (within-this-block) island mask, used by
+            # BOTH GenEO call sites below so the eigen-analysis runs on the
+            # physical (non-penalty-inflated) spectrum -- see
+            # interface_coarse.geneo_lowest_eigenpairs's island_local_mask
+            # docstring for the full rationale.  Island nodes CAN appear in
+            # an ownership block (see interface_coarse.py's module
+            # docstring, "Island rows in GenEO columns").
+            island_local_mask = (
+                np.isin(owned_global_arr, self._island_idx)
+                if self._island_idx is not None else None
+            )
+
             try:
                 cho = la.cho_factor(sub, lower=False, check_finite=False)
-                _block_factors.append((owned_global_arr, 'cho', cho))
             except la.LinAlgError:
                 # SPD-safe fallback (item 7): eigh-based PSD projection,
                 # NOT np.linalg.pinv.  pinv of a numerically indefinite
@@ -1458,7 +1952,12 @@ class InterfaceCGSolver:
                 # such failure degrades to "skip this block" instead of
                 # aborting the entire prepare()/factor() call.
                 try:
-                    eigh_factor = _spd_safe_pseudo_solve_factor(sub)
+                    # Stage 3: use the ``_ex`` form (returns the raw spectrum
+                    # ``w`` too) so GenEO-lite can reuse it below WITHOUT a
+                    # second eigh call on the same block ("don't recompute" --
+                    # see interface_coarse.py's module docstring and
+                    # _spd_safe_pseudo_solve_factor_ex's docstring).
+                    eigh_factor_ex = _spd_safe_pseudo_solve_factor_ex(sub)
                 except Exception as exc:
                     logger.warning(
                         "Block-Jacobi: eigh-based SPD-safe fallback itself "
@@ -1466,9 +1965,29 @@ class InterfaceCGSolver:
                         "back to identity for this block's nodes).",
                         sub.shape[0], type(exc).__name__, exc,
                     )
-                    eigh_factor = None
-                if eigh_factor is not None:
-                    _block_factors.append((owned_global_arr, 'eigh', eigh_factor))
+                    eigh_factor_ex = None
+                if eigh_factor_ex is not None:
+                    V_eigh, inv_w_eigh, w_eigh = eigh_factor_ex
+                    _block_factors.append(
+                        (owned_global_arr, 'eigh', (V_eigh, inv_w_eigh))
+                    )
+                    if self._want_geneo:
+                        try:
+                            V_k, w_k = interface_coarse.geneo_lowest_eigenpairs(
+                                sub, k=self._geneo_k, tol=self._geneo_tol,
+                                precomputed=(w_eigh, V_eigh),
+                                island_local_mask=island_local_mask,
+                            )
+                            if V_k.shape[1] > 0:
+                                self._geneo_pairs.append((owned_global_arr, V_k, w_k))
+                        except Exception as exc:
+                            logger.warning(
+                                "Block-Jacobi: GenEO-lite enrichment failed "
+                                "on the eigh-fallback block size %d (%s: "
+                                "%s); skipping enrichment for this block "
+                                "(keeps the eigh factor).",
+                                sub.shape[0], type(exc).__name__, exc,
+                            )
                 else:
                     logger.warning(
                         "Block-Jacobi: block size %d has no positive "
@@ -1476,6 +1995,38 @@ class InterfaceCGSolver:
                         "to identity for this block's nodes).",
                         sub.shape[0],
                     )
+            else:
+                # Finding 2: the cho-factor SUCCESS path lives in this
+                # `else:` clause (not inline after cho_factor() inside the
+                # try), and the GenEO call below has its OWN narrow
+                # try/except -- neither can land in the `except
+                # la.LinAlgError` above.  Before this fix, GenEO ran INSIDE
+                # the try, AFTER the 'cho' entry was already appended to
+                # _block_factors; a LinAlgError raised by GenEO's own dense
+                # np.linalg.eigh calls (interface_coarse.py's ARPACK-
+                # ArpackNoConvergence/exception fallbacks) was caught by
+                # `except la.LinAlgError` above, which appended a SECOND
+                # ('eigh') entry for the SAME owned_global_arr -- breaking
+                # the block-ownership partition _bj_perm/_bj_offsets rely
+                # on (the block would be gathered/applied twice, and
+                # result[perm] = y_perm would double-write those nodes).
+                _block_factors.append((owned_global_arr, 'cho', cho))
+                if self._want_geneo:
+                    try:
+                        V_k, w_k = interface_coarse.geneo_lowest_eigenpairs(
+                            sub, cho=cho, k=self._geneo_k, tol=self._geneo_tol,
+                            island_local_mask=island_local_mask,
+                        )
+                        if V_k.shape[1] > 0:
+                            self._geneo_pairs.append((owned_global_arr, V_k, w_k))
+                    except Exception as exc:
+                        logger.warning(
+                            "Block-Jacobi: GenEO-lite enrichment failed on "
+                            "block size %d (%s: %s); skipping enrichment "
+                            "for this block (keeps the cho factor -- "
+                            "block-Jacobi itself is unaffected).",
+                            sub.shape[0], type(exc).__name__, exc,
+                        )
 
         if not _block_factors:
             logger.warning(
@@ -1483,12 +2034,61 @@ class InterfaceCGSolver:
             )
             return None
 
-        # ---- 4. LPT partition of blocks by k^2 for threaded apply ----------
+        # ---- 4. Materialize each block's dense (pseudo-)inverse, in place --
+        # BJ-apply perf fix (Stage 3): the OLD apply (kept as _bj_apply_one's
+        # cho_solve/two-GEMV forms up through Stage 2) gathered
+        # ``x[global_idx]`` and scattered ``result[global_idx] = ...`` once
+        # PER BLOCK -- fancy-index random-access numpy ops that do not
+        # release the GIL, measured (Stage 2) to serialize threads down to a
+        # 1.4x speedup despite cho_solve's own LAPACK call releasing the
+        # GIL fine. Replaced by materializing each block's dense SPD
+        # (pseudo-)inverse HERE (cho_solve(cho, eye(k)) for 'cho' blocks; the
+        # already-available V @ diag(inv_w) @ V.T for 'eigh' blocks) --
+        # REPLACING (not duplicating) the cho-factor payload in
+        # _block_factors, so total memory stays Sum(k_i^2)*8 bytes, the same
+        # order as before -- so apply becomes ONE global gather + a loop of
+        # CONTIGUOUS-slice GEMVs (BLAS-2, releases the GIL) + ONE global
+        # scatter (see _bj_solve_serial/_bj_solve_threaded below).
+        _bj_perm_parts: List[np.ndarray] = []
+        _bj_inv_blocks: List[np.ndarray] = []
+        _offsets = [0]
+        for _bi, (global_idx, kind, payload) in enumerate(_block_factors):
+            k = len(global_idx)
+            if kind == 'cho':
+                Sinv = la.cho_solve(payload, np.eye(k), check_finite=False)
+                # Finding 9: cho_solve's explicitly-formed inverse is not
+                # exactly symmetric (unlike the backward-stable triangular
+                # solves the old apply-time cho_solve(cho, x) design used
+                # directly) -- on the ill-conditioned blocks this feature
+                # targets (near-null eigenvalues ~1e-10 relative, cond up to
+                # ~1e10 per the module docstring) the asymmetry is large
+                # enough to weaken PCG's SPD-preconditioner assumption.
+                # Cheap, exact fix: symmetrize in place.  ('eigh' blocks
+                # below are already exactly symmetric by construction --
+                # V @ diag(inv_w) @ V.T -- so this is only needed here.)
+                Sinv = 0.5 * (Sinv + Sinv.T)
+            else:
+                V, inv_w = payload
+                Sinv = (V * inv_w) @ V.T
+            Sinv = np.ascontiguousarray(Sinv)
+            _block_factors[_bi] = (global_idx, kind, Sinv)
+            _bj_perm_parts.append(global_idx)
+            _bj_inv_blocks.append(Sinv)
+            _offsets.append(_offsets[-1] + k)
+
+        self._bj_block_factors = _block_factors
+        self._bj_perm = (
+            np.concatenate(_bj_perm_parts) if _bj_perm_parts
+            else np.empty(0, dtype=np.int64)
+        )
+        self._bj_offsets = np.array(_offsets, dtype=np.int64)
+        self._bj_inv_blocks = _bj_inv_blocks
+
+        # ---- 5. LPT partition of blocks by k^2 for threaded apply ----------
         # Threading is safe WITHOUT accumulation: block ownership is a
         # partition (each interface node owned by exactly one block), so
-        # concurrent threads write to disjoint positions of `result` --
+        # concurrent threads write to disjoint SLICES of y_perm below --
         # no race, no reduction step needed (item 5).
-        self._bj_block_factors = _block_factors
         # Finding 15: cap the bin count at len(_block_factors) -- see the
         # matching comment in _prepare_tilewise_matvec_state.
         self._bj_n_bins = min(self.matvec_threads, len(_block_factors))
@@ -1497,28 +2097,36 @@ class InterfaceCGSolver:
             self._bj_n_bins,
         )
 
-        def _bj_apply_one(global_idx: np.ndarray, kind: str, payload: Any,
-                          x: np.ndarray) -> np.ndarray:
-            x_sub = x[global_idx]
-            if kind == 'cho':
-                return la.cho_solve(payload, x_sub, check_finite=False)
-            V, inv_w = payload
-            return V @ (inv_w * (V.T @ x_sub))
-
         def _bj_solve_serial(x: np.ndarray) -> np.ndarray:
             result = x.copy()  # identity for any unowned nodes
-            for global_idx, kind, payload in _block_factors:
-                result[global_idx] = _bj_apply_one(global_idx, kind, payload, x)
+            perm = self._bj_perm
+            if len(perm):
+                offs = self._bj_offsets
+                x_perm = x[perm]                      # ONE gather
+                y_perm = np.empty_like(x_perm)
+                for i, Sinv in enumerate(self._bj_inv_blocks):
+                    s, e = offs[i], offs[i + 1]
+                    y_perm[s:e] = Sinv @ x_perm[s:e]   # contiguous GEMV
+                result[perm] = y_perm                  # ONE scatter
             return result
 
         def _bj_solve_threaded(x: np.ndarray) -> np.ndarray:
-            result = x.copy()  # identity for any unowned nodes; disjoint
-                                # per-block writes below need no lock/reduce.
+            result = x.copy()  # identity for any unowned nodes
+            perm = self._bj_perm
+            if len(perm) == 0:
+                return result
+            offs = self._bj_offsets
+            inv_blocks = self._bj_inv_blocks
+            x_perm = x[perm]                           # ONE gather
+            y_perm = np.empty_like(x_perm)
 
             def work(t: int) -> None:
                 for bi in self._bj_partition[t]:
-                    global_idx, kind, payload = _block_factors[bi]
-                    result[global_idx] = _bj_apply_one(global_idx, kind, payload, x)
+                    s, e = offs[bi], offs[bi + 1]
+                    # Disjoint contiguous slice per block -- no lock needed;
+                    # dgemv releases the GIL so this genuinely parallelizes,
+                    # unlike the old per-block fancy-index gather/scatter.
+                    y_perm[s:e] = inv_blocks[bi] @ x_perm[s:e]
 
             pool = self._get_pool()
             with threadpoolctl.threadpool_limits(1):
@@ -1526,6 +2134,7 @@ class InterfaceCGSolver:
                 # self.matvec_threads -- see the matching comment in
                 # _prepare_tilewise_matvec_state.
                 list(pool.map(work, range(self._bj_n_bins)))
+            result[perm] = y_perm                       # ONE scatter
             return result
 
         def _bj_solve(x: np.ndarray) -> np.ndarray:
@@ -1852,6 +2461,20 @@ def build_interface_solver(
     matvec_threads: Any = 'auto',
     matvec_dtype: Any = 'float64',
     strict_dtype_rtol: bool = True,
+    island_idx: Optional[np.ndarray] = None,
+    # Finding 9: None-sentinel defaults (NOT interface_coarse.DEFAULT_*
+    # bound at def/import time) -- forwarded as-is to InterfaceCGSolver,
+    # which resolves them dynamically (see its constructor's Finding 9
+    # comment). A def-time snapshot here would silently defeat
+    # monkeypatch.setattr(interface_coarse, 'DEFAULT_GENEO_K', ...) even
+    # after InterfaceCGSolver itself was fixed, since this factory's own
+    # default would already be a concrete (stale) int/float by the time
+    # InterfaceCGSolver.__init__ ever sees it.
+    interface_coarse_geneo_k: Optional[int] = None,
+    interface_coarse_geneo_tol: Optional[float] = None,
+    interface_coarse_eps_rank: Optional[float] = None,
+    interface_coarse_max_cols: Optional[int] = None,
+    interface_coarse_max_bytes: Optional[int] = None,
 ) -> Tuple[Callable, str, Optional['InterfaceCGSolver']]:
     """Build an interface solve callable (direct LU or CG).
 
@@ -1878,7 +2501,11 @@ def build_interface_solver(
         matvec_mode: 'auto' (default; item 8 -- 'tilewise' when
             ``tile_schur_complements`` is provided, else 'assembled'),
             'assembled', or 'tilewise' (only used when cg selected).
-        preconditioner: 'block_jacobi', 'jacobi', 'none', or 'amg'.
+        preconditioner: 'auto' (Stage 3 -- resolves to 'two_level' when the
+            resolved CG matvec mode is 'tilewise', else 'block_jacobi'; see
+            :func:`resolve_preconditioner`, the ONE place this resolution
+            happens), 'block_jacobi', 'jacobi', 'none', 'amg', or
+            'two_level'.
         rtol: CG relative convergence tolerance (default 1e-8).
         atol: CG absolute convergence tolerance floor (default 1e-14).
         maxiter: Max CG iterations (default None -> 3 * n_interface).
@@ -1906,6 +2533,13 @@ def build_interface_solver(
         matvec_dtype: Stage 2 tilewise storage dtype ('float64' default).
         strict_dtype_rtol: Enforce the fp32-matvec/rtol pairing (default
             True) -- see :class:`InterfaceCGSolver`.
+        island_idx: Stage 3: global interface indices of interface-island
+            nodes, for the 'two_level' preconditioner's coarse-space row
+            zeroing (ignored otherwise).
+        interface_coarse_geneo_k, interface_coarse_geneo_tol,
+        interface_coarse_eps_rank, interface_coarse_max_cols,
+        interface_coarse_max_bytes: Stage 3 'two_level' knobs -- see
+            :class:`InterfaceCGSolver`.
 
     Returns:
         (solve_callable, resolved_mode, cg_solver_or_none)
@@ -2003,6 +2637,11 @@ def build_interface_solver(
             "but S_global is None."
         )
 
+    # Stage 3: the ONE place 'auto' preconditioner resolution happens --
+    # 'two_level' when CG + tilewise, else the legacy 'block_jacobi' default.
+    # An explicit (non-'auto') caller value passes through unchanged.
+    preconditioner = resolve_preconditioner(preconditioner, resolved, matvec_mode)
+
     t0 = time.perf_counter()
     cg_solver = InterfaceCGSolver(
         n_interface=n,
@@ -2022,13 +2661,19 @@ def build_interface_solver(
         matvec_threads=matvec_threads,
         matvec_dtype=matvec_dtype,
         strict_dtype_rtol=strict_dtype_rtol,
+        island_idx=island_idx,
+        interface_coarse_geneo_k=interface_coarse_geneo_k,
+        interface_coarse_geneo_tol=interface_coarse_geneo_tol,
+        interface_coarse_eps_rank=interface_coarse_eps_rank,
+        interface_coarse_max_cols=interface_coarse_max_cols,
+        interface_coarse_max_bytes=interface_coarse_max_bytes,
     )
     elapsed = time.perf_counter() - t0
     if verbose:
         logger.info(
             "Interface CG solver built: mode=%s, precond=%s, rtol=%.2e, n=%d, "
             "threads=%d, dtype=%s, build_time=%.3fs",
-            matvec_mode, preconditioner, rtol, n,
+            matvec_mode, cg_solver.preconditioner_label, rtol, n,
             cg_solver.matvec_threads, cg_solver.matvec_dtype, elapsed,
         )
 

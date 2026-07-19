@@ -162,6 +162,12 @@ class _InterfaceCgSettings:
     matvec_threads: Any
     matvec_dtype: Any
     strict_dtype_rtol: bool
+    # Stage 3: two-level coarse-space preconditioner knobs.
+    geneo_k: int
+    geneo_tol: float
+    eps_rank: float
+    max_cols: int
+    max_bytes: int
 
 
 def _read_interface_cg_settings(model: Optional[Any]) -> '_InterfaceCgSettings':
@@ -185,6 +191,18 @@ def _read_interface_cg_settings(model: Optional[Any]) -> '_InterfaceCgSettings':
     unconditionally and never reads ``interface_matvec_mode``, so folding
     it in here would misrepresent which sites actually consume it.
 
+    Stage 3: ``preconditioner``'s default changed from the literal
+    ``'block_jacobi'`` to ``'auto'`` -- this is the "no explicit setting"
+    signal that ``build_interface_solver``'s ``resolve_preconditioner()``
+    (the ONE place 'auto' is resolved) turns into 'two_level' for CG+
+    tilewise, or 'block_jacobi' otherwise (unchanged behaviour for
+    'assembled'/'direct'). An explicit ``interface_preconditioner`` setting
+    (YAML/CLI/``model.settings``) always overrides this and passes through
+    unchanged. Note this is independent of ``cli.py``'s own
+    ``_IFACE_SETTING_DEFAULTS['interface_preconditioner']`` (also 'auto' as
+    of Stage 3) -- both defaults were changed together so CLI-driven and
+    direct-``model.settings``-driven runs get the same resolved behaviour.
+
     Args:
         model: The ``DistributedPowerGridModel`` (or ``None`` -- every
             built-in default is returned in that case, matching every call
@@ -194,13 +212,40 @@ def _read_interface_cg_settings(model: Optional[Any]) -> '_InterfaceCgSettings':
         An :class:`_InterfaceCgSettings` with every field resolved to its
         documented default when unset.
     """
-    from .interface_iterative import resolve_block_jacobi_max_bytes
+    # Finding 15: lazy import (matching this function's existing
+    # resolve_block_jacobi_max_bytes import) -- interface_coarse.py has no
+    # internal-package dependencies of its own, so a module-level import
+    # here would create no cycle, but result_factorization.py's convention
+    # for interface_iterative/interface_coarse is a lazy, function-local
+    # import (see the sibling import on the next line), kept consistent
+    # here rather than special-cased.
+    from . import interface_coarse
+    from .interface_iterative import (
+        resolve_block_jacobi_max_bytes, resolve_coarse_max_bytes,
+    )
 
     _settings = getattr(model, 'settings', None) if model is not None else None
     _settings = _settings or {}
     _cg_maxiter_raw = _settings.get('interface_cg_maxiter', None)
+    _preconditioner_raw = _settings.get('interface_preconditioner', 'auto')
     return _InterfaceCgSettings(
-        preconditioner=_settings.get('interface_preconditioner', 'block_jacobi'),
+        # Finding 1 (round 2): normalize (strip + lower) HERE, ONCE, at
+        # settings-read time -- not just inside resolve_preconditioner
+        # (which does its own normalization too, defense in depth, but
+        # every OTHER literal comparison against this value -- the refactor
+        # degrade guards and coarse-space-lost warning condition in this
+        # module -- compared the RAW string against lowercase literals like
+        # ``'block_jacobi'``/``'two_level'``/``'auto'``.  A sloppy-but-valid
+        # YAML scalar (``'Two_Level'``, or ``' two_level '`` with a
+        # trailing space from a quoted scalar -- resolve_preconditioner
+        # itself already tolerates both) would build correctly at factor()
+        # time (resolve_preconditioner normalizes) but silently bypass
+        # these OTHER guards after a save()/load()+refactor() cycle, since
+        # they never saw the canonical lowercase form.
+        preconditioner=(
+            _preconditioner_raw.strip().lower()
+            if isinstance(_preconditioner_raw, str) else _preconditioner_raw
+        ),
         cg_rtol=float(_settings.get('interface_cg_rtol', 1e-8)),
         cg_atol=float(_settings.get('interface_cg_atol', 1e-14)),
         cg_maxiter=(
@@ -219,7 +264,77 @@ def _read_interface_cg_settings(model: Optional[Any]) -> '_InterfaceCgSettings':
             _settings.get('interface_strict_dtype_rtol', True),
             'interface_strict_dtype_rtol',
         ),
+        # Finding 15 (round 1) / Finding 9 (round 2): the canonical defaults
+        # live on interface_coarse.py's DEFAULT_GENEO_K/DEFAULT_GENEO_TOL/
+        # DEFAULT_EPS_RANK/DEFAULT_MAX_COLS -- read from there (a genuinely
+        # dynamic attribute lookup: this function body runs fresh on every
+        # call, unlike a def-time default) instead of re-hardcoding the
+        # literals a second time.  interface_iterative.py's own
+        # InterfaceCGSolver.__init__/build_interface_solver resolve from the
+        # SAME source, dynamically, via None-sentinel defaults (Finding 9)
+        # -- not bound at def time -- so a future retune of interface_
+        # coarse.py's DEFAULT_* stays in sync across CLI-driven,
+        # model.settings-driven, AND direct-constructor call sites.
+        geneo_k=_coerce_int(
+            _settings.get(
+                'interface_coarse_geneo_k', interface_coarse.DEFAULT_GENEO_K,
+            ),
+            'interface_coarse_geneo_k',
+        ),
+        # Finding 2 (round 2): _coerce_float (not a bare float()) -- rejects
+        # a YAML-1.1 bool (e.g. 'interface_coarse_geneo_tol: yes') instead
+        # of silently coercing it to 1.0 (float(True) == 1.0), matching the
+        # bool-rejection already applied to every sibling coercer in this
+        # function (_coerce_int for geneo_k/max_cols, _coerce_bool for
+        # cg_strict/strict_dtype_rtol).
+        geneo_tol=_coerce_float(
+            _settings.get(
+                'interface_coarse_geneo_tol', interface_coarse.DEFAULT_GENEO_TOL,
+            ),
+            'interface_coarse_geneo_tol',
+        ),
+        eps_rank=_coerce_float(
+            _settings.get(
+                'interface_coarse_eps_rank', interface_coarse.DEFAULT_EPS_RANK,
+            ),
+            'interface_coarse_eps_rank',
+        ),
+        max_cols=_coerce_int(
+            _settings.get(
+                'interface_coarse_max_cols', interface_coarse.DEFAULT_MAX_COLS,
+            ),
+            'interface_coarse_max_cols',
+        ),
+        # Finding 5: byte-based guard (see resolve_coarse_max_bytes) on the
+        # dense Z_dense/SZ arrays -- 'auto' = min(8 GB, 0.1x total RAM).
+        max_bytes=resolve_coarse_max_bytes(
+            _settings.get('interface_coarse_max_bytes', 'auto')
+        ),
     )
+
+
+def _island_idx_array(
+    island_nodes: Optional[Any], interface_node_to_idx: Dict[str, int],
+) -> Optional[np.ndarray]:
+    """Stage 3: convert an island-node-name set to a global interface-index
+    array for the 'two_level' preconditioner's coarse-space row zeroing.
+
+    Shared by every ``build_interface_solver`` call site so the same
+    ``(island_nodes, interface_node_to_idx) -> island_idx`` conversion isn't
+    duplicated five times with slight drift. Returns ``None`` for an empty/
+    ``None`` island set (the common case) so callers can pass it straight
+    through as ``island_idx=`` without an extra ``if``.
+    """
+    if not island_nodes:
+        return None
+    idx = np.array(
+        sorted(
+            interface_node_to_idx[n] for n in island_nodes
+            if n in interface_node_to_idx
+        ),
+        dtype=np.int64,
+    )
+    return idx if idx.size else None
 
 
 def _check_summaries_mixed_state(model: Any) -> None:
@@ -384,6 +499,42 @@ def _coerce_int(value: Any, setting_name: str) -> int:
         raise ValueError(
             f"Invalid integer setting {setting_name}={value!r}: expected an "
             f"integer (or numeric string)."
+        ) from exc
+
+
+def _coerce_float(value: Any, setting_name: str) -> float:
+    """Coerce a YAML/CLI-sourced numeric setting to float, rejecting garbage.
+
+    Finding 2 (round 2): mirrors :func:`_coerce_int`'s bool-rejection idiom
+    -- the Stage 3 coarse-space float knobs (``interface_coarse_geneo_tol``,
+    ``interface_coarse_eps_rank``) were being read via a bare ``float(...)``
+    call, which (unlike every sibling coercer in this module) silently
+    accepts a YAML-1.1 bool (``interface_coarse_geneo_tol: yes`` parses to
+    Python ``True``) and coerces it to ``1.0`` instead of raising --
+    ``float(True) == 1.0``, the exact classic pitfall ``_coerce_int``'s own
+    docstring calls out for the int case.
+
+    Args:
+        value: The raw settings value.
+        setting_name: Name of the setting, used in the error message.
+
+    Returns:
+        The coerced float.
+
+    Raises:
+        ValueError: If ``value`` cannot be interpreted as a float.
+    """
+    if isinstance(value, bool):
+        raise ValueError(
+            f"Invalid float setting {setting_name}={value!r}: bool is not "
+            f"a valid float value."
+        )
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid float setting {setting_name}={value!r}: expected a "
+            f"float (or numeric string)."
         ) from exc
 
 
@@ -1586,6 +1737,10 @@ def _factor_dc_context_no_s_global(
     _matvec_threads = _cg_settings.matvec_threads
     _matvec_dtype = _cg_settings.matvec_dtype
     _strict_dtype_rtol = _cg_settings.strict_dtype_rtol
+    # Stage 3: two-level coarse-space knobs + island indices (for the
+    # coarse-space row-zeroing -- see interface_coarse.py's module
+    # docstring).  island_nodes was computed above (island detection step).
+    _island_idx = _island_idx_array(island_nodes, interface_node_to_idx)
 
     t0 = _time.perf_counter()
     _cg_stats: Dict[str, Any] = {}
@@ -1608,6 +1763,12 @@ def _factor_dc_context_no_s_global(
         matvec_threads=_matvec_threads,
         matvec_dtype=_matvec_dtype,
         strict_dtype_rtol=_strict_dtype_rtol,
+        island_idx=_island_idx,
+        interface_coarse_geneo_k=_cg_settings.geneo_k,
+        interface_coarse_geneo_tol=_cg_settings.geneo_tol,
+        interface_coarse_eps_rank=_cg_settings.eps_rank,
+        interface_coarse_max_cols=_cg_settings.max_cols,
+        interface_coarse_max_bytes=_cg_settings.max_bytes,
     )
     timings['factor_interface'] = _time.perf_counter() - t0
     timings['total_prepare'] = sum(
@@ -2057,6 +2218,11 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
                     island_nodes=island_nodes,
                 )
 
+        # Stage 3: island indices for the 'two_level' preconditioner's
+        # coarse-space row zeroing -- independent of matvec_mode (two_level
+        # works in both 'assembled' and 'tilewise' CG matvec modes).
+        _island_idx = _island_idx_array(island_nodes, interface_node_to_idx)
+
         _cg_solve_callable, _cg_resolved_mode, _cg_solver = build_interface_solver(
             S_global=S_global,
             interface_solver='cg',
@@ -2075,6 +2241,12 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             matvec_threads=_matvec_threads,
             matvec_dtype=_matvec_dtype,
             strict_dtype_rtol=_strict_dtype_rtol,
+            island_idx=_island_idx,
+            interface_coarse_geneo_k=_cg_settings.geneo_k,
+            interface_coarse_geneo_tol=_cg_settings.geneo_tol,
+            interface_coarse_eps_rank=_cg_settings.eps_rank,
+            interface_coarse_max_cols=_cg_settings.max_cols,
+            interface_coarse_max_bytes=_cg_settings.max_bytes,
         )
 
         # Synthetic stats object (matching SparseFactorAdapter fields used below)
@@ -2082,7 +2254,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             backend = 'cg'
             backend_info = (
                 f"CG/{_cg_solver.matvec_mode}/"
-                f"precond={_cg_solver.preconditioner}"
+                f"precond={_cg_solver.preconditioner_label}"
             )
             resolved_mode = 'cg'
             solve = _cg_solve_callable
@@ -2091,7 +2263,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
         if verbose:
             logger.info(
                 "Interface CG solver: mode=%s, precond=%s, rtol=%.2e, n=%d",
-                _matvec_mode, _preconditioner, _cg_rtol, len(interface_nodes),
+                _matvec_mode, _cg_solver.preconditioner_label, _cg_rtol, len(interface_nodes),
             )
 
     timings['factor_interface'] = _time.perf_counter() - t0
@@ -2328,6 +2500,125 @@ def _load_dc_context(
     return ctx
 
 
+def _warn_if_coarse_space_lost(
+    preconditioner: str,
+    matvec_mode: str,
+    want_tilewise: bool,
+    matvec_mode_setting: Any,
+    workers_attached: bool,
+) -> None:
+    """Finding 6 (round 2) / Finding 11: shared coarse-space-lost warning
+    for BOTH refactor paths (DC and TD) -- previously ~18 lines duplicated
+    verbatim in ``_refactor_dc_context`` and ``_refactor_transient_context``,
+    built on a false premise the round-1 fix baked in (see below).
+
+    Corrected semantics: warn ONLY when a two_level coarse space is
+    GENUINELY lost by this refactor -- NOT merely whenever the resolved
+    matvec mode isn't 'tilewise'.  The round-1 guard's premise ("the
+    two_level coarse-space preconditioner requires 'tilewise' matvec
+    mode") is false: ``preconditioner='two_level'`` works identically in
+    'assembled' mode -- ``_augment_with_coarse_space``'s
+    ``build_coarse_space`` call uses ``self._linear_op.matmat`` regardless
+    of matvec mode (in 'assembled' mode that matmat is the sparse
+    S_global matvec), and ``resolve_preconditioner()`` honours an EXPLICIT
+    'two_level' setting verbatim in both modes.  Only 'auto' is
+    mode-sensitive (it resolves to 'two_level' only for CG+tilewise, else
+    'block_jacobi' -- see ``resolve_preconditioner``'s docstring).
+
+    "Genuinely lost" is defined by comparing what the preconditioner
+    setting WOULD resolve to at the matvec mode this refactor's request
+    INTENDED (``want_tilewise`` -- the mode implied by interface_matvec_
+    mode/attachment BEFORE this refactor's actual re-gather outcome is
+    applied) against what it ACTUALLY resolves to at the matvec mode this
+    refactor ended up with.  If intent would have reached 'two_level' but
+    the actual outcome does not, that is a genuine regression from what
+    was requested -- warn.  This needs no historical solver-state
+    introspection (unreliable after a fresh ``load()`` -- the coarse
+    space, like the per-tile Schur blocks it derives from, is never
+    persisted, so ``ctx._cg_solver`` may be ``None`` at refactor time):
+
+      - explicit 'two_level' + matvec forced to 'assembled' (regather
+        failed): intended == actual == 'two_level' (explicit passthrough
+        in both modes) -- NOT lost, no warning.
+      - 'auto' + interface_matvec_mode explicitly 'tilewise' but workers
+        not attached (regather impossible): intended (at 'tilewise') ==
+        'two_level', actual (at 'assembled') == 'block_jacobi' -- LOST,
+        warn (this is the "workers-not-attached auto case" -- a genuine
+        loss).
+      - 'auto' + interface_matvec_mode explicitly 'assembled' (by design,
+        not by failure): intended == actual == 'assembled' both ways ==
+        'block_jacobi' -- nothing was ever going to be two_level here, no
+        warning.
+
+    Distinct from the sibling ``_degrade_preconditioner_if_no_tile_index_
+    maps`` guard below (a different failure mode; fires separately).
+
+    Args:
+        preconditioner: The (already-normalized, per Finding 1) resolved
+            ``interface_preconditioner`` setting.
+        matvec_mode: The matvec mode this refactor ACTUALLY resolved to
+            ('assembled' or 'tilewise').
+        want_tilewise: Whether tilewise was INTENDED for this refactor
+            (the caller's ``_want_tilewise`` local, reflecting the
+            interface_matvec_mode setting/attachment state, independent of
+            whether the re-gather actually succeeded).
+        matvec_mode_setting: The raw ``interface_matvec_mode`` setting
+            (for the log message only).
+        workers_attached: Whether workers were attached (for the log
+            message only).
+    """
+    from .interface_iterative import resolve_preconditioner
+    _intended_mode = 'tilewise' if want_tilewise else matvec_mode
+    _would_have_resolved = resolve_preconditioner(preconditioner, 'cg', _intended_mode)
+    _actually_resolved = resolve_preconditioner(preconditioner, 'cg', matvec_mode)
+    if _would_have_resolved == 'two_level' and _actually_resolved != 'two_level':
+        logger.warning(
+            "Refactor: the two_level coarse-space preconditioner "
+            "(interface_preconditioner=%r) would resolve to 'two_level' "
+            "had the requested matvec mode been honoured, but this "
+            "refactor resolved to %r matvec mode instead "
+            "(interface_matvec_mode setting=%r, workers_attached=%s -- "
+            "tile Schur blocks could not be re-gathered). The coarse "
+            "space is LOST for this refactor: CG falls back to %r. To "
+            "restore two_level, attach workers to ctx.model and call "
+            "factor() (not just refactor()) for a full re-factorization.",
+            preconditioner, matvec_mode, matvec_mode_setting, workers_attached,
+            _actually_resolved,
+        )
+
+
+def _degrade_preconditioner_if_no_tile_index_maps(
+    preconditioner: str, tile_index_maps: Optional[Dict[Any, np.ndarray]],
+) -> str:
+    """Finding 11: shared degrade-to-'jacobi' guard for BOTH refactor paths
+    (previously duplicated verbatim in ``_refactor_dc_context`` and
+    ``_refactor_transient_context``).
+
+    'block_jacobi'/'two_level'/'auto' preconditioners need tile_index_maps
+    for ownership assignment even in 'assembled' matvec mode; without it
+    (e.g. a pre-B2 checkpoint), CG would otherwise silently run
+    unpreconditioned (M=None). 'auto' is included because resolve_
+    preconditioner('auto', ...) resolves to 'block_jacobi' whenever
+    matvec_mode is forced to 'assembled' -- exactly the case this guard's
+    `not tile_index_maps` condition selects for.
+
+    Returns the (possibly-degraded) preconditioner setting.
+    """
+    if preconditioner in ('block_jacobi', 'two_level', 'auto') and not tile_index_maps:
+        logger.warning(
+            "Refactor: tile_index_maps unavailable on ctx.topology (missing "
+            "or predates this field), so the %r preconditioner "
+            "cannot be rebuilt after load()+refactor(). Degrading to "
+            "'jacobi' (diagonal) for this refactor -- expect MORE CG "
+            "iterations per solve than block_jacobi/two_level would need. "
+            "Call factor() (not just refactor()) to restore full "
+            "block_jacobi/two_level support.",
+            preconditioner,
+        )
+        return 'jacobi'
+    return preconditioner
+
+
 def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -> None:
     """Rebuild coordinator solve callable from saved S_global (DC).
 
@@ -2511,9 +2802,26 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
         _tile_index_maps = _topology_tile_index_maps
         _S_extra: Optional[sp.spmatrix] = None
         _matvec_mode = 'assembled'
+        # Stage 3: hoisted OUT of the `if _want_tilewise` branch below --
+        # island indices (for 'two_level' coarse-space row zeroing) are
+        # needed regardless of which matvec mode this refactor ends up
+        # resolving to (assembled or tilewise). S1: use this context's own
+        # DC-mode island set, NOT topology.removed_interface_nodes (that
+        # shared field is set once, at whichever mode -- DC or TD -- first
+        # created the topology, and is NOT updated afterward; DC and TD
+        # island sets genuinely differ when package_cap_edges exist).
+        # topology.island_nodes is the DC-mode cache, kept mode-correct
+        # independently of factor order (see _factor_dc_context).
+        _interface_node_to_idx = ctx.interface_node_to_idx
+        _island_nodes = (
+            getattr(ctx.topology, 'island_nodes', None)
+            if ctx.topology is not None else None
+        )
+        if _island_nodes is None:
+            _island_nodes = ctx._removed_interface_nodes or set()
+        _island_idx = _island_idx_array(_island_nodes, _interface_node_to_idx)
 
         if _want_tilewise and _workers_attached:
-            _interface_node_to_idx = ctx.interface_node_to_idx
             _fresh_port_count: Dict[Any, int] = {}
             (
                 _tile_schur_complements, _fresh_tile_index_maps, _fresh_kept_pos, _,
@@ -2535,19 +2843,6 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
             # comparing against a stale (or empty) port count after a
             # refactor()-only session.
             ctx._tile_port_count = _fresh_port_count
-            # S1: use this context's own DC-mode island set, NOT
-            # topology.removed_interface_nodes (that shared field is set
-            # once, at whichever mode -- DC or TD -- first created the
-            # topology, and is NOT updated afterward; DC and TD island sets
-            # genuinely differ when package_cap_edges exist). topology.
-            # island_nodes is the DC-mode cache, kept mode-correct
-            # independently of factor order (see _factor_dc_context).
-            _island_nodes = (
-                getattr(ctx.topology, 'island_nodes', None)
-                if ctx.topology is not None else None
-            )
-            if _island_nodes is None:
-                _island_nodes = ctx._removed_interface_nodes or set()
             _S_extra = _build_s_extra_direct(
                 interface_node_to_idx=_interface_node_to_idx,
                 n_iface=len(_interface_node_to_idx),
@@ -2565,27 +2860,24 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
                 "re-factorization to restore tilewise."
             )
 
-        # Finding 1: tile_index_maps is required for block_jacobi ownership
-        # assignment even in 'assembled' matvec mode (InterfaceCGSolver uses
-        # it to assign each interface node to an owning tile, then extracts
-        # that tile's principal submatrix from the assembled S_global).
-        # ctx.topology is restored from the saved checkpoint by load(), so
-        # tile_index_maps is normally available here -- pass it through so
-        # the preconditioner rebuilt on refactor() actually matches the one
-        # built during the original factor().  If topology genuinely lacks
-        # it (e.g. a pre-B2 checkpoint), degrade gracefully to the diagonal
-        # 'jacobi' preconditioner rather than silently building none at all.
-        if _preconditioner == 'block_jacobi' and not _tile_index_maps:
-            logger.warning(
-                "Refactor: tile_index_maps unavailable on ctx.topology (missing "
-                "or predates this field), so the 'block_jacobi' preconditioner "
-                "cannot be rebuilt after load()+refactor(). Degrading to "
-                "'jacobi' (diagonal) for this refactor -- expect MORE CG "
-                "iterations per solve than block_jacobi would need. Call "
-                "factor() (not just refactor()) to restore full block_jacobi "
-                "support."
-            )
-            _preconditioner = 'jacobi'
+        # Finding 6 (round 2) / Finding 11: shared helper -- see its
+        # docstring for the corrected "genuinely lost" semantics (the
+        # round-1 guard here fired whenever matvec_mode != 'tilewise',
+        # which is a false premise: explicit 'two_level' rebuilds the
+        # coarse space fine in 'assembled' mode too).
+        _warn_if_coarse_space_lost(
+            _preconditioner, _matvec_mode, _want_tilewise,
+            _matvec_mode_setting, _workers_attached,
+        )
+
+        # Finding 1 (round 1) / Finding 11: shared helper -- tile_index_maps
+        # is required for block_jacobi/two_level ownership assignment even
+        # in 'assembled' matvec mode; degrade to 'jacobi' if unavailable
+        # (e.g. a pre-B2 checkpoint) rather than silently building no
+        # preconditioner at all.
+        _preconditioner = _degrade_preconditioner_if_no_tile_index_maps(
+            _preconditioner, _tile_index_maps,
+        )
         _cg_stats: Dict[str, Any] = {}
         _solve_callable, _resolved_backend, cg_solver = build_interface_solver(
             S_global=ctx._S_global,
@@ -2606,6 +2898,12 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
             matvec_threads=_matvec_threads,
             matvec_dtype=_matvec_dtype,
             strict_dtype_rtol=_strict_dtype_rtol,
+            island_idx=_island_idx,
+            interface_coarse_geneo_k=_cg_settings.geneo_k,
+            interface_coarse_geneo_tol=_cg_settings.geneo_tol,
+            interface_coarse_eps_rank=_cg_settings.eps_rank,
+            interface_coarse_max_cols=_cg_settings.max_cols,
+            interface_coarse_max_bytes=_cg_settings.max_bytes,
         )
         ctx._interface_lu = _solve_callable
         ctx._cg_solver = cg_solver
@@ -3065,6 +3363,10 @@ def _factor_transient_context(
                     C_coeff=C_coeff,
                 )
 
+        # Stage 3: island indices for the 'two_level' preconditioner's
+        # coarse-space row zeroing -- independent of matvec_mode.
+        _island_idx_td = _island_idx_array(island_nodes, interface_node_to_idx)
+
         _cg_solve_callable_td, _cg_resolved_mode_td, _cg_solver_td = build_interface_solver(
             S_global=S_global,
             interface_solver='cg',
@@ -3083,13 +3385,19 @@ def _factor_transient_context(
             matvec_threads=_matvec_threads_td,
             matvec_dtype=_matvec_dtype_td,
             strict_dtype_rtol=_strict_dtype_rtol_td,
+            island_idx=_island_idx_td,
+            interface_coarse_geneo_k=_cg_settings_td.geneo_k,
+            interface_coarse_geneo_tol=_cg_settings_td.geneo_tol,
+            interface_coarse_eps_rank=_cg_settings_td.eps_rank,
+            interface_coarse_max_cols=_cg_settings_td.max_cols,
+            interface_coarse_max_bytes=_cg_settings_td.max_bytes,
         )
 
         class _CGSolveResultTD:
             backend = 'cg'
             backend_info = (
                 f"CG/{_cg_solver_td.matvec_mode}/"
-                f"precond={_cg_solver_td.preconditioner}"
+                f"precond={_cg_solver_td.preconditioner_label}"
             )
             resolved_mode = 'cg'
             solve = _cg_solve_callable_td
@@ -3098,7 +3406,7 @@ def _factor_transient_context(
         if verbose:
             logger.info(
                 "Transient interface CG solver: mode=%s, precond=%s, rtol=%.2e, n=%d",
-                _matvec_mode_td, _preconditioner_td, _cg_rtol_td, len(interface_nodes),
+                _matvec_mode_td, _cg_solver_td.preconditioner_label, _cg_rtol_td, len(interface_nodes),
             )
 
     timings['factor_transient_interface'] = _time.perf_counter() - t0
@@ -3478,9 +3786,21 @@ def _refactor_transient_context(
         _tile_index_maps = _topology_tile_index_maps
         _S_extra: Optional[sp.spmatrix] = None
         _matvec_mode = 'assembled'
+        # Stage 3: hoisted OUT of the `if _want_tilewise` branch below (see
+        # the matching comment in _refactor_dc_context) -- island indices
+        # are needed regardless of resolved matvec mode. S1: use this
+        # context's own TD-mode island set (topology.island_nodes_td), not
+        # the shared first-mode-wins topology.removed_interface_nodes.
+        _interface_node_to_idx = ctx.interface_node_to_idx
+        _island_nodes = (
+            getattr(ctx.topology, 'island_nodes_td', None)
+            if ctx.topology is not None else None
+        )
+        if _island_nodes is None:
+            _island_nodes = ctx._removed_interface_nodes or set()
+        _island_idx = _island_idx_array(_island_nodes, _interface_node_to_idx)
 
         if _want_tilewise and _workers_attached:
-            _interface_node_to_idx = ctx.interface_node_to_idx
             _fresh_port_count: Dict[Any, int] = {}
             (
                 _tile_schur_complements, _fresh_tile_index_maps, _fresh_kept_pos, _,
@@ -3497,17 +3817,6 @@ def _refactor_transient_context(
             ctx._tile_kept_port_pos = _fresh_kept_pos
             # S2/S13: parity with _tile_kept_port_pos.
             ctx._tile_port_count = _fresh_port_count
-            # S1: use this context's own TD-mode island set (topology.
-            # island_nodes_td), not the shared first-mode-wins
-            # topology.removed_interface_nodes -- see the matching comment
-            # in _refactor_dc_context. DC and TD island sets genuinely
-            # differ when package_cap_edges exist.
-            _island_nodes = (
-                getattr(ctx.topology, 'island_nodes_td', None)
-                if ctx.topology is not None else None
-            )
-            if _island_nodes is None:
-                _island_nodes = ctx._removed_interface_nodes or set()
             _S_extra = _build_s_extra_direct(
                 interface_node_to_idx=_interface_node_to_idx,
                 n_iface=len(_interface_node_to_idx),
@@ -3527,22 +3836,18 @@ def _refactor_transient_context(
                 "re-factorization to restore tilewise."
             )
 
-        # Finding 1: see the matching comment in _refactor_dc_context -- the
-        # 'block_jacobi' preconditioner needs tile_index_maps for ownership
-        # assignment even in 'assembled' matvec mode; without it, CG silently
-        # runs unpreconditioned.  ctx.topology is restored by load(), so it
-        # is normally available; degrade gracefully with a WARNING if not.
-        if _preconditioner == 'block_jacobi' and not _tile_index_maps:
-            logger.warning(
-                "Refactor: tile_index_maps unavailable on ctx.topology (missing "
-                "or predates this field), so the 'block_jacobi' preconditioner "
-                "cannot be rebuilt after load()+refactor(). Degrading to "
-                "'jacobi' (diagonal) for this refactor -- expect MORE CG "
-                "iterations per solve than block_jacobi would need. Call "
-                "factor() (not just refactor()) to restore full block_jacobi "
-                "support."
-            )
-            _preconditioner = 'jacobi'
+        # Finding 6 (round 2) / Finding 11: shared helper -- see the
+        # matching comment/docstring in _refactor_dc_context.
+        _warn_if_coarse_space_lost(
+            _preconditioner, _matvec_mode, _want_tilewise,
+            _matvec_mode_setting, _workers_attached,
+        )
+
+        # Finding 1 (round 1) / Finding 11: shared helper -- see the
+        # matching comment in _refactor_dc_context.
+        _preconditioner = _degrade_preconditioner_if_no_tile_index_maps(
+            _preconditioner, _tile_index_maps,
+        )
         _cg_stats: Dict[str, Any] = {}
         _solve_callable, _resolved_backend, cg_solver = build_interface_solver(
             S_global=ctx._S_global,
@@ -3551,6 +3856,12 @@ def _refactor_transient_context(
             tile_schur_complements=_tile_schur_complements,
             tile_index_maps=_tile_index_maps,
             S_extra=_S_extra,
+            island_idx=_island_idx,
+            interface_coarse_geneo_k=_cg_settings.geneo_k,
+            interface_coarse_geneo_tol=_cg_settings.geneo_tol,
+            interface_coarse_eps_rank=_cg_settings.eps_rank,
+            interface_coarse_max_cols=_cg_settings.max_cols,
+            interface_coarse_max_bytes=_cg_settings.max_bytes,
             preconditioner=_preconditioner,
             rtol=_cg_rtol,
             atol=_cg_atol,

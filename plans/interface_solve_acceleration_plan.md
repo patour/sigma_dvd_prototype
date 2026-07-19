@@ -114,7 +114,26 @@ Gates (here and every stage): `pytest tests/distributed -m unit`; equivalence su
 Tests: threaded-vs-serial ≤1e-13 rel (two-tile + randomized ~30-tile synthetic), thread-count invariance (1/2/8), matmat vs column matvecs, threaded BJ vs serial, auto-mode resolution, refactor-rebuilds-tilewise, drop-s-global-blocks-save.
 **Gate:** matvec ≤60 ms at 190K on dev (≤1.2 × 12.5 GB / measured STREAM BW); solve/step ≥5× vs Stage 0 CG baseline; equivalence exact at pinned 1e-12.
 
-## Stage 3 — Coarse-space two-level preconditioner
+## Stage 3 — Coarse-space two-level preconditioner — **COMPLETE (2026-07-19; docs §7.9)**
+
+> Landed with the full battery (workflow + 2×/code-review xhigh --fix with 30 findings fixed +
+> Opus CLEAN-FOR-COMMIT + negative-tested regressions). **GATE PASSED at mi200k_v2**: cold DC
+> stagnation eliminated (118 iters / 30 s @1e-12 where §7.8's BJ stagnated; 70 iters @1e-8,
+> 147 nV), warm transient 23.6 iters/step @1e-8 (≤30), accuracy 253 nV ≤ 1 µV. Production
+> default is `interface_preconditioner='auto'` → two_level for CG+tilewise. Measured surprise:
+> the 8 GB BJ budget downgrades the base to diagonal jacobi at this regime (est 10.6 GB,
+> max_block 13,834) so the default config is jacobi+PoU with GenEO skipped — and the 65-column
+> PoU space alone repairs the cold solve; warm gain vs no-coarse is 29.2→23.6. **The 16 GB-budget
+> variant `two_level(bj+geneo k=61)` STAGNATES cold (rel-res 9.7e-2 @ 4000 iters, both 1e-12 and
+> 1e-8)**: the additive coarse term cannot remove M_BJ⁻¹'s ~1e6 amplification along the broad
+> near-null ownership-block cluster — so jacobi+PoU is the *correct* split-regime design, not a
+> workaround, and the byte-budget guard lands on it automatically (both guard and pathology are
+> driven by giant weakly-grounded blocks). GenEO-lite stays implemented/tested and bj-base
+> two_level works at small regimes; A-DEF2 projection is the recorded contingency if a bj-base
+> ever needs rescuing. BJ-apply perf item closed (701→~50–120 ms, dense-inverse GEMV). **New dominant lever exposed**: transient prepare still assembles S_global (489 s /
+> 93 GB) and runs the 1-thread assembled matvec (~1.4 s/iter → 31 s/step); the same iterations
+> on the DC-style tilewise path would be ~6 s/step → TD never-assemble + tilewise is the next
+> work package (ahead of Stage 4 GPU on priority).
 
 New `src/distributed/interface_coarse.py`.
 

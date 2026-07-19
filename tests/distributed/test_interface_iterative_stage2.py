@@ -221,6 +221,53 @@ class TestThreadedBlockJacobi:
             solver_serial.close()
             solver_threaded.close()
 
+    def test_threaded_bj_matches_serial_ill_conditioned_block(self):
+        """Finding 9 (PLAUSIBLE) extension: on an ill-conditioned block
+        (cond ~1e10 -- the module docstring's own motivating regime), the
+        materialized dense inverse Sinv must be symmetrized in place, and
+        threaded vs serial apply must still agree tightly. A non-symmetric
+        Sinv would weaken PCG's SPD-preconditioner assumption; this
+        asserts both the stored block's exact symmetry and apply-output
+        equivalence."""
+        from distributed.interface_iterative import InterfaceCGSolver
+
+        rng = np.random.default_rng(41)
+        n = 50
+        V, _ = np.linalg.qr(rng.standard_normal((n, n)))
+        # cond ~1e10: eigenvalues log-spaced from 1e-5 to 1e5.
+        w = np.logspace(-5, 5, n)
+        S_i = (V * w) @ V.T
+        S_i = 0.5 * (S_i + S_i.T)
+        tile_schur = {0: S_i}
+        tile_idx = {0: np.arange(n, dtype=np.int32)}
+
+        solver_serial = InterfaceCGSolver(
+            n_interface=n, matvec_mode='tilewise',
+            tile_schur_complements={0: S_i.copy()}, tile_index_maps=tile_idx,
+            preconditioner='block_jacobi', matvec_threads=1,
+        )
+        solver_threaded = InterfaceCGSolver(
+            n_interface=n, matvec_mode='tilewise',
+            tile_schur_complements={0: S_i.copy()}, tile_index_maps=tile_idx,
+            preconditioner='block_jacobi', matvec_threads=8,
+        )
+        try:
+            # The stored materialized inverse must be EXACTLY symmetric
+            # (0.5*(Sinv+Sinv.T) is bit-exact symmetric by construction).
+            Sinv = solver_serial._bj_inv_blocks[0]
+            np.testing.assert_array_equal(Sinv, Sinv.T)
+
+            rng2 = np.random.default_rng(42)
+            x = rng2.standard_normal(n)
+            z_serial = solver_serial._M.matvec(x)
+            z_threaded = solver_threaded._M.matvec(x)
+            np.testing.assert_allclose(
+                z_serial, z_threaded, rtol=1e-12, atol=1e-12,
+            )
+        finally:
+            solver_serial.close()
+            solver_threaded.close()
+
 
 # ---------------------------------------------------------------------------
 # SPD-safe fallback (item 7)
@@ -897,6 +944,506 @@ class TestRefactorRebuildsTilewise:
             'no workers are attached' in rec.message for rec in caplog.records
         )
 
+    def test_refactor_auto_preconditioner_degrades_to_jacobi_not_unpreconditioned(
+        self, tmp_path, caplog,
+    ):
+        """Regression (spec-compliance review round 1, finding on
+        result_factorization.py:2650/3623): Stage 3 flipped the
+        ``interface_preconditioner`` DEFAULT from the literal
+        ``'block_jacobi'`` to ``'auto'``, but the degrade-to-jacobi guard in
+        both refactor paths keyed off the literal ``'block_jacobi'``/
+        ``'two_level'`` names only. With the (now-default) 'auto' setting
+        and ``tile_index_maps`` genuinely unavailable on ``ctx.topology``
+        (the pre-B2-checkpoint case the guard's own comment names), the
+        guard did NOT fire; 'auto' then resolved to 'block_jacobi' inside
+        ``build_interface_solver``, and ``_build_block_jacobi()`` returned
+        None (no ``tile_index_maps``, no ``tile_schur_complements``) --
+        silently running UNPRECONDITIONED CG instead of the intended
+        diagonal 'jacobi' fallback.
+
+        Note: merely detaching workers (as the sibling test above does) is
+        NOT sufficient to reach this branch -- ``ctx.topology.
+        tile_index_maps`` survives save()/load() independently of worker
+        attachment, so 'block_jacobi'/'two_level' still build a WORKING
+        preconditioner from ``S_global`` + the restored ``tile_index_maps``
+        in that case (this is intended: see ``_build_block_jacobi``'s
+        docstring path 1). This test additionally clears
+        ``ctx.topology.tile_index_maps`` after load() to simulate a
+        checkpoint that genuinely predates/lacks the field -- the guard's
+        actual `not _tile_index_maps` precondition.
+
+        This test leaves ``interface_preconditioner`` UNSET (exercising the
+        Stage 3 default) where the sibling test above sets it explicitly to
+        'block_jacobi'.
+        """
+        import logging
+        from distributed.result import DistributedSolverContext
+
+        model = self._build_model()
+        model.settings.update({
+            'interface_solver': 'cg',
+            'interface_matvec_mode': 'tilewise',
+            # Deliberately NOT setting interface_preconditioner: exercise
+            # the Stage 3 default ('auto'), not an explicit setting.
+            'interface_cg_rtol': 1e-12,
+        })
+        from distributed.solver import DistributedDDMSolver
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare()
+        # Finding 10 (round 2): try/finally around save/release/shutdown,
+        # matching the TD twin (test_refactor_transient_auto_
+        # preconditioner_degrades_to_jacobi, below) -- straight-line code
+        # here would leak the factored context (workers, thread pool) if
+        # ctx.save() ever raised.
+        try:
+            path = ctx.save(str(tmp_path / 'dc_ctx3.pkl'))
+        finally:
+            ctx.release()
+            model.shutdown()  # workers fully torn down
+
+        class _EmptyWorkersModel:
+            workers = []
+            settings = {
+                'interface_solver': 'cg',
+                'interface_matvec_mode': 'tilewise',
+                'interface_cg_rtol': 1e-12,
+            }
+            coordinator_solver_config = None
+
+        ctx2 = DistributedSolverContext.load(_EmptyWorkersModel(), path)
+        # Simulate a checkpoint that predates/lacks tile_index_maps (the
+        # guard's documented trigger case) -- with workers detached too, so
+        # the tilewise re-gather branch (which would otherwise refresh
+        # _tile_index_maps from live workers) cannot run.
+        ctx2.topology.tile_index_maps = {}
+        with caplog.at_level(logging.WARNING):
+            ctx2.refactor()
+        assert ctx2._cg_solver.matvec_mode == 'assembled'
+        # The degrade-to-jacobi guard must fire for the 'auto' default too.
+        assert ctx2._cg_solver.preconditioner == 'jacobi', (
+            f"expected the degrade-to-jacobi guard to fire for the 'auto' "
+            f"default preconditioner when tile_index_maps is unavailable; "
+            f"got preconditioner={ctx2._cg_solver.preconditioner!r} "
+            f"(pre-fix: stayed 'auto' -> resolved to 'block_jacobi' inside "
+            f"build_interface_solver -> _build_block_jacobi() returned "
+            f"None)"
+        )
+        # ...and it must be a WORKING preconditioner (M is not None), not
+        # silently-unpreconditioned CG.
+        assert ctx2._cg_solver._M is not None, (
+            "degrade-to-jacobi guard bypassed: CG is running with M=None "
+            "(unpreconditioned) instead of the diagonal 'jacobi' fallback"
+        )
+        assert any(
+            'jacobi' in rec.message.lower() for rec in caplog.records
+        )
+
+    def test_mixed_case_two_level_setting_still_hits_degrade_guard(
+        self, tmp_path, caplog,
+    ):
+        """Finding 1 (round 2) regression: ``interface_preconditioner=
+        'Two_Level'`` (mixed case -- a valid-but-sloppy YAML scalar that
+        ``resolve_preconditioner``'s own normalization already tolerates at
+        factor() time) must ALSO be recognized by the refactor degrade
+        guards in this module, which (pre-fix) compared the RAW settings
+        string against lowercase literals
+        (``_preconditioner in ('block_jacobi', 'two_level', 'auto')``).
+        Without normalizing at settings-READ time (Finding 1's fix, in
+        ``_read_interface_cg_settings``), the mixed-case string bypasses
+        that tile_index_maps-unavailable guard, silently building NO
+        preconditioner (M=None, unpreconditioned CG) instead of degrading
+        to 'jacobi' -- the exact silent regression the guard exists to
+        prevent, just reached via a case-variant spelling instead of
+        'auto'.
+        """
+        import logging
+        from distributed.result import DistributedSolverContext
+
+        model = self._build_model()
+        model.settings.update({
+            'interface_solver': 'cg',
+            'interface_matvec_mode': 'tilewise',
+            'interface_preconditioner': 'Two_Level',  # mixed case
+            'interface_cg_rtol': 1e-12,
+        })
+        from distributed.solver import DistributedDDMSolver
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare()
+        try:
+            path = ctx.save(str(tmp_path / 'dc_ctx_f1_mixed_case.pkl'))
+        finally:
+            ctx.release()
+            model.shutdown()  # workers fully torn down
+
+        class _EmptyWorkersModel:
+            workers = []
+            settings = {
+                'interface_solver': 'cg',
+                'interface_matvec_mode': 'tilewise',
+                'interface_preconditioner': 'Two_Level',
+                'interface_cg_rtol': 1e-12,
+            }
+            coordinator_solver_config = None
+
+        ctx2 = DistributedSolverContext.load(_EmptyWorkersModel(), path)
+        # Simulate a checkpoint that predates/lacks tile_index_maps, with
+        # workers detached so the tilewise re-gather branch cannot refresh
+        # it from live workers -- the degrade guard's documented trigger.
+        ctx2.topology.tile_index_maps = {}
+        with caplog.at_level(logging.WARNING):
+            ctx2.refactor()
+        assert ctx2._cg_solver.matvec_mode == 'assembled'
+        assert ctx2._cg_solver.preconditioner == 'jacobi', (
+            f"expected the mixed-case 'Two_Level' setting to still hit the "
+            f"degrade-to-jacobi guard; got preconditioner="
+            f"{ctx2._cg_solver.preconditioner!r} (pre-fix: the raw "
+            f"'Two_Level' string bypassed the lowercase-literal guard, "
+            f"leaving CG unpreconditioned)"
+        )
+        assert ctx2._cg_solver._M is not None, (
+            "degrade-to-jacobi guard bypassed: CG is running with M=None "
+            "(unpreconditioned) for the mixed-case setting"
+        )
+        assert any(
+            'jacobi' in rec.message.lower() for rec in caplog.records
+        )
+
+    def test_refactor_transient_auto_preconditioner_degrades_to_jacobi(
+        self, tmp_path, caplog,
+    ):
+        """Transient twin of
+        ``test_refactor_auto_preconditioner_degrades_to_jacobi_not_
+        unpreconditioned`` -- the reviewer finding flagged BOTH refactor
+        guards (result_factorization.py:2650 DC and :3623 TD) as sharing
+        the identical bypass, since they are separate copy-pasted `if`
+        statements rather than shared code. Covers the TD-specific guard
+        independently so a future edit that fixes one copy but not the
+        other is caught.
+        """
+        import logging
+        from distributed.result import DistributedTransientContext
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        model.settings.update({
+            'interface_solver': 'cg',
+            'interface_matvec_mode': 'tilewise',
+            # Deliberately NOT setting interface_preconditioner: exercise
+            # the Stage 3 default ('auto'), not an explicit setting.
+            'interface_cg_rtol': 1e-12,
+        })
+        from distributed.solver import DistributedDDMSolver
+        solver = DistributedDDMSolver(model)
+        dc_ctx = solver.prepare()
+        trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+        try:
+            td_path = trans_ctx.save(str(tmp_path / 'td_ctx_auto.pkl'))
+        finally:
+            trans_ctx.release()
+            dc_ctx.release()
+            model.shutdown()  # workers fully torn down
+
+        class _EmptyWorkersModel:
+            workers = []
+            settings = {
+                'interface_solver': 'cg',
+                'interface_matvec_mode': 'tilewise',
+                'interface_cg_rtol': 1e-12,
+            }
+            coordinator_solver_config = None
+
+        trans_ctx2 = DistributedTransientContext.load(_EmptyWorkersModel(), td_path)
+        # Simulate a checkpoint that predates/lacks tile_index_maps, with
+        # workers detached so the tilewise re-gather branch cannot refresh
+        # it from live workers -- see the DC sibling test's docstring.
+        trans_ctx2.topology.tile_index_maps = {}
+        with caplog.at_level(logging.WARNING):
+            trans_ctx2.refactor()
+        assert trans_ctx2._cg_solver.matvec_mode == 'assembled'
+        assert trans_ctx2._cg_solver.preconditioner == 'jacobi', (
+            f"expected the degrade-to-jacobi guard to fire for the 'auto' "
+            f"default preconditioner (TD refactor path) when "
+            f"tile_index_maps is unavailable; got "
+            f"preconditioner={trans_ctx2._cg_solver.preconditioner!r}"
+        )
+        assert trans_ctx2._cg_solver._M is not None, (
+            "TD refactor: degrade-to-jacobi guard bypassed -- CG is "
+            "running with M=None (unpreconditioned)"
+        )
+        assert any(
+            'jacobi' in rec.message.lower() for rec in caplog.records
+        )
+
+
+class TestFinding4RefactorTwoLevelLossWarning:
+    """Finding 4 (round 1) / Finding 6 (round 2) regression: refactor() can
+    silently lose the two_level coarse-space correction with NO warning
+    naming that fact -- distinct from the sibling ``tile_index_maps``-
+    unavailable guard (which fires on a DIFFERENT failure mode and is
+    already tested above). Covers BOTH refactor paths (DC and TD), per the
+    finding's guidance.
+
+    Unlike the ``TestRefactorRebuildsTilewise`` siblings above, the first
+    two (warning) fixtures below deliberately do NOT clear
+    ``ctx.topology.tile_index_maps`` after load() -- tile_index_maps stays
+    available, so the resolved preconditioner is a WORKING 'block_jacobi'
+    (not a 'jacobi' downgrade); the only symptom is the silently-lost
+    coarse space this finding's fix makes loud.
+
+    Finding 6 (round 2) corrected the warning's semantics: the round-1
+    guard fired whenever the resolved matvec mode was not 'tilewise',
+    which is a FALSE premise -- an explicit 'two_level' preconditioner
+    setting rebuilds a working coarse space in 'assembled' matvec mode
+    too (``_augment_with_coarse_space``'s ``build_coarse_space`` call uses
+    ``self._linear_op.matmat`` regardless of matvec mode). The corrected
+    condition compares what the preconditioner setting WOULD resolve to at
+    the INTENDED matvec mode against what it ACTUALLY resolves to at the
+    matvec mode this refactor ended up with -- warn only when that is a
+    genuine regression. The two "no-warning" tests below cover the cases
+    the round-1 guard got wrong (spurious firing); the two "warns" tests
+    above cover the genuine-loss case (the workers-not-attached 'auto'
+    case still warns -- unchanged from round 1).
+    """
+
+    def test_dc_refactor_without_workers_warns_coarse_space_lost(
+        self, tmp_path, caplog,
+    ):
+        import logging
+        from distributed.result import DistributedSolverContext
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        model.settings.update({
+            'interface_solver': 'cg',
+            'interface_matvec_mode': 'tilewise',
+            # Deliberately NOT setting interface_preconditioner: exercise
+            # the Stage 3 default ('auto'), which resolves to 'two_level'
+            # while workers are attached (the original factor() below).
+            'interface_cg_rtol': 1e-12,
+        })
+        from distributed.solver import DistributedDDMSolver
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare()
+        assert ctx._cg_solver.preconditioner == 'two_level', (
+            "fixture must resolve to two_level under the original factor() "
+            "for this test (workers attached, tilewise matvec) to be "
+            "meaningful"
+        )
+        # Finding 10 (round 2): try/finally around save/release/shutdown,
+        # matching the TD twin (test_td_refactor_without_workers_warns_
+        # coarse_space_lost, below).
+        try:
+            path = ctx.save(str(tmp_path / 'dc_ctx_f4.pkl'))
+        finally:
+            ctx.release()
+            model.shutdown()  # workers fully torn down
+
+        class _EmptyWorkersModel:
+            workers = []
+            settings = {
+                'interface_solver': 'cg',
+                'interface_matvec_mode': 'tilewise',
+                'interface_cg_rtol': 1e-12,
+            }
+            coordinator_solver_config = None
+
+        ctx2 = DistributedSolverContext.load(_EmptyWorkersModel(), path)
+        # tile_index_maps is NOT cleared -- it survives save()/load()
+        # independently of worker attachment, so block_jacobi builds a
+        # WORKING preconditioner; only the coarse space is silently lost.
+        with caplog.at_level(logging.WARNING):
+            ctx2.refactor()
+        assert ctx2._cg_solver.matvec_mode == 'assembled'
+        assert ctx2._cg_solver.preconditioner == 'block_jacobi', (
+            f"expected a working block_jacobi base (tile_index_maps IS "
+            f"available), got {ctx2._cg_solver.preconditioner!r}"
+        )
+        assert any(
+            'two_level' in rec.message.lower()
+            and 'coarse space is lost' in rec.message.lower()
+            for rec in caplog.records
+        ), (
+            "expected a WARNING naming the silently-lost two_level coarse "
+            f"space; got records: {[r.message for r in caplog.records]}"
+        )
+
+    def test_td_refactor_without_workers_warns_coarse_space_lost(
+        self, tmp_path, caplog,
+    ):
+        import logging
+        from distributed.result import DistributedTransientContext
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        model.settings.update({
+            'interface_solver': 'cg',
+            'interface_matvec_mode': 'tilewise',
+            'interface_cg_rtol': 1e-12,
+        })
+        from distributed.solver import DistributedDDMSolver
+        solver = DistributedDDMSolver(model)
+        dc_ctx = solver.prepare()
+        trans_ctx = solver.prepare_transient(dt=1e-10, method='be')
+        assert trans_ctx._cg_solver.preconditioner == 'two_level'
+        try:
+            td_path = trans_ctx.save(str(tmp_path / 'td_ctx_f4.pkl'))
+        finally:
+            trans_ctx.release()
+            dc_ctx.release()
+            model.shutdown()
+
+        class _EmptyWorkersModel:
+            workers = []
+            settings = {
+                'interface_solver': 'cg',
+                'interface_matvec_mode': 'tilewise',
+                'interface_cg_rtol': 1e-12,
+            }
+            coordinator_solver_config = None
+
+        trans_ctx2 = DistributedTransientContext.load(_EmptyWorkersModel(), td_path)
+        with caplog.at_level(logging.WARNING):
+            trans_ctx2.refactor()
+        assert trans_ctx2._cg_solver.matvec_mode == 'assembled'
+        assert trans_ctx2._cg_solver.preconditioner == 'block_jacobi'
+        assert any(
+            'two_level' in rec.message.lower()
+            and 'coarse space is lost' in rec.message.lower()
+            for rec in caplog.records
+        ), (
+            "expected a WARNING naming the silently-lost two_level coarse "
+            f"space (TD refactor path); got records: "
+            f"{[r.message for r in caplog.records]}"
+        )
+
+    def test_explicit_two_level_with_assembled_matvec_rebuilds_no_warning(
+        self, tmp_path, caplog,
+    ):
+        """Finding 6 (round 2) no-warning case: an EXPLICIT
+        interface_preconditioner='two_level' setting with
+        interface_matvec_mode='assembled' rebuilds a WORKING coarse space
+        on refactor() too -- preconditioner='two_level' does not require
+        'tilewise' matvec (_augment_with_coarse_space's build_coarse_space
+        call uses self._linear_op.matmat regardless of mode, and
+        resolve_preconditioner() honours an explicit 'two_level' setting
+        verbatim in both modes). No workers need be attached for this
+        (matvec_mode is explicitly 'assembled', never auto-resolved away
+        from 'tilewise'), so nothing is EVER lost here -- must NOT emit the
+        coarse-space-lost warning the round-1 guard spuriously fired here.
+        """
+        import logging
+        from distributed.result import DistributedSolverContext
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        model.settings.update({
+            'interface_solver': 'cg',
+            'interface_matvec_mode': 'assembled',
+            'interface_preconditioner': 'two_level',
+            'interface_cg_rtol': 1e-12,
+        })
+        from distributed.solver import DistributedDDMSolver
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare()
+        assert ctx._cg_solver.preconditioner == 'two_level', (
+            "fixture must resolve to two_level under the original factor() "
+            "(explicit setting, assembled matvec) for this test to be "
+            "meaningful"
+        )
+        try:
+            path = ctx.save(str(tmp_path / 'dc_ctx_f6_no_warn1.pkl'))
+        finally:
+            ctx.release()
+            model.shutdown()  # workers fully torn down; irrelevant here --
+            # matvec_mode is explicitly 'assembled', never auto-resolved.
+
+        class _EmptyWorkersModel:
+            workers = []
+            settings = {
+                'interface_solver': 'cg',
+                'interface_matvec_mode': 'assembled',
+                'interface_preconditioner': 'two_level',
+                'interface_cg_rtol': 1e-12,
+            }
+            coordinator_solver_config = None
+
+        ctx2 = DistributedSolverContext.load(_EmptyWorkersModel(), path)
+        with caplog.at_level(logging.WARNING):
+            ctx2.refactor()
+        assert ctx2._cg_solver.matvec_mode == 'assembled'
+        assert ctx2._cg_solver.preconditioner == 'two_level', (
+            "explicit two_level must rebuild successfully in assembled "
+            f"matvec mode; got {ctx2._cg_solver.preconditioner!r}"
+        )
+        assert ctx2._cg_solver._coarse is not None
+        assert not any(
+            'coarse space is lost' in rec.message.lower()
+            for rec in caplog.records
+        ), (
+            "must NOT warn 'coarse space is lost' -- explicit two_level "
+            "rebuilds a working coarse space in assembled matvec mode too; "
+            f"got records: {[r.message for r in caplog.records]}"
+        )
+
+    def test_auto_preconditioner_with_explicit_assembled_matvec_no_warning(
+        self, tmp_path, caplog,
+    ):
+        """Finding 6 (round 2) no-warning case: the default 'auto'
+        preconditioner with an EXPLICITLY 'assembled' interface_matvec_mode
+        resolves to plain 'block_jacobi' at the ORIGINAL factor() already
+        (never 'two_level' to begin with, since matvec never resolves to
+        'tilewise' -- resolve_preconditioner('auto', 'cg', 'assembled') ==
+        'block_jacobi') -- refactor() resolves the SAME way. Nothing is
+        lost by this refactor (there was never a coarse space to lose), so
+        it must NOT warn -- the round-1 guard fired here spuriously
+        (matvec_mode != 'tilewise' was its whole condition).
+        """
+        import logging
+        from distributed.result import DistributedSolverContext
+
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        model.settings.update({
+            'interface_solver': 'cg',
+            'interface_matvec_mode': 'assembled',
+            # Deliberately NOT setting interface_preconditioner: exercise
+            # the Stage 3 'auto' default, which resolves to 'block_jacobi'
+            # here (matvec never resolves to 'tilewise').
+            'interface_cg_rtol': 1e-12,
+        })
+        from distributed.solver import DistributedDDMSolver
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare()
+        assert ctx._cg_solver.preconditioner == 'block_jacobi', (
+            "fixture must resolve to block_jacobi (not two_level) under "
+            "the original factor() for this test to be meaningful -- got "
+            f"{ctx._cg_solver.preconditioner!r}"
+        )
+        try:
+            path = ctx.save(str(tmp_path / 'dc_ctx_f6_no_warn2.pkl'))
+        finally:
+            ctx.release()
+            model.shutdown()
+
+        class _EmptyWorkersModel:
+            workers = []
+            settings = {
+                'interface_solver': 'cg',
+                'interface_matvec_mode': 'assembled',
+                'interface_cg_rtol': 1e-12,
+            }
+            coordinator_solver_config = None
+
+        ctx2 = DistributedSolverContext.load(_EmptyWorkersModel(), path)
+        with caplog.at_level(logging.WARNING):
+            ctx2.refactor()
+        assert ctx2._cg_solver.matvec_mode == 'assembled'
+        assert ctx2._cg_solver.preconditioner == 'block_jacobi'
+        assert not any(
+            'coarse space is lost' in rec.message.lower()
+            for rec in caplog.records
+        ), (
+            "must NOT warn 'coarse space is lost' -- this refactor resolves "
+            "to the SAME block_jacobi the original factor() already used; "
+            "nothing was ever two_level here; got records: "
+            f"{[r.message for r in caplog.records]}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # interface_drop_s_global (item 3)
@@ -1533,6 +2080,41 @@ class TestS15ForcedCGEquivalenceMatrix:
                 },
                 1e-12, id="tilewise_fp64_never_assemble",
             ),
+            # Stage 3: explicit preconditioner='two_level' rows.
+            pytest.param(
+                "two_level_tilewise_with_s_global", None,
+                {
+                    'interface_solver': 'cg',
+                    'interface_matvec_mode': 'tilewise',
+                    'interface_preconditioner': 'two_level',
+                    'interface_cg_rtol': 1e-12,
+                    'interface_cg_atol': 1e-16,
+                },
+                1e-12, id="two_level_tilewise_with_s_global",
+            ),
+            pytest.param(
+                "two_level_assembled_with_s_global", None,
+                {
+                    'interface_solver': 'cg',
+                    'interface_matvec_mode': 'assembled',
+                    'interface_preconditioner': 'two_level',
+                    'interface_cg_rtol': 1e-12,
+                    'interface_cg_atol': 1e-16,
+                },
+                1e-12, id="two_level_assembled_with_s_global",
+            ),
+            pytest.param(
+                "two_level_tilewise_never_assemble", 'summaries',
+                {
+                    'interface_solver': 'cg',
+                    'interface_matvec_mode': 'tilewise',
+                    'interface_preconditioner': 'two_level',
+                    'interface_cg_rtol': 1e-12,
+                    'interface_cg_atol': 1e-16,
+                    'interface_drop_s_global': True,
+                },
+                1e-12, id="two_level_tilewise_never_assemble",
+            ),
         ],
     )
     def test_cg_matches_direct_at_pinned_rtol(
@@ -1578,6 +2160,122 @@ class TestS15ForcedCGEquivalenceMatrix:
                 f"a ~1e-7 relative residual floor; looser tolerance than "
                 f"the fp64 cases is expected and documented)"
             )
+
+
+# ---------------------------------------------------------------------------
+# code-quality review round 1: verbose "Interface CG solver" / "Transient
+# interface CG solver" INFO logs (result_factorization.py) must print the
+# preconditioner that was ACTUALLY built (cg_solver.preconditioner_label),
+# not the unresolved 'auto' setting.  Stage 3 flipped the default
+# ``interface_preconditioner`` to 'auto' but these two log lines still
+# formatted the raw pre-resolution setting -- with the default left
+# untouched, a --verbose run logged "precond=auto" even though
+# build_interface_solver's ONE resolution point (resolve_preconditioner())
+# had already turned it into 'two_level(...)' (or 'block_jacobi'/'jacobi' on
+# a degrade).  backend_info (used by solver_stats/tests elsewhere) was
+# already correct; only these two bare logger.info() calls were stale.
+# ---------------------------------------------------------------------------
+
+
+class TestInterfaceCgVerboseLogReportsResolvedPreconditioner:
+    """Regression: the verbose 'Interface CG solver' / 'Transient interface
+    CG solver' log lines must never print the literal unresolved 'auto'
+    setting -- they must match the resolved ``preconditioner_label`` (the
+    same value already reported in solver_stats['interface']['backend_info'])."""
+
+    @staticmethod
+    def _build_model(tmp_path=None):
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        if tmp_path is not None:
+            for tc in model.metadata.tile_configs:
+                tc.ckt_path = str(tmp_path / 'dummy.ckt')
+        model.settings.update({
+            'interface_solver': 'cg',
+            'interface_matvec_mode': 'tilewise',
+            # interface_preconditioner deliberately left UNSET so it takes
+            # the Stage 3 default of 'auto' -- the exact condition under
+            # which the pre-fix code printed the unresolved literal.
+            'interface_cg_rtol': 1e-10,
+        })
+        return model
+
+    def test_dc_factor_verbose_log_does_not_print_auto(self, caplog):
+        import logging
+        from distributed.solver import DistributedDDMSolver
+
+        model = self._build_model()
+        solver = DistributedDDMSolver(model)
+        try:
+            with caplog.at_level(
+                logging.INFO, logger='distributed.result_factorization',
+            ):
+                ctx = solver.prepare(verbose=True)
+            backend_info = ctx.timings['solver_stats']['interface']['backend_info']
+            ctx.release()
+        finally:
+            model.shutdown()
+
+        records = [
+            r for r in caplog.records
+            if r.message.startswith('Interface CG solver: mode=')
+        ]
+        assert records, (
+            f"expected an 'Interface CG solver: mode=...' INFO log; got "
+            f"{[r.message for r in caplog.records]}"
+        )
+        msg = records[0].message
+        assert 'precond=auto' not in msg, (
+            f"verbose DC factor log printed the unresolved 'auto' setting "
+            f"instead of the resolved preconditioner: {msg!r}"
+        )
+        # Must match the SAME resolved label already reported in
+        # backend_info (e.g. "CG/tilewise/precond=two_level(...)").
+        resolved_suffix = backend_info.split('precond=', 1)[1]
+        assert f"precond={resolved_suffix}" in msg, (
+            f"log line {msg!r} does not report the resolved preconditioner "
+            f"{resolved_suffix!r} from backend_info={backend_info!r}"
+        )
+
+    def test_transient_factor_verbose_log_does_not_print_auto(
+        self, caplog, tmp_path,
+    ):
+        import logging
+        from distributed.solver import DistributedDDMSolver
+
+        model = self._build_model(tmp_path)
+        solver = DistributedDDMSolver(model)
+        try:
+            with caplog.at_level(
+                logging.INFO, logger='distributed.result_factorization',
+            ):
+                trans_ctx = solver.prepare_transient(
+                    dt=1e-10, method='be', verbose=True,
+                )
+            backend_info = (
+                trans_ctx.timings['solver_stats']['interface']['backend_info']
+            )
+            trans_ctx.release()
+        finally:
+            model.shutdown()
+
+        records = [
+            r for r in caplog.records
+            if r.message.startswith('Transient interface CG solver: mode=')
+        ]
+        assert records, (
+            f"expected a 'Transient interface CG solver: mode=...' INFO "
+            f"log; got {[r.message for r in caplog.records]}"
+        )
+        msg = records[0].message
+        assert 'precond=auto' not in msg, (
+            f"verbose transient factor log printed the unresolved 'auto' "
+            f"setting instead of the resolved preconditioner: {msg!r}"
+        )
+        resolved_suffix = backend_info.split('precond=', 1)[1]
+        assert f"precond={resolved_suffix}" in msg, (
+            f"log line {msg!r} does not report the resolved preconditioner "
+            f"{resolved_suffix!r} from backend_info={backend_info!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2205,6 +2903,88 @@ class TestFinding6FactorClosesOutgoingCgSolver:
 
 
 # ---------------------------------------------------------------------------
+# Stage 3 code-review finding (double-append guard): the GenEO-lite
+# eigensolve used to run INSIDE the try block whose `except la.LinAlgError`
+# implements the cho_factor-failed SPD-safe fallback, AFTER the 'cho' entry
+# was already appended to _block_factors for this block. A LinAlgError
+# raised by GenEO's own dense eigh calls (interface_coarse.py's ARPACK-
+# ArpackNoConvergence/exception fallbacks) landed in that same except
+# branch, which appended a SECOND ('eigh') entry for the SAME
+# owned_global_arr -- breaking the block-ownership partition
+# _bj_perm/_bj_offsets rely on (double gather/apply, double-write scatter).
+# ---------------------------------------------------------------------------
+
+
+class TestGenEODoubleAppendGuard:
+
+    def test_geneo_linalgerror_does_not_double_append_block(self, monkeypatch):
+        """A LinAlgError raised inside the GenEO-lite eigensolve (reusing
+        the just-built cho factor) must give exactly ONE _block_factors
+        entry for the block ('cho', unchanged) -- not two. Also verifies
+        the resulting block-Jacobi apply is still numerically correct
+        (single, unambiguous inverse per node)."""
+        import scipy.linalg as la
+        import distributed.interface_iterative as ii_mod
+        from distributed.interface_iterative import InterfaceCGSolver
+
+        n = 4
+        diag_vals = np.array([2.0, 3.0, 4.0, 5.0])
+        block = np.diag(diag_vals)
+        tile_schur = {'a': block}
+        tile_idx = {'a': np.arange(n, dtype=np.int32)}
+
+        def _raise_linalg_error(sub, cho=None, k=4, tol=1e-6,
+                                 small_block_threshold=500,
+                                 precomputed=None, island_local_mask=None):
+            raise la.LinAlgError("simulated GenEO eigensolve failure")
+
+        monkeypatch.setattr(
+            ii_mod.interface_coarse, 'geneo_lowest_eigenpairs',
+            _raise_linalg_error,
+        )
+
+        cg_solver = InterfaceCGSolver(
+            n_interface=n, matvec_mode='tilewise',
+            tile_schur_complements=tile_schur, tile_index_maps=tile_idx,
+            preconditioner='two_level', matvec_threads=1,
+            interface_coarse_geneo_k=4,
+        )
+        try:
+            # Exactly one entry per block -- not two ('cho' + spurious
+            # 'eigh' double-append for the same owned_global_arr).
+            assert len(cg_solver._bj_block_factors) == 1, (
+                f"expected exactly 1 block-Jacobi factor entry (single "
+                f"'cho' block), got {len(cg_solver._bj_block_factors)} -- "
+                f"a GenEO LinAlgError double-appended the same block"
+            )
+            kinds = [kind for (_, kind, _) in cg_solver._bj_block_factors]
+            assert kinds == ['cho'], (
+                f"expected the block to remain 'cho' (GenEO failure must "
+                f"not touch the cho block's own factor entry); got "
+                f"kinds={kinds!r}"
+            )
+            # No duplicated global indices in the ownership permutation.
+            assert len(cg_solver._bj_perm) == n
+            assert len(set(cg_solver._bj_perm.tolist())) == n, (
+                "block-ownership partition must have no duplicate indices "
+                "(a double-append would duplicate this tile's global "
+                "indices in _bj_perm)"
+            )
+            # The base block-Jacobi component's materialized inverse must
+            # be numerically correct (single, unambiguous inverse per
+            # node) -- diag(1/diag_vals) -- checked directly on the
+            # materialized block rather than through cg_solver._M
+            # (which, for preconditioner='two_level', is the ADDITIVE
+            # base+coarse combination, not the base alone).
+            np.testing.assert_allclose(
+                cg_solver._bj_inv_blocks[0], np.diag(1.0 / diag_vals),
+                rtol=1e-10, atol=1e-12,
+            )
+        finally:
+            cg_solver.close()
+
+
+# ---------------------------------------------------------------------------
 # Finding 7: S11 narrowed the block-Jacobi eigh-based fallback's error path
 # to `except la.LinAlgError`, but np.linalg.eigh (and its 0.5*(sub+sub.T)
 # allocation) can raise other exceptions (MemoryError, ValueError on
@@ -2234,11 +3014,20 @@ class TestFinding7BlockJacobiEighFallbackCatchAll:
             'b': np.array([2, 3], dtype=np.int32),
         }
 
-        def _raise_non_linalg_error(sub):
+        def _raise_non_linalg_error(sub, eps_rel=1e-10):
             raise ValueError("simulated non-LinAlgError failure inside eigh")
 
+        # `_build_block_jacobi` calls `_spd_safe_pseudo_solve_factor_ex`
+        # directly on its eigh-fallback path (Stage 3 GenEO-lite plumbing
+        # needs the raw spectrum `w`, see that function's docstring) -- NOT
+        # the 2-tuple `_spd_safe_pseudo_solve_factor` wrapper, which is only
+        # a thin, unused-by-production delegator kept for its own direct
+        # unit test (`TestSPDSafeFallback`). Patching the wrapper here would
+        # leave production's `_ex` call untouched and this test would pass
+        # vacuously without ever reaching the `except Exception` catch-all
+        # under test.
         monkeypatch.setattr(
-            ii_mod, '_spd_safe_pseudo_solve_factor', _raise_non_linalg_error,
+            ii_mod, '_spd_safe_pseudo_solve_factor_ex', _raise_non_linalg_error,
         )
 
         # Pre-fix: `except la.LinAlgError` does not catch ValueError, so
@@ -2258,6 +3047,20 @@ class TestFinding7BlockJacobiEighFallbackCatchAll:
         assert cg_solver._M is not None, (
             "tile 'a' block still builds a valid preconditioner even "
             "though tile 'b's block failed and was skipped"
+        )
+        # Directly verify the catch-all actually fired for tile 'b': only
+        # tile 'a's well-conditioned block should have factored ('cho');
+        # tile 'b' must be ABSENT (skipped), not present as 'eigh' (which
+        # would mean the simulated failure never reached the eigh-fallback
+        # path at all -- i.e. the monkeypatch missed). This is the
+        # assertion that fails vacuously (kinds == ['cho', 'eigh']) if the
+        # monkeypatch target regresses back to the unused 2-tuple wrapper.
+        kinds = [kind for (_, kind, _) in cg_solver._bj_block_factors]
+        assert kinds == ['cho'], (
+            f"expected tile 'b' to be skipped by the except-Exception "
+            f"catch-all (leaving only tile 'a's 'cho' block), got kinds="
+            f"{kinds!r} -- the simulated eigh-fallback failure did not "
+            f"reach _build_block_jacobi's eigh-fallback path"
         )
 
 
@@ -2475,3 +3278,186 @@ class TestFinding15MatvecThreadsCappedByPartitionSize:
             results[n_threads] = cg_solver._linear_op.matvec(x)
 
         np.testing.assert_allclose(results[2], results[32], rtol=1e-12, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Round-2 code review fixes: Finding 2 (bare float() coerces YAML bools),
+# Finding 9 (import-time DEFAULT_* snapshots defeat monkeypatching).
+# ---------------------------------------------------------------------------
+
+
+class TestFinding2CoerceFloatRejectsBool:
+    """Finding 2 (round 2): interface_coarse_geneo_tol/interface_coarse_
+    eps_rank were read via a bare ``float(...)`` call in
+    ``_read_interface_cg_settings`` -- unlike every sibling coercer in that
+    function (``_coerce_int`` for geneo_k/max_cols, ``_coerce_bool`` for
+    cg_strict/strict_dtype_rtol) -- so a YAML-1.1 bool
+    (``interface_coarse_geneo_tol: yes`` -> Python ``True``) silently
+    coerced to ``1.0`` instead of raising (``float(True) == 1.0``)."""
+
+    def test_coerce_float_rejects_bool(self):
+        from distributed.result_factorization import _coerce_float
+
+        with pytest.raises(ValueError, match='Invalid float setting'):
+            _coerce_float(True, 'interface_coarse_geneo_tol')
+        with pytest.raises(ValueError, match='Invalid float setting'):
+            _coerce_float(False, 'interface_coarse_eps_rank')
+
+    def test_coerce_float_accepts_real_floats_and_numeric_strings(self):
+        from distributed.result_factorization import _coerce_float
+
+        assert _coerce_float(1e-6, 'x') == 1e-6
+        assert _coerce_float('1e-6', 'x') == 1e-6
+        assert _coerce_float(0, 'x') == 0.0
+
+    def test_coerce_float_inf_raises_value_error(self):
+        """Same OverflowError/TypeError/ValueError-catching discipline as
+        _coerce_int -- though float('inf') itself is a valid float (unlike
+        int(float('inf'))), a non-numeric string must still raise a clean
+        ValueError, not a raw TypeError/ValueError from float()."""
+        from distributed.result_factorization import _coerce_float
+
+        with pytest.raises(ValueError, match='Invalid float setting'):
+            _coerce_float('not-a-number', 'interface_coarse_geneo_tol')
+        with pytest.raises(ValueError, match='Invalid float setting'):
+            _coerce_float(None, 'interface_coarse_eps_rank')
+
+    def test_geneo_tol_bool_setting_raises_via_read_interface_cg_settings(self):
+        """End-to-end: a bool interface_coarse_geneo_tol/eps_rank setting
+        (the exact YAML-1.1 'yes'/'no' pitfall) must raise loudly out of
+        _read_interface_cg_settings, not silently resolve to 1.0/0.0."""
+        from distributed.result_factorization import _read_interface_cg_settings
+
+        class _Model:
+            settings = {'interface_coarse_geneo_tol': True}
+
+        with pytest.raises(ValueError, match='Invalid float setting'):
+            _read_interface_cg_settings(_Model())
+
+        class _Model2:
+            settings = {'interface_coarse_eps_rank': False}
+
+        with pytest.raises(ValueError, match='Invalid float setting'):
+            _read_interface_cg_settings(_Model2())
+
+
+class TestFinding9DynamicCoarseDefaults:
+    """Finding 9 (round 2): interface_coarse.py's DEFAULT_GENEO_K/
+    DEFAULT_GENEO_TOL/DEFAULT_EPS_RANK/DEFAULT_MAX_COLS/DEFAULT_MAX_BYTES
+    must be read DYNAMICALLY (a live attribute lookup at call time) by
+    InterfaceCGSolver.__init__/build_interface_solver, not bound as
+    def-time (module-import-time) default parameter values -- the latter
+    silently defeats monkeypatch.setattr(interface_coarse, 'DEFAULT_*', ...)
+    despite a since-removed module constant's comment claiming the
+    opposite."""
+
+    def test_monkeypatched_default_geneo_k_reaches_constructor(self, monkeypatch):
+        import distributed.interface_coarse as interface_coarse
+        from distributed.interface_iterative import InterfaceCGSolver
+
+        tile_schur = {
+            0: np.array([[2.0, -1.0], [-1.0, 2.0]]),
+            1: np.array([[2.0, -1.0], [-1.0, 2.0]]),
+        }
+        tile_idx = {
+            0: np.array([0, 1], dtype=np.int32),
+            1: np.array([1, 2], dtype=np.int32),
+        }
+        n = 3
+
+        monkeypatch.setattr(interface_coarse, 'DEFAULT_GENEO_K', 0)
+        solver = InterfaceCGSolver(
+            n_interface=n, matvec_mode='tilewise',
+            tile_schur_complements={k: v.copy() for k, v in tile_schur.items()},
+            tile_index_maps=tile_idx,
+            preconditioner='two_level', matvec_threads=1,
+        )
+        try:
+            assert solver._geneo_k == 0, (
+                "InterfaceCGSolver.__init__ did not pick up the "
+                "monkeypatched interface_coarse.DEFAULT_GENEO_K -- its "
+                "constructor default is bound at def/import time instead "
+                "of being resolved dynamically"
+            )
+            # k=0 means GenEO is disabled -- PoU-only coarse space, no
+            # geneo_k mismatch anywhere downstream.
+            assert solver._want_geneo is False
+        finally:
+            solver.close()
+
+    def test_monkeypatched_default_max_bytes_reaches_coarse_build(
+        self, monkeypatch,
+    ):
+        """A tiny monkeypatched DEFAULT_MAX_BYTES must actually constrain
+        the coarse build when interface_coarse_max_bytes is NOT passed
+        explicitly to the constructor (the direct-constructor, no-
+        model.settings path this finding's failure scenario describes)."""
+        import distributed.interface_coarse as interface_coarse
+        from distributed.interface_iterative import InterfaceCGSolver
+
+        tile_schur = {
+            i: np.array([[2.0, -1.0], [-1.0, 2.0]]) for i in range(10)
+        }
+        tile_idx = {
+            i: np.array([i, i + 1], dtype=np.int32) for i in range(10)
+        }
+        n = 11
+
+        monkeypatch.setattr(interface_coarse, 'DEFAULT_MAX_BYTES', 1)
+        solver = InterfaceCGSolver(
+            n_interface=n, matvec_mode='tilewise',
+            tile_schur_complements={k: v.copy() for k, v in tile_schur.items()},
+            tile_index_maps=tile_idx,
+            preconditioner='two_level', matvec_threads=1,
+        )
+        try:
+            assert solver._coarse is None, (
+                "expected the monkeypatched 1-byte DEFAULT_MAX_BYTES to "
+                "disable the coarse space entirely (degrading to the base "
+                "preconditioner) -- if _coarse is not None, the "
+                "constructor did not pick up the monkeypatch"
+            )
+            assert solver.preconditioner != 'two_level'
+        finally:
+            solver.close()
+
+    def test_monkeypatched_default_reaches_build_interface_solver(
+        self, monkeypatch,
+    ):
+        """The same dynamic-default requirement applies one layer up, at
+        build_interface_solver -- it must forward a None sentinel (not its
+        own def-time-bound copy of interface_coarse.DEFAULT_GENEO_K) so
+        InterfaceCGSolver's own dynamic resolution is not shadowed."""
+        import distributed.interface_coarse as interface_coarse
+        from distributed.interface_iterative import build_interface_solver
+
+        tile_schur = {
+            0: np.array([[2.0, -1.0], [-1.0, 2.0]]),
+            1: np.array([[2.0, -1.0], [-1.0, 2.0]]),
+        }
+        tile_idx = {
+            0: np.array([0, 1], dtype=np.int32),
+            1: np.array([1, 2], dtype=np.int32),
+        }
+        n = 3
+
+        monkeypatch.setattr(interface_coarse, 'DEFAULT_GENEO_K', 0)
+        _, _, cg_solver = build_interface_solver(
+            S_global=None,
+            interface_solver='cg',
+            matvec_mode='tilewise',
+            tile_schur_complements={k: v.copy() for k, v in tile_schur.items()},
+            tile_index_maps=tile_idx,
+            preconditioner='two_level',
+            matvec_threads=1,
+            n_interface=n,
+        )
+        try:
+            assert cg_solver._geneo_k == 0, (
+                "build_interface_solver did not forward a None sentinel "
+                "for interface_coarse_geneo_k -- InterfaceCGSolver's "
+                "dynamic default resolution was shadowed by a def-time-"
+                "bound value here instead"
+            )
+        finally:
+            cg_solver.close()

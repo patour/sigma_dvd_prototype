@@ -767,6 +767,82 @@ Scripts: `run_stage2_proxy_measurement.py`, `probe_iter_decomposition.py` (+ per
 progress logging via `InterfaceCGSolver.progress_every`), raw JSONs
 `results_iter_decomp_mi200k.json` in `scripts/benchmark/microbench/`.
 
+### 7.9 Stage 3 landed — two-level coarse-space preconditioner (2026-07-19, dev host)
+
+**Landed** (branch `distributed-10x`): `src/distributed/interface_coarse.py` — partition-of-unity
+coarse space Z (island rows zeroed, unowned/tap indicator column, all-zero columns dropped),
+GenEO-lite enrichment (k lowest eigenpairs per BJ ownership block via shift-invert `eigsh`
+reusing the existing Cholesky factor; island-restricted submatrix so the 1e5 penalty diagonals
+can't inflate the near-null threshold), `S_c = ZᵀSZ` via the fp64-accumulating tilewise
+`_matmat` (S_extra included), eigh-based PSD pseudo-inverse of S_c (checkerboard rank deficiency
+is the expected case; rank logged), additive apply `M⁻¹ = M_base⁻¹ + Z S_c⁺ Zᵀ`. New
+preconditioner value `'two_level'`; `interface_preconditioner` default is now `'auto'` →
+resolves to `two_level` for CG+tilewise, `block_jacobi` elsewhere (small systems resolve to
+direct — notebooks/equivalence untouched, verified bit-identical). Degradation ladder:
+PoU+GenEO → PoU-only (column or byte cap) → base preconditioner (build failure), each with
+WARNING; coarse state is never persisted (rebuilt by `refactor()`); genuine-loss-only refactor
+warnings. Also landed: **BJ-apply rewrite** — per-block dense inverses (symmetrized) applied via
+permuted gather + GEMV: **701 ms → ~50–120 ms** at the mi200k regime (microbench), closing the
+Stage 2 perf item. Review battery: 14-agent workflow (Sonnet impl + Opus spec×5/quality×3
+reviews, all clean), 2 × `/code-review xhigh --fix` rounds (15 + 15 verified findings fixed —
+among them: ARPACK partial-eigenpair threshold on the wrong scale, GenEO-failure double-append
+into the BJ factor list, island-penalty-inflated GenEO thresholds, normalization-vs-guard
+bypasses, byte-guard undercounts), Opus fix-verification CLEAN-FOR-COMMIT; 6+ negative-tested
+regressions. Tests: 1064 distributed unit (+77 vs Stage 2), validation 225, perf baseline flat
+(peak bit-identical), 4/4 parity notebooks bit-identical.
+
+**Split-regime head-to-head (mi200k_v2: 64 tiles / 168,586 interface unknowns, Ray,
+tiles_per_worker=4, BE dt=5 ps, 20 steps, `run_stage3_head_to_head.py`).** With the default
+8 GB BJ budget, the base downgrades to diagonal jacobi at this regime (est. 10.6 GB,
+max_block=13,834 from skewed first-seen ownership) and GenEO is skipped (no cho-factored
+blocks on that path) — so the production-default configuration is `two_level(jacobi+PoU, T′=65)`:
+
+| Quantity | two_level (jacobi+PoU) | no-coarse ablation (jacobi) |
+|---|---|---|
+| DC prepare (never-assemble) | 126.5 s / 19.3 GB RSS | — |
+| **Cold DC @1e-12** | **converges: 118 iters / 30.0 s** (rel-res 4e-11 @ iter 100) | Stage 2 BJ: stagnates (§7.8) |
+| Cold DC @1e-8 | 70 iters / 18.1 s; max\|dV\| vs 1e-12 = **147 nV** | — |
+| Warm transient iters/step @1e-8 | **23.6** (GATE ≤ 30 ✓) | 29.2 |
+| Warm transient @1e-12 (reference) | mean 66.9, max 106 | — |
+| Transient s/step @1e-8 | 31.1 | 38.2 |
+| Accuracy @1e-8 vs 1e-12 waveforms | max\|dV\| 253 nV; peak Δ 12.5 nV, node match | 247 nV |
+| Coarse build | Z 65 cols, S_c 65×65, rank 65, cond ~1e3, ≪1 s | — |
+
+**Stage 3 gate: PASSED** — cold-solve stagnation eliminated (the headline defect from §7.8) and
+warm iters/step 23.6 ≤ 30 at rtol 1e-8, accuracy 6× inside the ≤1 µV budget.
+
+**Findings.** (1) The 65-column PoU coarse space alone repairs the cold solve — 4 orders of
+residual per ~40 iterations, ~0.25 s/iter on the never-assemble tilewise path. (2) Warm-started
+transient gains are modest (29.2 → 23.6 iters/step): warm starts already remove most smooth
+global error; the coarse space's value is cold solves, robustness, and tile-count-independent
+scaling (chain-fixture test: BJ grows 34→67→165 iters with 15→60→150 tiles, two_level flat at
+~27). (3) The transient path is now **matvec-bound, not preconditioner-bound**: TD prepare still
+assembles S_global (489 s, 93 GB RSS) and its CG runs the single-threaded assembled-CSR matvec
+at ~1.4 s/iter (§7.7's 1384 ms) — 23.6 iters × 1.4 s ≈ 31 s/step. The same iteration count on
+the DC-style tilewise threaded matvec (~0.25 s/iter incl. BJ-apply-fixed base) would be
+**~6 s/step**; extending never-assemble + tilewise to the transient factor path is now the
+single dominant lever at the split regime and is promoted from "open item" to the next work
+package. (4) **The bj+geneo variant fails — and the "downgrade accident" is the right design.** Re-run
+with `--bj-max-bytes 16 GiB` so the block-Jacobi base survives the budget guard: the build
+produces the originally-specified `two_level(bj+geneo k=61, T′=126, rank=126)` (61 genuine
+GenEO columns across 64 blocks — Stage 2's near-null eigendirections are real and found;
+coarse build 97 s, DC prepare 221 s). **Cold DC stagnates anyway**: rel-res plateaus at
+9.7e-2 after 4000 iterations (~0.32 s/iter, 1289 s) at BOTH rtol 1e-12 and a fresh 1e-8
+attempt. Interpretation: the additive two-level form can only *add* a PSD coarse correction —
+it deflates S's small-eigenvalue cluster but cannot remove M_BJ⁻¹'s ~1e6-relative
+amplification along the near-null ownership-block directions (measured in §7.8), and those
+directions form a broad cluster, far more than k=4/block captures. A diagonal base has no such
+amplification, so jacobi+PoU converges. Consequences: (a) `two_level(jacobi+PoU)` — exactly
+what the default byte-budget guard produces at this regime — is the production configuration,
+cheaper to build (126 s vs 221 s) and the only cold-convergent one; the guard's downgrade
+correlates with the pathology (both are driven by giant weakly-grounded ownership blocks), so
+the default composes correctly. (b) bj-base two_level remains fine at small/well-conditioned
+regimes (multi_tile smoke: 102 vs 107 iters; chain fixture flat at 27) and failures are loud
+(strict RuntimeError), but removing the bj-base amplification at split regimes would need a
+projected/deflated form (A-DEF2) rather than the additive one — recorded as a contingency,
+not scheduled. Raw JSONs: `stage3_h2h.json` (production default), `stage3_h2h_bj16.log`
+(variant failure) — summarized here; scripts: `run_stage3_head_to_head.py`.
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |
