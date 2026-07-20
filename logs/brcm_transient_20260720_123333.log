@@ -1,0 +1,38 @@
+12:33:33 distributed.cli INFO: Logging to file: /wv/bwdev1/patrasej/dev/sigma_dvd/mpower_testcases/BRCM/analysis/dynamic_ir/distributed_mi750k/transient_20260720_123333.log
+12:33:34 distributed.model INFO: Loaded metadata from netlist/netlist_brcm/distributed_pkl_mi750k: 55 tiles, 195524 shared boundary nodes, 288329 connectivity summaries
+12:33:46 distributed.model INFO: Interface: 195690 nodes (195524 boundary + 309 die attachment)
+12:34:02 distributed.model INFO: Model created in 27.537s: 55 tile-worker handles, 30622646 interior nodes, 237403 boundary entries, 195690 interface nodes, island_detection=summaries
+12:34:02 distributed.cli INFO: Interface solver: cg (matvec=auto, precond=auto, rtol=1.00e-08)
+12:49:32 distributed.solver_td INFO: Smoothing: 55 tiles, cache hits=0/55, per-tile wall: max=739.933s mean=145.049s
+12:49:32 distributed.solver_td INFO: VCS init: 12393200 total sources across 55 tiles (0 from cache)
+12:49:32 distributed.solver_td INFO:   init_vcs: 189.8916s
+12:49:32 distributed.solver_td INFO:   smooth_sources: 740.7464s
+12:52:40 distributed.interface_iterative DEBUG: Block-Jacobi: estimated factor memory 3186.8 MB (n=120961, T=55 tiles, max_block=5230).
+12:53:33 distributed.interface_coarse INFO: build_coarse_space: n=120961, T'=56 (pou=56, geneo=0, dropped=0), Z_dense ~51.7 MB (SZ retained, deflated)
+12:53:34 distributed.interface_coarse INFO: build_coarse_space: S_c 56x56, rank=56 (eps_rank=1.0e-12), cond~1.393e+03 (0 structurally-deficient direction(s) dropped)
+12:53:34 distributed.interface_iterative INFO: InterfaceCGSolver: two_level preconditioner active -- two_level[deflated](bj+geneo k=0, T'=56, rank=56)
+12:53:34 distributed.interface_iterative INFO: Interface CG solver built: mode=tilewise, precond=two_level[deflated](bj+geneo k=0, T'=56, rank=56), rtol=1.00e-08, n=120961, threads=8, dtype=float64, build_time=54.560s
+12:53:34 distributed.result_factorization INFO: === Distributed DDM Prepare Statistics (never-assemble S_global) ===
+12:53:34 distributed.result_factorization INFO: Interface system: 120961 unknowns, 0 islands penalized, matvec_threads=8, matvec_dtype=float64
+12:53:34 distributed.result_factorization INFO:   gather_port_lists                    0.064s
+12:53:34 distributed.result_factorization INFO:   compute_ordering                     0.176s
+12:53:34 distributed.result_factorization INFO:   detect_interface_islands             1.305s
+12:53:34 distributed.result_factorization INFO:   factor_tiles                         185.854s
+12:53:34 distributed.result_factorization INFO:   build_s_extra                        0.012s
+12:53:34 distributed.result_factorization INFO: === Total Prepare: 241.972s ===
+12:53:35 distributed.result_factorization DEBUG: Transient (never-assemble) island detection: cache hit (0 islands), union-find skipped.
+12:54:02 distributed.interface_iterative DEBUG: Block-Jacobi: estimated factor memory 3186.8 MB (n=120961, T=55 tiles, max_block=5230).
+12:54:18 distributed.interface_coarse INFO: build_coarse_space: n=120961, T'=56 (pou=56, geneo=0, dropped=0), Z_dense ~51.7 MB (SZ retained, deflated)
+12:54:19 distributed.interface_coarse INFO: build_coarse_space: S_c 56x56, rank=56 (eps_rank=1.0e-12), cond~1.258e+03 (0 structurally-deficient direction(s) dropped)
+12:54:19 distributed.interface_iterative INFO: InterfaceCGSolver: two_level preconditioner active -- two_level[deflated](bj+geneo k=0, T'=56, rank=56)
+12:54:19 distributed.interface_iterative INFO: Interface CG solver built: mode=tilewise, precond=two_level[deflated](bj+geneo k=0, T'=56, rank=56), rtol=1.00e-08, n=120961, threads=8, dtype=float64, build_time=17.444s
+12:54:19 distributed.result_factorization INFO: === Distributed DDM Prepare Transient Statistics (never-assemble S_global) ===
+12:54:19 distributed.result_factorization INFO: Method: be  |  dt: 5.0 ps  |  C_coeff: 0.2000
+12:54:19 distributed.result_factorization INFO: Transient interface: 120961 unknowns, 0 islands penalized, matvec_threads=8, matvec_dtype=float64
+12:54:19 distributed.result_factorization INFO:   gather_port_lists                    0.090s
+12:54:19 distributed.result_factorization INFO:   compute_ordering                     0.146s
+12:54:19 distributed.result_factorization INFO:   detect_interface_islands             0.001s
+12:54:19 distributed.result_factorization INFO:   factor_transient_tiles               27.039s
+12:54:19 distributed.result_factorization INFO:   build_s_extra                        0.007s
+12:54:19 distributed.result_factorization INFO:   factor_transient_interface           17.444s
+12:54:19 distributed.result_factorization INFO: === Total Prepare: 44.726s ===
