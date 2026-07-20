@@ -108,41 +108,20 @@ D1 fix (pad-port corruption)
 Threaded tilewise matvec (design + measured scatter decision)
     ``matvec_threads`` controls a **persistent** ``ThreadPoolExecutor``
     (lazy-built on first tilewise matvec/BJ-apply call, closed via
-    :meth:`InterfaceCGSolver.close` or a ``weakref.finalize`` safety net).
-    Work is a static LPT (longest-processing-time) partition of tiles by
-    ``n_ports**2`` (proxy for per-tile GEMV cost) across
-    ``matvec_threads`` bins, computed once at construction.
-
-    Scatter design (measured on this host, `docs`/plan §Stage 2 report has
-    the full numbers): each thread accumulates into a **compact buffer**
-    sized to the UNION of global interface indices its assigned tiles
-    touch (precomputed once), not a full ``(n_threads, n)`` array that must
-    be zero-filled and reduced via ``acc.sum(axis=0)`` every call.  Stage 0
-    measured the naive full-row-accumulator design INVERT above 8 threads
-    (zero-fill + reduction cost growing with thread count outpacing the
-    GEMV work); the compact-touched-index design was measured on this host
-    to match the naive design's throughput at <=8 threads and pull ahead at
-    16-32 threads (e.g. ~26.6ms vs ~31.6ms at 32 threads on a 150K-interface
-    /60-tile synthetic), while being architecturally immune to the
-    zero-fill-scales-with-n_threads*n failure mode.  ``matvec_threads='auto'``
-    resolves to ``min(8, cpu_count, n_tiles)`` -- 8, not 32 -- because Stage 0
-    measured best throughput at 8 threads on the BRCM-class proxy; the
-    original Stage 2 sketch's ``min(32, ...)`` predates that measurement.
+    :meth:`InterfaceCGSolver.close` or a ``weakref.finalize`` safety net),
+    partitioning tiles across threads by a static LPT (longest-processing-
+    time) heuristic on ``n_ports**2``.  ``matvec_threads='auto'`` resolves
+    to ``min(8, cpu_count, n_tiles)`` (Stage 0 measured best throughput at
+    8 threads on the BRCM-class proxy).  Full scatter-design rationale and
+    measured numbers: ``interface_deflation_notes.md``, "Stage 2" section.
 
 fp32 critical path (BRCM host is CPU-only)
-    ``matvec_dtype='float32'`` stores each tile's ``S_i`` as float32 and
-    casts the (small) gathered ``x`` slice to float32 per tile so the GEMV
-    itself (``S_i @ x_local``) stays entirely in float32 and hits the BLAS
-    ``sgemv`` fast path; the float32 result is then accumulated into the
-    float64 running total.  A naive mixed-dtype ``S_i`` (float32) times
-    ``x`` (float64) call falls OFF the BLAS fast path in numpy (silently
-    promotes to a slow elementwise loop) -- Stage 0 measured this ~10x
-    SLOWER than fp64, which is why both operands of the GEMV must share
-    dtype.  Measured on this host (150K-interface/60-tile synthetic,
-    8 threads): fp32 ~1.7-2.0x the fp64 throughput, matching the plan's "at
-    least ~2x" expectation.  fp32 residual floor is ~1e-7 relative, so
-    ``matvec_dtype='float32'`` is enforced to pair with ``rtol >= 1e-7``
-    (``ValueError`` otherwise; override with ``strict_dtype_rtol=False``).
+    ``matvec_dtype='float32'`` stores each tile's ``S_i`` as float32 (both
+    GEMV operands must share dtype to hit BLAS's fast path -- a naive
+    mixed-dtype call falls off it, ~10x slower).  fp32 residual floor is
+    ~1e-7 relative, so ``matvec_dtype='float32'`` is enforced to pair with
+    ``rtol >= 1e-7`` (``ValueError`` otherwise; override with
+    ``strict_dtype_rtol=False``).  Measured throughput: see notes.md.
 
 SPD-safe block-Jacobi fallback
     Singular/indefinite owned blocks previously fell back to
@@ -177,33 +156,186 @@ coarse build itself fails outright (PoU-only T' ALSO exceeds
 ``interface_coarse_max_cols``, no usable ``tile_index_maps``, or ``S_c`` has
 no positive spectrum).
 
+A-DEF2 work package -- deflated apply mode ('interface_coarse_apply_mode=deflated')
+-------------------------------------------------------------------------------------
+The additive two-level form (above) is the weak link *warm*: the coarse and
+fine (block-Jacobi/jacobi) spaces stay coupled, so a warm-started transient
+step's iteration count only drops modestly (measured 29.2 -> 23.6 iters/step,
+jacobi-alone -> two_level(jacobi+PoU)) even though the coarse space alone
+repairs cold-solve stagnation completely. This apply mode removes
+``range(Z)`` from the iteration exactly via a PROJECTED matvec, rather than
+adding a correction on top of it -- the deflation/"DEF" member of the
+Tang/Nabben/Vuik/Erlangga taxonomy (Tang, Nabben, Vuik & Erlangga, "A
+comparison of two-level preconditioners based on multigrid and deflation",
+2009).
+
+**Naming / ratification record** (full measured numbers and the true-A-DEF2
+head-to-head comparison: ``interface_deflation_notes.md``): the setting
+ships as ``'deflated'``, not ``'adef2'`` -- the coordinator measured the
+literal Tang/Nabben/Vuik/Erlangga A-DEF2 preconditioner head-to-head against
+the deflation ("DEF") member of the same taxonomy and DEF won on data (true
+A-DEF2 regressed warm iterations on the 'natural' block-Jacobi-base scenario
+and failed to converge outright on the realistic-ratio ill-conditioned
+fixture). The true-A-DEF2 implementation that was measured and rejected
+(``_true_adef2_pcg``) lives in ``tests/distributed/test_interface_coarse.py``
+alongside the other previously-rejected variant (``_literal_spec_adef2_pcg``)
+-- kept for the regression coverage of the "warm ``x0`` must be projected"
+lesson (see ``TestTrueADef2X0ProjectionRegression``), not shipped as a
+selectable mode. Its ``Q S v`` helper (``apply_QS``) moved out of src
+alongside it (round-2 code review finding 10: it had no other caller) -- now
+a test-local free function (``_apply_QS(coarse, v)``), not a ``CoarseSpace``
+method.
+
+Notation: ``Q = Z S_c^+ Z^T`` (never materialized; every application goes
+through :meth:`interface_coarse.CoarseSpace.apply`/``apply_with_SQ``, reusing
+the same eigenfactorization the additive ``two_level`` mode already
+computes), ``P = I - S Q``.
+
+**Implementation location**: the hand-rolled loop itself
+(:func:`_deflated_pcg`, plus :func:`_is_breakdown`/``_BREAKDOWN_EPS`` and
+``DEFLATED_DEBOUNCE_REARM_FALLBACK_ITERS``) lives in
+``interface_deflated_pcg.py`` (round-3 code review finding 11 -- moved out
+of this file, which had grown well past the repo's ~800-line-per-file
+convention, once the numerics stabilized; pure mechanical move, no logic
+change) and is imported back into this module's namespace below, so every
+``_deflated_pcg``/``_is_breakdown``/``_BREAKDOWN_EPS`` reference in this
+docstring and the rest of this file resolves unchanged.
+
+**Why DEF, not the literal formula** (full derivation/rejected-formula
+walkthrough: ``interface_deflation_notes.md``): two literal-taxonomy
+candidates were tried and rejected, both keeping the matvec ``S p``
+un-projected and folding ``Q`` into the preconditioner apply instead -- the
+spec's in-line formula STALLS on the real ``netlist_multi_tile`` PDN
+fixture, and applying ``P`` after ``M_base^-1`` SILENTLY STAGNATES on the
+same fixture (``info=0`` with the tracked residual satisfied while the true
+residual never approaches rtol). Root cause: for a non-DEF member of this
+taxonomy, ``Z^T r_k = 0`` is not preserved by the plain (un-projected) CG
+recurrence beyond the first iterate (the resulting operator is not
+symmetric, so standard 3-term PCG has no guaranteed conjugate search
+directions); chain fixtures mask this since their PoU column count T' sits
+close to n. See ``tests/distributed/test_interface_coarse.py``'s
+``TestTransposeCorrectedADef2AlsoFails`` /
+``TestLiteralADef2FormulaIndependentlyReverified`` for the independent
+reproductions.
+
+**What is actually implemented ("DEF")**: the matvec ITSELF is projected --
+``w = P(S p) = S p - S Q(S p)`` (one ``apply_with_SQ`` call on the ALREADY-
+computed ``S p``, so this is CHEAPER per iteration than either rejected
+formula, not more expensive) -- the preconditioner apply is the PLAIN base
+(``z = M_base^-1 r``, no ``Q`` term; deflation is carried entirely by the
+projected matvec), and the solution is RECOVERED from the CG iterate ``y``
+(which solves the projected system ``(P S) y = P b``) via ``x = y + Q(b - S
+y)`` rather than accumulated directly as ``x += alpha * p`` (that
+accumulation is exactly what breaks the ``r = b - S x`` identity once the
+matvec is projected). Because the matvec's own projection makes ``Z^T (P v)
+= 0`` an IDENTITY for any ``v``, ``Z^T r_k = 0`` holds BY CONSTRUCTION at
+every CG iterate -- not merely "usually true" -- which is why re-projection
+(below) is genuine hygiene here, not a correctness requirement.
+
+* **Initial setup** (inside :func:`_deflated_pcg`): ``y0 = x0`` (cold start:
+  zero), ``r0 = P(b - S y0)`` via one ``apply_with_SQ`` call. The final
+  answer is always recovered as ``x = y + Q(b - S y)`` -- for a cold start
+  with 0 CG iterations this degenerates to exactly ``Q b``, the intuitive
+  "coarse-only" solve. ``S y`` is tracked incrementally from each
+  iteration's already-computed ``S p`` (``S y += alpha * S p``), so recovery
+  is one cheap ``coarse.apply`` call, never an extra full matvec.
+* **Re-projection** (numerical hygiene, not correctness): every
+  ``interface_deflated_reproject_every`` iterations (default 50, ``<= 0``
+  disables), :func:`_deflated_pcg` recomputes ``r = P(b - S y)`` from
+  scratch instead of trusting the incrementally-updated ``r``, correcting
+  floating-point drift in ``Z^T r -> 0`` accumulated over many iterations.
+  Verified to make no difference to whether a given fixture converges
+  (``reproject_every=0`` still converges correctly on every fixture this
+  module's tests exercise) -- only, potentially, to the exact iteration
+  count on a very long solve.
+* ``SZ`` **retention**: ``S Q v = (S Z) (S_c^+ (Z^T v))`` for whatever vector
+  ``v`` the projected matvec/re-projection needs it on (``S p`` per
+  iteration, or ``b - S y`` at re-projection/setup) -- apply_mode='deflated'
+  retains the dense ``(n, T')`` fp64 ``S Z`` array on the ``CoarseSpace``
+  (``interface_coarse.build_coarse_space(..., retain_sz=True)``) so every
+  ``S Q`` application in the hot loop is a GEMV pair, never a full-``n``
+  matvec of ``S`` itself. Persistent memory cost: one more ``n * T' * 8``
+  bytes for the coarse space's lifetime -- folded into the
+  ``interface_coarse_max_bytes`` byte guard (see ``build_coarse_space``'s
+  ``retain_sz`` docstring). Round-2 code review finding 6 (corrects an
+  earlier revision of this paragraph, which claimed the opposite order):
+  the existing GenEO-then-disable ladder (drop GenEO columns, then disable
+  the coarse space outright) runs FIRST and determines the FINAL T'; the
+  retained-SZ byte check is evaluated AFTER, against that final T', using
+  the SAME ``3*n*T'*8`` formula/limit the ladder itself just verified fits
+  -- so in practice a too-tight budget is caught by the ladder (PoU-only
+  degrade or outright disablement) before SZ retention is ever separately
+  at risk, and the dedicated "drop SZ, keep additive" degrade is defensive
+  (documents the invariant, guards against the accounting ever changing)
+  rather than a distinct degradation step an operator should expect to
+  observe. fp32 tilewise matvec storage
+  (``matvec_dtype='float32'``) does not weaken this: ``SZ`` and ``S_c`` are
+  both formed via the SAME fp64-accumulating ``matmat`` the additive mode
+  already uses (each tile's fp32 GEMV result is cast back to float64 before
+  accumulating into the running ``(n, T')`` sum -- see
+  ``_tilewise_matmat``), so the retained ``SZ`` GEMV inside every ``S Q``
+  application is fp64 regardless of ``matvec_dtype``.
+* **True-residual acceptance**: exactly like the additive/scipy path, the
+  strict-mode non-convergence check (and its ``last_cg_rel_residual`` stat)
+  recomputes ``rhs - S @ x`` via a FRESH full matvec on the final RECOVERED
+  iterate, never trusting the internally-tracked recurrence residual (``r``
+  tracks the PROJECTED system, ``P b - P S y``, a genuinely different
+  quantity from ``b - S x``) -- shared code between both apply modes (see
+  ``InterfaceCGSolver.__call__``). This gate applies on EVERY tentative-
+  convergence event inside :func:`_deflated_pcg` (top-of-loop check, the
+  final post-update check after ``maxiter`` iterations, and the CG-breakdown
+  early-exit), via the internal ``_try_accept`` helper: a disagreement
+  (tracked ``r`` says converged, the fresh check does not) is not a hard
+  failure, it just means the loop keeps iterating. This is a safety net
+  against ``Sy``'s incremental accumulation (``Sy = Sy + alpha * Sp`` every
+  iteration, never a fresh ``matvec(y)``) drifting from the true ``S @ y``
+  over a very long solve -- re-projection (above) corrects ``Z^T r`` drift
+  but not ``Sy`` drift itself. Each acceptance attempt costs two extra
+  matvecs (fresh ``Sy = matvec(y)`` plus the ``matvec(x_candidate)``
+  residual check) and one ``coarse.apply``; attempts fire when the tracked
+  residual first looks converged and then at most once per
+  ``_rearm_period`` iterations -- bounded, never per-iteration.
+* Degradation: if ``preconditioner`` never resolves to (or degrades away
+  from) ``'two_level'``, or the coarse build itself fails/degrades such that
+  no ``SZ`` was retained, ``apply_mode='deflated'`` is moot -- ``__call__``
+  dispatches to the plain ``scipy.sparse.linalg.cg`` path (whatever base/
+  additive ``self._M`` was actually built), so a degraded coarse space is
+  zero risk to any existing (non-deflated) code path.
+* Composes with ``interface_warm_start_extrapolation`` (below) and with
+  every base the ``two_level`` machinery accepts (jacobi-downgraded,
+  block_jacobi, or a full GenEO-enriched block_jacobi).
+* :attr:`InterfaceCGSolver.preconditioner_label` tags an active deflated
+  apply as ``[deflated]`` (``stats['apply_algorithm'] == 'deflated'``);
+  the additive label format is byte-identical to pre-work-package Stage 3
+  (no tag at all) when ``apply_mode='additive'`` or the coarse build never
+  retained ``SZ``.
+
+Warm-start extrapolation ('interface_warm_start_extrapolation')
+-------------------------------------------------------------------
+Optional, composes with either apply mode. When enabled,
+:meth:`InterfaceCGSolver.push_solution_history` (called at the end of every
+successful solve in place of the plain ``self._x0 = result.copy()``) seeds
+the NEXT solve's warm start with the linear extrapolation ``2*x_prev -
+x_prev2`` instead of just ``x_prev`` -- falls back to ``x_prev`` until two
+solves have been recorded. Anticipates a slowly-varying transient RHS's next
+solution rather than assuming it equals the current one; the transient time
+loop itself (``solver_td.py``) is unchanged -- this lives entirely inside
+``InterfaceCGSolver``, which already owns ``_x0``.
+
 BJ-apply perf fix (permuted-contiguous GEMV)
 -------------------------------------------------------------------
-Stage 2 measured the threaded block-Jacobi apply at only 1.4x speedup (701 ms
-vs 990 ms serial, 64 blocks / n=167,659) despite ``cho_solve`` itself
-releasing the GIL (LAPACK ``dpotrs``): the PER-BLOCK fancy-index gather
-(``x[global_idx]``) and scatter (``result[global_idx] = ...``) do NOT release
-the GIL and are RANDOM-access (cache-miss-bound) at a cost comparable to the
-O(k^2) solve itself at these block sizes -- serializing across threads even
-though the solve itself parallelizes fine. The fix: do exactly ONE gather and
-ONE scatter per ``apply()`` call (not one per block) via a single global
-permutation array (block-Jacobi ownership is a partition, so concatenating
-every block's global index array is a valid partial permutation of
-``[0, n)``), and materialize each block's dense (pseudo-)inverse ONCE at
-build time (replacing -- not duplicating -- the cho factor payload, so total
-memory stays the same order as before) so each block's apply is a single
-contiguous-slice GEMV (BLAS-2, releases the GIL) instead of two triangular
-solves plus scattered indexing. Measured on a synthetic proportional to the
-mi200k_v2 regime (64 blocks, ~2674 avg block size, n~171K, 8 threads, BLAS
-pinned to 1 thread throughout via ``threadpool_limits``): the OLD design's
-own threading is NEGATIVE (serial ~255 ms, 8-thread ~470-490 ms -- concurrent
-``cho_solve`` calls across threads contend rather than parallelize, even
-with per-thread disjoint data); the fix is faster BOTH serially (~120 ms,
-~2.1x -- a streaming GEMV beats two triangular-solve passes even
-single-threaded) AND when threaded (~47-52 ms, a further ~2.3-2.5x over its
-own serial, ~9-10x over the OLD design's threaded number). See
-``_build_block_jacobi``'s ``_bj_perm``/``_bj_offsets``/``_bj_solve_threaded``
-for the implementation.
+Stage 2 measured the threaded block-Jacobi apply at only 1.4x speedup despite
+``cho_solve`` itself releasing the GIL: the PER-BLOCK fancy-index gather/
+scatter does NOT release the GIL and is RANDOM-access (cache-miss-bound) at
+a cost comparable to the O(k^2) solve itself, serializing across threads.
+The fix: exactly ONE gather and ONE scatter per ``apply()`` call (not one per
+block) via a single global permutation array, with each block's dense
+(pseudo-)inverse materialized ONCE at build time so each block's apply is a
+single contiguous-slice GEMV (BLAS-2) instead of two triangular solves plus
+scattered indexing -- measured ~9-10x over the old design's threaded number
+on a mi200k_v2-proportional synthetic. Full measured numbers:
+``interface_deflation_notes.md``. See ``_build_block_jacobi``'s
+``_bj_perm``/``_bj_offsets``/``_bj_solve_threaded`` for the implementation.
 
 Tilewise without ever assembling S_global (Finding 0 upgrade; extended to the
 transient factor path by the TD never-assemble work package)
@@ -248,6 +380,20 @@ import scipy.sparse.linalg as spla
 import threadpoolctl
 
 from . import interface_coarse
+# Round-3 code review finding 11: the self-contained A-DEF2 hand-rolled
+# deflated-PCG machinery (module-level, no InterfaceCGSolver dependency --
+# see that module's docstring) now lives in its own file to keep this one
+# under the repo's ~800-line-per-file convention for src/distributed/.
+# Re-exported here under their original names so existing call sites
+# (``_deflated_pcg(...)`` below) and test imports (``from
+# distributed.interface_iterative import _deflated_pcg, _is_breakdown,
+# _BREAKDOWN_EPS``) keep working unchanged -- a pure mechanical move.
+from .interface_deflated_pcg import (
+    DEFLATED_DEBOUNCE_REARM_FALLBACK_ITERS,
+    _BREAKDOWN_EPS,
+    _deflated_pcg,
+    _is_breakdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +415,61 @@ DEFAULT_MATVEC_THREADS_CAP: int = 8
 # tolerance.  Enforced in InterfaceCGSolver.__init__ unless
 # strict_dtype_rtol=False.
 FP32_MATVEC_MIN_RTOL: float = 1e-7
+
+# Round-3 code review finding 1 (CONFIRMED, option (a) chosen -- see the
+# module's "A-DEF2" docstring section for the record): apply_mode='deflated'
+# gates EVERY acceptance -- not just the scipy path's failure-branch
+# diagnostic -- on a FRESH true residual (``b - matvec(x_candidate)``,
+# ``_try_accept`` in ``_deflated_pcg``) computed through the fp32 tilewise
+# matvec.  At ``rtol == FP32_MATVEC_MIN_RTOL`` (1e-7, the base guard's own
+# floor), ``atol_eff`` sits exactly at the fp32 matvec's own ~1e-7 relative
+# noise floor, so the fresh check can disagree with the tracked/deflated
+# recurrence residual on EVERY attempt (not merely occasionally, as on the
+# additive/scipy path, which only recomputes a fresh residual on the
+# failure branch and otherwise accepts scipy's own tracked quantity) --
+# turning a genuinely-converging deflated solve into a guaranteed
+# strict-mode ``RuntimeError`` after burning the full ``maxiter`` budget.
+# One extra decade of headroom between the CG target and the matvec's own
+# noise floor is enough for the fresh check to reliably agree (the same
+# margin the base guard already assumes is sufficient FOR THE TRACKED
+# residual alone -- deflated mode adds a second, independent fp32
+# evaluation of that same floor via the fresh check, so it needs the
+# floor to be one decade further from the target, not the same distance).
+# Simpler, more conservative than a bounded-disagreement/WARNING escape
+# hatch (rejected: it would let a marginal, potentially-silent accuracy
+# regression through on the highest-risk apply mode instead of failing
+# loudly at construction time, and duplicates none of the existing
+# ``strict_dtype_rtol=False`` override machinery for users who deliberately
+# want the tighter floor).
+FP32_MATVEC_MIN_RTOL_DEFLATED: float = 1e-6
+
+# A-DEF2 work package: warm-start extrapolation default (also the
+# model.settings / CLI default -- interface_warm_start_extrapolation).  This
+# is a general CG warm-start refinement (composes with either apply mode),
+# not part of the coarse-space build, so its default lives here rather than
+# in interface_coarse.py alongside DEFAULT_APPLY_MODE/DEFAULT_DEFLATED_
+# REPROJECT_EVERY.  False (unchanged behaviour: next solve's x0 seed is
+# simply the just-computed solution) until the coordinator's on/off
+# measurement (see InterfaceCGSolver.push_solution_history) motivates
+# flipping it.
+DEFAULT_WARM_START_EXTRAPOLATION: bool = False
+
+# Round-3 code review finding 11: DEFLATED_DEBOUNCE_REARM_FALLBACK_ITERS
+# (fallback re-arm period for _deflated_pcg's debounced fresh-true-residual
+# acceptance check) now lives in interface_deflated_pcg.py alongside the
+# rest of the self-contained deflated-PCG machinery it exclusively serves --
+# imported back below for backward-compatible access as
+# ``interface_iterative.DEFLATED_DEBOUNCE_REARM_FALLBACK_ITERS``.
+
+# Historical note (no longer a live code path): an earlier revision of this
+# module shipped the deflated apply mode under the setting value 'adef2'
+# even though the algorithm actually dispatched was DEF, not literal A-DEF2
+# (see the "A-DEF2 work package" docstring section above for the full
+# ratification/selection record) -- that mismatch required runtime self-
+# disclosure (a module constant `ADEF2_ACTUAL_ALGORITHM = 'def1'`, a
+# `[adef2:def1]` preconditioner_label tag, a one-time WARNING). The setting
+# is now honestly named 'deflated', so none of that disclosure machinery is
+# needed; it has been removed rather than kept as dead code.
 
 # ---------------------------------------------------------------------------
 # Threshold for auto-select: use CG when n_interface >= this value.
@@ -321,6 +522,27 @@ AUTO_CG_FACTOR_MEMORY_BUDGET_BYTES: int = 32 * 1024 ** 3  # 32 GB
 # argument by callers (result_factorization.py).
 # ---------------------------------------------------------------------------
 BLOCK_JACOBI_MAX_FACTOR_BYTES: int = 4 * 1024 ** 3  # 4 GB
+
+# A-DEF2 work package finding 1 (round-1 code review): floor for the
+# DECOUPLED GenEO pass's per-block memory cap (see
+# InterfaceCGSolver._extract_geneo_decoupled).  That pass forms one
+# ownership block dense (~5*k^2*8 bytes worst-case -- covers the
+# eigh-fallback path's peak, not just the cheaper cho_factor-succeeds 2x;
+# see Finding 7, round 2, and _extract_geneo_decoupled's own estimate
+# comment) at a time on the block_jacobi memory-downgrade
+# path -- the resolved ``interface_block_jacobi_max_bytes`` is the natural
+# per-block ceiling (peak memory during the pass is exactly one block, by
+# design), but that setting is sometimes configured far below any real
+# per-block cost purely to force the SUM-based downgrade deterministically
+# (this module's own test suite does this extensively, e.g.
+# ``block_jacobi_max_bytes=1``) rather than to express a genuine memory
+# ceiling.  ``max(resolved_max_bytes, this floor)`` -- mirroring the
+# existing 'auto' floor pattern in ``resolve_block_jacobi_max_bytes`` --
+# means the cap never rejects a block too small to plausibly threaten
+# coordinator memory (64 MiB is ~1000x smaller than the ~80-160 GB
+# single-block failure scenario the guard exists to catch, and comfortably
+# above every block this module's tests ever form).
+GENEO_DECOUPLED_MIN_BLOCK_CAP_BYTES: int = 64 * 1024 ** 2  # 64 MiB
 
 # Host-aware 'auto' caps (Stage 1c) — independent of the legacy module
 # constants above so that changing these does not alter the fallback path
@@ -967,6 +1189,30 @@ class InterfaceCGSolver:
         interface_coarse_eps_rank: Optional[float] = None,
         interface_coarse_max_cols: Optional[int] = None,
         interface_coarse_max_bytes: Optional[int] = None,
+        # A-DEF2 work package: same None-sentinel dynamic-default pattern as
+        # the Stage 3 coarse knobs above (apply_mode/reproject_every are
+        # resolved from interface_coarse.DEFAULT_APPLY_MODE/DEFAULT_DEFLATED_
+        # REPROJECT_EVERY dynamically in the constructor body, NOT bound at
+        # def time). Round-2 code review finding 5 (regression -- corrects a
+        # prior revision of this comment, which claimed a plain bool
+        # def-time default was fine here because "its canonical default
+        # lives in THIS module": that reasoning is exactly backwards --
+        # DEFAULT_WARM_START_EXTRAPOLATION living in this module is why it
+        # MUST be resolved dynamically too, not why a def-time snapshot is
+        # safe. `warm_start_extrapolation: bool = DEFAULT_WARM_START_
+        # EXTRAPOLATION` binds the constant's value ONCE, at module-import
+        # time -- monkeypatch.setattr(interface_iterative,
+        # 'DEFAULT_WARM_START_EXTRAPOLATION', ...) (the exact pattern
+        # cli.py's _iface_default docstring promises works, and
+        # TestFinding9DynamicCoarseDefaults exercises for the sibling coarse
+        # knobs) would silently have NO effect on a caller that omits this
+        # kwarg -- a def-time-bound copy, same class of bug Finding 9
+        # (round 1) fixed for the coarse knobs above. Same None-sentinel
+        # fix here: resolved dynamically in the constructor body, see the
+        # Finding-5 comment there.
+        interface_coarse_apply_mode: Optional[str] = None,
+        interface_deflated_reproject_every: Optional[int] = None,
+        warm_start_extrapolation: Optional[bool] = None,
     ) -> None:
         """
         Parameters
@@ -979,8 +1225,13 @@ class InterfaceCGSolver:
             into ``S_c``.  See ``interface_coarse.py``'s module docstring.
         interface_coarse_geneo_k : int
             Stage 3: max GenEO-lite eigenpairs enriched per block-Jacobi
-            ownership block (default 4; 0 disables GenEO, leaving a PoU-only
-            coarse space).  Only used by ``preconditioner='two_level'``.
+            ownership block (default 0 as of the 2026-07-20 measurement-
+            driven flip -- GenEO measured ZERO iteration benefit in every
+            cold/warm x additive/deflated cell on mi200k_v2 while costing
+            ~70 s/prepare, see ``interface_deflation_notes.md``; the
+            machinery stays fully functional and opt-in via geneo_k > 0).
+            0 disables GenEO, leaving a PoU-only coarse space.  Only used by
+            ``preconditioner='two_level'``.
         interface_coarse_geneo_tol : float
             Stage 3: relative eigenvalue threshold (fraction of the block's
             own ``lambda_max``) below which an eigenpair is enriched
@@ -1004,6 +1255,44 @@ class InterfaceCGSolver:
             RAM)); same two-rung PoU-only-then-disable degradation as
             ``interface_coarse_max_cols`` above, since a large-n/modest-T'
             system can exceed it even when comfortably under the column cap.
+        interface_coarse_apply_mode : 'additive' or 'deflated'
+            A-DEF2 work package: how the ``two_level`` coarse-space
+            correction is applied inside CG (default 'deflated' as of the
+            2026-07-20 measurement-driven flip -- 'deflated' beat 'additive'
+            in EVERY cell of the mi200k_v2 head-to-head matrix, see
+            ``interface_deflation_notes.md``'s "Defaults flipped by
+            measurement" section; see this module's "A-DEF2 work package"
+            docstring section for the full derivation and the ratification
+            record of why the non-additive value is named 'deflated', not
+            'adef2'). 'additive' is the Stage 3 ``M^-1 = M_base^-1 + Z S_c^+
+            Z^T`` form (unchanged, still fully supported, just no longer the
+            default). 'deflated' deflects ``range(Z)`` out of the iteration exactly
+            (``M^-1_DEF r = M_base^-1(r - S Q r) + Q r``), routed through the
+            hand-rolled :func:`_deflated_pcg` loop instead of
+            ``scipy.sparse.linalg.cg`` -- only takes effect when
+            ``preconditioner`` resolves to ``'two_level'`` AND the coarse
+            build actually retains ``SZ`` (see ``interface_coarse_max_bytes``
+            -- an over-budget coarse space degrades via the GenEO-then-
+            disable ladder FIRST; the dedicated SZ-only "keep the coarse
+            space, drop SZ, fall back to additive" degrade only fires in the
+            (defensive, not normally reachable) case where the ladder's own
+            pass already fits but a persistent SZ still would not -- see
+            this module's "A-DEF2 work package" docstring's "SZ retention"
+            bullet). Ignored (no-op) for every other ``preconditioner``
+            value.
+        interface_deflated_reproject_every : int
+            A-DEF2 work package: re-project the deflated residual every this
+            many CG iterations to control finite-precision drift in the
+            deflation invariant ``Z^T r -> 0`` (default 50; ``<= 0``
+            disables reprojection). Only consumed when
+            ``interface_coarse_apply_mode == 'deflated'`` and the coarse
+            build retained ``SZ``.
+        warm_start_extrapolation : bool
+            When True, seeds each solve's warm start with the linear
+            extrapolation ``2*x_prev - x_prev2`` of the last two solutions
+            (falls back to ``x_prev`` until two solves have been recorded)
+            instead of the plain previous solution (default False). Composes
+            with either apply mode; see :meth:`push_solution_history`.
         S_extra : sp.spmatrix, optional
             Additional sparse contribution to the matvec, added on top of the
             per-tile Schur sum.  For ``matvec_mode='tilewise'`` this carries the
@@ -1042,8 +1331,17 @@ class InterfaceCGSolver:
             If True (default) and ``matvec_dtype='float32'``, raise
             ``ValueError`` when ``rtol < FP32_MATVEC_MIN_RTOL`` (1e-7) --
             fp32's own matvec error floor makes a tighter CG tolerance
-            unachievable/meaningless.  Set False to override (e.g. for a
-            deliberate accuracy study).
+            unachievable/meaningless.  With ``interface_coarse_apply_mode
+            ='deflated'``, the floor is ``FP32_MATVEC_MIN_RTOL_DEFLATED``
+            (1e-6, one decade looser) instead -- the deflated loop's
+            acceptance gate (``_try_accept`` in :func:`_deflated_pcg`)
+            recomputes a FRESH true residual through the same fp32 matvec
+            on every attempt (not just the failure branch, as the scipy/
+            additive path does), so at the plain 1e-7 floor that gate can
+            sit persistently at/above the fp32 noise floor and never
+            accept, even though CG's own tracked residual has genuinely
+            converged (round-3 code review finding 1).  Set False to
+            override (e.g. for a deliberate accuracy study).
         """
         if matvec_mode not in ('assembled', 'tilewise'):
             raise ValueError(
@@ -1183,6 +1481,65 @@ class InterfaceCGSolver:
         # (both consumers only run after _augment_with_coarse_space has).
         self._base_precond_label: str = 'block_jacobi'
 
+        # --- A-DEF2 work package: apply-mode / warm-start-extrapolation state ---
+        _apply_mode_norm = (
+            interface_coarse_apply_mode.strip().lower()
+            if isinstance(interface_coarse_apply_mode, str)
+            else interface_coarse_apply_mode
+        )
+        self._apply_mode: str = (
+            _apply_mode_norm if _apply_mode_norm is not None
+            else interface_coarse.DEFAULT_APPLY_MODE
+        )
+        # A-DEF2 work package -- RATIFIED (coordinator ruling; see this
+        # module's "A-DEF2" docstring section for the full selection
+        # record). The non-additive value is named 'deflated', NOT 'adef2':
+        # the coordinator measured the true Tang/Nabben/Vuik/Erlangga A-DEF2
+        # preconditioner head-to-head against the deflation ("DEF") member
+        # of the same taxonomy this module actually ships, and DEF won (true
+        # A-DEF2 regressed warm iterations on the netlist_multi_tile
+        # 'natural' scenario and failed to converge outright on the
+        # realistic-ratio ill-conditioned fixture -- see the docstring
+        # section for the numbers). Shipping the setting as 'deflated'
+        # rather than 'adef2' means the name no longer claims an algorithm
+        # that isn't what runs -- no runtime self-disclosure machinery is
+        # needed as a result (contrast the removed ADEF2_ACTUAL_ALGORITHM /
+        # one-time-WARNING pattern an earlier revision of this module used
+        # while the setting was still misleadingly named 'adef2').
+        if self._apply_mode not in ('additive', 'deflated'):
+            raise ValueError(
+                f"interface_coarse_apply_mode must be 'additive' or "
+                f"'deflated'; got {interface_coarse_apply_mode!r}."
+            )
+        self._deflated_reproject_every: int = int(
+            interface_deflated_reproject_every
+            if interface_deflated_reproject_every is not None
+            else interface_coarse.DEFAULT_DEFLATED_REPROJECT_EVERY
+        )
+        # Base (pre-coarse-augmentation) preconditioner apply, used ONLY by
+        # the 'deflated' hand-rolled loop (self._M holds the ADDITIVE
+        # combination base_apply(r) + coarse.apply(r) once two_level is
+        # active, which is the wrong operator for the deflated apply's own
+        # M_base^-1(r - S Q r) + Q r formula) -- set inside
+        # _augment_with_coarse_space, read here only for the type
+        # annotation/default (never called before that runs when
+        # _two_level_requested; __call__ only dispatches to the deflated
+        # loop when self._coarse is not None, which implies
+        # _augment_with_coarse_space already ran and set this).
+        self._M_base_apply: Callable[[np.ndarray], np.ndarray] = (
+            lambda r: r.copy()
+        )
+        # Finding 5 (round 2, mirrors Finding 9's round-1 pattern for the
+        # coarse knobs): resolve the None sentinel HERE, dynamically, not
+        # at def time -- see the parameter's Finding-5 comment above.
+        self._warm_start_extrapolation: bool = bool(
+            warm_start_extrapolation if warm_start_extrapolation is not None
+            else DEFAULT_WARM_START_EXTRAPOLATION
+        )
+        # push_solution_history's two-point history (see its docstring).
+        self._x_hist_prev: Optional[np.ndarray] = None
+        self._x_hist_prev2: Optional[np.ndarray] = None
+
         # --- Stage 2: threaded matvec/BJ-apply state -----------------------
         self.matvec_dtype: np.dtype = resolve_matvec_dtype(matvec_dtype)
         # S9: matvec_dtype is documented as IGNORED in 'assembled' mode (pure
@@ -1198,13 +1555,33 @@ class InterfaceCGSolver:
             and self.matvec_dtype == np.dtype(np.float32)
             and strict_dtype_rtol
         ):
-            if rtol < FP32_MATVEC_MIN_RTOL:
+            # Round-3 code review finding 1: apply_mode='deflated' gates
+            # EVERY acceptance (not just a failure-branch diagnostic) on a
+            # FRESH true residual computed through this same fp32 matvec
+            # (see FP32_MATVEC_MIN_RTOL_DEFLATED's module-level comment
+            # above for the full reasoning) -- needs one decade more
+            # headroom above the matvec's own noise floor than the plain
+            # additive/scipy path does.
+            _fp32_min_rtol = (
+                FP32_MATVEC_MIN_RTOL_DEFLATED if self._apply_mode == 'deflated'
+                else FP32_MATVEC_MIN_RTOL
+            )
+            if rtol < _fp32_min_rtol:
                 raise ValueError(
                     f"matvec_dtype='float32' requires rtol >= "
-                    f"{FP32_MATVEC_MIN_RTOL:.0e} (fp32 tilewise matvec has a "
+                    f"{_fp32_min_rtol:.0e} (fp32 tilewise matvec has a "
                     f"~1e-7 relative residual floor -- a tighter CG rtol is "
-                    f"unachievable). Got rtol={rtol:.2e}. Raise rtol, use "
-                    f"matvec_dtype='float64', or pass "
+                    f"unachievable). Got rtol={rtol:.2e}. "
+                    + (
+                        "interface_coarse_apply_mode='deflated' additionally "
+                        "gates EVERY acceptance on a fresh true residual "
+                        "through this same fp32 matvec, so it needs rtol "
+                        "comfortably above the plain fp32 floor "
+                        f"({FP32_MATVEC_MIN_RTOL:.0e}), not merely at it. "
+                        if self._apply_mode == 'deflated' else ""
+                    )
+                    + "Raise rtol, use matvec_dtype='float64', use "
+                    f"apply_mode='additive', or pass "
                     f"strict_dtype_rtol=False to override."
                 )
         # n_tiles for the 'auto' thread-count cap: prefer tile_index_maps
@@ -1627,6 +2004,15 @@ class InterfaceCGSolver:
         else:
             self._base_precond_label = 'block_jacobi'
         base_apply = base_M.matvec if base_M is not None else (lambda r: r.copy())
+        # A-DEF2: remember the RAW base apply (independent of whatever
+        # self._M ends up holding below -- the additive combination for a
+        # successful build, or base_M unchanged on a degrade) -- the
+        # hand-rolled A-DEF2 loop needs M_base^-1 alone, never the additive
+        # sum.  Set unconditionally (even on the degrade-to-base path) so
+        # self._M_base_apply is always consistent with "the base
+        # preconditioner actually in effect", though it is read only when
+        # self._coarse is not None (the __call__ dispatch condition).
+        self._M_base_apply = base_apply
 
         # Finding 9: read interface_coarse.DEFAULT_MAX_BYTES dynamically
         # (attribute lookup at call time), NOT a module-level snapshot --
@@ -1655,6 +2041,7 @@ class InterfaceCGSolver:
                 eps_rank=self._eps_rank,
                 max_bytes=_max_bytes,
                 matvec_dtype=_coarse_matvec_dtype,
+                retain_sz=(self._apply_mode == 'deflated'),
             )
         except Exception as exc:
             # Finding 6: build_coarse_space is documented "never raises" at
@@ -1708,9 +2095,21 @@ class InterfaceCGSolver:
     @property
     def preconditioner_label(self) -> str:
         """Human-readable preconditioner description for stats/logs, e.g.
-        ``"two_level(bj+geneo k=4, T'=321, rank=320)"``.  Falls back to the
+        ``"two_level(bj+geneo k=4, T'=321, rank=320)"`` (additive, the
+        byte-identical Stage 3 format -- unchanged) or
+        ``"two_level[deflated](jacobi+geneo k=61, T'=126, rank=126)"``
+        (A-DEF2 work package, apply_mode='deflated' AND the coarse build
+        actually retained SZ -- see ``coarse.SZ``).  Falls back to the
         plain ``self.preconditioner`` string when no coarse space is active
-        (including a degraded two_level request)."""
+        (including a degraded two_level request).
+
+        The setting is named 'deflated', not 'adef2' (see this module's
+        "A-DEF2 work package" docstring section for the ratification/
+        selection record) -- the algorithm shipped IS what the setting name
+        says, so (unlike an earlier revision of this module) no separate
+        actual-vs-requested self-disclosure tag is needed;
+        ``InterfaceCGSolver.stats['apply_algorithm']`` carries the same
+        plain 'deflated' value in machine-readable form."""
         if self._coarse is not None:
             # Finding 13: self._base_precond_label (derived once in
             # _augment_with_coarse_space -- see its docstring) is 'none' |
@@ -1723,8 +2122,363 @@ class InterfaceCGSolver:
                 'bj' if self._base_precond_label == 'block_jacobi'
                 else self._base_precond_label
             )
-            return f"two_level({base}+geneo k={self._coarse.n_geneo_cols}, T'={self._coarse.n_cols}, rank={self._coarse.rank})"
+            # Only tag the label when apply_mode='deflated' genuinely took
+            # effect (SZ retained) -- a byte-guard SZ-drop silently runs the
+            # additive apply for this solve (see
+            # interface_coarse.build_coarse_space's retain_sz docstring), so
+            # the label must say so too, keeping the additive format
+            # byte-identical whenever that is what is actually running.
+            _tag = (
+                '[deflated]'
+                if self._apply_mode == 'deflated' and self._coarse.SZ is not None
+                else ''
+            )
+            return (
+                f"two_level{_tag}({base}+geneo k={self._coarse.n_geneo_cols}, "
+                f"T'={self._coarse.n_cols}, rank={self._coarse.rank})"
+            )
         return self.preconditioner
+
+    def _form_owned_block(
+        self,
+        tile_or_node_group: Any,
+        owned_global_arr: np.ndarray,
+        S_csr: Optional[sp.csr_matrix],
+        S_extra_csr: Optional[sp.csr_matrix],
+        use_s_global: bool,
+    ) -> Optional[np.ndarray]:
+        """Dense, 1e-12-jittered ownership block for ``tile_or_node_group``.
+
+        A-DEF2 work package (Deliverable 1): factored out of
+        ``_build_block_jacobi``'s per-block loop so the EXACT same block
+        (true ``S_global`` principal submatrix when available, else the
+        per-tile Schur block + ``S_extra``) is used both there (the
+        retained-factor path) and by :meth:`_extract_geneo_decoupled` (the
+        new decoupled-GenEO path, which runs even when the base
+        preconditioner downgrades to diagonal 'jacobi' and never reaches
+        the retained-factor loop at all) -- one block-formation
+        implementation, not two.
+
+        Returns ``None`` only when neither ``S_global`` nor
+        ``tile_schur_complements``/``tile_index_maps`` are available
+        (mirrors the original inline ``continue`` case -- callers should
+        skip this ownership group).
+        """
+        if use_s_global:
+            sub = S_csr[np.ix_(owned_global_arr, owned_global_arr)].toarray()
+        elif self.tile_schur_complements is not None and self.tile_index_maps is not None:
+            tid = tile_or_node_group
+            S_i = np.asarray(self.tile_schur_complements[tid], dtype=np.float64)
+            idx_full = self.tile_index_maps[tid]
+            global_to_local: Dict[int, int] = {
+                int(g): loc for loc, g in enumerate(idx_full)
+            }
+            owned_local = np.array(
+                [global_to_local[g] for g in owned_global_arr], dtype=np.int32
+            )
+            sub = S_i[np.ix_(owned_local, owned_local)].copy()
+            if S_extra_csr is not None:
+                sub += S_extra_csr[
+                    np.ix_(owned_global_arr, owned_global_arr)
+                ].toarray()
+        else:
+            return None
+
+        # Regularize to ensure SPD.
+        sub += 1e-12 * np.eye(sub.shape[0])
+        return sub
+
+    def _cho_or_eigh_with_geneo(
+        self,
+        sub: np.ndarray,
+        island_local_mask: Optional[np.ndarray],
+        owned_global_arr: np.ndarray,
+        log_prefix: str,
+        run_geneo: bool,
+    ) -> Tuple[Optional[Tuple[str, Any]], bool]:
+        """Cholesky-factor ``sub`` (SPD-safe eigh fallback on
+        ``LinAlgError``), optionally running GenEO-lite enrichment on
+        whichever factor succeeds.
+
+        Finding 13 (A-DEF2 code review, round 1): shared by
+        ``_build_block_jacobi``'s retained-factor loop
+        (``run_geneo=self._want_geneo``; caller retains the returned
+        factor payload for preconditioner application) and
+        :meth:`_extract_geneo_decoupled` (``run_geneo=True`` always; the
+        returned factor payload is discarded by the caller instead of
+        retained) -- these two call sites used to duplicate this cascade
+        almost verbatim. ``log_prefix`` distinguishes each call site's log
+        messages ('Block-Jacobi' / 'Decoupled GenEO').
+
+        Error handling (S11 / Finding 7, pre-existing, preserved unchanged):
+        ``la.cho_factor`` failing with ``LinAlgError`` falls back to
+        ``_spd_safe_pseudo_solve_factor_ex`` (eigh-based SPD projection, NOT
+        ``np.linalg.pinv`` -- pinv of a numerically indefinite symmetric
+        block can retain tiny negative eigenvalues from FP noise, silently
+        voiding CG's SPD-preconditioner assumption). The eigh fallback
+        ITSELF is wrapped in a catch-all (``except Exception``) since
+        ``np.linalg.eigh`` can raise ``MemoryError``/``ValueError`` on a
+        pathological block -- degrades to "skip this block" rather than
+        aborting the whole ``prepare()``/``factor()`` call. GenEO itself
+        gets its own narrow ``try/except`` so a GenEO-only failure never
+        lands in the ``LinAlgError`` handler above and double-appends a
+        factor for the same ``owned_global_arr`` (Finding 2, round 1).
+
+        NOTE: does NOT itself guard ``la.cho_factor``/``np.linalg.eigh``
+        against ``MemoryError`` on the FIRST attempt (only the eigh
+        fallback's own re-entry is wrapped, per the paragraph above).
+        ``_extract_geneo_decoupled`` (an optional enrichment pass) wraps
+        this method's call in its own ``except MemoryError`` to degrade
+        gracefully; ``_build_block_jacobi``'s retained-factor loop (the
+        BASE preconditioner) deliberately does NOT -- see round-2 code
+        review finding 2 -- a MemoryError there must propagate and abort
+        ``prepare()``/``factor()`` fail-fast, not silently skip a block
+        that's needed for the preconditioner CG actually uses.
+
+        Returns:
+            ``(factor_repr, geneo_contributed)`` where ``factor_repr`` is
+            ``('cho', cho)`` / ``('eigh', (V, inv_w))`` on success or
+            ``None`` when even the eigh fallback fails outright, and
+            ``geneo_contributed`` is ``True`` iff a GenEO call actually
+            appended near-null columns to ``self._geneo_pairs``.
+        """
+        try:
+            cho = la.cho_factor(sub, lower=False, check_finite=False)
+        except la.LinAlgError:
+            logger.warning(
+                "%s: owned block size %d is singular/indefinite; using "
+                "eigh-based SPD-safe pseudo-inverse fallback (clipped to "
+                ">= eps*lambda_max).",
+                log_prefix, sub.shape[0],
+            )
+            try:
+                eigh_factor_ex = _spd_safe_pseudo_solve_factor_ex(sub)
+            except Exception as exc:
+                logger.warning(
+                    "%s: eigh-based SPD-safe fallback itself failed on "
+                    "block size %d (%s: %s); skipping this block.",
+                    log_prefix, sub.shape[0], type(exc).__name__, exc,
+                )
+                return None, False
+            if eigh_factor_ex is None:
+                logger.warning(
+                    "%s: block size %d has no positive spectrum "
+                    "(lambda_max <= 0); skipping this block.",
+                    log_prefix, sub.shape[0],
+                )
+                return None, False
+            V_eigh, inv_w_eigh, w_eigh = eigh_factor_ex
+            contributed = False
+            if run_geneo:
+                try:
+                    V_k, w_k = interface_coarse.geneo_lowest_eigenpairs(
+                        sub, k=self._geneo_k, tol=self._geneo_tol,
+                        precomputed=(w_eigh, V_eigh),
+                        island_local_mask=island_local_mask,
+                    )
+                    if V_k.shape[1] > 0:
+                        self._geneo_pairs.append((owned_global_arr, V_k, w_k))
+                        contributed = True
+                except Exception as exc:
+                    logger.warning(
+                        "%s: GenEO enrichment failed on the eigh-fallback "
+                        "block size %d (%s: %s); skipping enrichment for "
+                        "this block (keeps the eigh factor).",
+                        log_prefix, sub.shape[0], type(exc).__name__, exc,
+                    )
+            return ('eigh', (V_eigh, inv_w_eigh)), contributed
+        else:
+            contributed = False
+            if run_geneo:
+                try:
+                    V_k, w_k = interface_coarse.geneo_lowest_eigenpairs(
+                        sub, cho=cho, k=self._geneo_k, tol=self._geneo_tol,
+                        island_local_mask=island_local_mask,
+                    )
+                    if V_k.shape[1] > 0:
+                        self._geneo_pairs.append((owned_global_arr, V_k, w_k))
+                        contributed = True
+                except Exception as exc:
+                    logger.warning(
+                        "%s: GenEO enrichment failed on block size %d (%s: "
+                        "%s); skipping enrichment for this block (keeps "
+                        "the cho factor -- block-Jacobi itself is "
+                        "unaffected).",
+                        log_prefix, sub.shape[0], type(exc).__name__, exc,
+                    )
+            return ('cho', cho), contributed
+
+    def _extract_geneo_decoupled(self, tile_owned: Dict[Any, List[int]]) -> None:
+        """A-DEF2 work package (Deliverable 1): GenEO-lite extraction
+        decoupled from which base preconditioner actually gets built.
+
+        Before this method existed, GenEO enrichment ran ONLY inside
+        ``_build_block_jacobi``'s retained-factor loop (below) -- when the
+        byte-budget guard downgraded the base to diagonal 'jacobi' (the
+        ``_build_jacobi_fallback`` early-return, triggered BEFORE that
+        loop), no block was ever cho-factored, so ``self._geneo_pairs``
+        stayed permanently empty, discarding real near-null eigendirection
+        material at exactly the split regime that benefits from it most
+        (measured detail: docs §7.8/§7.9, ``interface_deflation_notes.md``).
+
+        Called with the SAME ``tile_owned`` (ownership assignment) the
+        retained-factor loop uses, so column labeling/ordering in the
+        eventual coarse space is unaffected by which code path populated
+        ``self._geneo_pairs``. Each block is formed via
+        :meth:`_form_owned_block` (identical to the retained loop), then
+        factored ONE BLOCK AT A TIME via the SHARED
+        :meth:`_cho_or_eigh_with_geneo` helper (Finding 13) -- the factor is
+        DISCARDED at the end of each iteration (never appended anywhere)
+        instead of retained for preconditioner application, so peak
+        coordinator memory during this pass is bounded by the single
+        largest PROCESSED block's factor, not the sum over all blocks (this
+        pass must not reintroduce the pressure the byte-budget guard just
+        downgraded away from).
+
+        Memory guard (Finding 1, round 1; multiplier corrected by Finding 7,
+        round 2): before forming a block, its estimated dense
+        formation+cho/eigh-fallback peak (``5 * k^2 * 8`` bytes -- covers
+        the WORST of the two paths ``_cho_or_eigh_with_geneo`` can take, not
+        just the cheaper 2x cho_factor-succeeds case; see the estimate's own
+        inline comment for the accounting) is checked against a per-block
+        cap derived from the resolved ``interface_block_jacobi_max_bytes``
+        (see ``GENEO_DECOUPLED_MIN_BLOCK_CAP_BYTES`` for the floor rationale);
+        an over-cap block is skipped (WARNING) WITHOUT ever calling
+        :meth:`_form_owned_block`. Block formation and the cho-factor-or-
+        eigh-fallback call are ALSO wrapped in a ``MemoryError``-tolerant
+        guard (unlike ``_build_block_jacobi``'s retained-factor loop, which
+        must stay fail-fast -- see round-2 code review finding 2): even a
+        block that passes the pre-flight estimate can still exhaust memory
+        in practice, and that must skip the block (this is an optional
+        enrichment pass), not abort ``prepare()``/``factor()``.
+
+        Processes blocks SEQUENTIALLY, not via the thread pool (spec-
+        permitted choice -- this method only runs on the infrequent
+        memory-downgrade path, so build-time throughput is secondary to
+        simplicity here). Timed as its own phase (INFO log) -- see
+        ``interface_deflation_notes.md`` for the measured one-time cost.
+        """
+        t0 = time.perf_counter()
+        _use_s_global = self.S_global is not None
+        S_csr = self.S_global.tocsr() if _use_s_global else None
+        _S_extra_csr_early = (
+            self.S_extra.tocsr() if self.S_extra is not None else None
+        )
+        _max_bytes = (
+            self.block_jacobi_max_bytes
+            if self.block_jacobi_max_bytes is not None
+            else BLOCK_JACOBI_MAX_FACTOR_BYTES
+        )
+        # See GENEO_DECOUPLED_MIN_BLOCK_CAP_BYTES's module-level docstring
+        # for why the floor is necessary (a resolved budget configured far
+        # below any real per-block cost -- e.g. this module's own tests --
+        # must not reject every block outright).
+        _per_block_cap = max(_max_bytes, GENEO_DECOUPLED_MIN_BLOCK_CAP_BYTES)
+        _n_blocks_enriched = 0
+        for tile_or_node_group, owned_global in tile_owned.items():
+            owned_global_arr = np.array(sorted(owned_global), dtype=np.int32)
+            k = owned_global_arr.shape[0]
+            # Finding 1 (round 1) / Finding 7 (round 2, corrects an
+            # under-count in the round-1 estimate): this pre-flight must
+            # cover the WORST-CASE peak among the two paths
+            # _cho_or_eigh_with_geneo can take, not just the common
+            # (cho_factor succeeds) one:
+            #   - cho_factor path: sub (k^2*8) + cho_factor's own internal
+            #     working copy (another k^2*8) = 2*k^2*8.
+            #   - eigh-fallback path (singular/indefinite block -- the exact
+            #     pathological case this guard targets): sub (k^2*8) is
+            #     still live, PLUS _spd_safe_pseudo_solve_factor_ex's own
+            #     ``0.5*(sub+sub.T)`` allocation (another k^2*8) AND
+            #     ``np.linalg.eigh``'s internal LAPACK workspace (divide-
+            #     and-conquer ``syevd`` needs roughly 2*k^2 doubles of
+            #     scratch beyond its output arrays) -- roughly 4*k^2*8
+            #     concurrent with ``sub`` itself, ~5*k^2*8 total. Sizing the
+            #     pre-flight for the cho_factor path's cheaper 2x therefore
+            #     admits blocks that, on hitting the eigh fallback, attempt
+            #     ~2-2.5x the intended per-block cap -- risking an OOM-kill
+            #     (SIGKILL, not a catchable MemoryError) rather than the
+            #     graceful WARNING-and-skip degrade this guard exists to
+            #     guarantee. Use the eigh-path multiplier (5x) so the guard
+            #     stays honest for the pathological blocks it targets; this
+            #     is conservative for the (more common) cho_factor-succeeds
+            #     case, which is the intended direction to err.
+            est_block_bytes = 5 * k * k * 8
+            if est_block_bytes > _per_block_cap:
+                logger.warning(
+                    "Decoupled GenEO: skipping ownership block of size %d "
+                    "(~%.1f MB estimated dense formation+cho/eigh-fallback "
+                    "peak exceeds the %.1f MB per-block cap derived from "
+                    "'interface_block_jacobi_max_bytes'); this block's "
+                    "rows enter the coarse space as PoU-only (no GenEO "
+                    "columns).",
+                    k, est_block_bytes / 1024.0 ** 2,
+                    _per_block_cap / 1024.0 ** 2,
+                )
+                continue
+
+            try:
+                sub = self._form_owned_block(
+                    tile_or_node_group, owned_global_arr, S_csr,
+                    _S_extra_csr_early, _use_s_global,
+                )
+            except MemoryError as exc:
+                logger.warning(
+                    "Decoupled GenEO: forming ownership block of size %d "
+                    "raised MemoryError (%s); skipping this block (PoU-"
+                    "only for its rows) rather than aborting prepare().",
+                    k, exc,
+                )
+                continue
+            if sub is None:
+                continue
+
+            island_local_mask = (
+                np.isin(owned_global_arr, self._island_idx)
+                if self._island_idx is not None else None
+            )
+
+            try:
+                _factor_repr, contributed = self._cho_or_eigh_with_geneo(
+                    sub, island_local_mask, owned_global_arr,
+                    log_prefix="Decoupled GenEO", run_geneo=True,
+                )
+            except MemoryError as exc:
+                logger.warning(
+                    "Decoupled GenEO: factoring ownership block of size "
+                    "%d raised MemoryError (%s); skipping this block "
+                    "(PoU-only for its rows) rather than aborting "
+                    "prepare().",
+                    k, exc,
+                )
+                continue
+            # `_factor_repr` (the 'cho'/'eigh' payload) is intentionally
+            # discarded here -- never retained, see this method's
+            # docstring -- it falls out of scope at the end of this
+            # iteration (peak memory = one block's factor, not the sum).
+            if contributed:
+                _n_blocks_enriched += 1
+
+        elapsed = time.perf_counter() - t0
+        if _n_blocks_enriched > 0:
+            # Finding 12: only claim the coarse space "stays PoU+GenEO"
+            # when at least one block actually contributed columns --
+            # otherwise (every block failed/skipped/had no near-null
+            # spectrum) it degrades to PoU-only exactly like the
+            # geneo_k=0/disabled case, and the log must say so.
+            logger.info(
+                "Decoupled GenEO: %d/%d ownership block(s) contributed "
+                "columns (base preconditioner downgraded to diagonal "
+                "'jacobi'; coarse space stays PoU+GenEO instead of "
+                "degrading to PoU-only), %.3fs.",
+                _n_blocks_enriched, len(tile_owned), elapsed,
+            )
+        else:
+            logger.info(
+                "Decoupled GenEO: 0/%d ownership block(s) contributed "
+                "columns (base preconditioner downgraded to diagonal "
+                "'jacobi'; coarse space stays PoU-only), %.3fs.",
+                len(tile_owned), elapsed,
+            )
 
     def _build_block_jacobi(self) -> Optional[spla.LinearOperator]:
         """Block-Jacobi preconditioner.
@@ -1818,13 +2572,16 @@ class InterfaceCGSolver:
             # see that branch's comment) -- name the ACTUAL requested
             # preconditioner (self.requested_preconditioner), not a
             # hardcoded 'block_jacobi', and -- when the request was
-            # 'two_level' -- say so explicitly: this fallback path
-            # (_build_jacobi_fallback) never reaches the per-block
-            # cho_factor loop below, so no blocks get cho-factored and
-            # GenEO enrichment is silently skipped entirely for this factor
-            # (self._geneo_pairs stays empty); the coarse space built
-            # afterward by _augment_with_coarse_space is PoU-only, not
-            # PoU+GenEO.
+            # 'two_level' -- say so explicitly.
+            #
+            # A-DEF2 work package (Deliverable 1): this fallback path
+            # (_build_jacobi_fallback) never reaches the RETAINED-factor
+            # per-block cho_factor loop below, but GenEO enrichment is NO
+            # LONGER silently skipped as a result -- _extract_geneo_
+            # decoupled runs its OWN one-block-at-a-time factor+discard
+            # pass right here when self._want_geneo, so the eventual
+            # coarse space (if two_level) still gets PoU+GenEO, not
+            # PoU-only, even with a diagonal base.
             _is_two_level = self.requested_preconditioner == 'two_level'
             logger.warning(
                 "Block-Jacobi: estimated factor memory %.1f GB exceeds budget "
@@ -1844,10 +2601,16 @@ class InterfaceCGSolver:
                 max_block,
                 self.requested_preconditioner,
                 (
-                    " GenEO enrichment is SKIPPED for this factor (no "
-                    "blocks are cho-factored on this fallback path); the "
-                    "two_level coarse space -- if it can still be built at "
-                    "all -- will be PoU-only, not PoU+GenEO."
+                    " GenEO enrichment runs via a DECOUPLED one-block-at-a-"
+                    "time pass (factor discarded after each block's GenEO "
+                    "call, so peak memory stays bounded) -- the two_level "
+                    "coarse space -- if it can still be built at all -- "
+                    "stays PoU+GenEO, not PoU-only."
+                    if _is_two_level and self._want_geneo else
+                    " GenEO enrichment is disabled "
+                    "(interface_coarse_geneo_k=0); the two_level coarse "
+                    "space -- if it can still be built at all -- will be "
+                    "PoU-only."
                     if _is_two_level else ""
                 ),
             )
@@ -1858,6 +2621,14 @@ class InterfaceCGSolver:
             # downstream report (backend_info, verbose logs) reflects reality.
             self.preconditioner = 'jacobi'
             self._bj_downgraded = True
+            # A-DEF2 work package (Deliverable 1): GenEO extraction
+            # decoupled from the base -- runs even though this path never
+            # reaches the retained-factor loop below.  Guarded by
+            # self._want_geneo (== _two_level_requested and geneo_k > 0)
+            # so a plain 'block_jacobi' request (not 'two_level') or an
+            # explicit interface_coarse_geneo_k=0 correctly pays nothing.
+            if self._want_geneo:
+                self._extract_geneo_decoupled(tile_owned)
             return self._build_jacobi_fallback()
 
         logger.debug(
@@ -1874,8 +2645,7 @@ class InterfaceCGSolver:
 
         # Path 1: use actual diagonal blocks of S_global (preferred)
         _use_s_global = self.S_global is not None
-        if _use_s_global:
-            S_csr = self.S_global.tocsr()
+        S_csr = self.S_global.tocsr() if _use_s_global else None
         # S4: never-assemble mode (S_global is None) needs S_extra's
         # contribution (island 1e5 penalties + package conductances) added
         # into each owned block too -- S = sum_i P_i^T S_i P_i + S_extra, so
@@ -1887,34 +2657,39 @@ class InterfaceCGSolver:
             self.S_extra.tocsr() if self.S_extra is not None else None
         )
 
+        # Round-2 code review finding 2: unlike _extract_geneo_decoupled
+        # (below), this retained-factor loop builds the BASE preconditioner
+        # itself -- the thing CG correctness/performance depends on, not an
+        # optional enrichment pass -- so block formation/factoring here must
+        # stay FAIL-FAST on MemoryError, exactly as it was before Finding 1
+        # (round 1) introduced a shared _form_owned_block/_cho_or_eigh_with_
+        # geneo helper pair. Round 1 correctly wrapped the NEW decoupled-
+        # GenEO pass's calls to those helpers in `except MemoryError`
+        # (that pass is a graceful-degradation enrichment step -- see its
+        # own docstring), but the shared refactor also accidentally added
+        # the SAME guard around THESE two call sites, silently converting a
+        # coordinator-under-memory-pressure MemoryError that used to abort
+        # prepare()/factor() immediately (with a clear signal to raise the
+        # budget or retile) into "skip this block, fall back to identity
+        # preconditioning for its nodes" -- masking the real out-of-memory
+        # root cause behind a slow, confusing CG stall or strict-mode
+        # non-convergence error, potentially hours into a transient run.
+        # Neither call is wrapped here anymore; a MemoryError propagates
+        # out of this method (and __init__) uncaught, matching pre-Finding-1
+        # behavior. GenEO enrichment failures (a narrower, already-caught
+        # concern) still degrade gracefully -- see
+        # _cho_or_eigh_with_geneo's own inner `except Exception` around
+        # each `geneo_lowest_eigenpairs` call, which never lets a GenEO-only
+        # failure reach this loop as an exception at all.
         for tile_or_node_group, owned_global in tile_owned.items():
             owned_global_arr = np.array(sorted(owned_global), dtype=np.int32)
 
-            if _use_s_global:
-                # Extract true diagonal block from S_global
-                sub = S_csr[np.ix_(owned_global_arr, owned_global_arr)].toarray()
-            elif (self.tile_schur_complements is not None
-                  and self.tile_index_maps is not None):
-                # Fallback: use per-tile Schur block (less accurate)
-                tid = tile_or_node_group
-                S_i = np.asarray(self.tile_schur_complements[tid], dtype=np.float64)
-                idx_full = self.tile_index_maps[tid]
-                global_to_local: Dict[int, int] = {
-                    int(g): loc for loc, g in enumerate(idx_full)
-                }
-                owned_local = np.array(
-                    [global_to_local[g] for g in owned_global_arr], dtype=np.int32
-                )
-                sub = S_i[np.ix_(owned_local, owned_local)].copy()
-                if _S_extra_csr_early is not None:
-                    sub += _S_extra_csr_early[
-                        np.ix_(owned_global_arr, owned_global_arr)
-                    ].toarray()
-            else:
+            sub = self._form_owned_block(
+                tile_or_node_group, owned_global_arr, S_csr,
+                _S_extra_csr_early, _use_s_global,
+            )
+            if sub is None:
                 continue
-
-            # Regularize to ensure SPD
-            sub += 1e-12 * np.eye(sub.shape[0])
 
             # Finding 3: local (within-this-block) island mask, used by
             # BOTH GenEO call sites below so the eigen-analysis runs on the
@@ -1928,112 +2703,19 @@ class InterfaceCGSolver:
                 if self._island_idx is not None else None
             )
 
-            try:
-                cho = la.cho_factor(sub, lower=False, check_finite=False)
-            except la.LinAlgError:
-                # SPD-safe fallback (item 7): eigh-based PSD projection,
-                # NOT np.linalg.pinv.  pinv of a numerically indefinite
-                # symmetric block can retain tiny negative eigenvalues from
-                # FP noise -- silently voiding CG's convergence guarantee
-                # (a preconditioner must itself be SPD).  See
-                # _spd_safe_pseudo_solve_factor's docstring.
-                logger.warning(
-                    "Block-Jacobi: owned block size %d is singular/"
-                    "indefinite; using eigh-based SPD-safe pseudo-inverse "
-                    "fallback (clipped to >= eps*lambda_max).",
-                    sub.shape[0],
-                )
-                # S11: eigh itself can raise LinAlgError (eigenvalue
-                # non-convergence, NaN/Inf-contaminated block) -- the old
-                # pre-Stage-2 code wrapped its np.linalg.pinv fallback in a
-                # catch-all and skipped the block on any failure; this eigh-
-                # based replacement must be just as resilient, not let a
-                # pathological block crash the whole prepare().
-                #
-                # Finding 7: S11 narrowed this to `except la.LinAlgError`,
-                # but np.linalg.eigh (and the 0.5*(sub+sub.T) allocation
-                # ahead of it) can also raise other exceptions on a
-                # pathological block -- e.g. MemoryError on a large block
-                # under coordinator memory pressure, or ValueError on
-                # NaN/Inf-contaminated input. Restore the catch-all so any
-                # such failure degrades to "skip this block" instead of
-                # aborting the entire prepare()/factor() call.
-                try:
-                    # Stage 3: use the ``_ex`` form (returns the raw spectrum
-                    # ``w`` too) so GenEO-lite can reuse it below WITHOUT a
-                    # second eigh call on the same block ("don't recompute" --
-                    # see interface_coarse.py's module docstring and
-                    # _spd_safe_pseudo_solve_factor_ex's docstring).
-                    eigh_factor_ex = _spd_safe_pseudo_solve_factor_ex(sub)
-                except Exception as exc:
-                    logger.warning(
-                        "Block-Jacobi: eigh-based SPD-safe fallback itself "
-                        "failed on block size %d (%s: %s); skipping (falls "
-                        "back to identity for this block's nodes).",
-                        sub.shape[0], type(exc).__name__, exc,
-                    )
-                    eigh_factor_ex = None
-                if eigh_factor_ex is not None:
-                    V_eigh, inv_w_eigh, w_eigh = eigh_factor_ex
-                    _block_factors.append(
-                        (owned_global_arr, 'eigh', (V_eigh, inv_w_eigh))
-                    )
-                    if self._want_geneo:
-                        try:
-                            V_k, w_k = interface_coarse.geneo_lowest_eigenpairs(
-                                sub, k=self._geneo_k, tol=self._geneo_tol,
-                                precomputed=(w_eigh, V_eigh),
-                                island_local_mask=island_local_mask,
-                            )
-                            if V_k.shape[1] > 0:
-                                self._geneo_pairs.append((owned_global_arr, V_k, w_k))
-                        except Exception as exc:
-                            logger.warning(
-                                "Block-Jacobi: GenEO-lite enrichment failed "
-                                "on the eigh-fallback block size %d (%s: "
-                                "%s); skipping enrichment for this block "
-                                "(keeps the eigh factor).",
-                                sub.shape[0], type(exc).__name__, exc,
-                            )
-                else:
-                    logger.warning(
-                        "Block-Jacobi: block size %d has no positive "
-                        "spectrum (lambda_max <= 0); skipping (falls back "
-                        "to identity for this block's nodes).",
-                        sub.shape[0],
-                    )
-            else:
-                # Finding 2: the cho-factor SUCCESS path lives in this
-                # `else:` clause (not inline after cho_factor() inside the
-                # try), and the GenEO call below has its OWN narrow
-                # try/except -- neither can land in the `except
-                # la.LinAlgError` above.  Before this fix, GenEO ran INSIDE
-                # the try, AFTER the 'cho' entry was already appended to
-                # _block_factors; a LinAlgError raised by GenEO's own dense
-                # np.linalg.eigh calls (interface_coarse.py's ARPACK-
-                # ArpackNoConvergence/exception fallbacks) was caught by
-                # `except la.LinAlgError` above, which appended a SECOND
-                # ('eigh') entry for the SAME owned_global_arr -- breaking
-                # the block-ownership partition _bj_perm/_bj_offsets rely
-                # on (the block would be gathered/applied twice, and
-                # result[perm] = y_perm would double-write those nodes).
-                _block_factors.append((owned_global_arr, 'cho', cho))
-                if self._want_geneo:
-                    try:
-                        V_k, w_k = interface_coarse.geneo_lowest_eigenpairs(
-                            sub, cho=cho, k=self._geneo_k, tol=self._geneo_tol,
-                            island_local_mask=island_local_mask,
-                        )
-                        if V_k.shape[1] > 0:
-                            self._geneo_pairs.append((owned_global_arr, V_k, w_k))
-                    except Exception as exc:
-                        logger.warning(
-                            "Block-Jacobi: GenEO-lite enrichment failed on "
-                            "block size %d (%s: %s); skipping enrichment "
-                            "for this block (keeps the cho factor -- "
-                            "block-Jacobi itself is unaffected).",
-                            sub.shape[0], type(exc).__name__, exc,
-                        )
+            # Finding 13: the cho_factor-then-eigh-fallback-then-GenEO
+            # cascade (S11's catch-all resilience, Finding 2's
+            # double-append fix, Finding 7's MemoryError/ValueError
+            # catch-all on the eigh fallback) lives ONCE in the shared
+            # _cho_or_eigh_with_geneo helper -- also used by
+            # _extract_geneo_decoupled (the jacobi-downgrade path).
+            _factor_repr, _contributed = self._cho_or_eigh_with_geneo(
+                sub, island_local_mask, owned_global_arr,
+                log_prefix="Block-Jacobi", run_geneo=self._want_geneo,
+            )
+            if _factor_repr is not None:
+                _kind, _payload = _factor_repr
+                _block_factors.append((owned_global_arr, _kind, _payload))
 
         if not _block_factors:
             logger.warning(
@@ -2247,13 +2929,30 @@ class InterfaceCGSolver:
         # measurement script): log progress every `progress_every` CG
         # iterations, including the TRUE relative residual (costs one extra
         # matvec per report -- e.g. 0.5% overhead at progress_every=200).
-        # 0 (default) disables.
+        # <= 0 (0 is the default) disables.
         _progress_every = int(getattr(self, 'progress_every', 0) or 0)
-        _rhs_norm = float(np.linalg.norm(rhs)) if _progress_every else 0.0
+        _rhs_norm = float(np.linalg.norm(rhs)) if _progress_every > 0 else 0.0
 
-        def _callback(xk: np.ndarray) -> None:
+        def _callback(xk: Optional[np.ndarray]) -> None:
+            # xk is None when called from _deflated_pcg's progress_every
+            # gate on an iteration it decided not to log (see that
+            # function's `progress_every` Args entry) -- guaranteed to line
+            # up with the `iters[0] % _progress_every == 0` check below
+            # (same modulus, same value), so xk is never None on an
+            # iteration this branch actually enters.
+            #
+            # Finding 3 (A-DEF2 code review, round 1): gate on
+            # `_progress_every > 0`, not plain truthiness -- a NEGATIVE
+            # value is truthy in Python, and `k % -m == 0` is True whenever
+            # k is a multiple of m, so the old `if _progress_every:` gate
+            # entered this branch on a negative setting while
+            # _deflated_pcg's own gate (below, `progress_every > 0`) still
+            # delivered `xk=None` for every iteration (its "logging
+            # disabled" contract) -- `self._linear_op.matvec(None)` then
+            # raised TypeError, a deflated-only crash on a value the
+            # sibling `reproject_every` knob documents as "<= 0 disables".
             iters[0] += 1
-            if _progress_every and iters[0] % _progress_every == 0:
+            if _progress_every > 0 and iters[0] % _progress_every == 0:
                 rel = (float(np.linalg.norm(rhs - self._linear_op.matvec(xk)))
                        / max(_rhs_norm, 1e-300))
                 logger.info(
@@ -2262,16 +2961,50 @@ class InterfaceCGSolver:
                     iters[0], rel, time.perf_counter() - t0, self.rtol,
                 )
 
-        result, info = spla.cg(
-            self._linear_op,
-            rhs,
-            x0=x0,
-            rtol=self.rtol,
-            atol=self.atol,
-            maxiter=self.maxiter,
-            M=self._M,
-            callback=_callback,
+        # A-DEF2 work package: the hand-rolled deflated-PCG loop is used
+        # ONLY when apply_mode='deflated' actually has a coarse space WITH
+        # retained SZ to deflect against (see module docstring's "A-DEF2
+        # work package" section) -- every other combination (additive
+        # two_level, plain block_jacobi/jacobi/none/amg, or a two_level
+        # request that degraded/never retained SZ) goes through the
+        # unchanged scipy path, so this is zero risk to any pre-existing
+        # mode (spec's "simplest correct" degradation choice).
+        _use_deflated = (
+            self._apply_mode == 'deflated'
+            and self._coarse is not None
+            and self._coarse.SZ is not None
         )
+        if _use_deflated:
+            result, info = _deflated_pcg(
+                matvec=self._linear_op.matvec,
+                base_apply=self._M_base_apply,
+                coarse=self._coarse,
+                b=rhs,
+                x0=x0,
+                rtol=self.rtol,
+                atol=self.atol,
+                maxiter=self.maxiter,
+                reproject_every=self._deflated_reproject_every,
+                callback=_callback,
+                # Perf finding: without this, _deflated_pcg recovers the
+                # full x (two O(n*T') dense GEMVs) every iteration solely
+                # to feed a callback that only USES it once every
+                # `_progress_every` iterations (0 = never, the default) --
+                # gate the recovery on the same interval so the default
+                # (progress logging off) skips it entirely.
+                progress_every=_progress_every,
+            )
+        else:
+            result, info = spla.cg(
+                self._linear_op,
+                rhs,
+                x0=x0,
+                rtol=self.rtol,
+                atol=self.atol,
+                maxiter=self.maxiter,
+                M=self._M,
+                callback=_callback,
+            )
 
         elapsed = time.perf_counter() - t0
         n_iter = iters[0]
@@ -2288,6 +3021,16 @@ class InterfaceCGSolver:
         self._stats['last_cg_iters'] = n_iter
         self._stats['last_cg_time_s'] = elapsed
         self._stats['last_cg_info'] = info
+        # Machine-readable disclosure of the algorithm actually dispatched
+        # this call -- 'deflated' when apply_mode='deflated' genuinely took
+        # effect, 'additive' for the Stage 3 two_level combination, or the
+        # plain base preconditioner name otherwise. A measurement script
+        # (e.g. the coordinator's mi200k/Gate-4 harness) can key off this
+        # without parsing preconditioner_label's string.
+        self._stats['apply_algorithm'] = (
+            'deflated' if _use_deflated
+            else ('additive' if self._coarse is not None else self.preconditioner)
+        )
         self._stats.setdefault('total_cg_iters', 0)
         self._stats['total_cg_iters'] = self._total_iters
         self._stats.setdefault('total_cg_solves', 0)
@@ -2297,6 +3040,7 @@ class InterfaceCGSolver:
         self._stats['cg_failed'] = _failed
         self._stats.setdefault('total_cg_failures', 0)
 
+        rel_res: Optional[float] = None
         if info > 0:
             # Compute actual relative residual so the error message is informative.
             r_norm = float(np.linalg.norm(rhs - self._linear_op.matvec(result)))
@@ -2305,6 +3049,62 @@ class InterfaceCGSolver:
             self._stats['last_cg_rel_residual'] = rel_res
             self._stats['total_cg_failures'] += 1
 
+        # Warm-start: update x0 for next call (plain previous-solution seed,
+        # or the linear-extrapolation seed when warm_start_extrapolation is
+        # enabled -- see push_solution_history).
+        #
+        # Finding 2 (A-DEF2 code review, round 1): only feed a CONVERGED
+        # solution (info == 0) into the extrapolation history. Pushing a
+        # non-converged iterate (info != 0, reachable with strict=False)
+        # would have its error linearly AMPLIFIED by the next step's
+        # ``2*x_prev - x_prev2`` seed instead of merely being reused
+        # as-is -- on a transient run that repeatedly hits maxiter this
+        # compounds step over step, producing progressively worse warm
+        # starts. On a failed solve: seed the NEXT call with the plain
+        # best iterate (never worse than the pre-extrapolation behaviour)
+        # and CLEAR the two-point history so a later converged solve does
+        # not extrapolate across the gap using the bad iterate as one of
+        # its two history entries.
+        #
+        # Round-2 code review finding 8 (PLAUSIBLE, confirmed): this
+        # hygiene MUST run BEFORE the strict-mode raise below, not after
+        # it -- a prior revision of this method ran the raise first, so
+        # with strict=True (the production default) a failed solve's
+        # RuntimeError propagated out of __call__ WITHOUT ever clearing
+        # ``_x_hist_prev``/``_x_hist_prev2`` or reseeding ``_x0`` from the
+        # best iterate. A caller that catches that RuntimeError and
+        # retries (the documented recovery path short of strict=False)
+        # would then re-solve from the SAME pre-failure ``_x0``/history
+        # that just failed -- and if a LATER solve converges, it would
+        # extrapolate ``2*x_prev - x_prev2`` across the failed step using
+        # stale pre-failure history, exactly the across-the-gap
+        # extrapolation this hygiene exists to prevent. Reordering costs
+        # nothing (the raise below still fires with the same message/stats
+        # either way) and makes the hygiene hold unconditionally.
+        #
+        # Round-3 code review finding 3 (CONFIRMED): a ``bnrm2 == 0`` RHS
+        # is a special-cased immediate return (both the scipy path and
+        # ``_deflated_pcg`` short-circuit to ``x=0, info=0`` WITHOUT
+        # running a single iteration -- see their own ``bnrm2 == 0``
+        # branches) -- it is not a genuine converged SOLUTION of a
+        # "family" the extrapolation history should track. Pushing it in
+        # would seed the NEXT solve with ``2*0 - x_prev == -x_prev`` (via
+        # ``push_solution_history``), a seed reliably WORSE than a cold
+        # start. Skip the push entirely for this case -- leave ``_x0``/
+        # ``_x_hist_prev``/``_x_hist_prev2`` exactly as they were before
+        # this call, so the NEXT solve warm-starts from whatever the state
+        # was prior to the zero-RHS solve (unaffected by it), matching the
+        # intuition that "solve nothing" should be a no-op for warm-start
+        # purposes rather than actively corrupting it.
+        _bnrm2 = float(np.linalg.norm(rhs))
+        if info == 0 and _bnrm2 != 0.0:
+            self.push_solution_history(result)
+        elif info != 0:
+            self._x_hist_prev = None
+            self._x_hist_prev2 = None
+            self._x0 = result.copy()
+
+        if info > 0:
             if self.strict:
                 raise RuntimeError(
                     f"InterfaceCGSolver: CG did not converge after {n_iter} "
@@ -2321,9 +3121,6 @@ class InterfaceCGSolver:
                     n_iter, self.rtol, rel_res,
                 )
 
-        # Warm-start: update x0 for next call
-        self._x0 = result.copy()
-
         logger.debug(
             "InterfaceCGSolver: %d iters, info=%d, %.4fs (warm=%s)",
             n_iter, info, elapsed, x0 is not None,
@@ -2336,12 +3133,46 @@ class InterfaceCGSolver:
     # ------------------------------------------------------------------
 
     def reset_warm_start(self) -> None:
-        """Clear the warm-start initial guess (force cold start next call)."""
+        """Clear the warm-start initial guess (force cold start next call),
+        including the linear-extrapolation history (see
+        :meth:`push_solution_history`) -- the next call after a reset gets
+        neither the plain previous solution nor an extrapolated seed."""
         self._x0 = None
+        self._x_hist_prev = None
+        self._x_hist_prev2 = None
 
     def set_x0(self, x0: Optional[np.ndarray]) -> None:
         """Explicitly set the warm-start guess for the next solve call."""
         self._x0 = x0 if x0 is None else np.asarray(x0, dtype=np.float64).copy()
+
+    def push_solution_history(self, x: np.ndarray) -> None:
+        """Update the warm-start seed for the NEXT solve from a just-computed
+        solution ``x``.
+
+        When ``warm_start_extrapolation`` is False (default), this is
+        byte-identical to the pre-A-DEF2-work-package behaviour: the seed is
+        simply ``x`` itself. When True, seeds with the linear extrapolation
+        ``2*x_prev - x_prev2`` of the last two solutions (falls back to
+        ``x_prev`` -- i.e. the plain previous-solution seed -- until two
+        solves have been recorded) -- anticipates a slowly-varying
+        transient RHS's next solution rather than assuming it equals the
+        current one. Called automatically at the end of every CONVERGED
+        :meth:`__call__` (Finding 2, round 1: a non-converged solve
+        instead clears the history and seeds plainly -- see the call
+        site); exposed as a public method so a caller with its own solve
+        loop (bypassing ``__call__``) can still opt in.
+        """
+        x = np.asarray(x, dtype=np.float64)
+        if not self._warm_start_extrapolation:
+            self._x0 = x.copy()
+            return
+        if self._x_hist_prev is not None:
+            self._x_hist_prev2 = self._x_hist_prev
+        self._x_hist_prev = x.copy()
+        if self._x_hist_prev2 is not None:
+            self._x0 = 2.0 * self._x_hist_prev - self._x_hist_prev2
+        else:
+            self._x0 = self._x_hist_prev.copy()
 
     # ------------------------------------------------------------------
     # Stats access
@@ -2361,6 +3192,15 @@ class InterfaceCGSolver:
     def total_solves(self) -> int:
         """Total solve calls."""
         return self._total_solves
+
+
+# Round-3 code review finding 11: the hand-rolled A-DEF2 deflated-PCG
+# machinery (_deflated_pcg, _is_breakdown, _BREAKDOWN_EPS,
+# DEFLATED_DEBOUNCE_REARM_FALLBACK_ITERS) moved to interface_deflated_pcg.py
+# (pure mechanical move, zero logic change) -- imported above and
+# re-exported under their original names so every existing call site and
+# test import keeps working unchanged. See that module's docstring for
+# the full algorithm/dependency record.
 
 
 # ---------------------------------------------------------------------------
@@ -2482,6 +3322,17 @@ def build_interface_solver(
     interface_coarse_eps_rank: Optional[float] = None,
     interface_coarse_max_cols: Optional[int] = None,
     interface_coarse_max_bytes: Optional[int] = None,
+    # A-DEF2 work package: same None-sentinel forwarding pattern as the
+    # Stage 3 coarse knobs above -- including warm_start_extrapolation
+    # (round-2 code review finding 5: a prior revision of this signature
+    # bound it to DEFAULT_WARM_START_EXTRAPOLATION at def time instead,
+    # same class of bug as a def-time-bound interface_coarse_geneo_k
+    # default would be). None is forwarded as-is to InterfaceCGSolver,
+    # which resolves it dynamically -- never resolved here, for the same
+    # reason the four coarse knobs above are not.
+    interface_coarse_apply_mode: Optional[str] = None,
+    interface_deflated_reproject_every: Optional[int] = None,
+    warm_start_extrapolation: Optional[bool] = None,
 ) -> Tuple[Callable, str, Optional['InterfaceCGSolver']]:
     """Build an interface solve callable (direct LU or CG).
 
@@ -2546,6 +3397,9 @@ def build_interface_solver(
         interface_coarse_geneo_k, interface_coarse_geneo_tol,
         interface_coarse_eps_rank, interface_coarse_max_cols,
         interface_coarse_max_bytes: Stage 3 'two_level' knobs -- see
+            :class:`InterfaceCGSolver`.
+        interface_coarse_apply_mode, interface_deflated_reproject_every,
+        warm_start_extrapolation: A-DEF2 work package knobs -- see
             :class:`InterfaceCGSolver`.
 
     Returns:
@@ -2674,6 +3528,9 @@ def build_interface_solver(
         interface_coarse_eps_rank=interface_coarse_eps_rank,
         interface_coarse_max_cols=interface_coarse_max_cols,
         interface_coarse_max_bytes=interface_coarse_max_bytes,
+        interface_coarse_apply_mode=interface_coarse_apply_mode,
+        interface_deflated_reproject_every=interface_deflated_reproject_every,
+        warm_start_extrapolation=warm_start_extrapolation,
     )
     elapsed = time.perf_counter() - t0
     if verbose:

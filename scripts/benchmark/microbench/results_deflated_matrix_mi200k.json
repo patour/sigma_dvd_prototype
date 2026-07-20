@@ -1,0 +1,118 @@
+{
+  "pkl_dir": "netlist/netlist_brcm_sampled/distributed_pkl_mi200k_v2",
+  "dt": 5e-12,
+  "t_end": 1e-10,
+  "runs": {
+    "dc_additive_geneo": {
+      "prepare_s": 198.32819158700295,
+      "cg": {
+        "label": "two_level(jacobi+geneo k=61, T'=126, rank=126)",
+        "n_pou_cols": 65,
+        "n_geneo_cols": 61,
+        "rank": 126,
+        "sz_retained": false
+      },
+      "cold_iters_1e12": 118,
+      "cold_s_1e12": 29.728221972007304,
+      "cold_iters_1e8": 70,
+      "cold_s_1e8": 17.796245506004198,
+      "max_dV_V": 1.453801363737739e-07,
+      "rss_gb": 23.126003712
+    },
+    "tr_B_additive_geneo_1e-12_ref": {
+      "tr_prepare_s": 195.18012501701014,
+      "loop_s_per_step": 16.111936818048708,
+      "peak_mV": 76.16114133667374
+    },
+    "tr_B_additive_geneo_1e-8": {
+      "tr_prepare_s": 195.18012501701014,
+      "cg": {
+        "label": "two_level(jacobi+geneo k=60, T'=125, rank=125)",
+        "n_pou_cols": 65,
+        "n_geneo_cols": 60,
+        "rank": 125,
+        "sz_retained": false
+      },
+      "loop_s_per_step": 6.249475293899013,
+      "iters_per_step": 23.45,
+      "max_dV_V": 2.540112059579158e-07,
+      "peak_mV": 76.16115389965061,
+      "rss_gb": 39.93751552
+    },
+    "tr_B_additive_geneo_1e-8_extrap": {
+      "tr_prepare_s": 195.18012501701014,
+      "cg": {
+        "label": "two_level(jacobi+geneo k=60, T'=125, rank=125)",
+        "n_pou_cols": 65,
+        "n_geneo_cols": 60,
+        "rank": 125,
+        "sz_retained": false
+      },
+      "loop_s_per_step": 5.692382328098756,
+      "iters_per_step": 20.9,
+      "max_dV_V": 2.9658497924245353e-07,
+      "peak_mV": 76.16114843615229,
+      "rss_gb": 39.938326528
+    },
+    "tr_C_deflated_geneo_1e-8": {
+      "tr_prepare_s": 196.27845175698167,
+      "cg": {
+        "label": "two_level[deflated](jacobi+geneo k=60, T'=125, rank=125)",
+        "n_pou_cols": 65,
+        "n_geneo_cols": 60,
+        "rank": 125,
+        "sz_retained": true
+      },
+      "loop_s_per_step": 5.5504332699507355,
+      "iters_per_step": 20.0,
+      "max_dV_V": 1.8294160564202855e-07,
+      "peak_mV": 76.16114946506458,
+      "rss_gb": 58.629701632
+    },
+    "tr_C_deflated_geneo_1e-8_extrap": {
+      "tr_prepare_s": 196.27845175698167,
+      "cg": {
+        "label": "two_level[deflated](jacobi+geneo k=60, T'=125, rank=125)",
+        "n_pou_cols": 65,
+        "n_geneo_cols": 60,
+        "rank": 125,
+        "sz_retained": true
+      },
+      "loop_s_per_step": 4.979809689549438,
+      "iters_per_step": 17.7,
+      "max_dV_V": 2.6357876170557404e-07,
+      "peak_mV": 76.16114641048677,
+      "rss_gb": 58.629701632
+    },
+    "tr_D_additive_pou_only_1e-8": {
+      "tr_prepare_s": 125.10140342000523,
+      "cg": {
+        "label": "two_level(jacobi+geneo k=0, T'=65, rank=65)",
+        "n_pou_cols": 65,
+        "n_geneo_cols": 0,
+        "rank": 65,
+        "sz_retained": false
+      },
+      "loop_s_per_step": 6.26994738594949,
+      "iters_per_step": 23.6,
+      "max_dV_V": 2.527553197850807e-07,
+      "peak_mV": 76.16115386572586,
+      "rss_gb": 58.438459392
+    },
+    "tr_D_additive_pou_only_1e-8_extrap": {
+      "tr_prepare_s": 125.10140342000523,
+      "cg": {
+        "label": "two_level(jacobi+geneo k=0, T'=65, rank=65)",
+        "n_pou_cols": 65,
+        "n_geneo_cols": 0,
+        "rank": 65,
+        "sz_retained": false
+      },
+      "loop_s_per_step": 5.663978563950513,
+      "iters_per_step": 20.9,
+      "max_dV_V": 2.90580938755447e-07,
+      "peak_mV": 76.16114924319406,
+      "rss_gb": 58.438729728
+    }
+  }
+}

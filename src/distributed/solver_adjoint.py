@@ -51,6 +51,36 @@ from .tile_parsing import _parse_node_xy
 logger = logging.getLogger(__name__)
 
 
+def _reset_interface_cg_warm_start(ctx: Any) -> None:
+    """Reset the interface CG solver's warm-start state (plain ``_x0`` seed
+    AND the two-point linear-extrapolation history -- see
+    ``InterfaceCGSolver.reset_warm_start``) before a solve that starts a new
+    RHS "family" on a context whose ``interface_lu`` may be a warm-started
+    ``InterfaceCGSolver`` shared with an unrelated prior solve.
+
+    Round-3 code review finding 2: ``ctx``/``trans_ctx`` are long-lived and
+    shared across very different linear-system families that all route
+    through the SAME ``ctx._cg_solver`` instance -- forward transient/QS
+    voltage solves, the adjoint terminal condition (``e_victim``), and the
+    adjoint backward-sweep steps for one victim vs. the NEXT victim's
+    terminal condition. ``push_solution_history`` (called automatically at
+    the end of every converged ``InterfaceCGSolver.__call__``) has no way
+    to know a family boundary was crossed -- it will happily extrapolate
+    ``2*x_prev - x_prev2`` across two solutions of entirely different
+    systems when ``interface_warm_start_extrapolation=True``, a seed that
+    can be strictly worse than a cold start. Call this at every genuine
+    family boundary (adjoint terminal solve, and the forward solve that
+    follows an adjoint solve on the same context) so each family starts
+    from a clean plain-previous-or-cold seed instead. A no-op when the
+    context is not using the CG interface solver (``_cg_solver is None`` --
+    e.g. 'direct' mode has no warm-start state) or has no interface solver
+    configured yet.
+    """
+    cg_solver = getattr(ctx, '_cg_solver', None)
+    if cg_solver is not None:
+        cg_solver.reset_warm_start()
+
+
 class _AdjointMixin:
     """Mixin providing adjoint sensitivity methods for DistributedDDMSolver.
 
@@ -679,6 +709,12 @@ class _AdjointMixin:
         # problem with Dirichlet BCs.
 
         # 6. Coordinator: solve interface system
+        # Finding 2 (round 3): this ctx's interface CG solver may still be
+        # warm-started from an unrelated prior solve (a forward DC solve,
+        # or -- across victims in the caller's loop -- the previous
+        # victim's own forward QS solve below) -- reset before starting
+        # this victim's adjoint family (see _reset_interface_cg_warm_start).
+        _reset_interface_cg_warm_start(ctx)
         t0 = time_module.perf_counter()
         lambda_p = ctx.interface_lu(global_rhs)
         timings['solve_interface'] = time_module.perf_counter() - t0
@@ -733,6 +769,11 @@ class _AdjointMixin:
         #    Pass a dummy smoothed_sources to prevent solve_quasi_static from
         #    re-calling preprocess_sources (which would apply smoothing by default
         #    and overwrite _active_sources).
+        # Finding 2 (round 3): this forward voltage solve reuses the SAME
+        # ctx (and, in CG mode, the SAME warm-started _cg_solver) as the
+        # adjoint lambda solve just above -- a different RHS family
+        # (forward currents vs. e_victim) -- reset before crossing back.
+        _reset_interface_cg_warm_start(ctx)
         t0 = time_module.perf_counter()
         from .result import DistributedSmoothedSources
         _already_init = DistributedSmoothedSources(
@@ -930,6 +971,19 @@ class _AdjointMixin:
         )
 
         # 8. Coordinator solves S_transient @ lambda_p = global_rhs
+        # Finding 2 (round 3): trans_ctx's interface CG solver may still be
+        # warm-started from the forward transient sweep that produced
+        # ``transient_result`` (a different RHS family: forward voltages,
+        # not adjoint lambdas) -- OR, when this method runs for the NEXT
+        # victim in analyze_adjoint's loop, from the PREVIOUS victim's own
+        # terminal/backward-sweep solves (a different e_victim). Resetting
+        # here, at the top of every terminal step, covers both boundaries
+        # (see _reset_interface_cg_warm_start) without touching the
+        # legitimate warm start WITHIN this victim's backward sweep below
+        # (each step's lambda_p is a genuine continuation of the SAME
+        # adjoint family, one time step apart -- exactly analogous to the
+        # forward loop's own warm start across time steps).
+        _reset_interface_cg_warm_start(trans_ctx)
         lambda_p = trans_ctx.interface_lu(global_rhs)
         timings['terminal_step'] = time_module.perf_counter() - t0
 

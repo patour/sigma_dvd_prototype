@@ -1,0 +1,25 @@
+{
+  "pkl_dir": "netlist/netlist_brcm_sampled/distributed_pkl_mi200k_v2",
+  "runs": {
+    "dc_deflated_pou_only": {
+      "prepare_s": 129.19247748999624,
+      "cold_iters_1e12": 79,
+      "cold_s_1e12": 17.89749625400873,
+      "cold_iters_1e8": 34,
+      "cold_s_1e8": 9.993198307987768,
+      "rss_gb": 20.93225984
+    },
+    "tr_deflated_pou_only_1e-8": {
+      "loop_s_per_step": 5.65881624015019,
+      "iters_per_step": 20.0,
+      "peak_mV": 76.16114949952613,
+      "rss_gb": 39.937032192
+    },
+    "tr_deflated_pou_only_1e-8_extrap": {
+      "loop_s_per_step": 5.159928915199998,
+      "iters_per_step": 17.7,
+      "peak_mV": 76.1611463899966,
+      "rss_gb": 39.960231936
+    }
+  }
+}

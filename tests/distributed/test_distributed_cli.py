@@ -419,12 +419,148 @@ class TestInterfaceCGPrecedence:
         assert args.interface_strict_dtype_rtol is True
         assert args.interface_drop_s_global is False
         # Stage 3 additions
-        assert args.interface_coarse_geneo_k == 4
+        # Measurement-driven flip (2026-07-20): interface_coarse.
+        # DEFAULT_GENEO_K changed 4 -> 0 (GenEO measured zero iteration
+        # benefit on mi200k_v2, see interface_deflation_notes.md); GenEO
+        # itself is unchanged and fully opt-in via geneo_k > 0.
+        assert args.interface_coarse_geneo_k == 0
         assert args.interface_coarse_geneo_tol == 1e-6
         assert args.interface_coarse_eps_rank == 1e-12
         assert args.interface_coarse_max_cols == 4096
         # Finding 5 (Stage 3): new byte-based coarse-build guard.
         assert args.interface_coarse_max_bytes == 'auto'
+        # A-DEF2 work package additions.
+        # Measurement-driven flip (2026-07-20): interface_coarse.
+        # DEFAULT_APPLY_MODE changed 'additive' -> 'deflated' ('deflated'
+        # beat 'additive' in every cell of the mi200k_v2 head-to-head
+        # matrix, see interface_deflation_notes.md's "Defaults flipped by
+        # measurement" section). 'additive' remains fully supported and
+        # selectable explicitly.
+        assert args.interface_coarse_apply_mode == 'deflated'
+        assert args.interface_deflated_reproject_every == 50
+        assert args.interface_warm_start_extrapolation is False
+
+
+class TestADef2CLIWiring:
+    """A-DEF2 work package: CLI flags + YAML + precedence for
+    interface_coarse_apply_mode / interface_deflated_reproject_every /
+    interface_warm_start_extrapolation -- follows the exact pattern of
+    TestInterfaceCGYamlConfig/TestInterfaceCGPrecedence above."""
+
+    def test_explicit_cli_flags(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl',
+            '--interface-coarse-apply-mode', 'deflated',
+            '--interface-deflated-reproject-every', '10',
+            '--interface-warm-start-extrapolation',
+        ])
+        assert args.interface_coarse_apply_mode == 'deflated'
+        assert args.interface_deflated_reproject_every == 10
+        assert args.interface_warm_start_extrapolation is True
+
+    def test_yaml_settings_applied(self, tmp_path):
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text(
+            "solver:\n"
+            "  interface_coarse_apply_mode: deflated\n"
+            "  interface_deflated_reproject_every: 25\n"
+            "  interface_warm_start_extrapolation: true\n"
+        )
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_coarse_apply_mode == 'deflated'
+        assert args.interface_deflated_reproject_every == 25
+        assert args.interface_warm_start_extrapolation is True
+
+    def test_explicit_cli_beats_yaml(self, tmp_path):
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text(
+            "solver:\n"
+            "  interface_coarse_apply_mode: deflated\n"
+        )
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+            '--interface-coarse-apply-mode', 'additive',
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_coarse_apply_mode == 'additive'
+
+    def test_no_warm_start_extrapolation_overrides_yaml_true(self, tmp_path):
+        """Finding-10-style paired negation flag: an explicit CLI False
+        must beat a YAML true (matches --interface-no-drop-s-global's
+        established pattern)."""
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text(
+            "solver:\n  interface_warm_start_extrapolation: true\n"
+        )
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+            '--interface-no-warm-start-extrapolation',
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_warm_start_extrapolation is False
+
+    def test_invalid_apply_mode_rejected(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args([
+                'solve', '/tmp/pkl',
+                '--interface-coarse-apply-mode', 'bogus',
+            ])
+
+    def test_build_interface_settings_includes_deflated_keys(self):
+        from distributed.cli import (
+            build_parser, _load_and_apply_config, _build_interface_settings,
+        )
+
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl',
+            '--interface-coarse-apply-mode', 'deflated',
+            '--interface-deflated-reproject-every', '5',
+            '--interface-warm-start-extrapolation',
+        ])
+        args = _load_and_apply_config(args)
+        settings = _build_interface_settings(args)
+        assert settings['interface_coarse_apply_mode'] == 'deflated'
+        assert settings['interface_deflated_reproject_every'] == 5
+        assert settings['interface_warm_start_extrapolation'] is True
+
+    def test_warm_start_extrapolation_default_resolves_dynamically(self, monkeypatch):
+        """Finding 6 (round-1 code review) regression: the CLI/YAML default
+        for interface_warm_start_extrapolation must read
+        interface_iterative.DEFAULT_WARM_START_EXTRAPOLATION dynamically
+        (same _iface_default pattern as interface_coarse_apply_mode/
+        interface_coarse_geneo_k/etc. -- see
+        test_interface_iterative_stage2.py's analogous
+        monkeypatch.setattr(interface_coarse, 'DEFAULT_*', ...) tests),
+        NOT a def-time-bound literal snapshot -- a hardcoded default would
+        make this knob permanently unreachable for CLI-driven runs even
+        after the coordinator flips the canonical module constant."""
+        import distributed.interface_iterative as interface_iterative
+        from distributed.cli import _load_and_apply_config, _build_interface_settings
+
+        monkeypatch.setattr(
+            interface_iterative, 'DEFAULT_WARM_START_EXTRAPOLATION', True,
+        )
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        args = _load_and_apply_config(args)
+        assert args.interface_warm_start_extrapolation is True
+        settings = _build_interface_settings(args)
+        assert settings['interface_warm_start_extrapolation'] is True
 
 
 class TestDecomposeParser:
@@ -765,12 +901,21 @@ class TestDecomposeDispatch:
                 'interface_matvec_dtype': 'float64',
                 'interface_strict_dtype_rtol': True,
                 'interface_drop_s_global': False,
-                'interface_coarse_geneo_k': 4,
+                # Measurement-driven flip (2026-07-20): DEFAULT_GENEO_K
+                # 4 -> 0 (see interface_deflation_notes.md).
+                'interface_coarse_geneo_k': 0,
                 'interface_coarse_geneo_tol': 1e-6,
                 'interface_coarse_eps_rank': 1e-12,
                 'interface_coarse_max_cols': 4096,
                 # Finding 5 (Stage 3): new byte-based coarse-build guard.
                 'interface_coarse_max_bytes': 'auto',
+                # A-DEF2 work package. Measurement-driven flip
+                # (2026-07-20): DEFAULT_APPLY_MODE 'additive' -> 'deflated'
+                # (see interface_deflation_notes.md's "Defaults flipped by
+                # measurement" section).
+                'interface_coarse_apply_mode': 'deflated',
+                'interface_deflated_reproject_every': 50,
+                'interface_warm_start_extrapolation': False,
             },
             island_detection='auto',
         )

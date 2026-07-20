@@ -98,7 +98,15 @@ logger = logging.getLogger(__name__)
 # _IFACE_SETTING_DEFAULTS and result_factorization.py
 # _read_interface_cg_settings).
 # ---------------------------------------------------------------------------
-DEFAULT_GENEO_K: int = 4
+# Measurement-driven default flip (2026-07-20, see
+# interface_deflation_notes.md's "Defaults flipped by measurement" section):
+# on the mi200k_v2 head-to-head matrix (64 tiles, 168,586 unknowns), GenEO
+# enrichment contributed ZERO across every measured cell (cold/warm x
+# additive/deflated: 118==118 iters, 70==70, 23.6~=23.4, 20.0==20.0 iters)
+# while costing ~70 s per prepare at the split regime -- so GenEO is now
+# OFF by default (k=0, PoU-only coarse space). The GenEO machinery itself
+# is unchanged and fully opt-in via interface_coarse_geneo_k > 0.
+DEFAULT_GENEO_K: int = 0
 DEFAULT_GENEO_TOL: float = 1e-6
 DEFAULT_EPS_RANK: float = 1e-12
 DEFAULT_MAX_COLS: int = 4096
@@ -115,6 +123,34 @@ DEFAULT_MAX_COLS: int = 4096
 # interface_iterative.resolve_coarse_max_bytes for the host-aware 'auto'
 # resolution (min(8 GB, 0.1 * total RAM) via psutil).
 DEFAULT_MAX_BYTES: int = 8 * 1024 ** 3
+
+# A-DEF2 work package (RATIFIED, see interface_iterative.py's "A-DEF2"
+# docstring section for the full head-to-head selection record): apply-mode
+# + reprojection-interval defaults (also the model.settings / CLI defaults
+# -- interface_coarse_apply_mode / interface_deflated_reproject_every).
+# The non-additive value is named 'deflated' -- NOT 'adef2' -- because the
+# coordinator's head-to-head measurement selected the DEF (deflation) member
+# of the Tang/Nabben/Vuik/Erlangga taxonomy, not the literal A-DEF2 formula
+# (see interface_iterative.py for the derivation, the true-A-DEF2
+# implementation that was measured and rejected, and why).
+#
+# Measurement-driven default flip (2026-07-20, see
+# interface_deflation_notes.md's "Defaults flipped by measurement" section):
+# a SECOND coordinator ruling, measured on mi200k_v2 (64 tiles, 168,586
+# unknowns), found 'deflated' beats 'additive' in EVERY measured cell (cold
+# DC 118->79 iters @1e-12, 70->34 @1e-8; warm transient 23.6->20.0
+# iters/step @1e-8; accuracy equal or better, 183 nV vs 253 nV) -- so
+# 'deflated' (M^-1_DEF r = M_base^-1(r - S Q r) + Q r, routed through the
+# hand-rolled PCG loop) is now the DEFAULT. 'additive' (M^-1 = M_base^-1 + Z
+# S_c^+ Z^T, the Stage 3 form above) remains fully supported and selectable
+# explicitly via interface_coarse_apply_mode='additive'.
+# 50 iterations between residual re-projections controls the deflation-
+# invariant drift (Z^T r -> 0) a plain CG recurrence accumulates in finite
+# precision without materially affecting the per-iteration cost (the
+# reprojection itself is O(n*T'), like one extra `apply()` call, not O(n)
+# sparse/dense matvec work).
+DEFAULT_APPLY_MODE: str = 'deflated'
+DEFAULT_DEFLATED_REPROJECT_EVERY: int = 50
 
 # Below this block size, GenEO eigendecomposition uses dense np.linalg.eigh
 # directly rather than ARPACK shift-invert (eigsh has diminishing returns --
@@ -459,11 +495,25 @@ class CoarseSpace:
         n_pou_cols / n_geneo_cols / n_dropped_cols: Column-count bookkeeping
             for logging/introspection.
         rank / cond_estimate: Diagnostics from the eigh rank-truncation step.
+        SZ: A-DEF2 work package -- dense ``(n, T')`` fp64 ``S @ Z`` (the SAME
+            fp64-accumulating ``matmat`` used to build ``S_c``), retained
+            ONLY when the caller requests ``retain_sz=True`` (i.e.
+            ``interface_coarse_apply_mode='deflated'``, the DEFAULT as of the
+            2026-07-20 measurement-driven flip -- see
+            ``interface_deflation_notes.md``) -- ``None`` when
+            ``apply_mode='additive'`` (still fully supported, just no longer
+            the default), in which case memory usage is byte-identical to
+            pre-A-DEF2 Stage 3 (``apply()`` alone never needed it).  Lets
+            :meth:`apply_with_SQ` compute ``S (Z S_c^+
+            Z^T r)`` via ``SZ @ (S_c^+ (Z^T r))`` -- an ``(n, T')`` GEMV, not
+            a full ``S`` matvec -- for the deflated-PCG apply (``M^-1_DEF r =
+            M_base^-1(r - S Q r) + Q r``, see
+            ``interface_iterative._deflated_pcg``).
     """
 
     __slots__ = (
         'Z', 'V_c', 'inv_lambda_c', 'n_pou_cols', 'n_geneo_cols',
-        'n_dropped_cols', 'rank', 'cond_estimate', 'col_labels',
+        'n_dropped_cols', 'rank', 'cond_estimate', 'col_labels', 'SZ',
     )
 
     def __init__(
@@ -477,6 +527,7 @@ class CoarseSpace:
         rank: int,
         cond_estimate: float,
         col_labels: List[Any],
+        SZ: Optional[np.ndarray] = None,
     ) -> None:
         self.Z = Z
         self.V_c = V_c
@@ -487,11 +538,46 @@ class CoarseSpace:
         self.rank = rank
         self.cond_estimate = cond_estimate
         self.col_labels = col_labels
+        self.SZ = SZ
 
     @property
     def n_cols(self) -> int:
         """T' -- total coarse-space column count (post drop)."""
         return self.Z.shape[1]
+
+    def _solve_Sc_pinv(self, w: np.ndarray) -> np.ndarray:
+        """``S_c^+ w`` in the ``V_c`` eigenbasis, for an already-projected
+        ``(T', k)`` (or ``(T',)``) input ``w`` -- the small dense pseudo-
+        inverse solve shared by every ``Q``/``QS`` application below.
+
+        Finding 8 (A-DEF2 code review, round 1): broadcasts
+        ``inv_lambda_c`` (shape ``(rank,)``) against the projected vector
+        according to ITS actual rank, not unconditionally via the
+        ``[:, None]`` column-broadcast that assumes a 2-D ``(rank, k)``
+        input -- for a genuinely 1-D ``(rank,)`` input, ``(rank,) *
+        (rank, 1)`` silently broadcasts to a ``(rank, rank)`` matrix,
+        so the old code returned a ``(T', rank)`` matrix instead of the
+        documented ``(T',)`` vector. All current callers
+        (:meth:`apply`/:meth:`apply_with_SQ`, plus
+        ``tests.distributed.test_interface_coarse``'s test-local
+        ``_apply_QS`` helper -- see Finding 10, round 2 -- for the
+        rejected true-A-DEF2 selection record) already reshape to 2-D
+        before calling this, so the bug only bit a direct caller following
+        this method's own documented 1-D contract.
+        """
+        w2 = self.V_c.T @ w                                   # (rank,) or (rank, k)
+        if w2.ndim == 1:
+            w2 = w2 * self.inv_lambda_c                       # (rank,) elementwise
+        else:
+            w2 = w2 * self.inv_lambda_c[:, None]               # (rank, k)
+        return self.V_c @ w2                                  # (T',) or (T', k)
+
+    def _project(self, r: np.ndarray) -> np.ndarray:
+        """``y = S_c^+ (Z^T r)`` in the ``V_c`` eigenbasis -- shape ``(rank
+        -> T', k)``.  Shared by :meth:`apply` and :meth:`apply_with_SQ` so
+        the small (T'-dim) pseudo-inverse solve is written once."""
+        w = np.asarray(self.Z.T @ r, dtype=np.float64)        # (T', k)
+        return self._solve_Sc_pinv(w)
 
     def apply(self, r: np.ndarray) -> np.ndarray:
         """``Z @ (V_c @ (inv_lambda_c * (V_c.T @ (Z.T @ r))))``.
@@ -503,12 +589,59 @@ class CoarseSpace:
         """
         squeeze = r.ndim == 1
         Rr = r.reshape(-1, 1) if squeeze else r
-        w = np.asarray(self.Z.T @ Rr, dtype=np.float64)      # (T', k)
-        w2 = self.V_c.T @ w                                   # (rank, k)
-        w2 *= self.inv_lambda_c[:, None]
-        y = self.V_c @ w2                                     # (rank -> T', k)
+        y = self._project(Rr)
         out = np.asarray(self.Z @ y, dtype=np.float64)        # (n, k)
         return out[:, 0] if squeeze else out
+
+    def apply_with_SQ(self, r: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Deflated apply (A-DEF2 work package): ``(Q r, S Q r)`` where
+        ``Q = Z S_c^+ Z^T``, computed from ONE shared ``S_c^+ (Z^T r)``
+        solve (:meth:`_project`) -- ``Q r = Z @ y`` and ``S Q r = SZ @ y``
+        reuse the SAME ``y``, so this costs one extra ``(n, T')`` GEMV over
+        :meth:`apply` alone, never a second full ``S`` matvec.
+
+        Accepts either a 1-D vector or a ``(n, k)`` batch; returns a matching
+        pair of arrays.
+
+        Raises:
+            ValueError: If ``self.SZ`` was not retained (built with
+                ``retain_sz=False`` / apply_mode != 'deflated') -- callers
+                must check ``coarse.SZ is not None`` before selecting the
+                deflated-PCG path (see
+                ``InterfaceCGSolver.__call__``'s dispatch).
+        """
+        if self.SZ is None:
+            raise ValueError(
+                "CoarseSpace.apply_with_SQ requires SZ retained (build with "
+                "retain_sz=True, i.e. interface_coarse_apply_mode='deflated'); "
+                "this CoarseSpace was built with SZ dropped (additive apply "
+                "mode, or a byte-budget SZ-drop degrade)."
+            )
+        squeeze = r.ndim == 1
+        Rr = r.reshape(-1, 1) if squeeze else r
+        y = self._project(Rr)
+        Qr = np.asarray(self.Z @ y, dtype=np.float64)          # (n, k)
+        SQr = np.asarray(self.SZ @ y, dtype=np.float64)        # (n, k)
+        if squeeze:
+            return Qr[:, 0], SQr[:, 0]
+        return Qr, SQr
+
+    # Round-2 code review finding 10: apply_QS (True A-DEF2's ``Q S v``
+    # product) used to live here. Its ONLY consumer, ever, was
+    # ``tests.distributed.test_interface_coarse._true_adef2_pcg`` -- the
+    # measured-and-REJECTED true-A-DEF2 variant kept purely as a selection
+    # record (see ``interface_iterative``'s "A-DEF2 work package" docstring
+    # section for the head-to-head numbers; DEF ships, not true A-DEF2).
+    # Carrying ~45 lines of otherwise-dead production API surface (plus its
+    # own SZ-precondition ValueError branch) for a single rejected-algorithm
+    # test helper meant every future reader of the deflated apply path had
+    # to rule this out as a live code path. Moved to a test-local
+    # ``_apply_QS(coarse, v)`` free function in
+    # ``tests/distributed/test_interface_coarse.py``, right next to
+    # ``_true_adef2_pcg`` -- it needs only ``self.SZ``/``self.Z`` (public
+    # attributes) and ``self._solve_Sc_pinv`` (already reached into by
+    # other test-file helpers), the same three ingredients this method
+    # used.
 
     def describe(self) -> str:
         return (
@@ -607,6 +740,7 @@ def build_coarse_space(
     eps_rank: float = DEFAULT_EPS_RANK,
     max_bytes: int = DEFAULT_MAX_BYTES,
     matvec_dtype: Any = np.float64,
+    retain_sz: bool = False,
 ) -> Optional[CoarseSpace]:
     """Build the full two-level coarse space: PoU + GenEO columns, ``S_c``,
     and its eigh-based PSD pseudo-inverse factorization.
@@ -655,6 +789,29 @@ def build_coarse_space(
         matvec_dtype: The linear op's matvec storage dtype (Finding 7) --
             ``InterfaceCGSolver.matvec_dtype`` in 'tilewise' mode, float64
             otherwise (see the ``eps_rank`` note above).
+        retain_sz: A-DEF2 work package -- when True, the ``S @ Z`` dense
+            array computed while forming ``S_c`` is RETAINED on the returned
+            ``CoarseSpace`` (as ``.SZ``, for :meth:`CoarseSpace.
+            apply_with_SQ`) instead of being discarded once ``S_c`` is
+            formed.  Findings 3+4 (round-1 code review): ``SZ`` is the
+            SAME array the ``~3 * n * T' * 8`` transient build peak (see
+            ``max_bytes`` below) already forms while computing ``S_c`` --
+            REGARDLESS of ``retain_sz`` -- so retaining it costs NOTHING
+            extra at build time (there is no separate "4x deflated total"
+            to guard against; a prior version of this guard double-counted
+            SZ and needlessly downgraded apply_mode deflated -> additive
+            on budgets that fit comfortably). The byte guard below (see
+            ``max_bytes``) runs the retain_sz-agnostic max_bytes
+            degradation ladder FIRST to determine the FINAL T', and only
+            THEN checks whether retaining SZ at that T' still fits (3x,
+            evaluated on the final T', not the pre-degradation one) --
+            defensive rather than expected to trigger, given the ladder
+            already guarantees the 3x cost fits by that point. Caller
+            (``InterfaceCGSolver.__call__``) checks ``coarse.SZ is not
+            None`` to decide whether the deflated hand-rolled PCG path is
+            actually available for a given built coarse space, so this
+            degrade is transparent -- no separate "apply_mode was
+            silently downgraded" flag is needed.
 
     Returns:
         A :class:`CoarseSpace` (possibly PoU-only if the GenEO-enriched
@@ -772,6 +929,14 @@ def build_coarse_space(
     # streaming regime this feature must not regress -- see the module
     # docstring) can still blow the coordinator memory bound even when
     # comfortably under max_cols.
+    #
+    # A-DEF2 work package findings 3+4 (round-1 code review): this ladder
+    # now runs BEFORE the retained-SZ decision below (was after -- see
+    # that block's comment for why the old order was a bug), and its
+    # metric (3*n*t*8) is retain_sz-AGNOSTIC on purpose: computing S_c at
+    # all (regardless of whether SZ is kept afterward) already needs this
+    # exact 3x transient peak (Z_dense + SZ + matmat thread buffers), so
+    # this single ladder run determines the FINAL T' for either apply mode.
     Z, col_labels, n_geneo_cols, T_prime, _disabled = _degrade_to_pou_if_over_budget(
         Z, col_labels, n_pou_cols, n_geneo_cols, T_prime,
         metric_fn=lambda t: 3 * n * t * 8,
@@ -783,11 +948,62 @@ def build_coarse_space(
     if _disabled:
         return None
 
+    # A-DEF2 work package: retained-SZ rung -- evaluated AFTER the ladder
+    # above, on the FINAL (post-degradation) T', not before it.
+    #
+    # Finding 3 (round-1 code review): the pre-fix code evaluated this
+    # rung FIRST, against the pre-degradation T' -- so a budget that also
+    # forced the max_bytes ladder to drop GenEO permanently lost SZ
+    # retention even when the EVENTUAL (smaller, PoU-only) coarse space
+    # would have comfortably fit it (reviewer's repro: n=100, T'_full=28,
+    # T'_pou=4, max_bytes=50000 -- old code checked T'=28 and dropped SZ;
+    # the correct answer, checking the final T'=4 the ladder settles on,
+    # is "SZ survives").
+    #
+    # Finding 4 (round-1 code review): retaining SZ does NOT add a FOURTH
+    # concurrent (n, T') array on top of the ladder's own 3x accounting.
+    # ``SZ`` is the EXACT SAME array the build forms while computing
+    # ``S_c`` (``SZ = matmat(Z_dense)`` below) REGARDLESS of ``retain_sz``
+    # -- the only thing ``retain_sz`` changes is whether that array is
+    # kept alive on the returned ``CoarseSpace`` (``.SZ``) instead of
+    # being garbage-collected once this function returns. So the byte
+    # cost of "keep SZ" at a given T' is identical to the cost of
+    # "compute S_c at all" at that T' -- ~3*n*T'*8, not ~4*n*T'*8 (the
+    # pre-fix formula double-counted SZ: once inside the 3x transient-peak
+    # term, again as a separate "+1x persistent" term). Consequently,
+    # whenever the retain_sz-agnostic ladder above has already confirmed
+    # the final T' fits within max_bytes at its 3x cost (the only way
+    # this point is reached without having returned ``None``), retaining
+    # SZ costs NOTHING further -- this rung is intentionally evaluated
+    # with the SAME 3x formula/limit the ladder just verified, so it is
+    # defensive (documents the invariant explicitly; kept in case
+    # metric_fn accounting ever changes) rather than expected to trigger
+    # in practice. ``effective_retain_sz`` degrading to False for a
+    # byte-budget reason can now only coincide with the coarse space
+    # being disabled outright above (SZ is moot when there is no
+    # CoarseSpace to retain it on).
+    effective_retain_sz = retain_sz
+    if effective_retain_sz:
+        _with_sz_bytes = 3 * n * T_prime * 8
+        if _with_sz_bytes > max_bytes:
+            logger.warning(
+                "build_coarse_space: retained-SZ T'=%d would need ~%.1f MB "
+                "(3*n*T'*8: SZ is the same array the build's own 3x "
+                "transient peak already forms, not a separate 4th "
+                "allocation) > interface_coarse_max_bytes=%.1f MB; "
+                "dropping SZ retention (apply_mode deflated -> additive "
+                "for this coarse build). Raise interface_coarse_max_bytes "
+                "to keep the deflated apply active at this T'.",
+                T_prime, _with_sz_bytes / 1024 ** 2, max_bytes / 1024 ** 2,
+            )
+            effective_retain_sz = False
+
     z_mem_mb = n * T_prime * 8 / 1024 ** 2
     logger.info(
         "build_coarse_space: n=%d, T'=%d (pou=%d, geneo=%d, dropped=%d), "
-        "Z_dense ~%.1f MB",
+        "Z_dense ~%.1f MB%s",
         n, T_prime, n_pou_cols, n_geneo_cols, n_dropped, z_mem_mb,
+        ' (SZ retained, deflated)' if effective_retain_sz else '',
     )
 
     Z_dense = np.asarray(Z.toarray(), dtype=np.float64)
@@ -848,4 +1064,5 @@ def build_coarse_space(
         n_pou_cols=n_pou_cols, n_geneo_cols=n_geneo_cols,
         n_dropped_cols=n_dropped, rank=rank, cond_estimate=cond_estimate,
         col_labels=col_labels,
+        SZ=(SZ if effective_retain_sz else None),
     )

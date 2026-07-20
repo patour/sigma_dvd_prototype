@@ -886,6 +886,61 @@ target (≤0.3–0.5 s/step interface solve) requires the warm-iteration count t
 next steps; at the current numbers the projected BRCM-host transient loop is already in the
 ~1.5 + ~15 s/step class vs the 329 s/step CG baseline of §7.4.
 
+### 7.11 Deflation work package landed — warm iters 23.6 → 17.7, cold DC 2× (2026-07-20, dev host)
+
+**Landed** (branch `distributed-10x`): three additions to the two-level machinery, all
+measurement-gated. (1) **`interface_coarse_apply_mode='deflated'`** — a hand-rolled deflated
+PCG (`src/distributed/interface_deflated_pcg.py`): projected matvec `P(Sp)` via retained SZ,
+recovery `x = Qb + Pᵀy`, periodic re-projection + bounded fresh-true-residual acceptance,
+breakdown guards. The algorithm is DEF, selected by a three-way head-to-head after the spec's
+literal formula was identified as an A-DEF1 transcription error (known non-robust) and TRUE
+A-DEF2 was implemented, measured, and rejected (ties DEF at the production regime, 31% worse
+on bj bases, maxiter-fails on ill-conditioned jacobi fixtures — full record in
+`src/distributed/interface_deflation_notes.md` and the selection-record tests). (2)
+**Decoupled GenEO** — enrichment no longer requires the block-Jacobi base to survive its byte
+budget (one-block-at-a-time factor+eigsh, memory-capped). (3) **Opt-in warm-start
+extrapolation** (`2·x_prev − x_prev2`). Review battery: implementation workflow (4 spec + 2
+quality Opus rounds), coordinator-ruled algorithm selection, THREE `/code-review xhigh --fix`
+rounds (15 + 12 + 11 verified findings fixed, negative-tested; round 2 caught regressions of
+round-1 fixes — the info=0 false-success contract bug chief among them), final Opus
+CLEAN-FOR-COMMIT. 1199 distributed unit tests; all standing gates green.
+
+**mi200k_v2 measurement matrix** (64 tiles / 168,586 unknowns, BE dt=5 ps, 20 steps,
+rtol 1e-8 warm, IC = DC solution; jacobi-downgraded base per §7.9 throughout):
+
+| config | cold DC 1e-12 / 1e-8 | warm iters/step | + extrapolation | s/step (best) |
+|---|---|---|---|---|
+| additive, PoU-only (§7.10 baseline) | 118 / 70 | 23.6 | 20.9 | 5.66 |
+| additive + GenEO (T′=125) | 118 / 70 | 23.4 | 20.9 | 5.69 |
+| deflated + GenEO | — | 20.0 | 17.7 | 4.98 |
+| **deflated, PoU-only** | **79 / 34** | 20.0 | **17.7** | 5.16 |
+
+Accuracy: every 1e-8 cell ≤ 300 nV vs the 1e-12 tracked reference (budget 1 µV); deflated
+cells were the most accurate (183 nV). GenEO prepare cost: +70 s (the decoupled eigsolve).
+
+**Verdict against the ≤10 warm-iteration target: NOT met.** Best configuration
+(deflated + extrapolation) reaches **17.7 iters/step (1.33×)** and **~5.0 s/step (1.26×)**;
+cold DC improves **2.1×** (70 → 34 @1e-8). The residual warm floor is set by locally-varying
+fine-space error that no 65–125-column coarse space can represent — deflation removed
+everything the coarse space contains (its warm gain equals the theoretical maximum for this
+Z), and enlarging Z further hits the T′² coarse-solve and SZ-memory walls long before ~10
+iters. Conclusions recorded for the roadmap: the remaining interface-solve levers are a
+fundamentally stronger fine-space preconditioner (no candidate identified that survives the
+§7.9 bj-collapse analysis) or making iterations cheap (Stage 4 GPU matvec: ~0.03 s/iter
+would put even 20 iters at ~0.6 s/step + RHS).
+
+**Measurement-driven default flips** (recorded in `interface_deflation_notes.md`):
+`DEFAULT_APPLY_MODE` 'additive' → **'deflated'** (wins every cell, equal-or-better accuracy)
+and `DEFAULT_GENEO_K` 4 → **0** (zero contribution in every cell at both regimes measured;
+machinery retained opt-in). Extrapolation stays opt-in (real 1.13× but cross-solve-family
+seeding semantics warrant explicit enablement). Production default at the split regime is
+therefore now `two_level[deflated](jacobi+PoU)`: **cold DC 34 iters / 10 s @1e-8, warm 20.0
+iters/step, ~5.6 s/step**; with extrapolation enabled: 17.7 / ~5.2 s/step.
+
+Scripts: `run_deflated_measurement_matrix.py`, `run_deflated_pou_only_addendum.py`,
+`run_adef2_multi_tile_gate.py`; raw JSONs `results_deflated_matrix_mi200k.json`,
+`results_deflated_pou_only_addendum_mi200k.json`.
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |

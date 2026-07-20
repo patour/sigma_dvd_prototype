@@ -108,7 +108,10 @@ class DistributedPowerGridModel:
     #       'none' | 'amg' | 'two_level' (default 'auto' -- Stage 3: resolves
     #       to 'two_level' for CG+tilewise, else 'block_jacobi'; see
     #       interface_iterative.resolve_preconditioner)
-    #   'interface_coarse_geneo_k': int (default 4; Stage 3 two_level knob)
+    #   'interface_coarse_geneo_k': int (default 0 as of the 2026-07-20
+    #       measurement-driven flip -- GenEO measured zero iteration benefit
+    #       on mi200k_v2, see interface_deflation_notes.md; Stage 3
+    #       two_level knob, still fully functional and opt-in for k > 0)
     #   'interface_coarse_geneo_tol': float (default 1e-6)
     #   'interface_coarse_eps_rank': float (default 1e-12)
     #   'interface_coarse_max_cols': int (default 4096)
@@ -125,6 +128,27 @@ class DistributedPowerGridModel:
     #       (default 'auto' = min(32 GB, 0.4 * total RAM) via psutil)
     #   'interface_block_jacobi_max_bytes': 'auto' | int bytes
     #       (default 'auto' = min(8 GB, 0.1 * total RAM) via psutil)
+    #   'interface_coarse_apply_mode': 'additive' | 'deflated' (default
+    #       'deflated' as of the 2026-07-20 measurement-driven flip --
+    #       'deflated' beat 'additive' in every cell of the mi200k_v2
+    #       head-to-head matrix, see interface_deflation_notes.md's
+    #       "Defaults flipped by measurement" section) -- A-DEF2 work
+    #       package: how the 'two_level' coarse correction is applied
+    #       inside CG. 'deflated' deflects range(Z) out of the iteration
+    #       exactly (routed through a hand-rolled PCG loop, the Tang/Nabben/
+    #       Vuik/Erlangga taxonomy's DEF member -- selected over the
+    #       literal A-DEF2 formula by head-to-head measurement, see
+    #       interface_iterative.py) instead of adding it on top; only takes
+    #       effect when the coarse build retains SZ (see
+    #       interface_coarse_max_bytes). 'additive' remains fully supported
+    #       and selectable explicitly.
+    #   'interface_deflated_reproject_every': int (default 50) -- A-DEF2:
+    #       residual re-projection interval (<= 0 disables); only consumed
+    #       when apply_mode == 'deflated'.
+    #   'interface_warm_start_extrapolation': bool (default False) -- seed
+    #       each solve's warm start with the linear extrapolation of the
+    #       last two solutions instead of the plain previous solution;
+    #       composes with either apply mode.
     #   'interface_drop_s_global': bool (default False) -- opt-in "never
     #       assemble S_global" factor path (item 3). Requires explicit
     #       interface_solver='cg', interface_matvec_mode in

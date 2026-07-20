@@ -175,6 +175,10 @@ class _InterfaceCgSettings:
     eps_rank: float
     max_cols: int
     max_bytes: int
+    # A-DEF2 work package: deflated apply mode + warm-start extrapolation.
+    apply_mode: str
+    deflated_reproject_every: int
+    warm_start_extrapolation: bool
 
 
 def _read_interface_cg_settings(model: Optional[Any]) -> '_InterfaceCgSettings':
@@ -227,6 +231,7 @@ def _read_interface_cg_settings(model: Optional[Any]) -> '_InterfaceCgSettings':
     # import (see the sibling import on the next line), kept consistent
     # here rather than special-cased.
     from . import interface_coarse
+    from . import interface_iterative
     from .interface_iterative import (
         resolve_block_jacobi_max_bytes, resolve_coarse_max_bytes,
     )
@@ -316,6 +321,44 @@ def _read_interface_cg_settings(model: Optional[Any]) -> '_InterfaceCgSettings':
         # dense Z_dense/SZ arrays -- 'auto' = min(8 GB, 0.1x total RAM).
         max_bytes=resolve_coarse_max_bytes(
             _settings.get('interface_coarse_max_bytes', 'auto')
+        ),
+        # A-DEF2 work package: same "read the canonical default dynamically"
+        # pattern as the geneo_k/geneo_tol/eps_rank/max_cols reads above --
+        # interface_coarse.DEFAULT_APPLY_MODE/DEFAULT_DEFLATED_REPROJECT_EVERY
+        # are the single canonical source, also consumed dynamically by
+        # InterfaceCGSolver's own None-sentinel constructor defaults.
+        #
+        # Round-3 code review finding 9 (cleanup): pass the raw settings
+        # value through UNNORMALIZED -- InterfaceCGSolver.__init__ already
+        # does `_v.strip().lower() if isinstance(_v, str) else _v` on
+        # `interface_coarse_apply_mode` (it is the single validation point
+        # for this value, also raising ValueError for anything outside
+        # {'additive', 'deflated'}), so normalizing here too was a
+        # duplicate of that exact logic in a second place that could
+        # silently diverge from it later. Every consumer of this field
+        # (`apply_mode=_cg_settings.apply_mode` at all six
+        # ``build_interface_solver`` call sites) threads it straight into
+        # ``InterfaceCGSolver(interface_coarse_apply_mode=...)``, so the
+        # constructor's own normalization always runs regardless.
+        apply_mode=_settings.get(
+            'interface_coarse_apply_mode', interface_coarse.DEFAULT_APPLY_MODE,
+        ),
+        deflated_reproject_every=_coerce_int(
+            _settings.get(
+                'interface_deflated_reproject_every',
+                interface_coarse.DEFAULT_DEFLATED_REPROJECT_EVERY,
+            ),
+            'interface_deflated_reproject_every',
+        ),
+        # interface_warm_start_extrapolation's canonical default lives in
+        # interface_iterative.py (DEFAULT_WARM_START_EXTRAPOLATION), not
+        # interface_coarse.py -- see that constant's docstring for why.
+        warm_start_extrapolation=_coerce_bool(
+            _settings.get(
+                'interface_warm_start_extrapolation',
+                interface_iterative.DEFAULT_WARM_START_EXTRAPOLATION,
+            ),
+            'interface_warm_start_extrapolation',
         ),
     )
 
@@ -1837,6 +1880,9 @@ def _factor_dc_context_no_s_global(
         interface_coarse_eps_rank=_cg_settings.eps_rank,
         interface_coarse_max_cols=_cg_settings.max_cols,
         interface_coarse_max_bytes=_cg_settings.max_bytes,
+        interface_coarse_apply_mode=_cg_settings.apply_mode,
+        interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
+        warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
     )
     timings['factor_interface'] = _time.perf_counter() - t0
     timings['total_prepare'] = sum(
@@ -2307,6 +2353,9 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             interface_coarse_eps_rank=_cg_settings.eps_rank,
             interface_coarse_max_cols=_cg_settings.max_cols,
             interface_coarse_max_bytes=_cg_settings.max_bytes,
+            interface_coarse_apply_mode=_cg_settings.apply_mode,
+            interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
+            warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
         )
 
         # Synthetic stats object (matching SparseFactorAdapter fields used below)
@@ -2964,6 +3013,9 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
             interface_coarse_eps_rank=_cg_settings.eps_rank,
             interface_coarse_max_cols=_cg_settings.max_cols,
             interface_coarse_max_bytes=_cg_settings.max_bytes,
+            interface_coarse_apply_mode=_cg_settings.apply_mode,
+            interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
+            warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
         )
         ctx._interface_lu = _solve_callable
         ctx._cg_solver = cg_solver
@@ -3463,6 +3515,9 @@ def _factor_transient_context_no_s_global(
         interface_coarse_eps_rank=_cg_settings.eps_rank,
         interface_coarse_max_cols=_cg_settings.max_cols,
         interface_coarse_max_bytes=_cg_settings.max_bytes,
+        interface_coarse_apply_mode=_cg_settings.apply_mode,
+        interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
+        warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
     )
     timings['factor_transient_interface'] = _time.perf_counter() - t0
     timings['total_prepare_transient'] = sum(
@@ -4028,6 +4083,9 @@ def _factor_transient_context(
             interface_coarse_eps_rank=_cg_settings_td.eps_rank,
             interface_coarse_max_cols=_cg_settings_td.max_cols,
             interface_coarse_max_bytes=_cg_settings_td.max_bytes,
+            interface_coarse_apply_mode=_cg_settings_td.apply_mode,
+            interface_deflated_reproject_every=_cg_settings_td.deflated_reproject_every,
+            warm_start_extrapolation=_cg_settings_td.warm_start_extrapolation,
         )
 
         class _CGSolveResultTD:
@@ -4763,6 +4821,9 @@ def _refactor_transient_context(
             interface_coarse_eps_rank=_cg_settings.eps_rank,
             interface_coarse_max_cols=_cg_settings.max_cols,
             interface_coarse_max_bytes=_cg_settings.max_bytes,
+            interface_coarse_apply_mode=_cg_settings.apply_mode,
+            interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
+            warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
             preconditioner=_preconditioner,
             rtol=_cg_rtol,
             atol=_cg_atol,

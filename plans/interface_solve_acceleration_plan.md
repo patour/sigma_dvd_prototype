@@ -150,6 +150,23 @@ Tests: threaded-vs-serial ≤1e-13 rel (two-tile + randomized ~30-tile synthetic
 > recovery. Remaining gap to ≤0.3–0.5 s/step BRCM interface-solve target needs warm iters
 > →5–10 (A-DEF2 contingency) and/or Stage 4 GPU — both optional next steps.
 
+## Deflation work package — **COMPLETE, gate ≤10 NOT met (2026-07-20; docs §7.11)**
+
+> Landed: `interface_coarse_apply_mode='deflated'` (hand-rolled deflated PCG in new
+> `interface_deflated_pcg.py`; DEF algorithm selected by three-way head-to-head — the spec's
+> literal formula was an A-DEF1 transcription error, true A-DEF2 implemented/measured/REJECTED:
+> ties at production regime, 31% worse on bj bases, maxiter-fails on ill-conditioned jacobi;
+> records in `interface_deflation_notes.md` + selection-record tests), decoupled GenEO
+> (jacobi bases get enrichment), opt-in warm-start extrapolation. Battery: workflow + 3×
+> /code-review xhigh (15+12+11 findings, negative-tested) + Opus CLEAN-FOR-COMMIT.
+> **mi200k_v2 matrix: warm 23.6→17.7 iters/step best (deflated+extrap, 1.33×), s/step
+> 6.25→~5.0; cold DC 70→34 @1e-8 (2.1×); GenEO measured ZERO in every cell (+70 s prepare).**
+> Defaults flipped by measurement: apply_mode → 'deflated', geneo_k → 0; extrapolation stays
+> opt-in. Warm floor ≈ locally-varying fine-space error — coarse-space/deflation avenue is
+> exhausted (deflation extracts the theoretical max for this Z). Remaining levers: Stage 4
+> GPU matvec (~0.03 s/iter ⇒ even 20 iters ≈ 0.6 s/step) or a fundamentally stronger
+> fine-space preconditioner (no surviving candidate per §7.9 analysis).
+
 New `src/distributed/interface_coarse.py`.
 
 **Why it's needed (the algorithmic gap):** CG iterations ≈ √κ(M⁻¹S). Block-Jacobi is a *local* preconditioner — each application corrects error only within a tile's own port block, so a die-spanning smooth error mode is corrected one tile-hop per iteration. Spectrally, M_BJ⁻¹S carries a cluster of ~O(T) small eigenvalues whose eigenvectors are near-constant per tile; CG resolves them essentially one at a time. This is the measured ~180 warm iters at 107 tiles (κ ~ 1/H² in DDM terms), and it worsens with further splitting. Relaxing rtol truncates the tail but cannot remove the cluster. The fix is a second, tiny *global* correction that solves exactly those per-tile-constant modes directly; with it, condition (and iteration count) becomes essentially independent of tile count (Nicolaides coarse space; additive Schwarz two-level theory, Toselli–Widlund).

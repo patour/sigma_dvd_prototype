@@ -119,6 +119,16 @@ def cmd_parse(args: argparse.Namespace) -> None:
 # 'block_jacobi' default (see interface_iterative.resolve_preconditioner,
 # the ONE place 'auto' is resolved). New interface_coarse_* knobs control
 # the coarse-space build; see InterfaceCGSolver's docstring.
+#
+# A-DEF2 work package: interface_coarse_apply_mode ('deflated' default as of
+# the 2026-07-20 measurement-driven flip -- see interface_coarse.py's
+# DEFAULT_APPLY_MODE comment and interface_deflation_notes.md's "Defaults
+# flipped by measurement" section; 'deflated' deflects the coarse space out
+# of the iteration exactly via a hand-rolled PCG loop, 'additive' remains
+# fully supported and selectable explicitly), interface_deflated_reproject_
+# every (residual re-projection interval, default 50), interface_warm_start_
+# extrapolation (bool, default False -- linear-extrapolation warm-start
+# seed).
 _IFACE_SETTING_DEFAULTS: Dict[str, Any] = {
     'interface_solver': 'auto',
     'interface_matvec_mode': 'auto',
@@ -143,6 +153,22 @@ _IFACE_SETTING_DEFAULTS: Dict[str, Any] = {
     'interface_coarse_eps_rank': None,
     'interface_coarse_max_cols': None,
     'interface_coarse_max_bytes': 'auto',
+    # A-DEF2 work package: apply_mode/reproject_every are lazily resolved
+    # from interface_coarse.py (see _COARSE_DEFAULT_KEYS below), same
+    # pattern as the four Stage 3 knobs above.
+    # warm_start_extrapolation's canonical default lives in
+    # interface_iterative.DEFAULT_WARM_START_EXTRAPOLATION -- Finding 6
+    # (round-1 code review): this MUST also be lazily resolved (see
+    # _ITERATIVE_DEFAULT_KEYS below), not a def-time-bound literal copy --
+    # a hardcoded `False` here would permanently pin every CLI-driven run
+    # to the old behaviour even after the coordinator flips the canonical
+    # constant (the constant's own comment anticipates exactly that), while
+    # library-API callers (whose settings fall back to the constant
+    # directly) would pick up the flip immediately -- a silent CLI/library
+    # divergence with no warning.
+    'interface_coarse_apply_mode': None,
+    'interface_deflated_reproject_every': None,
+    'interface_warm_start_extrapolation': None,
 }
 
 # Finding 15: keys whose real default is resolved lazily via
@@ -152,27 +178,42 @@ _IFACE_SETTING_DEFAULTS: Dict[str, Any] = {
 _COARSE_DEFAULT_KEYS = frozenset((
     'interface_coarse_geneo_k', 'interface_coarse_geneo_tol',
     'interface_coarse_eps_rank', 'interface_coarse_max_cols',
+    'interface_coarse_apply_mode', 'interface_deflated_reproject_every',
+))
+
+# Finding 6 (A-DEF2 code review, round 1): same lazy-resolution pattern as
+# _COARSE_DEFAULT_KEYS, but for knobs whose canonical default lives in
+# interface_iterative.py rather than interface_coarse.py -- kept as a
+# separate set (not merged into _COARSE_DEFAULT_KEYS) since _iface_default
+# needs to import a different module to resolve it.
+_ITERATIVE_DEFAULT_KEYS = frozenset((
+    'interface_warm_start_extrapolation',
 ))
 
 
 def _iface_default(key: str) -> Any:
-    """Resolve an ``_IFACE_SETTING_DEFAULTS`` entry (Finding 15).
+    """Resolve an ``_IFACE_SETTING_DEFAULTS`` entry (Finding 15; Finding 6
+    round 1 extended this to ``interface_warm_start_extrapolation``).
 
-    The four Stage-3 coarse-space column/rank knobs are resolved from
+    The four Stage-3 coarse-space column/rank knobs (plus the A-DEF2
+    apply-mode/reproject-every knobs) are resolved from
     ``interface_coarse.DEFAULT_GENEO_K`` et al. (the single canonical
     source) instead of being re-hardcoded a third time here.
+    ``interface_warm_start_extrapolation`` is resolved from
+    ``interface_iterative.DEFAULT_WARM_START_EXTRAPOLATION`` the same way.
     ``interface_iterative.py``'s own ``InterfaceCGSolver.__init__``/
     ``build_interface_solver`` signatures use ``None``-sentinel defaults and
-    resolve from the SAME canonical source dynamically, at call time
+    resolve from the SAME canonical sources dynamically, at call time
     (Finding 9, round 2) -- not a def-time-bound copy, which would defeat
-    ``monkeypatch.setattr(interface_coarse, 'DEFAULT_GENEO_K', ...)``.  The
-    import here is lazy
+    ``monkeypatch.setattr(interface_coarse, 'DEFAULT_GENEO_K', ...)`` /
+    ``monkeypatch.setattr(interface_iterative,
+    'DEFAULT_WARM_START_EXTRAPOLATION', ...)``.  The import here is lazy
     (function-local, not module-level) to preserve cli.py's existing
     convention of deferring every internal-package import so a plain
     ``--help``/argparse-only invocation doesn't pay for pulling in
-    numpy/scipy (``interface_coarse.py`` imports both) -- see every other
-    ``from .xxx import ...`` in this file, all function-local for the same
-    reason.
+    numpy/scipy (both ``interface_coarse.py`` and ``interface_iterative.py``
+    import them) -- see every other ``from .xxx import ...`` in this file,
+    all function-local for the same reason.
     """
     if key in _COARSE_DEFAULT_KEYS:
         from . import interface_coarse
@@ -181,6 +222,14 @@ def _iface_default(key: str) -> Any:
             'interface_coarse_geneo_tol': interface_coarse.DEFAULT_GENEO_TOL,
             'interface_coarse_eps_rank': interface_coarse.DEFAULT_EPS_RANK,
             'interface_coarse_max_cols': interface_coarse.DEFAULT_MAX_COLS,
+            'interface_coarse_apply_mode': interface_coarse.DEFAULT_APPLY_MODE,
+            'interface_deflated_reproject_every': interface_coarse.DEFAULT_DEFLATED_REPROJECT_EVERY,
+        }[key]
+    if key in _ITERATIVE_DEFAULT_KEYS:
+        from . import interface_iterative
+        return {
+            'interface_warm_start_extrapolation':
+                interface_iterative.DEFAULT_WARM_START_EXTRAPOLATION,
         }[key]
     return _IFACE_SETTING_DEFAULTS[key]
 
@@ -229,6 +278,10 @@ def _build_interface_settings(args: argparse.Namespace) -> Dict[str, Any]:
         'interface_coarse_eps_rank': _get('interface_coarse_eps_rank'),
         'interface_coarse_max_cols': _get('interface_coarse_max_cols'),
         'interface_coarse_max_bytes': _get('interface_coarse_max_bytes'),
+        # A-DEF2 work package.
+        'interface_coarse_apply_mode': _get('interface_coarse_apply_mode'),
+        'interface_deflated_reproject_every': _get('interface_deflated_reproject_every'),
+        'interface_warm_start_extrapolation': _get('interface_warm_start_extrapolation'),
     }
 
 
@@ -940,8 +993,11 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
         dest='interface_coarse_geneo_k',
         help=(
             "Max GenEO-lite eigenpairs enriched per block-Jacobi ownership "
-            "block (default: 4; 0 disables GenEO, leaving a partition-of-"
-            "unity-only coarse space)."
+            "block (default: 0 as of the 2026-07-20 measurement-driven "
+            "flip -- GenEO measured zero iteration benefit on mi200k_v2, "
+            "see interface_deflation_notes.md; 0 disables GenEO, leaving a "
+            "partition-of-unity-only coarse space; still fully functional "
+            "and opt-in for k > 0)."
         ),
     )
     iface_grp.add_argument(
@@ -985,6 +1041,70 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
             "from --interface-coarse-max-cols (a column-count cap that "
             "does not scale with n); same two-rung degradation (PoU-only, "
             "then disable) when exceeded. (default: auto)"
+        ),
+    )
+    # A-DEF2 work package: deflated apply mode + warm-start extrapolation.
+    iface_grp.add_argument(
+        '--interface-coarse-apply-mode', type=str, default=None,
+        choices=['additive', 'deflated'],
+        dest='interface_coarse_apply_mode',
+        help=(
+            "How the 'two_level' coarse-space correction is applied inside "
+            "CG (only used when the resolved preconditioner is "
+            "'two_level'). 'deflated' (default as of the 2026-07-20 "
+            "measurement-driven flip -- beat 'additive' in every cell of "
+            "the mi200k_v2 head-to-head matrix, see "
+            "interface_deflation_notes.md's 'Defaults flipped by "
+            "measurement' section) = deflects range(Z) out of the "
+            "iteration exactly via a hand-rolled PCG loop (the Tang/Nabben/"
+            "Vuik/Erlangga taxonomy's DEF member, selected over the "
+            "literal A-DEF2 formula by head-to-head measurement -- see "
+            "interface_iterative.py's 'A-DEF2 work package' docstring "
+            "section) -- fixes the warm-start weak link the additive form "
+            "leaves (coarse and fine spaces stay coupled); only takes "
+            "effect when the coarse build retains SZ. 'additive' = M^-1 = "
+            "M_base^-1 + Z S_c^+ Z^T (Stage 3) remains fully supported and "
+            "selectable explicitly. A too-tight "
+            "--interface-coarse-max-bytes degrades via the GenEO-then-"
+            "disable ladder first (PoU-only, then disable outright); SZ "
+            "retention is checked afterward against the SAME budget the "
+            "ladder already fit, so a standalone deflated-to-additive "
+            "SZ-drop is a defensive edge case, not the normal degrade path."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-deflated-reproject-every', type=int, default=None,
+        dest='interface_deflated_reproject_every',
+        help=(
+            "A-DEF2 work package: re-project the deflated residual every "
+            "this many CG iterations to control finite-precision drift in "
+            "the deflation invariant Z^T r -> 0 (default: 50; <= 0 "
+            "disables). Only consumed when "
+            "--interface-coarse-apply-mode=deflated."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-warm-start-extrapolation',
+        dest='interface_warm_start_extrapolation',
+        action='store_true', default=None,
+        help=(
+            "Seed each solve's warm start with the linear extrapolation "
+            "2*x_prev - x_prev2 of the last two solutions (falls back to "
+            "x_prev until two solves have been recorded) instead of the "
+            "plain previous solution (default: disabled). Composes with "
+            "either apply mode; cuts iterations on smooth/slowly-varying "
+            "transient waveforms."
+        ),
+    )
+    iface_grp.add_argument(
+        '--interface-no-warm-start-extrapolation',
+        dest='interface_warm_start_extrapolation',
+        action='store_false',
+        help=(
+            "Explicit negation of --interface-warm-start-extrapolation "
+            "(same paired true/false pattern as the other iface-group "
+            "booleans) -- lets an explicit CLI False beat a YAML "
+            "interface_warm_start_extrapolation: true."
         ),
     )
     # Stage 2: threaded tilewise matvec / block-Jacobi apply
@@ -1381,6 +1501,9 @@ _VALID_SOLVER_YAML_KEYS = frozenset({
     'interface_coarse_geneo_k', 'interface_coarse_geneo_tol',
     'interface_coarse_eps_rank', 'interface_coarse_max_cols',
     'interface_coarse_max_bytes',
+    # A-DEF2 work package: deflated apply mode + warm-start extrapolation
+    'interface_coarse_apply_mode', 'interface_deflated_reproject_every',
+    'interface_warm_start_extrapolation',
     # B3: streaming Schur assembly + A2 step-column table
     'streaming_assembly', 'use_step_columns', 'max_table_mb',
     # Stage 1e: island detection strategy
@@ -1630,6 +1753,9 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
         'interface_coarse_geneo_k', 'interface_coarse_geneo_tol',
         'interface_coarse_eps_rank', 'interface_coarse_max_cols',
         'interface_coarse_max_bytes',
+        # A-DEF2 work package
+        'interface_coarse_apply_mode', 'interface_deflated_reproject_every',
+        'interface_warm_start_extrapolation',
     )
     solver_cfg_iface = (
         _raw_config.get('solver', {}) if _raw_config is not None else {}

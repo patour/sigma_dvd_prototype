@@ -1024,9 +1024,17 @@ class TestTwoLevelPreconditionerNeverAssemble:
             track_nodes=['a1', 'b1', 'shared'],
         )
         try:
-            assert trans_a._cg_solver.preconditioner_label.startswith('two_level('), (
+            # 'two_level(' (additive, untagged) or 'two_level[deflated](' --
+            # this test's invariant is "coarse space actually built, not
+            # silently degraded to block_jacobi/jacobi", independent of
+            # which apply_mode interface_coarse.DEFAULT_APPLY_MODE resolves
+            # to (2026-07-20 flip: 'deflated'). Neither settings dict above
+            # pins interface_coarse_apply_mode, so both paths pick up
+            # whatever the canonical default currently is.
+            label_a = trans_a._cg_solver.preconditioner_label
+            assert label_a.startswith('two_level(') or label_a.startswith('two_level['), (
                 f"fixture sanity: assembled reference must resolve to "
-                f"two_level, got {trans_a._cg_solver.preconditioner_label!r}"
+                f"two_level, got {label_a!r}"
             )
             assert trans_a._cg_solver._coarse is not None
             n_geneo_cols_a = trans_a._cg_solver._coarse.n_geneo_cols
@@ -1049,10 +1057,10 @@ class TestTwoLevelPreconditionerNeverAssemble:
             # blocks the coarse build was originally validated against)
             # silently degrading two_level to block_jacobi/jacobi, or
             # crashing inside prepare_transient.
-            assert trans_n._cg_solver.preconditioner_label.startswith('two_level('), (
+            label_n = trans_n._cg_solver.preconditioner_label
+            assert label_n.startswith('two_level(') or label_n.startswith('two_level['), (
                 f"never-assemble path must also resolve to two_level, not "
-                f"silently degrade -- got "
-                f"{trans_n._cg_solver.preconditioner_label!r}"
+                f"silently degrade -- got {label_n!r}"
             )
             assert trans_n._cg_solver._coarse is not None
             # This fixture's tiles have only 1 interior DOF each, so GenEO

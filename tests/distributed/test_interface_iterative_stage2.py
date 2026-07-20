@@ -369,6 +369,16 @@ class TestFp32CriticalPath:
             tile_schur_complements=tile_schur_32, tile_index_maps=tile_idx,
             preconditioner='none', matvec_threads=4, matvec_dtype='float32',
             rtol=1e-7,
+            # This test exercises the raw fp32-vs-fp64 tilewise matvec (no
+            # coarse space -- preconditioner='none') at rtol pinned to the
+            # plain FP32_MATVEC_MIN_RTOL floor (1e-7). apply_mode is a
+            # no-op here (only consumed by 'two_level'), but the
+            # 2026-07-20 DEFAULT_APPLY_MODE flip to 'deflated' makes the
+            # constructor's strict_dtype_rtol gate use the stricter
+            # FP32_MATVEC_MIN_RTOL_DEFLATED (1e-6) floor unconditionally --
+            # pin 'additive' explicitly so this test keeps exercising the
+            # plain (non-deflated) floor it was written for.
+            interface_coarse_apply_mode='additive',
         )
         try:
             rng = np.random.default_rng(6)
@@ -853,6 +863,152 @@ class TestD1QsTransientAdjointRegression:
             f"direct ir_drop_at_T={ir_drop_direct!r} vs "
             f"cg/tilewise ir_drop_at_T={ir_drop_cg_tilewise!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Round-3 code review finding 2: warm-start extrapolation history must not
+# cross RHS-family boundaries on the adjoint path (solver_adjoint.py).
+# ---------------------------------------------------------------------------
+
+
+class TestAdjointWarmStartFamilyBoundaryReset:
+    """Round-3 code review finding 2 (CONFIRMED): with
+    ``interface_warm_start_extrapolation=True``,
+    ``InterfaceCGSolver.push_solution_history`` applies the linear
+    extrapolation seed (``2*x_prev - x_prev2``) unconditionally on every
+    converged solve -- including across UNRELATED RHS families that share
+    the same context's CG solver (forward DC/QS voltage solves vs. the
+    adjoint terminal condition, ``e_victim``). ``InterfaceCGSolver.
+    reset_warm_start()`` already clears both ``_x0`` AND the two-point
+    history (verified: :class:`TestWarmStartExtrapolation`'s
+    ``test_reset_warm_start_clears_extrapolation_history`` in
+    ``test_interface_coarse.py``) -- the missing piece was that nothing
+    in production code ever CALLED it at the adjoint family boundaries.
+    ``solver_adjoint.py`` now calls a small
+    ``_reset_interface_cg_warm_start(ctx)`` helper immediately before
+    every ``ctx.interface_lu(...)``/``trans_ctx.interface_lu(...)`` call
+    that starts a new RHS family sharing a context with an unrelated
+    prior solve: the adjoint terminal solve (static and dynamic paths),
+    the forward QS solve that follows the adjoint solve within
+    ``_analyze_single_victim_static``, and (dynamic path) the terminal
+    step of every victim's backward sweep -- which also covers
+    victim-to-victim transitions, since each victim's terminal step is
+    the first solve of its own analysis call.
+
+    This test exercises the STATIC path end-to-end (two forward DC solves
+    -> analyze_adjoint_static on the SAME context) since it needs no
+    transient factorization.
+
+    Negative-test evidence: temporarily removing the
+    ``_reset_interface_cg_warm_start(ctx)`` call immediately before
+    ``lambda_p = ctx.interface_lu(global_rhs)`` in
+    ``_analyze_single_victim_static`` (solver_adjoint.py) makes
+    :meth:`test_history_cleared_across_adjoint_boundary` FAIL
+    (``_x_hist_prev2`` stays populated with the stale forward-DC solution
+    instead of being reset) -- verified directly while implementing this
+    fix (see this session's final report for the revert/restore
+    transcript)."""
+
+    @staticmethod
+    def _build_model(tmp_path):
+        # A real (existing) ckt_path parent dir is required -- same
+        # requirement as TestD1QsTransientAdjointRegression above (VCS
+        # pkl_dir cache location derivation).
+        model = _build_two_tile_distributed_model(package_cap_edges=[])
+        for tc in model.metadata.tile_configs:
+            tc.ckt_path = str(tmp_path / 'dummy.ckt')
+        return model
+
+    def test_history_cleared_across_adjoint_boundary(self, tmp_path):
+        from distributed.solver import DistributedDDMSolver
+
+        model = self._build_model(tmp_path)
+        model.settings.update({
+            'interface_solver': 'cg',
+            'interface_matvec_mode': 'tilewise',
+            'interface_preconditioner': 'block_jacobi',
+            'interface_cg_rtol': 1e-10,
+            'interface_warm_start_extrapolation': True,
+        })
+        solver = DistributedDDMSolver(model)
+        dc_ctx = solver.prepare()
+        try:
+            cg_solver = dc_ctx._cg_solver
+            assert cg_solver is not None, (
+                "fixture must actually resolve to the CG interface path "
+                "for this test to exercise anything"
+            )
+
+            # Two transient-style (forward DC) solves on the SAME context
+            # -- builds a genuine two-point extrapolation history.
+            solver.solve_dc(dc_ctx)
+            solver.solve_dc(dc_ctx)
+            assert cg_solver._x_hist_prev is not None
+            assert cg_solver._x_hist_prev2 is not None, (
+                "test precondition: two solves must populate BOTH "
+                "history slots before the adjoint-style switch"
+            )
+
+            # _analyze_single_victim_static makes TWO ctx.interface_lu(...)
+            # calls internally: (1) the adjoint terminal solve, (2) the
+            # forward QS solve at the observation time (step 9). Spy on
+            # ctx.interface_lu (a settable property -- see DistributedSolver
+            # Context.interface_lu's setter) to snapshot whether
+            # _x_hist_prev2 was populated immediately BEFORE each call
+            # actually runs -- i.e. whether that call's OWN family-boundary
+            # reset (not some LATER reset masking an earlier miss) fired.
+            # A plain end-of-call assertion cannot distinguish "both resets
+            # fired" from "only the second one did" (the second
+            # unconditionally clears history regardless of what the first
+            # left behind), so this spy checks each boundary independently.
+            pre_call_prev2_populated = []
+            orig_interface_lu = dc_ctx.interface_lu
+
+            def _spy_interface_lu(rhs):
+                pre_call_prev2_populated.append(
+                    cg_solver._x_hist_prev2 is not None
+                )
+                return orig_interface_lu(rhs)
+
+            dc_ctx.interface_lu = _spy_interface_lu
+
+            # Adjoint-style RHS-family switch (e_victim, not forward
+            # currents) on the SAME context/CG solver.
+            solver.analyze_adjoint_static(
+                victim_nodes='b1', observation_time=1e-9, dc_context=dc_ctx,
+            )
+
+            assert len(pre_call_prev2_populated) == 2, (
+                f"expected exactly 2 ctx.interface_lu calls inside "
+                f"analyze_adjoint_static (adjoint terminal solve + "
+                f"forward QS solve) -- got {len(pre_call_prev2_populated)}; "
+                f"test's call-count assumption is stale"
+            )
+            assert pre_call_prev2_populated[0] is False, (
+                "the ADJOINT TERMINAL solve must not inherit a populated "
+                "extrapolation history from the two prior forward-DC "
+                "solves -- got _x_hist_prev2 populated right before this "
+                "call, meaning the family-boundary reset before the "
+                "adjoint solve did not fire"
+            )
+            assert pre_call_prev2_populated[1] is False, (
+                "the forward QS solve (step 9) must not inherit a "
+                "populated extrapolation history from the adjoint "
+                "terminal solve just before it -- got _x_hist_prev2 "
+                "populated right before this call, meaning the "
+                "family-boundary reset before the QS solve did not fire"
+            )
+
+            # End-state sanity: after the whole call, history reflects
+            # only the LAST solve (the QS forward solve), never an
+            # extrapolation across either boundary.
+            assert cg_solver._x_hist_prev2 is None, (
+                "extrapolation history must still be reset-then-single-"
+                "solve at the end of analyze_adjoint_static"
+            )
+        finally:
+            dc_ctx.release()
+            model.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -3637,6 +3793,97 @@ class TestFinding9DynamicCoarseDefaults:
             assert cg_solver._geneo_k == 0, (
                 "build_interface_solver did not forward a None sentinel "
                 "for interface_coarse_geneo_k -- InterfaceCGSolver's "
+                "dynamic default resolution was shadowed by a def-time-"
+                "bound value here instead"
+            )
+        finally:
+            cg_solver.close()
+
+    def test_monkeypatched_default_warm_start_extrapolation_reaches_constructor(
+        self, monkeypatch,
+    ):
+        """Round-2 code review finding 5 (regression): unlike the four
+        Stage-3 coarse knobs above, ``InterfaceCGSolver.__init__``'s
+        ``warm_start_extrapolation`` parameter used to be bound to
+        ``DEFAULT_WARM_START_EXTRAPOLATION`` at DEF TIME (module-import
+        time) instead of resolved dynamically -- the exact same class of
+        bug Finding 9 (round 1) fixed for ``interface_coarse_geneo_k`` et
+        al., but reintroduced here for a sibling knob whose own comment
+        incorrectly claimed a def-time-bound default was safe "because its
+        canonical default lives in this module" (backwards reasoning: that
+        is exactly why it must be resolved dynamically). Same test
+        pattern as ``test_monkeypatched_default_geneo_k_reaches_
+        constructor`` above, applied to
+        ``interface_iterative.DEFAULT_WARM_START_EXTRAPOLATION``."""
+        import distributed.interface_iterative as interface_iterative
+        from distributed.interface_iterative import InterfaceCGSolver
+
+        tile_schur = {
+            0: np.array([[2.0, -1.0], [-1.0, 2.0]]),
+            1: np.array([[2.0, -1.0], [-1.0, 2.0]]),
+        }
+        tile_idx = {
+            0: np.array([0, 1], dtype=np.int32),
+            1: np.array([1, 2], dtype=np.int32),
+        }
+        n = 3
+
+        monkeypatch.setattr(
+            interface_iterative, 'DEFAULT_WARM_START_EXTRAPOLATION', True,
+        )
+        solver = InterfaceCGSolver(
+            n_interface=n, matvec_mode='tilewise',
+            tile_schur_complements={k: v.copy() for k, v in tile_schur.items()},
+            tile_index_maps=tile_idx,
+            preconditioner='jacobi', matvec_threads=1,
+        )
+        try:
+            assert solver._warm_start_extrapolation is True, (
+                "InterfaceCGSolver.__init__ did not pick up the "
+                "monkeypatched interface_iterative."
+                "DEFAULT_WARM_START_EXTRAPOLATION -- its constructor "
+                "default is bound at def/import time instead of being "
+                "resolved dynamically"
+            )
+        finally:
+            solver.close()
+
+    def test_monkeypatched_default_warm_start_extrapolation_reaches_build_interface_solver(
+        self, monkeypatch,
+    ):
+        """Same dynamic-default requirement one layer up, at
+        build_interface_solver -- it must forward a None sentinel for
+        warm_start_extrapolation too (not its own def-time-bound copy)."""
+        import distributed.interface_iterative as interface_iterative
+        from distributed.interface_iterative import build_interface_solver
+
+        tile_schur = {
+            0: np.array([[2.0, -1.0], [-1.0, 2.0]]),
+            1: np.array([[2.0, -1.0], [-1.0, 2.0]]),
+        }
+        tile_idx = {
+            0: np.array([0, 1], dtype=np.int32),
+            1: np.array([1, 2], dtype=np.int32),
+        }
+        n = 3
+
+        monkeypatch.setattr(
+            interface_iterative, 'DEFAULT_WARM_START_EXTRAPOLATION', True,
+        )
+        _, _, cg_solver = build_interface_solver(
+            S_global=None,
+            interface_solver='cg',
+            matvec_mode='tilewise',
+            tile_schur_complements={k: v.copy() for k, v in tile_schur.items()},
+            tile_index_maps=tile_idx,
+            preconditioner='jacobi',
+            matvec_threads=1,
+            n_interface=n,
+        )
+        try:
+            assert cg_solver._warm_start_extrapolation is True, (
+                "build_interface_solver did not forward a None sentinel "
+                "for warm_start_extrapolation -- InterfaceCGSolver's "
                 "dynamic default resolution was shadowed by a def-time-"
                 "bound value here instead"
             )
