@@ -151,54 +151,77 @@ $$\boxed{\text{one victim-centered response} \Rightarrow \text{all aggressor sen
 
 ---
 
-# Discrete kernel (Backward Euler)
+# Discrete kernel: one forward BE transient
 
-BE matrices:
+BE matrices (same $A$ the forward engine already factors):
 
 $$A = G + \frac{C}{\Delta t_s}, \qquad B = \frac{C}{\Delta t_s}$$
 
-Discrete sensitivity in lag $\ell$:
+BE-discretize the kernel equation $C\,h_v'(s) + G\,h_v(s) = e_v\,\delta(s)$ — symmetric $G, C$, so no transposes:
 
-$$h_v^{BE}[0] = A^{-\top} e_v, \qquad A^\top h_v^{BE}[\ell] = B^\top h_v^{BE}[\ell-1]$$
+$$\boxed{A\, h_v[0] = e_v, \qquad A\, h_v[\ell] = B\, h_v[\ell-1] \quad (\ell \ge 1)}$$
 
-Reindex to forward time $k$ with $\ell = N - 1 - k$:
+This is *exactly* a **stock forward BE transient** that
 
-$$\boxed{\lambda_k = h_v^{BE}[N - 1 - k]}$$
+- starts from the **no-load DC state** — all loads off, so every node sits at its pad voltage $V_{dd}$ (**zero IR-drop**, $V_u = 0$),
+- injects a **unit current pulse at victim $v$** (width one $\Delta t_s$) at step $0$,
+- then runs **source-free** (free decay).
 
-> $\lambda_k$ is the time-reversed BE-discrete victim sensitivity kernel.
+**Pad cancellation.** $V \equiv V_{dd}$ is the exact steady state of the pulse-free grid, so by superposition $V(t) = V_{dd} - V_{\text{pulse}}(t)$: the recorded IR-drop $\Delta V = V_{dd} - V(t)$ *is* the pure pulse response — no reference-run subtraction:
 
----
+$$\boxed{h_v[\ell][n_j] = \Delta V_{n_j}(\ell\,\Delta t_s)}$$
 
-# Backward sweep and accumulation
+*(unit pulse — for a pulse of amplitude $I_p$, divide by $I_p$)*
 
-Initialize and sweep:
-
-$$\lambda_{N-1} = A^{-\top} e_v, \qquad A^\top \lambda_k = B^\top \lambda_{k+1} \quad (k = N-2, \dots, 0)$$
-
-Per-aggressor accumulation:
-
-$$\boxed{c_j = \sum_{k=0}^{N-1} \lambda_k[n_j]\, I_j[k]}$$
-
-Interpretation: $\lambda_k[n_j] = \partial V_v[N-1] / \partial I_j[k]$.
-
-For symmetric RC, $A^\top = A$ and $B^\top = B$.
+> $h_v[\ell]$ = voltage probe of one ordinary transient, $\ell$ steps after the victim pulse. No adjoint code.
 
 ---
 
-# Complexity, pruning, validation
+# mPower recipe: one transient + a correlation
 
-Definitions: $n$ unknowns, $M$ aggressors, $N$ time steps in the blame window, horizon $H = N \Delta t_s$.
+**Reuse the existing forward engine.** Blame = one special transient run + a post-processing sum.
 
-**Cost**: $O(N \cdot \text{Solve})$.  **Memory**: $O(n)$.
+**Step 1 — kernel run** *(transient iteratons)*
+
+- zero out all instance current sources
+- add **one** synthetic load at victim $v$: rectangular pulse, amplitude $I_p$, width one $\Delta t_s$
+- initial condition = **no-load DC operating point** (all nodes at $V_{dd}$ — zero IR-drop)
+- run $L$ steps ($L$ = memory window, a few grid RC constants); probe voltages at **aggressor nodes only**
+
+$$\boxed{h_v[\ell][n_j] = \Delta V_{n_j}(\ell\,\Delta t_s)\,/\,I_p}$$
+
+**Step 2 — blame accumulation** *(post-processing)*
+
+$$\boxed{c_j = \sum_{\ell=0}^{L-1} h_v[\ell][n_j]\; I_j\!\left(T - \ell\,\Delta t_s\right)}$$
+
+- **Lag-reversed pairing**: freshest sample $h_v[0]$ pairs with the aggressor current **at** observation time $T$.
+
+Rank $|c_j|$ $\to$ top-$K$. Interpretation: $h_v[\ell][n_j] = \partial V_v(T) / \partial I_j(T - \ell\,\Delta t_s)$.
+
+---
+
+# Requirements, cost, validation
+
+**Exactness conditions** *(all hold for an RC PDN)*
+
+- **Integrator-consistent kernel** — BE shown. TR variant: $A = G + \tfrac{2C}{\Delta t_s}$, $B = \tfrac{2C}{\Delta t_s} - G$, same kernel run, but each sample pairs with **two** adjacent current samples: $c_j = \sum_\ell h_v[\ell][n_j]\bigl(I_j(T\!-\!\ell\Delta t_s) + I_j(T\!-\!(\ell\!+\!1)\Delta t_s)\bigr)$. BE kernels are smoother (no TR ringing).
+- **Symmetric $G, C$** — buys reciprocity / self-adjointness
+- **Pads at constant voltage (Dirichlet)** — guarantees exact background cancellation
+- Same $\Delta t_s$ as the target analysis; **one kernel run per victim**
+
+**Cost & memory**
+
+- One extra $L$-step transient per victim, plus $O(M \cdot L)$ correlation
+- $O(\text{probed aggressors} \times L)$ for dumped waveforms (or $O(n + M)$ if streamed)
 
 **Pruning**
 
-- Active aggressors only in $[T - H, T]$
-- Spatial: keep nodes with $\max_k |\lambda_k[n_j]| > \epsilon$
+- Active aggressors only in $[T - L\,\Delta t_s,\, T]$
+- Spatial: keep nodes with $\max_\ell |h_v[\ell][n_j]| > \epsilon$
 
-**Validation**: $V_v(T) \approx c_{\text{init}} + \sum_j c_j$.
+**Validation** — cross-check against mPower's own forward run:
 
-$$\boxed{\text{One victim sensitivity sweep gives per-instance IR-drop blame.}}$$
+$$\boxed{\sum_j c_j \approx V_v(T)}$$
 
 ---
 
