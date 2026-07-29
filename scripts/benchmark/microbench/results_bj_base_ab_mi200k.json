@@ -1,0 +1,88 @@
+{
+  "pkl_dir": "netlist/netlist_brcm_sampled/distributed_pkl_mi200k_v2",
+  "dt": 5e-12,
+  "t_end": 1e-10,
+  "rtol": 1e-08,
+  "maxiter": 1500,
+  "question": "Does two_level[deflated](bj+PoU) -- the config the stuck BRCM run built -- converge at the split regime, vs the proxy-validated two_level[deflated](jacobi+PoU)?",
+  "variants": [
+    {
+      "variant": "A_jacobi_base_control",
+      "bj_max_bytes": null,
+      "dc_prepare_s": 126.13474036497064,
+      "dc_precond": {
+        "label": "two_level[deflated](jacobi+geneo k=0, T'=65, rank=65)",
+        "preconditioner": "two_level",
+        "requested": "two_level",
+        "base_label": "jacobi",
+        "bj_downgraded": true,
+        "apply_mode": "deflated",
+        "maxiter": 1500,
+        "rtol": 1e-08,
+        "n_pou_cols": 65,
+        "n_geneo_cols": 0,
+        "rank": 65,
+        "SZ_retained": true
+      },
+      "dc_prepare_rss_gb": 19.368792064,
+      "dc_converged": true,
+      "dc_error": null,
+      "dc_solve_s": 9.914942606003024,
+      "dc_iters": 34,
+      "dc_rel_residual": null,
+      "tr_prepare_s": 125.339647112065,
+      "tr_precond": {
+        "label": "two_level[deflated](jacobi+geneo k=0, T'=65, rank=65)",
+        "preconditioner": "two_level",
+        "requested": "two_level",
+        "base_label": "jacobi",
+        "bj_downgraded": true,
+        "apply_mode": "deflated",
+        "maxiter": 1500,
+        "rtol": 1e-08,
+        "n_pou_cols": 65,
+        "n_geneo_cols": 0,
+        "rank": 65,
+        "SZ_retained": true
+      },
+      "transient": {
+        "n_steps": 20,
+        "converged": true,
+        "loop_s": 107.36794404697139,
+        "s_per_step": 5.36839720234857,
+        "iters_per_step": 17.7,
+        "peak_mV": 76.16114640043902,
+        "peak_time_ns": 0.095,
+        "peak_node": null
+      },
+      "peak_rss_gb": 40.013103104
+    },
+    {
+      "variant": "B_bj_base_brcm_config",
+      "bj_max_bytes": 17179869184,
+      "dc_prepare_s": 170.04538770299405,
+      "dc_precond": {
+        "label": "two_level[deflated](bj+geneo k=0, T'=65, rank=65)",
+        "preconditioner": "two_level",
+        "requested": "two_level",
+        "base_label": "block_jacobi",
+        "bj_downgraded": false,
+        "apply_mode": "deflated",
+        "maxiter": 1500,
+        "rtol": 1e-08,
+        "n_pou_cols": 65,
+        "n_geneo_cols": 0,
+        "rank": 65,
+        "SZ_retained": true
+      },
+      "dc_prepare_rss_gb": 63.97530112,
+      "dc_converged": false,
+      "dc_error": "InterfaceCGSolver: CG did not converge after 1500 iterations (rtol=1.00e-08, atol=1.00e-14, rel_residual=1.022e-05). Increase maxiter, relax tolerances, or improve the preconditioner. Set strict=False to demote to a warning.",
+      "dc_solve_s": 520.1064581490355,
+      "dc_iters": 1500,
+      "dc_rel_residual": 1.0224009892664171e-05,
+      "transient": null
+    }
+  ],
+  "end_to_end_s": 1069.1009783650516
+}

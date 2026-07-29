@@ -598,7 +598,9 @@ realistic values from merged conductances.
 
 **Acceptance criteria from §7.5:** (1) islands ≈ 0 — **met** (0 penalized, 0 parse warnings,
 98.5% of sampled nodes survive as interior vs 17% before). (2) Interface structure — **exceeded**
-(exact, not approximate). (3) R/node ±30% of 1.87 — missed high (3.765): contraction merged nodes
+(exact, not approximate) — *but see §7.13: this holds for the unknown count and S structure and
+NOT for the Dirichlet pad-port population (BRCM 38–49% of interface nodes, proxy ≈ 0), so the D1
+kept-port path is not exercised by this proxy*. (3) R/node ±30% of 1.87 — missed high (3.765): contraction merged nodes
 3.72× but inter-cluster resistors only 1.85×, so the coarse graph is ~2× denser per node. This errs
 in the safe direction (no fragmentation) but makes tile factor/recovery relatively costlier per
 node. (4) Per-step shares ≈ 32/51/16 ±10 pts — RHS 37% met; solve 25% / recovery 38% skewed toward
@@ -940,6 +942,169 @@ iters/step, ~5.6 s/step**; with extrapolation enabled: 17.7 / ~5.2 s/step.
 Scripts: `run_deflated_measurement_matrix.py`, `run_deflated_pou_only_addendum.py`,
 `run_adef2_multi_tile_gate.py`; raw JSONs `results_deflated_matrix_mi200k.json`,
 `results_deflated_pou_only_addendum_mi200k.json`.
+
+### 7.12 Full-length 2000-step proxy run, winning config (2026-07-25, dev host)
+
+Final verification item 3 of the interface-solve plan: the production configuration
+(`two_level[deflated](jacobi+PoU)`, geneo_k=0, tilewise CG, never-assemble
+`streaming_assembly + interface_drop_s_global`, rtol 1e-8, warm-start extrapolation ON,
+tiles_per_worker=4, Ray) run for the **same physical window as the §7.6 baseline**: 2000 steps
+BE dt=5 ps, t_end=10 ns, IC = DC solve, on `distributed_pkl_mi200k_v2` (64 tiles / 168,586
+interface unknowns — the BRCM split-regime analog).
+
+| Phase | Measured |
+|---|---|
+| DC prepare | 126.8 s (RSS 19.4 GB) |
+| DC cold solve @1e-8 | 34 iters / 10.1 s |
+| Transient prepare (never-assemble) | 125.2 s (RSS 39.8 GB) |
+| Smoothing (cold cache, 10 ns window) | 61.5 s |
+| **Loop** | **10,055 s = 5.03 s/step** |
+| — RHS | 0.297 s/step (5.9%) |
+| — pure interface solve | 4.416 s/step (87.8%) |
+| — recovery | 0.313 s/step (6.2%) |
+| CG iters/step | mean 17.3, max 29 (step 1), min 12, quartiles 16/17/19 |
+| Peak IR-drop | **76.176 mV @ 6.585 ns** |
+| End-to-end / peak RSS | 10,420 s / 40.0 GB |
+
+**The 20-step numbers hold at full length — no drift, no stagnation.** 17.3 iters/step over
+2000 steps vs 17.7 measured at 20 steps (§7.11); exactly one step ≥25 iters (the first);
+final-quarter steps run 16–18, i.e. the deflated+extrapolation warm floor is stationary.
+Memory is flat at 40 GB (watchdog never fired). One long-horizon surprise, pleasant: RHS is
+0.297 s/step here vs ~1.5 in the 20-step runs — the A2 step-column table build is a fixed
+cost that 20-step measurements amortize badly; at full length the loop's steady state is
+**88% interface solve**, sharpening the case that the remaining lever is per-iteration
+matvec cost (Stage 4 GPU) rather than tile-side work.
+
+**Accuracy cross-check (different tiling, different solver): peak 76.176 mV @ 6.585 ns vs
+the §7.6 36-tile direct-solver baseline 76.2 mV @ 6.6 ns** — the same physical answer through
+a 64-tile split + deflated PCG at rtol 1e-8, consistent with the ≤300 nV per-cell checks
+of §7.10–7.11.
+
+Comparison to §7.6 (same netlist, unsplit 36-tile regime where the direct solver still fits:
+0.626 s/step): the split regime costs 8× per step on the proxy, entirely in the interface
+solve (0.156 → 4.42 s/step; tile-side RHS+recovery stays comparable, 0.469 → 0.610 s/step). This is the expected trade — the split regime exists because the 36-tile
+regime's direct factor does not fit the BRCM problem (§7.4: >190 GB / 11.5 s/step backsolve
+on the BRCM host). BRCM-host expectation at the equivalent `--max-interior 750000` regime,
+using the ~3× measured kernel ratio: **~8–15 s/step**, dominated by the same interface solve.
+
+Script: `run_full_length_winning_config.py` (+ `run_full_length_watchdog.sh`); raw JSON with
+the full 2000-entry per-step CG-iteration list:
+`scripts/benchmark/microbench/results_full_length_mi200k.json`.
+
+### 7.13 BRCM production run hangs — the block-Jacobi base survives its budget on BRCM (2026-07-20 run, root-caused 2026-07-25)
+
+The first production BRCM run of the §7.12 winning configuration
+(`logs/brcm_transient_20260720_123333.log`, bundle `distributed_pkl_mi750k`: 55 tiles,
+30.62 M interior, 195,690 interface nodes → **120,961 unknowns**, BE dt=5 ps) **never
+completed a single time step.** All phases through `prepare_transient` succeeded and are
+healthy — smoothing 740.7 s (cold, 0/55 cached), DC prepare 242.0 s (never-assemble;
+`factor_tiles` 185.9 s, island detection 1.3 s via Stage 1e union-find), transient prepare
+44.7 s (A4 symbolic reuse: `factor_transient_tiles` 27.0 s, islands 0.001 s). The log then
+stops at 12:54:19 and produces nothing further.
+
+**Where it is stuck.** `cli.py:517-538` runs `preprocess_sources → prepare() →
+prepare_transient() → solve_transient()`. Inside `solve_transient` the only steps before the
+first log line are the `evaluate_and_get_reduced_rhs` fanout (`solver_td.py:882`), the **cold
+DC initial-condition interface solve** (`solver_td.py:913`), interior recovery, peak-tracking
+init, and the A2 step-column build. The time loop logs step 1 immediately
+(`solver_td.py:1141`, `step_idx % 10 == 0` fires at `step_idx=0`) and `--verbose` was on, so
+the absence of any `Step 1/N` line proves the run never reached the loop. The cold DC solve is
+silent by construction: `progress_every` is a `getattr` debug knob (`interface_iterative.py:2933`,
+default 0) with **no CLI flag**, and `maxiter = max(3·n_interface, 100)` = **362,883**
+(`interface_iterative.py:1405`).
+
+**Root cause — the preconditioner the run actually built.** The BRCM log reports
+`two_level[deflated](bj+geneo k=0, T'=56, rank=56)` — a **block-Jacobi base**. Every
+measurement behind §7.9–§7.12 instead ran `two_level[deflated](jacobi+PoU)`, because at the
+mi200k_v2 regime the BJ estimate is 10.6 GB > the 8 GB auto budget and the memory guard
+downgrades the base to diagonal. On BRCM the estimate is **3186.8 MB = 3.11 GiB**, below even
+the 4 GiB legacy floor in `resolve_block_jacobi_max_bytes` (`interface_iterative.py:663-681`),
+so **the downgrade cannot fire on this bundle at any host RAM size**. §7.9 finding (4) recorded
+that the guard's downgrade "correlates with the pathology, so the default composes correctly" —
+BRCM is the counterexample where the correlation breaks. The block-Jacobi *memory* guard has
+been silently doing duty as the *numerics* guard.
+
+**A/B confirmation on the proxy** (`run_bj_base_ab_mi200k.py`, mi200k_v2, 64 tiles /
+168,586 unknowns, Ray `tiles_per_worker=4`, deflated apply, `geneo_k=0`, tilewise CG,
+never-assemble, rtol 1e-8, extrapolation on — **only** `interface_block_jacobi_max_bytes`
+differs; `maxiter` bounded to 1500 so a stagnating cell fails in minutes):
+
+| | A — control (`auto`, guard fires) | B — BRCM's config (16 GiB, guard suppressed) |
+|---|---|---|
+| Label built | `two_level[deflated](jacobi+geneo k=0, T'=65, rank=65)` | `two_level[deflated](bj+geneo k=0, T'=65, rank=65)` |
+| Base / `_bj_downgraded` | `jacobi` / True | `block_jacobi` / **False** |
+| DC prepare | 126.1 s / 19.4 GB RSS | 170.0 s / **64.0 GB RSS** |
+| **Cold DC @1e-8** | **converged — 34 iters, 9.9 s** | **FAILED — 1500 iters, 520.1 s, rel-res 1.022e-05** |
+| 20-step transient | 17.7 iters/step, 5.368 s/step, peak 76.1611 mV | not reached |
+
+B's true-residual trajectory: `2.13e-5 (25) → 2.74e-5 (50) → 1.64e-5 (75) → 1.11e-5 (100) →
+1.11e-5 (125) → … → 1.02e-5 (1500)` — flat from ~iter 100, moving **8% over 1400 iterations**
+while sitting three orders above the target. Stagnation, not slow convergence. This extends
+§7.9 finding (4) (which measured the *additive* bj+GenEO variant) to the current production
+**deflated** apply mode with a PoU-only coarse space: the deflated form does not rescue a
+block-Jacobi base at the split regime either — consistent with the §7.8 diagnosis that
+M_BJ⁻¹'s ~1e6-relative amplification along near-null ownership-block directions lives in the
+fine space, which no 56–65-column coarse correction can reach. The bj base additionally costs
+**+45 GB of coordinator RAM** to build a preconditioner that then fails.
+
+Variant A reproduced the §7.11/§7.12 record exactly (DC prepare 126.8 s / 19.4 GB → 126.1 s /
+19.4 GB; cold DC 34 iters / 10.1 s → 34 / 9.9 s; TR prepare 125.2 s / 39.8 GB → 125.3 s /
+39.7 GB; 17.7 iters/step; peak 76.1611 mV vs the §7.7 direct reference 76.1606 mV at this
+window), so the bundle and harness are sound and the base is the sole causal variable.
+
+**Why it looks like a hang rather than an error.** With production `maxiter = 3·n = 362,883`
+and the proxy's 0.35 s/iteration, exhausting the budget takes **~35 hours**; the BRCM host runs
+these kernels ~3× slower (§7.6 cross-host anchor), so **days** — entirely silent, and the
+terminal `RuntimeError` (strict mode default) then discards the 21-minute prepare. A converging
+solve at this regime takes ~10 s on the proxy, i.e. ~1 minute on the BRCM host.
+
+**Caveat on transferability.** BRCM's ownership blocks are *less* skewed than the proxy's
+(`max_block` 5,230 with mean ≈ 2,199, max/mean 2.4×, Σkᵢ² ≈ 3.36e8; proxy 13,834 / 2,634 /
+5.3×, Σkᵢ² ≈ 8.49e8 — both back-computed from the logged byte estimates). The A/B therefore
+proves the mechanism and identifies the causal variable; it does not prove BRCM's residual
+plateaus at the same value. The log evidence closes that gap: hours of silence where a
+converging solve would take ~1 minute.
+
+**Standing risk NOT addressed by this fix — D1 pad ports at scale (correction to §7.6).**
+BRCM has 195,690 interface nodes but 120,961 unknowns, i.e. **74,729 (38%) are Dirichlet pad
+ports** (49% at the 36-tile bundle: 138,209 → 70,734). Every proxy bundle has **essentially
+zero**: `distributed_pkl` 69,504 boundary ≈ 70,734 unknowns, `distributed_pkl_mi200k_v2`
+167,493 boundary → 168,586 unknowns; §7.7 recorded "no tile-resident pad ports in this bundle
+(D1 doesn't bite here)". §7.6's claim that the contraction proxy reproduces the interface
+system "exactly" holds for unknown count and S structure but **not** for the Dirichlet port
+population. Consequently the D1 kept-port machinery (`tile_kept_port_pos`, `filter_kept_rhs`,
+the `S_arr[np.ix_(kept_pos, kept_pos)]` slice at `interface_iterative.py:916` feeding both the
+tilewise matvec and the block-Jacobi ownership, and the PoU coarse columns over the same maps)
+has never run at scale with a non-trivial kept mask — coverage is toy-fixture only
+(`tests/distributed/test_interface_iterative_stage2.py`, a 3-port tile with one dropped pad
+port). An indexing inconsistency there produces the same symptom (non-convergent CG), so the
+next BRCM run must be watched for it even after the base is corrected.
+
+**Immediate unblock (no code change):**
+```bash
+--interface-block-jacobi-max-bytes 1   # explicit values bypass the 4 GiB auto floor
+                                       # (interface_iterative.py:625-629) -> two_level[deflated](jacobi+PoU)
+--interface-cg-maxiter 2000            # bound the blast radius: fails in minutes, not days
+```
+Run 20 steps first (`--t-end 0.1ns`, ~50 min wall per §7.4) — that also surfaces the D1 risk
+cheaply, since any inconsistency shows up in the same cold DC solve.
+
+**Recommended code changes (not yet landed):**
+1. Select the diagonal base **explicitly** for `two_level` + tilewise rather than by
+   byte-budget accident. §7.9 recorded bj-base two_level is fine at small/well-conditioned
+   regimes (multi_tile smoke 102 vs 107 iters; chain fixture flat at 27), so gate on the
+   split/tilewise regime instead of removing the bj base.
+2. Expose `progress_every` as `--interface-cg-progress-every` (default ~50). A multi-hour
+   silent solve on the production path is an observability defect; the knob exists but only
+   microbench scripts can reach it.
+3. Cap the default `maxiter`. `3·n` = 362,883 at n=121 K is meaningless for a preconditioned
+   Krylov method and converts "did not converge" into "hangs for days, then discards the
+   prepare".
+4. Promote the surviving-BJ estimate from DEBUG to INFO and log the resolved budget, so a
+   divergence from the validated label is visible at a glance.
+
+Script: `run_bj_base_ab_mi200k.py`; raw JSON `results_bj_base_ab_mi200k.json`; run log
+`logs/bj_base_ab_mi200k.log`.
 
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
