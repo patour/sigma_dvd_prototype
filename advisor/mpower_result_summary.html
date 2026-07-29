@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mPower Result Summary — BRCM rts_top (N3E) Dynamic Vectored</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2029;
+    --panel2: #222a35;
+    --border: #2e3a48;
+    --text: #d7dee7;
+    --muted: #8b98a8;
+    --accent: #4fa3ff;
+    --green: #35c47c;
+    --amber: #f2b544;
+    --red: #ff5f56;
+    --redbg: #2a1416;
+    --amberbg: #2a2210;
+    --greenbg: #10241a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 0 0 80px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+  header.hero {
+    background: linear-gradient(135deg, #16202c 0%, #1d2a3a 100%);
+    border-bottom: 3px solid var(--accent);
+    padding: 36px 0 28px;
+    margin-bottom: 32px;
+  }
+  header.hero h1 { margin: 0 0 6px; font-size: 26px; font-weight: 650; letter-spacing: -0.3px; }
+  header.hero .sub { color: var(--muted); font-size: 14px; }
+  header.hero .meta { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 10px; }
+  .chip {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 20px;
+    padding: 4px 14px; font-size: 12.5px; color: var(--text);
+  }
+  .chip b { color: var(--accent); font-weight: 600; }
+  .status-ok { color: var(--green); font-weight: 650; }
+
+  h2 {
+    font-size: 20px; margin: 40px 0 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border); font-weight: 620; letter-spacing: -0.2px;
+  }
+  h3 { font-size: 16px; margin: 24px 0 8px; color: var(--text); font-weight: 620; }
+  h2 .num { color: var(--muted); font-weight: 400; margin-right: 8px; }
+
+  /* KPI cards */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin: 20px 0; }
+  .kpi {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px; position: relative; overflow: hidden;
+  }
+  .kpi .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .kpi .val { font-size: 24px; font-weight: 680; margin-top: 6px; letter-spacing: -0.5px; }
+  .kpi .foot { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .kpi.good { border-left: 4px solid var(--green); }
+  .kpi.warn { border-left: 4px solid var(--amber); }
+  .kpi.bad  { border-left: 4px solid var(--red); }
+  .kpi.info { border-left: 4px solid var(--accent); }
+  .kpi.good .val { color: var(--green); }
+  .kpi.warn .val { color: var(--amber); }
+  .kpi.bad  .val { color: var(--red); }
+
+  table {
+    width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  }
+  th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--border); }
+  th { background: var(--panel2); color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.4px; }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr:hover { background: rgba(79,163,255,0.05); }
+
+  .callout { border-radius: 10px; padding: 16px 20px; margin: 16px 0; border: 1px solid var(--border); }
+  .callout .title { font-weight: 650; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  .callout.red   { background: var(--redbg);   border-color: #4a2226; }
+  .callout.amber { background: var(--amberbg); border-color: #4a3d16; }
+  .callout.green { background: var(--greenbg); border-color: #1c4230; }
+  .callout.red .title   { color: var(--red); }
+  .callout.amber .title { color: var(--amber); }
+  .callout.green .title { color: var(--green); }
+  .callout p { margin: 6px 0; }
+  .callout ul { margin: 8px 0 4px; padding-left: 20px; }
+  .callout li { margin: 3px 0; }
+
+  code, pre { font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; }
+  code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; font-size: 12.5px; color: #b8d4f0; }
+  pre {
+    background: #0b0f14; border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; font-size: 12.5px; line-height: 1.5; color: #c8d4e0;
+  }
+  .pct-bar {
+    display: inline-block; height: 8px; border-radius: 4px; vertical-align: middle;
+    background: var(--accent); margin-left: 8px;
+  }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 5px; font-size: 11.5px; font-weight: 600; }
+  .badge.red   { background: #3a1a1c; color: var(--red); }
+  .badge.amber { background: #3a3012; color: var(--amber); }
+  .badge.green { background: #163020; color: var(--green); }
+  .tag { color: var(--muted); font-family: monospace; font-size: 12px; }
+
+  ol.actions { counter-reset: step; list-style: none; padding: 0; }
+  ol.actions li {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px 12px 52px; margin: 10px 0; position: relative;
+  }
+  ol.actions li::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 14px; top: 12px;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--accent); color: #061018; font-weight: 700; font-size: 14px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .footnote { color: var(--muted); font-size: 13px; border-top: 1px solid var(--border); margin-top: 40px; padding-top: 16px; }
+  a { color: var(--accent); }
+  .drop-meter { display:flex; align-items:center; gap:10px; }
+  .meter-track { flex:1; height:10px; background:#0b0f14; border-radius:5px; overflow:hidden; border:1px solid var(--border); max-width:220px; }
+  .meter-fill { height:100%; border-radius:5px; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>mPower Result Summary Dashboard</h1>
+    <div class="sub">BRCM <code>rts_top</code> · TSMC N3E · Dynamic Vectored IR Run &nbsp;—&nbsp; <span class="status-ok">✅ Completed successfully</span></div>
+    <div class="meta">
+      <span class="chip"><b>Run:</b> logs_20260709_222054</span>
+      <span class="chip"><b>Started:</b> Thu Jul 9 22:20:54 2026</span>
+      <span class="chip"><b>mPower:</b> 2026.3 (pre-production)</span>
+      <span class="chip"><b>Host:</b> orw-bw19-r8 · 128c / 1007 GB</span>
+      <span class="chip"><b>Slots:</b> 16 / 128</span>
+    </div>
+    <div class="sub" style="margin-top:12px;">Flow: extract PG → check grid → power (FSDB vectored) → static IR → dynamic IR (50 ns) → reporting · <b>DB saved, clean exit</b></div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ===== VERDICT KPIs ===== -->
+  <h2><span class="num">1.</span>Overall Verdict</h2>
+  <div class="kpis">
+    <div class="kpi good">
+      <div class="label">Run Outcome</div>
+      <div class="val">Completed</div>
+      <div class="foot">final.db saved · clean exit</div>
+    </div>
+    <div class="kpi info">
+      <div class="label">Total Wall Time</div>
+      <div class="val">11h 18m</div>
+      <div class="foot">CPU 14h 15m</div>
+    </div>
+    <div class="kpi info">
+      <div class="label">Peak Memory</div>
+      <div class="val">98.7 GB</div>
+      <div class="foot">dynamic sim process</div>
+    </div>
+    <div class="kpi bad">
+      <div class="label">Worst Dynamic IR</div>
+      <div class="val">14.7%</div>
+      <div class="foot">111.6 mV VDD drop</div>
+    </div>
+    <div class="kpi good">
+      <div class="label">EM Violations</div>
+      <div class="val">0</div>
+      <div class="foot">wire &amp; via clean</div>
+    </div>
+    <div class="kpi good">
+      <div class="label">Grid Integrity</div>
+      <div class="val">Clean</div>
+      <div class="foot">no floats / shorts</div>
+    </div>
+    <div class="kpi warn">
+      <div class="label">Hard Errors</div>
+      <div class="val">4</div>
+      <div class="foot">TWF dup clocks (non-fatal)</div>
+    </div>
+    <div class="kpi warn">
+      <div class="label">Dynamic IR Runtime</div>
+      <div class="val">69%</div>
+      <div class="foot">7.8h of total wall time</div>
+    </div>
+  </div>
+
+  <!-- ===== ATTENTION ===== -->
+  <h2><span class="num">2.</span>🔴 Items Requiring Attention</h2>
+
+  <div class="callout red">
+    <div class="title">2.1 &nbsp; Dynamic IR drop margin is marginal-to-failing</div>
+    <ul>
+      <li><b>Worst dynamic VDD drop: 111.63 mV</b> at <code>u_rts_clk_rst_ctrl/periph_tbuffer1_R1</code> → <b>14.7% of the 0.76 V rail</b>.</li>
+      <li><b>Worst dynamic VSS bounce: 122.51 mV</b> (same instance).</li>
+      <li>Worst combined <code>vdiff</code> ≈ 0.657 V (~13.5–14.7% total drop); top-100 cluster at 0.70–0.71 V (≈7–8%).</li>
+      <li>Hotspots concentrate in the <b>u_rts_clk_rst_ctrl clock-reset sync</b> logic (VSS side) and the triple <b>dualr8_ss R8 CPU / FPU / RAM</b> blocks.</li>
+    </ul>
+    <p><b>Action:</b> Compare against your dynamic IR spec (commonly ≤10% = 76 mV). At 14.7% this <b>likely exceeds budget</b> — inspect grid/via density around <code>u_rts_clk_rst_ctrl</code> and the R8 cores; consider decap (design currently has <b>0 decaps</b>, see 2.4).</p>
+  </div>
+
+  <div class="callout red">
+    <div class="title">2.2 &nbsp; Four TWF clock errors (commands ignored)</div>
+<pre>Error: Clock ... u_pll_wrapper/u_gmux/clk_and_EnCGChk/o already exist, command ignored
+Error: Clock ... u_rts_clk_rst_ctrl/dnt_ckbuf_rts_clk/o already exist, command ignored
+Error: Clock ... u_rts_clk_rst_ctrl/DRmv_dnt_ckbuf_gated_div2/o already exist, command ignored
+Error: Clock ... u_rts_clk_rst_ctrl/dnt_ckbuf_rts_clk_div4/dnt_ckbuf/o already exist, command ignored</pre>
+    <p><b>Meaning:</b> The TWF redefines clocks already declared; mPower <b>ignores the duplicate</b>, keeping the first definition.</p>
+    <p><b>Risk:</b> If the ignored definitions carried different periods/windows, toggle timing on those clock branches may be wrong. These are on <code>u_rts_clk_rst_ctrl</code> — <b>the same block as the worst dynamic IR</b> (2.1).</p>
+    <p><b>Action:</b> Check the TWF generator; deduplicate clock declarations or confirm the retained definition is correct.</p>
+  </div>
+
+  <div class="callout amber">
+    <div class="title">2.3 &nbsp; TWF parsing quality — 130,880 unrecognized-keyword warnings (PWR-272)</div>
+    <ul>
+      <li><code>PWR-272: Unrecognized keyword "#"</code> — TWF contains comment/header lines mPower can't parse (<code>#</code>, <code>#1)</code>…), 130,880 occurrences.</li>
+      <li><code>PWR-297: Timescale is not defined, using seconds as default</code> — no timescale in TWF.</li>
+      <li><code>Warning: No instances found in twf. Please check corresponding section.</code></li>
+    </ul>
+    <p><b>Action:</b> The TWF format looks partially non-conformant. Confirm <code>-type format2</code> matches the file, and that the missing timescale/instance section is intentional — this can silently degrade timing-window accuracy.</p>
+  </div>
+
+  <div class="callout amber">
+    <div class="title">2.4 &nbsp; No decaps in the design</div>
+    <p><code>Number Of Decaps : 0</code> and the decap row in the power summary is all-zero. With 14.7% dynamic drop and <b>zero decoupling capacitance modeled</b>, either decaps are genuinely absent or not being recognized.</p>
+    <p><b>Action:</b> Verify decap cells are in the LEF/LIB and being extracted — adding/modeling decap is the first lever for the 2.1 drop problem.</p>
+  </div>
+
+  <div class="callout amber">
+    <div class="title">2.5 &nbsp; Vectored annotation: low in the vector, high in the design</div>
+    <ul>
+      <li><b>99.88%</b> of design nets (4,040,360 / 4,045,248) got FSDB waveforms — excellent.</li>
+      <li>But only <b>12.06%</b> of the 33.5 M vector signals map to the design (testbench &gt; DUT — usually normal).</li>
+      <li>4,888 design nets (0.12%) got no waveform → fall back to <code>set_toggle_rate 0.07</code>. Listed in <code>vector_non_annotated_nets.txt</code> (mostly <code>*_paddr[*]</code>, debug/APB buses).</li>
+    </ul>
+    <p><b>Action:</b> Confirm the 4,888 un-annotated design nets aren't power-critical.</p>
+  </div>
+
+  <div class="callout amber">
+    <div class="title">2.6 &nbsp; 523,976 nets without delay / 105,820 unreachable</div>
+    <p><code>PWR-327: 523,976 of 4,045,248 nets don't have arrival time</code> (12.9%); <code>105,820 nets unreachable</code> (no clock period).</p>
+    <p><b>Action:</b> <code>report_nets -type without_delay</code> / <code>-type without_clock</code> to confirm these are tie-offs/constants, not real paths losing accuracy.</p>
+  </div>
+
+  <!-- ===== POWER ===== -->
+  <h2><span class="num">3.</span>Power &amp; Current Summary</h2>
+  <div class="kpis">
+    <div class="kpi info"><div class="label">Total Average Power</div><div class="val">2.0155 W</div><div class="foot">sw 0.456 · int 1.008 · leak 0.551</div></div>
+    <div class="kpi info"><div class="label">Total Scenario Power</div><div class="val">1.8127 W</div><div class="foot">sw 0.024 · int 1.238 · leak 0.551</div></div>
+    <div class="kpi info"><div class="label">VDD_VAR Current</div><div class="val">2.65 A</div><div class="foot">static / dyn-avg 2.41 A</div></div>
+    <div class="kpi warn"><div class="label">Peak SRAM Current</div><div class="val">239 mA</div><div class="foot">per PG pin (u7_sram_ll)</div></div>
+  </div>
+
+  <h3>Average power by cell type</h3>
+  <table>
+    <thead><tr><th>Cell type</th><th class="num">Total power (W)</th><th class="num">Share</th><th class="num">Power density (W/mm²)</th><th class="num">Count</th></tr></thead>
+    <tbody>
+      <tr><td>memory</td><td class="num">1.115</td><td class="num">55.3%</td><td class="num">0.501</td><td class="num">313</td></tr>
+      <tr><td>logic</td><td class="num">0.346</td><td class="num">17.2%</td><td class="num">2.97</td><td class="num">3,387,828</td></tr>
+      <tr><td>clock</td><td class="num">0.262</td><td class="num">13.0%</td><td class="num">83.97</td><td class="num">18,597</td></tr>
+      <tr><td>flop</td><td class="num">0.161</td><td class="num">8.0%</td><td class="num">1.91</td><td class="num">599,475</td></tr>
+      <tr><td>icg</td><td class="num">0.131</td><td class="num">6.5%</td><td class="num">6.20</td><td class="num">31,937</td></tr>
+      <tr><td>physical_only</td><td class="num">0.001</td><td class="num">0.1%</td><td class="num">0.002</td><td class="num">8,292,592</td></tr>
+      <tr><td><b>total</b></td><td class="num"><b>2.015</b></td><td class="num"><b>100%</b></td><td class="num">0.651</td><td class="num">12,330,828</td></tr>
+    </tbody>
+  </table>
+  <p><span class="tag">Memory dominates power &amp; current. Clock cells show by far the highest power density (84 W/mm²). SRAMs top peak/average/scenario current.</span></p>
+
+  <!-- ===== IR DROP ===== -->
+  <h2><span class="num">4.</span>IR Drop Summary</h2>
+  <table>
+    <thead><tr><th>Analysis</th><th class="num">Worst VDD drop</th><th class="num">Worst VSS bounce</th><th>Worst instance</th><th></th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Static</td>
+        <td class="num">10.27 mV <span class="badge green">1.35%</span></td>
+        <td class="num">12.09 mV</td>
+        <td class="tag">u_rts_clk_rst_ctrl/.../tbuffer2_R2</td>
+        <td><div class="drop-meter"><div class="meter-track"><div class="meter-fill" style="width:13.5%;background:var(--green)"></div></div></div></td>
+      </tr>
+      <tr>
+        <td>Dynamic</td>
+        <td class="num">111.63 mV <span class="badge red">14.7%</span></td>
+        <td class="num">122.51 mV</td>
+        <td class="tag">u_rts_clk_rst_ctrl/periph_tbuffer1_R1</td>
+        <td><div class="drop-meter"><div class="meter-track"><div class="meter-fill" style="width:100%;background:var(--red)"></div></div></div></td>
+      </tr>
+    </tbody>
+  </table>
+  <ul>
+    <li><b>Static IR is healthy</b> — top-100 all &lt; 2.4% / 22 mV.</li>
+    <li><b>Dynamic IR is ~11× worse than static</b> — expected for a vectored run, but 14.7% worst-case warrants sign-off review.</li>
+    <li><b>Grid resistance:</b> worst instance-to-rail R ≈ 779 Ω (<code>WELLTAP_PD_CLOVERINT_13971</code>), avg ≈ 735 Ω. Wells/taps at the R8 core periphery show the highest access resistance — consistent with the dynamic hotspots.</li>
+  </ul>
+
+  <!-- ===== EXTRACTION ===== -->
+  <h2><span class="num">5.</span>Extraction / Grid Health</h2>
+  <div class="kpis">
+    <div class="kpi info"><div class="label">PG Nodes</div><div class="val">61.9 M</div><div class="foot">115.4 M resistors</div></div>
+    <div class="kpi info"><div class="label">Circuit Caps</div><div class="val">86.4 M</div><div class="foot">24.8 M current sources</div></div>
+    <div class="kpi good"><div class="label">Floating / Shorts</div><div class="val">None</div><div class="foot">wires·vias·comps·pins</div></div>
+    <div class="kpi warn"><div class="label">Overlapping Vias</div><div class="val">2,314</div><div class="foot">report_grid_weakness</div></div>
+  </div>
+  <p>4 PG nets (VDD_VAR, VSS, pad_PLL_VDD1p5, pad_PLL_VSS), all extracted. Design: 12.33 M leaf cells, 4.05 M signal nets, die 3.185 mm², 125 °C. Circuit handed to simulator: 61.8 M nodes / 230.7 M edges.</p>
+  <p><span class="tag">⚠️ 2,314 overlapping vias — usually benign redundant vias, but verify with <code>report_grid_weakness -type via_overlaps</code>.</span></p>
+
+  <!-- ===== MISSING INPUTS ===== -->
+  <h2><span class="num">6.</span>Missing / Skipped Inputs (worked around)</h2>
+  <table>
+    <thead><tr><th>Symptom</th><th class="tag">Code</th><th class="num">Count</th><th>Meaning / impact</th></tr></thead>
+    <tbody>
+      <tr><td>CCSP leakage mismatch</td><td class="tag">PWR-258</td><td class="num">17,568,309</td><td>Liberty CCS-power waveform endpoints ≠ leakage; library-wide, flag to lib owners.</td></tr>
+      <tr><td>CCSP sign mismatch</td><td class="tag">PWR-259</td><td class="num">1,203,979</td><td>Left/right waveform areas differ in sign — CCSP data quality.</td></tr>
+      <tr><td>pg_current pg_pin not defined</td><td class="tag">PWR-170</td><td class="num">966,759</td><td>Liberty pg_current references a pg-pin absent from the cell.</td></tr>
+      <tr><td>Signal pin on PG net</td><td class="tag">EXT-223</td><td class="num">32,075</td><td>Signal pins tied to VDD_VAR (bumps + scan/datapath) — check intent.</td></tr>
+      <tr><td>Negative pwl time, skipped</td><td class="tag">PWR-230</td><td class="num">16,640</td><td>CTS buffer PG-pin waveforms with negative time skipped.</td></tr>
+      <tr><td>Negative-delay arcs in cell</td><td class="tag">PWR-245</td><td class="num">12,619</td><td>Cells containing negative delay arcs.</td></tr>
+      <tr><td>CG without input clock</td><td class="tag">PWR-306</td><td class="num">1,009</td><td>Clock-gates excluded from toggle-reduction (mostly MBIST/DFT).</td></tr>
+      <tr><td>out net not in SPEF</td><td class="tag">PWR-121</td><td class="num">885</td><td>Nets absent from SPEF (SYNOPSYS_UNCONNECTED, tie nets).</td></tr>
+      <tr><td>No PG pins in LIB → LEF used</td><td class="tag">PWR-201</td><td class="num">628</td><td>Bump/probe cells without LIB PG pins.</td></tr>
+      <tr><td>CG negative toggle reduction</td><td class="tag">PWR-305</td><td class="num">49</td><td>Clock gates with negative reduction — excluded.</td></tr>
+      <tr><td>Undriven nets</td><td class="tag">PWR-124</td><td class="num">25</td><td><code>o_ts_ext_mode_so[*]</code> scan outputs not driven.</td></tr>
+      <tr><td>TWF instance not in name db</td><td class="tag">PWR-112</td><td class="num">14</td><td>All <code>*_BCM_WATERMARK_*</code> watermark IP (intentionally ignored).</td></tr>
+      <tr><td>LEF layer not in tech</td><td class="tag">EXT-114</td><td class="num">13</td><td><code>M*_FB1</code>, <code>VIA*_FB1</code> unmapped — check LEF↔tech mapping.</td></tr>
+      <tr><td>Unrealistic wmin</td><td class="tag">EXT-202</td><td class="num">6</td><td>Layers BPC/MPC/TPC — verify stackup.</td></tr>
+      <tr><td>PLL vout pg-pins not in network</td><td class="tag">PWR-128/125</td><td class="num">3+3</td><td><code>u_pll_wrapper/u_pll</code> vout0p8_* rails not modeled.</td></tr>
+    </tbody>
+  </table>
+  <p class="tag">Note: <code>mpower.warning.log</code> is capped (10 shown per code). True totals above come from the "N out of M …" roll-up lines in <code>mpower.log</code>.</p>
+
+  <!-- ===== PERFORMANCE ===== -->
+  <h2><span class="num">7.</span>Performance Metrics (stage timing)</h2>
+  <table>
+    <thead><tr><th>Stage</th><th class="num">Wall time</th><th class="num">% of run</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Read DEF/LEF/LIB</td><td class="num">23m 55s</td><td class="num">3.5%</td><td>rts_top.def.gz = 960s; PLOVERINTEGRATION = 279s</td></tr>
+      <tr><td>Extract PG</td><td class="num">4m 44s</td><td class="num">0.7%</td><td>16 processes; 283s extract</td></tr>
+      <tr><td>Check grid</td><td class="num">2m 13s</td><td class="num">0.3%</td><td></td></tr>
+      <tr><td>SPEF + TWF + Power (FSDB)</td><td class="num">~2h 08m</td><td class="num">19%</td><td>FSDB read = 307s; <b>distributed power disabled</b> → single-node</td></tr>
+      <tr><td>Static IR</td><td class="num">17m</td><td class="num">2.5%</td><td>load 204s + preprocess 228s + solve 554s</td></tr>
+      <tr style="background:rgba(255,95,86,0.08)"><td><b>Dynamic IR (50 ns @ 5 ps)</b></td><td class="num"><b>7h 45m</b></td><td class="num"><b>69%</b></td><td>10,000 time steps on 61.8 M nodes, single-node</td></tr>
+      <tr><td>Reporting</td><td class="num">36m</td><td class="num">5.3%</td><td>well-threaded (14h CPU in 36m wall)</td></tr>
+      <tr><td><b>TOTAL</b></td><td class="num"><b>11h 18m</b></td><td class="num">100%</td><td>Peak 98.7 GB</td></tr>
+    </tbody>
+  </table>
+  <div class="callout amber">
+    <div class="title">Performance observations</div>
+    <ul>
+      <li><b>Dynamic IR dominates runtime</b> (69%). Levers: coarser <code>-tstep</code>, shorter <code>-stop</code> window, or fewer solve points if the full 50 ns isn't needed for sign-off.</li>
+      <li><b>Distributed power was disabled</b> — power ran on one node despite 128 cores; enabling it could cut the ~2h power stage.</li>
+      <li><b>Only 16 of 128 slots used</b> the entire run (license-limited). More slots would speed extraction and the solver.</li>
+      <li>Dynamic-IR CPU/wall ratio is low (6.3h CPU vs 7.8h wall) → the solver is <b>not parallelizing well</b> in that phase.</li>
+    </ul>
+  </div>
+
+  <!-- ===== NEXT ACTIONS ===== -->
+  <h2><span class="num">8.</span>Recommended Next Actions</h2>
+  <ol class="actions">
+    <li><b>Dynamic IR sign-off:</b> confirm 111.6 mV / 14.7% against spec; if failing, target <code>u_rts_clk_rst_ctrl</code> clock-reset sync and R8/FPU/RAM regions. <span class="tag">(§2.1)</span></li>
+    <li><b>Add/verify decap</b> — design reports 0 decaps; primary mitigation for dynamic drop. <span class="tag">(§2.4)</span></li>
+    <li><b>Resolve the 4 TWF clock errors</b> — they land on the worst-IR block; confirm the retained clock defs are correct. <span class="tag">(§2.2)</span></li>
+    <li><b>Fix TWF format</b> — 130k parse warnings + missing timescale + "no instances in twf" suggest a malformed/mismatched TWF. <span class="tag">(§2.3)</span></li>
+    <li><b>Review CCSP library quality</b> with lib owners — 17.5 M PWR-258 + 1.2 M PWR-259 indicate systematic CCS-power data issues. <span class="tag">(§6)</span></li>
+    <li><b>Enable distributed power / request more slots</b> to cut the ~2h power stage and long extraction. <span class="tag">(§7)</span></li>
+    <li><b>Spot-check</b> EXT-223 (32k signal-on-PG), EXT-114 (<code>*_FB1</code> unmapped layers), and the 2,314 overlapping vias. <span class="tag">(§5, §6)</span></li>
+  </ol>
+
+  <div class="footnote">
+    Generated from <code>logs_20260709_222054/mpower.log</code>, <code>mpower.error.log</code>, <code>mpower.warning.log</code>, <code>mpower.lib.log</code>, and the <code>*.rpt</code> output files. The 84 GB DB was not read.
+  </div>
+
+</div>
+</body>
+</html>
