@@ -1106,6 +1106,121 @@ cheaply, since any inconsistency shows up in the same cold DC solve.
 Script: `run_bj_base_ab_mi200k.py`; raw JSON `results_bj_base_ab_mi200k.json`; run log
 `logs/bj_base_ab_mi200k.log`.
 
+### 7.14 Block construction proven to be the root cause of BJ stagnation (2026-07-27, dev host)
+
+Intervention experiment isolating WHY block-Jacobi stagnates at the split regime while
+diagonal Jacobi (under the coarse space) converges. Every recorded stagnation (§7.8, §7.9
+bj16, §7.13) ran the never-assemble path, where `_form_owned_block` builds each ownership
+block from the single OWNER tile's `S_i` slice + `S_extra` ("path 2") — missing the
+neighbor-tile stiffness on every shared boundary node. The experiment monkeypatches
+`_form_owned_block` to return the TRUE principal submatrix
+`S[O_i,O_i] = Σ_t S_t[O_i∩ports_t] + S_extra[O_i,O_i]` (accumulated over ALL tiles,
+builder self-tested against explicit dense assembly), leaving ownership, factoring,
+apply, tilewise matvec, and the never-assemble memory profile byte-identical — block
+construction is the only variable. mi200k_v2, 64 tiles / 168,586 unknowns, Ray
+`tiles_per_worker=4`, cold DC @ rtol 1e-8, maxiter 1500, run under a 225 GB memory
+watchdog (peak system used: 106 GB; never fired).
+
+| Cell | Blocks | Preconditioner | Cold DC @1e-8 |
+|---|---|---|---|
+| control_jacobi_pou (anchor) | — | `two_level[deflated](jacobi+PoU)` | **34 iters / 11.0 s** (≡ §7.13 A: 34 / 9.9 s) |
+| path2_plain_bj | single-owner `S_i` | plain `block_jacobi` (16 GiB budget) | **FAILED** — 1500 iters / 490 s, rel-res **0.264** |
+| **true_plain_bj** | **true `S[O,O]`** | plain `block_jacobi` (16 GiB budget) | **converged — 262 iters / 87.5 s** |
+| true_twolevel_deflated | true `S[O,O]` | `two_level[deflated](bj_true+PoU)` | converged — 311 iters / 111.1 s |
+
+Trajectories: path-2 drops 0.909 → 0.323 by iter 225 then moves <20% over the next
+1,275 iterations (flat — stagnation, same shape as §7.8/§7.13); true-block BJ decays
+geometrically ~1 decade per ~35 iterations (8.2e-2 @25 → 1.6e-7 @225). The patch also
+quantifies what path 2 drops: the missing off-tile stiffness reaches **4.53× the
+Frobenius mass of the kept block** — for some blocks the neighbor contribution is the
+DOMINANT term, not a correction.
+
+**Findings.** (1) **Block construction is the root cause** — proven by intervention, not
+correlation: identical solver, identical partition, only the block contents changed, and
+stagnation became healthy convergence. §7.8's "block-Jacobi intrinsically collapses at
+split-regime granularity" is now qualified: the *path-2* blocks collapse (their
+"genuine near-null eigendirections" are largely an artifact of the missing off-tile
+anchoring); true blocks merely underperform. Consistent with the §7.4 indirect evidence
+(real-BRCM 107-tile assembled BJ: 330 cold iters @1e-12 — the assembled path always used
+true blocks). (2) **No production change is motivated**: even corrected, true-block BJ
+needs 262 iterations — 7.7× the production `two_level[deflated](jacobi+PoU)`'s 34 — so a
+distributed true-block gather (new reduction protocol) would buy a strictly worse
+preconditioner at this regime. §7.13's recommended fix (select the diagonal base
+explicitly for split/tilewise) stands unchanged. (3) **The coarse space composes poorly
+with a BJ base even when the blocks are correct**: adding PoU+deflation to true-BJ
+*regressed* it (262 → 311 iters), extending §7.9 finding (4) beyond the broken-blocks
+case. (4) Anchor cell reproduced §7.13 variant A exactly — harness validated.
+
+Script: `run_bj_true_block_isolation_mi200k.py` (+ `run_bj_true_block_watchdog.sh`,
+225 GB kill line); raw JSON `results_bj_true_block_isolation_mi200k.json` (includes
+per-block missing-mass stats and full config per cell); run log
+`logs/bj_true_block_isolation_20260727.log`; memory trace
+`scripts/benchmark/microbench/bj_true_block_isolation.memlog`.
+
+### 7.15 Why two_level makes true-block BJ worse: reprojection + a base-dependent DEF/additive flip (2026-07-27, dev host)
+
+§7.14 left an anomaly: `two_level[deflated](bj_true+PoU)` = 311 cold iters vs plain
+true-BJ's 262 — yet exact-arithmetic DEF theory (Nabben/Vuik-style spectrum restriction)
+says deflation with the same SPD base cannot worsen the effective condition number, so
+the +49 had to be finite-precision machinery or criterion asymmetry. Four pre-registered
+hypotheses were tested with instrumented cells (same harness/patch as §7.14; wrappers on
+`_M_base_apply` capture the tracked residual per iteration, matvec-burst counting detects
+`_try_accept` events; every cell also gets a fresh final true-residual check; watchdog
+peak 107 GB):
+
+| Cell (all true blocks, cold DC @1e-8) | iters | s/iter | final true rel-res | accept attempts |
+|---|---|---|---|---|
+| plain BJ (re-check) | 262 | 0.337 | 7.9e-9 | n/a (scipy) |
+| **two_level additive** | **225** | 0.337 | 9.8e-9 | n/a (scipy) |
+| deflated, reproject_every=0 | 283 | 0.357 | 9.3e-9 | 1 (succeeded) |
+| deflated, reproject_every=50 (default) | 311 | 0.351 | 9.7e-9 | 1 (succeeded) |
+| deflated, reproject_every=10 | 322 | 0.346 | 9.7e-9 | 1 (succeeded) |
+
+**Hypothesis verdicts.**
+- **H-C (criterion asymmetry) — REFUTED**: plain BJ's scipy tracked-residual stop is
+  honest (fresh true rel-res 7.9e-9 ≤ target); no discount.
+- **H-A (acceptance-gate wait) — REFUTED**: in every deflated cell the tracked residual
+  first crossed tolerance at the final iteration and the FIRST fresh-true-residual check
+  accepted (matvec counts exact: e.g. 325 = 311 + 12 progress + 2 for one attempt). The
+  slowdown is in the CG dynamics, not the recovery/acceptance machinery.
+- **H-R (reprojection perturbs conjugacy) — CONFIRMED, dose-dependent**: 283 / 311 / 322
+  iters at reprojection every 0 / 50 / 10. Each replacement of the recurrence residual
+  (`r ← P(b − Sy)`) acts like a partial restart in the ill-conditioned tail — the same
+  effect class the code already documents for the rejected `Sy` refresh at reprojection
+  points. Cost at the default: **+28 of the +49**. (Production jacobi-base solves finish
+  in ≤34 iters and never reach iteration 50, so reprojection never fires there.)
+- **H-S (coarse×BJ intrinsically harmful) — REFUTED in additive form, and the sign
+  flips**: additive two_level *helps* the true-BJ base (225 < 262). The §7.9 additive
+  bj+GenEO stagnation was the path-2 blocks, not the composition.
+
+**The residual +58 (additive 225 → deflated-r0 283) is a base-dependent DEF penalty.**
+On the jacobi base the same comparison goes the OTHER way (§7.11: deflated beat additive
+in every cell, 118→79 cold, 23.6→20.0 warm) — and the A-DEF2 selection record already
+contains the same flip on `netlist_multi_tile` (additive 74.65 < DEF 83.00 warm
+iters/step on the natural bj base). Mechanism (PLAUSIBLE, consistent with the traces,
+not separately proven): the BJ base apply amplifies precisely the per-tile-smooth
+directions that overlap span(Z) (the ownership blocks' smallest eigenvalues), so every
+search direction re-acquires large range(Z) components that the projected matvec must
+cancel — `w = Sp − SQ(Sp)` becomes a small difference of large terms, injecting relative
+fp noise each iteration; the instrumented tracked residual is visibly noise-limited in
+the tail (oscillating 1.1e-8 ↔ 4e-8 around the 1e-8 target in both r0 and r50). A
+diagonal base has no such amplification, so DEF's cleaner spectrum wins there instead.
+
+**Consequences.** (1) Production default `two_level[deflated](jacobi+PoU)` is untouched —
+the DEF-vs-additive ranking flip is base-conditional, and jacobi remains the only
+cold-convergent base at the split regime without true-block gathers. (2) If a bj-base
+two_level is ever shipped (e.g. after a distributed true-block gather), it should default
+to **additive**, not deflated. (3) `interface_deflated_reproject_every=50` is mildly
+counterproductive on any solve long enough to reach it; it never fires on production-
+regime solves, but long ill-conditioned deflated solves would do better with it disabled
+— worth revisiting if deflated solves >50 iters ever become a supported regime.
+
+Scripts/JSONs: same script, cells `true_plain_bj_check` +
+`results_bj_twolevel_regression_mi200k.json`, and
+`true_deflated_r50/r0/r10`, `true_additive` +
+`results_bj_twolevel_regression2_mi200k.json` (instrumented trajectories inside); run log
+`logs/bj_twolevel_regression_20260727.log`.
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |
