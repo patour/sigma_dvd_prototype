@@ -1,4 +1,4 @@
-# mPower Run Advisor — High-Level Execution Plan
+# mPower Advisor — High-Level Execution Plan
 
 **Status:** Draft for review
 **Author:** drafted with Copilot CLI
@@ -155,7 +155,7 @@ system must degrade gracefully.
 
 ## 3. Product concept
 
-**Name (working):** mPower Run Advisor
+**Name (working):** mPower Advisor
 
 **Primary form factor (Phase 1–2):** a standalone command-line tool, run after (or during)
 an mPower run, pointed at a run directory:
@@ -278,10 +278,29 @@ numbered action list), Markdown for pasting into tickets, JSON for CI/regression
 
 ## 5. Phased roadmap & level of effort
 
-LOE in **engineer-weeks (EW)**, assuming engineers familiar with mPower flows. A "team" of
-1–2 devs + fractional domain-expert time is assumed throughout.
+LOE in **dev engineer-weeks (EW)** unless stated otherwise, assuming engineers familiar with
+mPower flows. A "team" of 1–2 devs + fractional domain-expert time is assumed throughout.
+Domain-expert effort is quoted separately as **expert-weeks** and is *not* added to the dev
+total — the two come from different staffing pools.
 
-### Phase 0 — Foundations & corpus *(3 EW)*
+> **Basis of estimate.** These are top-down figures calibrated against the artifacts
+> inspected in §2, not a bottom-up task decomposition. Three conventions matter when reading
+> them:
+>
+> 1. **EW is dev effort, not elapsed time.** Phase 0 is largely gated on collecting run
+>    directories from colleagues — calendar time that is not charged here.
+> 2. **Phases 1–3 assume LLM-assisted development.** Parsers, report renderers and prompt
+>    scaffolding are exactly the work that compresses hardest; the same scope hand-written
+>    would be roughly 2× these numbers.
+> 3. **Dev-weeks and expert-weeks are not interchangeable.** Knowledge enrichment and the
+>    Phase 2 blind-review evaluation are domain-expert time.
+>
+> Phases 4 and 5 are the least compressible and carry the widest uncertainty — Phase 4 needs
+> genuine PI domain modeling, and Phase 5's Tcl/GUI2 integration is bound to the product
+> build and regression cycle. Together they are **~65–70% of the dev total.** If a
+> bottom-up re-estimate is needed for funding, do it on those two and not on Phases 0–3.
+
+### Phase 0 — Foundations & corpus *(2 EW)*
 Assemble a labeled corpus of ~20–30 diverse historical run directories (pass/fail/crash,
 static/dynamic, vectored/vectorless, EM, single/distributed, analog/digital). Define the
 Run Manifest schema. Normalize the mhelp catalog. Establish the evaluation harness.
@@ -289,7 +308,7 @@ Run Manifest schema. Normalize the mhelp catalog. Establish the evaluation harne
 > *Do not skip this.* Without a corpus, every later phase is built on one testcase and will
 > overfit to it.
 
-### Phase 1 — Deterministic Run Digest *(5–7 EW)*
+### Phase 1 — Deterministic Run Digest *(2–3 EW)*
 L1 collectors + L3 analyzers + L5 HTML/MD/JSON. **No LLM.** Reproduces the factual content
 of the reference report — KPIs, stage timing, roll-up warning counts, missing-input table,
 IR/power summary — for any run directory.
@@ -300,7 +319,7 @@ from §2.4), and it runs cleanly on ≥20 corpus runs.
 **Value delivered:** already shippable to AEs on its own — and, as §2.4 shows, already
 catching findings that expert manual analysis misses.
 
-### Phase 2 — LLM analyst layer *(4–6 EW)*
+### Phase 2 — LLM analyst layer *(2–3 EW)*
 L4 narrative, cross-domain correlation, severity ranking, prioritized actions. Strict
 grounding (no invented numbers) + citation enforcement. Model-agnostic interface so the
 backend can be swapped for whatever is approved for customer data.
@@ -308,7 +327,7 @@ backend can be swapped for whatever is approved for customer data.
 **Exit criterion:** blind review by 3 domain experts rates the generated analysis
 "as good as or better than what I'd write" on ≥70% of corpus runs.
 
-### Phase 3 — Interactive agent *(6–8 EW)*
+### Phase 3 — Interactive agent *(2–3 EW)*
 Conversational follow-up ("why is this instance failing?", "show me the nets without
 delay"), tool-use over the manifest and logs, session memory, multi-run comparison
 ("what changed vs last week's run?"). Multi-run diff is a heavily requested capability and
@@ -326,26 +345,26 @@ Pre-flight flow validation (catch setup errors *before* an 11-hour run — enorm
 guided setup Q&A, and integration into the product surface: a Tcl command
 (`analyze_run`), a GUI2 dashboard panel, and/or CI regression gating.
 
-### Cross-cutting — Knowledge enrichment *(4–6 EW, runs parallel from Phase 0)*
+### Cross-cutting — Knowledge enrichment *(4–6 expert-weeks, runs parallel from Phase 0)*
 Fill the 976 empty `<action>` fields for the top codes by real-world frequency; author the
 top-100 playbooks. **Staff this with domain experts, not the core dev team.** It is the
 long pole on *quality* and it is independent of all engineering work.
 
 ### Summary
 
-| Phase | Deliverable | LOE (EW) | Cumulative |
+| Phase | Deliverable | LOE (dev EW) | Cumulative |
 |---|---|---:|---:|
-| 0 | Corpus, manifest schema, eval harness | 3 | 3 |
-| 1 | Deterministic digest + HTML report | 5–7 | 8–10 |
-| 2 | LLM analyst narrative | 4–6 | 12–16 |
-| 3 | Interactive agent, multi-run diff | 6–8 | 18–24 |
-| 4 | EM/IR root-cause | 10–14 | 28–38 |
-| 5 | Setup assistant + integration | 6–10 | 34–48 |
-| — | Knowledge enrichment *(parallel)* | 4–6 | — |
+| 0 | Corpus, manifest schema, eval harness | 2 | 2 |
+| 1 | Deterministic digest + HTML report | 2–3 | 4–5 |
+| 2 | LLM analyst narrative | 2–3 | 6–8 |
+| 3 | Interactive agent, multi-run diff | 2–3 | 8–11 |
+| 4 | EM/IR root-cause | 10–14 | 18–25 |
+| 5 | Setup assistant + integration | 6–10 | 24–35 |
+| — | Knowledge enrichment *(parallel)* | 4–6 **expert**-weeks | *not in dev total* |
 
-**First shippable value: ~8–10 engineer-weeks** (Phases 0+1).
-**Full vision: ~34–48 engineer-weeks**, i.e. roughly 2 engineers × 4–6 months plus
-fractional domain-expert time.
+**First shippable value: ~4–5 dev engineer-weeks** (Phases 0+1).
+**Full vision: ~24–35 dev engineer-weeks**, i.e. roughly 2 engineers × 3–4 months, plus
+**4–6 domain-expert weeks** of knowledge enrichment running in parallel.
 
 ---
 
