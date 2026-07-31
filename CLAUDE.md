@@ -125,7 +125,9 @@ DDM is algebraically exact for any partition (DC, QS, and transient). The flat-v
 | `model.py` | `DistributedPowerGridModel`, `ParsedTileBundle`, `create_distributed_model` |
 | `parser.py` | `DistributedNetlistParser` |
 | `retile.py` | B1 tile splitting: `split_tile` (public entry), `_try_axis_split`, `_tile_id_str` |
-| `interface_iterative.py` | B2 CG interface solver: `InterfaceCGSolver`, `auto_select_interface_solver` |
+| `interface_iterative.py` | Iterative interface solve: `InterfaceCGSolver` (tilewise/assembled matvec, preconditioner ladder), `auto_select_interface_solver`, `build_interface_solver` (single factory) |
+| `interface_coarse.py` | Two-level coarse space: PoU + GenEO-lite columns, `CoarseSpace`, `build_coarse_space` |
+| `interface_deflated_pcg.py` | Hand-rolled deflated ("DEF") PCG loop; selection record in `interface_deflation_notes.md` |
 | `result.py` / `result_factorization.py` | Context/result dataclasses; `factor`/`release`/`save`/`load`/`refactor` |
 | `backend.py` | `LocalBackend`, `RayBackend`, `PackedTileWorker` |
 | `heatmap.py` | Tile-parallel pre-binned stripe heatmap pipeline |
@@ -190,6 +192,7 @@ All four are registered in `pyproject.toml`. `tests/validation/test_equivalence.
 - **Smoothed-VCS cache key**: `vcs_tile_X_Y_smoothed_<hash(time_step,t_start,t_end,compact_threshold,SMOOTHING_CODE_VERSION)>.pkl`. Bump `SMOOTHING_CODE_VERSION` in `tile_worker_td.py` whenever smoothing logic changes; existing caches invalidate automatically.
 - **Symbolic reuse fallback**: A4 caches the CHOLMOD symbolic analysis from the DC factor for reuse in the transient factor (`G + α·C` shares `G`'s sparsity). If the sparsity pattern changes (e.g., after retiling), the symbolic check fails and falls back to full re-analyze — correct but slower.
 - **`interface_solver` auto thresholds**: `'auto'` (default) selects direct CHOLMD/SuperLU when `n_interface < 200,000` and estimated factor memory is within budget; else CG. Override via `model.settings['interface_solver'] = 'direct'|'cg'|'auto'` or `--config solver.yaml`. Threshold is `AUTO_CG_N_INTERFACE_THRESHOLD = 200_000` in `interface_iterative.py`.
+- **Interface CG production config**: preconditioner `'auto'` resolves to `two_level[deflated](jacobi+PoU)` for CG+tilewise, rtol 1e-8 (≤1 µV accuracy budget; 1e-12 = bit-identical validation grade). Never run a **block_jacobi base** at the split regime: never-assemble BJ blocks are single-owner-tile `S_i` slices (not true diagonal blocks) and cold CG stagnates — and the BJ byte-budget guard is a *memory* guard, not a numerics guard, so it may not downgrade for you (the BRCM silent-hang incident). Bound `--interface-cg-maxiter` (default 3·n turns stagnation into a multi-day silent hang). Details: `src/distributed/CLAUDE.md` + `docs/brcm_distributed_runtime_optimization.md` §7.13–§7.15.
 - **`streaming_assembly` semantics**: `False` (default) — assemble full `S_global` in memory before factoring. `True` — tile shards arrive in batches and are accumulated into a pre-allocated CSR using the A4 cached assembly pattern; peak memory is proportional to one shard, not the full matrix. `'auto'` — switches to streaming when estimated `S_i` peak exceeds `streaming_assembly_auto_bytes`. Incompatible with `interface_solver='cg'` without prior `S_global` assembly.
 - **B1 retiling — 3-tuple tile IDs**: `retile.split_tile(tile_data, max_interior)` is the public entry; `parser._apply_tile_splits()` calls it for each oversized tile. Parent `(x, y)` yields sub-tiles `(x, y, k)`. `_tile_id_str` converts any-length tuple to `'_'`-joined slug used for filenames and VCS cache keys. VCS cache filenames include the full tile ID slug, so sub-tiles never collide with the parent cache.
 - **B1 split exactness**: DC/QS exact; BE/TR FP noise ≤ 2e-14 V for one-level bisection. For aggressive splits (4+ levels), noise can reach ~60 nV (BE) / ~6 µV (TR). This is below integration-method truncation error and is NOT a physics bug.
@@ -234,6 +237,7 @@ X_inst subckt n1 n2 ...    # subcircuit instance
 - **Parity notebooks** (must reproduce baseline JSONs): `notebooks/dynamic_irdrop_decomposition.ipynb`, `notebooks/transient_analysis_validation.ipynb`, `notebooks/distributed_transient_analysis_validation.ipynb`, `notebooks/distributed_dynamic_irdrop_decomposition.ipynb`
 - **Test netlists**: `netlist/netlist_test/` (small PDN, integration), `netlist/netlist_small/` (minimal unit fixtures), `netlist/netlist_sampled/` (distributed benchmark)
 - **Equivalence suite**: `tests/validation/test_equivalence.py` (marker `validation`)
+- **Interface-solve / CG docs**: `docs/cg_implementations_guide.md` (every CG implementation + rationale, new-hire oriented); `docs/brcm_distributed_runtime_optimization.md` (measurement log — record new measurement campaigns as §7.x sections there, with scripts + raw JSONs in `scripts/benchmark/microbench/`)
 - **Perf baseline**: `scripts/benchmark/baselines/perf_netlist_sampled.json`; runner: `scripts/benchmark/run_perf_baseline.py`
 - **API exports**: each `src/<pkg>/__init__.py`
 - **Copilot equivalent**: `.github/copilot-instructions.md` (overlapping content; this file is authoritative for Claude)

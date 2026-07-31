@@ -4,7 +4,7 @@
 
 ## Layout
 
-Mirrors `src/`. ~984 tests total.
+Mirrors `src/`. ~2,600 tests total (grew heavily with the interface-solve stages; re-count with `pytest --collect-only -q | tail -1` before quoting).
 
 ```
 tests/
@@ -91,6 +91,9 @@ SOLVER_VARIANTS = [
 - `tests/validation/test_equivalence.py` — flat-vs-distributed equivalence suite
 - `tests/distributed/test_retiling.py` — B1 retile exactness (DC/QS exact; transient ≤ 2e-14 V)
 - `tests/distributed/test_interface_iterative.py` — B2 CG convergence and direct/CG parity
+- `tests/distributed/test_interface_iterative_stage2.py` — tilewise matvec / D1 kept-port / fp32 / never-assemble (note: the D1 kept-port mask is toy-fixture-only here — no proxy netlist has pad ports; see §7.13's standing-risk note)
+- `tests/distributed/test_interface_coarse.py` — two-level coarse space + deflated PCG; also hosts the **rejected** A-DEF1/true-A-DEF2 reference implementations (`_literal_spec_adef2_pcg`, `_true_adef2_pcg`) kept as regression coverage — don't promote them to src
+- `tests/distributed/test_step_column_guard_matrix.py` — A2 step-column tier-selection/cache-validity guard matrix
 - `tests/distributed/test_streaming_assembly.py` — B3 streaming vs bulk assembly parity
 
 ## Invariants the suite guards

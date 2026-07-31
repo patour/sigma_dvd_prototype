@@ -80,13 +80,24 @@ Cache path: `<pkl_dir>/vcs_tile_<id>_smoothed_<hash>.pkl` where `hash` covers `(
 
 **Exactness**: DC/QS exact. Transient FP noise ≤ 2e-14 V for one-level bisections (BRCM-class); up to ~60 nV (BE) / ~6 µV (TR) for very aggressive four-level splits — below integration-method truncation error.
 
-## B2 — Iterative interface solve
+## B2 / Stages 1–3 — Iterative interface solve
 
-`interface_iterative.py`: `InterfaceCGSolver` implements CG on the SPD global Schur `S_global` with block-Jacobi preconditioner (per-tile diagonal `S_i` blocks). `auto_select_interface_solver(n_interface)` returns `'direct'` when `n_interface < AUTO_CG_N_INTERFACE_THRESHOLD` (200,000) and estimated factor memory is within budget; else `'cg'`.
+Files: `interface_iterative.py` (solver + preconditioner ladder + `build_interface_solver` factory), `interface_coarse.py` (two-level coarse space), `interface_deflated_pcg.py` (hand-rolled DEF loop), `interface_deflation_notes.md` (measurement/ratification records). Deep reference: `docs/cg_implementations_guide.md`; measurement log: `docs/brcm_distributed_runtime_optimization.md` §7.7–§7.15.
 
-Override via `model.settings['interface_solver'] = 'direct'|'cg'|'auto'` or YAML config. The resolved mode is stored as `ctx._interface_solver_mode` and propagated through `save()`/`load()`. Adjoint code checks `_interface_solver_mode` before choosing the solve path.
+- **Selection**: `auto_select_interface_solver` → `'direct'` when `n_interface < 200,000` AND estimated factor fits `min(32 GB, 0.4·RAM)`; else `'cg'`. `build_interface_solver()` is the single construction point. `ctx.interface_lu` is always a plain solve callable — the time loop and adjoint never special-case the mode (no `_interface_solver_mode` dispatch).
+- **Matvec modes**: `'auto'` → `tilewise` (per-tile dense GEMVs, LPT partition, ≤8 threads, `bincount` scatter) whenever tile Schur blocks exist; `'assembled'` CSR otherwise. fp32 storage (`interface_matvec_dtype='float32'`) requires `rtol ≥ 1e-7` (1e-6 deflated); mixed-dtype GEMV silently falls off BLAS (~10× slower).
+- **Preconditioner**: `'auto'` → `two_level` for CG+tilewise, else `block_jacobi`. Production split-regime config: `two_level[deflated](jacobi+PoU)` at rtol 1e-8 (measured 166 nV vs the ≤1 µV accuracy budget; rtol 1e-12 is bit-identical validation grade). GenEO default `geneo_k=0` (measured zero benefit); `interface_warm_start_extrapolation` opt-in (`2·x_prev − x_prev2`).
+- **Never-assemble** (`interface_drop_s_global=True`): tilewise CG without `S_global` on BOTH the DC and transient factor paths; requires `island_detection_mode='summaries'` (union-find); `save()` raises with guidance; coordinator peak ~19–40 GB at the mi200k split regime vs >190 GB for the bulk gather.
 
-Warm-start from previous step's `v_gamma` (transient changes slowly → typically few iterations/step on smooth waveforms).
+**Block-Jacobi hazards (measured, §7.13–§7.15 — read before touching BJ):**
+
+- Never-assemble BJ blocks are **single-owner-tile `S_i` slices**, NOT true diagonal blocks of S — they miss neighbor-tile stiffness (up to 4.5× the kept Frobenius mass) and cold CG **stagnates** at the split regime. True principal-submatrix blocks converge (262 iters) but still lose 7.7× to jacobi+PoU (34), so a bj base is never the production answer there.
+- The BJ byte-budget guard (`interface_block_jacobi_max_bytes`) is a **memory guard, not a numerics guard**: on BRCM the 3.1 GiB estimate sits below the 4 GiB auto floor, the jacobi downgrade cannot fire, and the run silently built the stagnating bj base. Unblock: `--interface-block-jacobi-max-bytes 1 --interface-cg-maxiter 2000`.
+- Default `maxiter = 3·n_interface` turns "did not converge" into a **multi-day silent hang** — bound it on production-scale runs and set `cg_solver.progress_every` (debug attribute; no CLI flag) for true-residual logging.
+- DEF-vs-additive is **base-dependent**: deflated wins on the jacobi base (production, §7.11); additive wins on any bj base (§7.15). `interface_deflated_reproject_every=50` is dose-dependently harmful on solves long enough to reach it (never fires at production's ≤34 iters).
+- `CoarseSpace` has `__slots__` — instance methods can't be monkeypatched; instrument via `cg._M_base_apply` / `cg._linear_op` / `cg._coarse.SZ` instead.
+
+**Big-memory proxy experiments**: run under a used-memory watchdog (`scripts/benchmark/microbench/run_bj_true_block_watchdog.sh` pattern — kills the driver pgid + `ray stop --force` at a configurable line; `*.log` is gitignored, raw JSONs are committed) and record the campaign as a §7.x section in `docs/brcm_distributed_runtime_optimization.md`.
 
 ## B3 — Streaming Schur assembly
 
