@@ -259,3 +259,13 @@ Raw campaign data: `results_neumann_*.json`, `results_tile_block_spectra_mi200k.
 in `scripts/benchmark/microbench/`; implementation: `_build_neumann` /
 `_nn_apply_*` in `src/distributed/interface_iterative.py` (knobs
 `interface_two_level_base`, `interface_neumann_{weight,reg,max_bytes}`).
+
+**Exact validation on a real (small) PDN.** `netlist/netlist_multi_tile` (9 tiles,
+interface system n=112) is small enough to compute everything above exactly instead
+of by sampling: every tile block has exactly one machine-zero tearing mode (the
+tiles are *fully* floating — VDD arrives only via the package, the pure limit of
+§3), the embedded-vs-local Rayleigh proof holds per-vector (−1e-14 local vs
+0.10–0.98 embedded), and the exact κ(M⁻¹S) ladder reproduces the h2h iteration
+ordering (champion 21 cold iters vs NN 42–286, bj slices 125). See
+`docs/brcm_distributed_runtime_optimization.md` §7.18 and
+`scripts/benchmark/microbench/analyze_interface_exact_multitile.py`.

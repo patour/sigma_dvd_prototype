@@ -1397,6 +1397,85 @@ production-config runs at this scale. (2) `mem_watchdog_attach.sh` (225 GB used 
 10 GB avail / 2 GB swap-growth kill lines) caught all three failures pre-OOM with
 zero swap — campaign standard, keep using it.
 
+### 7.18 Cross-check on a second PDN: `netlist_multi_tile` reproduces the §7.16 verdict with exact algebra (2026-08-03, dev host)
+
+Same eval on an independent testcase: the 9-tile 3×3 `netlist/netlist_multi_tile`
+PDN (2,951 interior nodes, VDD 0.75 V; interface system n=112 = 61 interface nodes
+(36 cut nodes at multiplicity 2–3 + 25 die-attachment at multiplicity 1) + 51
+package-only rows; PoU T'=10). Existing `distributed_pkl` bundle used as-is (it is
+post-Stage-1e — `connectivity_summary_version: 2`, 9 summaries — despite its
+2026-07-18 date, so never-assemble/tilewise run natively). Identical 100-step
+protocol (cold DC @1e-8 + 100-step BE dt=5ps), every run under
+`mem_watchdog_attach.sh` (all runs ~0.16 GB RSS, swap 0). Runner:
+`run_neumann_h2h_mi200k.py` (pkl-dir parametric); driver
+`run_h2h_multitile_campaign.sh`.
+
+| config (all `two_level[deflated](·+PoU T'=10)`) | cold DC iters | warm iters/step | s/step | peak mV |
+|---|---|---|---|---|
+| **jacobi base (champion)** | **21** | **2.56** | 0.011 | 84.9471 |
+| neumann reg=1e-3 | 42 | 6.8 | 0.022 | 84.9481 |
+| neumann reg=1e-5 | 83 | 6.91 | 0.022 | 84.9473 |
+| neumann reg=0 (eigclip) | 286 | 6.8 | 0.020 | 84.9471 |
+| block_jacobi (never-assemble owner slices) | 125 | 16.25 | 0.035 | 84.9468 |
+
+Ordering identical to BRCM at 1/3000 the interface size: champion wins cold and
+warm at every reg; NN's reg response is non-monotone (eigclip stagnation-flavored at
+286); the never-assemble bj base is the worst warm config (6.3× champion). All five
+agree on the peak within ~1.3 µV (rtol 1e-8 budget).
+
+**Tile-block census is the pure limit of the BRCM tearing structure.** The probe
+(`--sample 9` = full census, no extrapolation) finds **exactly one near-null mode per
+block in all 9 blocks, at λ_min_rel ≈ −1e-15** — the torn tiles are *exactly*
+floating (VDD reaches them only through the package, so tearing severs every ground
+path; BRCM's natural tiles had the same one-per-tile cluster but with weak ~1e-8
+leaks). GenEO-style repair would need T' ≈ 10 columns — which is precisely what the
+PoU space already provides for free, so on this family PoU ≡ the ideal spectral
+coarse space.
+
+**Exact algebra (n=112 allows what BRCM could only sample) —
+`analyze_interface_exact_multitile.py`:**
+
+1. **Tearing-mode proof.** For every tile, the block's null vector v has local
+   generalized Rayleigh (v·S_i v)/(v·D_i v) ≈ −1e-14 (machine zero — the torn block
+   thinks it's a rigid mode), while the SAME vector embedded in assembled S has
+   Rayleigh 0.10–0.98 (healthy). Direct, per-vector confirmation of the §7.16 root
+   cause. PoU coverage of these embedded vectors is ‖P_Z w‖/‖w‖ = 0.91–0.99 —
+   deflation removes almost exactly the space the local bases poison.
+2. **Exact condition numbers** (one-level κ(M⁻¹S) → PoU-deflated κ_eff):
+   jacobi 45.2 → **32.2**; true-block BJ (assembled principal blocks) 32.5 → 9.3;
+   never-assemble BJ slices 7.5e3 → 534; NN reg=0 3.6e5 → 534; NN reg=1e-3
+   8.2e5 → 1.18e3; NN reg=1e-5 8.2e7 → 1.17e5. The NN one-level amplification
+   (10³–10⁶× vs jacobi) is the 2-port mechanism of
+   `docs/neumann_neumann_pathology.md` measured on a real PDN.
+3. **Two honest nuances.** (a) κ and iteration counts invert between NN reg=1e-3
+   (κ_eff 1.18e3, 42 iters) and the bj slices (κ_eff 534, 125 iters) — κ is a bound;
+   NN's spectrum is more clustered. (b) On THIS testcase the true-block BJ would beat
+   jacobi in κ_eff (9.3 vs 32.2) — unlike BRCM's measured 206-vs-27 at 36 tiles —
+   because here blocks are 6–30 wide on a 112-unknown system (blocks capture most of
+   each tile's coupling). It is not deployable at the split regime anyway (requires
+   assembled S), and its never-assemble stand-in stays 16× worse than jacobi.
+4. **Package rows are a second structural penalty for local bases here:** 51 of 112
+   rows (46%) belong to the package and are covered by NO tile block — every
+   local-solve base falls back to the diagonal complement on them. Negligible
+   fraction on BRCM (package ≪ 355k interface); dominant on a small PDN.
+
+**Verdict.** The §7.16 finding generalizes to a second, independent PDN: the
+champion `two_level[deflated](jacobi+PoU)` wins on every axis, the NN/BDD family
+loses at every regularization, and the tearing-artifact mechanism is now confirmed
+with exact spectra rather than inference.
+
+**Follow-up (2026-08-03):** `interface_two_level_base` is now CLI/YAML-exposed
+(`--interface-two-level-base {auto,block_jacobi,jacobi,neumann}` + `solver:` YAML,
+incl. the YAML-only `interface_neumann_{weight,reg,max_bytes}`) — §7.13's
+recommended change 1. Production split-regime runs pass
+`--interface-two-level-base jacobi` explicitly; the
+`--interface-block-jacobi-max-bytes 1` downgrade-forcing unblock is obsolete. Files: `run_h2h_multitile_campaign.sh`,
+`analyze_interface_exact_multitile.py`,
+`results_{champion_100step,neumann_reg0,neumann_reg1em3,neumann_reg1em5,bj_neverassemble}_multitile.json`,
+`results_tile_block_spectra_multitile.json`,
+`results_interface_exact_multitile.json`, `h2h_multitile_*.memlog` (all under
+`scripts/benchmark/microbench/`).
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |
