@@ -261,6 +261,29 @@ pad-heavy bundle.
 
 ---
 
+### 3.9 The NN/BDD campaign (§7.16–§7.17): the fine-space question closed
+
+§3.7 ended with "the remaining lever is a fundamentally stronger fine-space
+preconditioner — no candidate identified." A SOTA research pass
+(`docs/interface_precond_sota_research.md`) identified the classical candidate the
+literature ranks first: the weighted Neumann–Neumann/BDD base, using the FULL per-tile
+dense Schur blocks we already hold (categorically different from the failed BJ owner
+slices — it keeps the neighbor coupling BJ discards). It was implemented
+(`interface_two_level_base='neumann'`), toy-validated (6–17× iteration win over the
+jacobi base on chain fixtures), and then measured dead on the proxy: cold DC 282 iters
+at best regularization vs the champion's 34, stagnation as reg→0, and — the decisive
+diagnostic — a spectrum probe showing every natural tile has exactly ONE near-null
+mode (the textbook floating constant) while B1-split sub-tiles carry 6–460 apiece,
+~2,905 total: **tearing artifacts** (modes grounded through neighbor tiles in
+assembled S) that any local-solve base must amplify and no affordable coarse space can
+cover. Verification cells after review: in-family ordering matches classical theory
+(NN 111 < true-BJ 206 at 36 tiles), so the finding is precisely "the diagonal beats
+the entire local-solve family on torn PDN operators," not "NN is broken." Full
+mechanism with a hand-checkable two-port derivation:
+`docs/neumann_neumann_pathology.md`; 24-node reproduction:
+`scripts/benchmark/microbench/nn_pathology_demo.py`. The champion configuration is
+unchanged; the fine-space chapter is closed with a proof of *why*.
+
 ## 4. Component deep-dives
 
 ### 4.1 Solver selection — `auto_select_interface_solver` / `build_interface_solver`
@@ -355,8 +378,16 @@ blocks exist. Implementation details that matter:
   budget guard is *not* a reliable proxy for that collapse (§3.8).
 - **`amg`** — pyamg smoothed aggregation, lazy import, skipped gracefully if missing.
   Never became a production path.
-- **`two_level`** — base (block_jacobi, possibly budget-downgraded to jacobi) plus the
-  coarse-space correction. The auto default for CG+tilewise. Two apply modes — §4.5/§4.6.
+- **`neumann`** — NN/BDD work package (§3.9): weighted Neumann–Neumann fine space
+  `M⁻¹ = Σᵢ RᵢᵀDᵢS̃ᵢ⁺DᵢRᵢ` over the FULL tile Schur blocks (scatter-add tilewise
+  apply; knobs `interface_neumann_{weight,reg,max_bytes}`). **Measured dead at both
+  proxy regimes** (111 vs jacobi's 27 at 36 tiles; 282→stagnation at 64) — kept for
+  well-grounded-block netlists, where it is a genuine 6–17× iteration win. Full
+  mechanism: `docs/neumann_neumann_pathology.md`.
+- **`two_level`** — base plus the coarse-space correction. The auto default for
+  CG+tilewise. The base is selected by `interface_two_level_base`
+  (`'auto'`→block_jacobi with its budget downgrade | `'jacobi'` | `'neumann'`);
+  two apply modes — §4.5/§4.6.
 
 ### 4.5 The coarse space (`interface_coarse.py`)
 

@@ -166,6 +166,11 @@ class _InterfaceCgSettings:
     cg_maxiter: Optional[int]
     cg_strict: bool
     bj_max_bytes: int
+    # NN/BDD work package: 'two_level' base selection + Neumann knobs.
+    two_level_base: Any
+    neumann_max_bytes: int
+    neumann_weight: Any
+    neumann_reg: float
     matvec_threads: Any
     matvec_dtype: Any
     strict_dtype_rtol: bool
@@ -234,6 +239,7 @@ def _read_interface_cg_settings(model: Optional[Any]) -> '_InterfaceCgSettings':
     from . import interface_iterative
     from .interface_iterative import (
         resolve_block_jacobi_max_bytes, resolve_coarse_max_bytes,
+        resolve_neumann_max_bytes,
     )
 
     _settings = getattr(model, 'settings', None) if model is not None else None
@@ -269,6 +275,23 @@ def _read_interface_cg_settings(model: Optional[Any]) -> '_InterfaceCgSettings':
         ),
         bj_max_bytes=resolve_block_jacobi_max_bytes(
             _settings.get('interface_block_jacobi_max_bytes', 'auto')
+        ),
+        # NN/BDD work package: raw two_level_base/neumann_weight values pass
+        # through UNNORMALIZED (InterfaceCGSolver.__init__ is the single
+        # validation/normalization point -- same round-3-finding-9 rationale
+        # as apply_mode below); the byte budget resolves here like its
+        # bj_max_bytes sibling.
+        two_level_base=_settings.get('interface_two_level_base', 'auto'),
+        neumann_max_bytes=resolve_neumann_max_bytes(
+            _settings.get('interface_neumann_max_bytes', 'auto')
+        ),
+        neumann_weight=_settings.get('interface_neumann_weight', None),
+        neumann_reg=_coerce_float(
+            _settings.get(
+                'interface_neumann_reg',
+                interface_iterative.DEFAULT_NEUMANN_REG,
+            ),
+            'interface_neumann_reg',
         ),
         matvec_threads=_settings.get('matvec_threads', 'auto'),
         matvec_dtype=_settings.get('interface_matvec_dtype', 'float64'),
@@ -1880,6 +1903,10 @@ def _factor_dc_context_no_s_global(
         interface_coarse_eps_rank=_cg_settings.eps_rank,
         interface_coarse_max_cols=_cg_settings.max_cols,
         interface_coarse_max_bytes=_cg_settings.max_bytes,
+        two_level_base=_cg_settings.two_level_base,
+        neumann_max_bytes=_cg_settings.neumann_max_bytes,
+        neumann_weight=_cg_settings.neumann_weight,
+        neumann_reg=_cg_settings.neumann_reg,
         interface_coarse_apply_mode=_cg_settings.apply_mode,
         interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
         warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
@@ -2353,6 +2380,10 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             interface_coarse_eps_rank=_cg_settings.eps_rank,
             interface_coarse_max_cols=_cg_settings.max_cols,
             interface_coarse_max_bytes=_cg_settings.max_bytes,
+            two_level_base=_cg_settings.two_level_base,
+            neumann_max_bytes=_cg_settings.neumann_max_bytes,
+            neumann_weight=_cg_settings.neumann_weight,
+            neumann_reg=_cg_settings.neumann_reg,
             interface_coarse_apply_mode=_cg_settings.apply_mode,
             interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
             warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
@@ -3013,6 +3044,10 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
             interface_coarse_eps_rank=_cg_settings.eps_rank,
             interface_coarse_max_cols=_cg_settings.max_cols,
             interface_coarse_max_bytes=_cg_settings.max_bytes,
+            two_level_base=_cg_settings.two_level_base,
+            neumann_max_bytes=_cg_settings.neumann_max_bytes,
+            neumann_weight=_cg_settings.neumann_weight,
+            neumann_reg=_cg_settings.neumann_reg,
             interface_coarse_apply_mode=_cg_settings.apply_mode,
             interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
             warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
@@ -3515,6 +3550,10 @@ def _factor_transient_context_no_s_global(
         interface_coarse_eps_rank=_cg_settings.eps_rank,
         interface_coarse_max_cols=_cg_settings.max_cols,
         interface_coarse_max_bytes=_cg_settings.max_bytes,
+        two_level_base=_cg_settings.two_level_base,
+        neumann_max_bytes=_cg_settings.neumann_max_bytes,
+        neumann_weight=_cg_settings.neumann_weight,
+        neumann_reg=_cg_settings.neumann_reg,
         interface_coarse_apply_mode=_cg_settings.apply_mode,
         interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
         warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
@@ -4083,6 +4122,10 @@ def _factor_transient_context(
             interface_coarse_eps_rank=_cg_settings_td.eps_rank,
             interface_coarse_max_cols=_cg_settings_td.max_cols,
             interface_coarse_max_bytes=_cg_settings_td.max_bytes,
+            two_level_base=_cg_settings_td.two_level_base,
+            neumann_max_bytes=_cg_settings_td.neumann_max_bytes,
+            neumann_weight=_cg_settings_td.neumann_weight,
+            neumann_reg=_cg_settings_td.neumann_reg,
             interface_coarse_apply_mode=_cg_settings_td.apply_mode,
             interface_deflated_reproject_every=_cg_settings_td.deflated_reproject_every,
             warm_start_extrapolation=_cg_settings_td.warm_start_extrapolation,
@@ -4821,6 +4864,10 @@ def _refactor_transient_context(
             interface_coarse_eps_rank=_cg_settings.eps_rank,
             interface_coarse_max_cols=_cg_settings.max_cols,
             interface_coarse_max_bytes=_cg_settings.max_bytes,
+            two_level_base=_cg_settings.two_level_base,
+            neumann_max_bytes=_cg_settings.neumann_max_bytes,
+            neumann_weight=_cg_settings.neumann_weight,
+            neumann_reg=_cg_settings.neumann_reg,
             interface_coarse_apply_mode=_cg_settings.apply_mode,
             interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
             warm_start_extrapolation=_cg_settings.warm_start_extrapolation,

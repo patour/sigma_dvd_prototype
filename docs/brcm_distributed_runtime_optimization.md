@@ -1221,6 +1221,182 @@ Scripts/JSONs: same script, cells `true_plain_bj_check` +
 `results_bj_twolevel_regression2_mi200k.json` (instrumented trajectories inside); run log
 `logs/bj_twolevel_regression_20260727.log`.
 
+### 7.16 Neumann–Neumann/BDD fine space measured dead at the split regime — tile-tearing artifact root cause (2026-08-01, dev host)
+
+Follow-up to the SOTA research pass (`docs/interface_precond_sota_research.md`), whose
+top-ranked candidate was the classical BDD fine space `M⁻¹ = Σᵢ RᵢᵀDᵢS̃ᵢ⁺DᵢRᵢ` — full
+per-tile dense Schur inverses reconciled by partition-of-unity weights, under the
+existing DEF coarse space. **Landed** (branch `distributed-10x`, measurement-gated
+default-off): `InterfaceCGSolver._build_neumann` + `_nn_apply_*` (scatter-add tilewise
+apply mirroring the frozen matvec pattern), knobs `interface_two_level_base`
+(`'auto'|'block_jacobi'|'jacobi'|'neumann'`), `interface_neumann_weight`
+(`stiffness`/`multiplicity`, Mandel–Brezina coefficient weights default),
+`interface_neumann_reg` (relative Tikhonov shift), `interface_neumann_max_bytes`
+(memory guard sized like a second tile-block footprint, min(64 GB, 0.25·RAM) auto);
+standalone `preconditioner='neumann'` for ablation. Island nodes sliced out of every
+block pre-factor (penalty-inflation trap); Cholesky pivot-ratio check routes
+cond ≳ 1e12 blocks to the SPD-safe eigclip pseudo-inverse; degrade ladder to 'jacobi'
+with WARNING. 18 unit tests (`tests/distributed/test_interface_neumann.py`), full
+distributed suite 1217 green. **Benchmark protocol (user-set):** cold DC @1e-8 +
+**100-step** BE dt=5ps transient on `distributed_pkl_mi200k_v2`; champion re-baselined
+at 100 steps first: cold 34 iters / warm 17.34 iters/step / 5.254 s/step / RSS 40 GB —
+the §7.12 numbers hold exactly at the shorter window.
+
+**Toy-fixture promise (why it was worth a run):** on a 5–30-tile overlapping
+resistor-chain fixture with weak ground leak, NN+PoU needs 5/10/14 iters where
+jacobi+PoU needs 85/103/114 — the textbook N-independence, pinned as a regression test.
+
+**mi200k_v2 reality — every configuration fails:**
+
+| config | cold DC @1e-8 | note |
+|---|---|---|
+| champion jacobi+PoU (reference) | **34 iters / 10.5 s** | prepare 126 s |
+| NN reg=0 (eigclip pseudo-inverse) | **stagnates**: rel-res 1.6e-5 @ 2000-iter bound | all 64 blocks eigclip'd; eigh build 574 s (prepare 699 s) |
+| NN reg=1e-3 (Cholesky path) | 282 iters / 131 s | NN build ~104 s (prepare 230 s) |
+| NN reg=1e-4 | 869 iters / 397 s | monotonically worse as reg shrinks |
+| NN reg=1e-5 / 1e-6 | maxiter 1500, rel-res not reached | |
+
+The bounded `interface_cg_maxiter` turned each failure into a ~20-minute measurement
+instead of §7.13's multi-day hang. Peak memory 96 GB / 251 GB, swap 0 throughout
+(`mem_watchdog_attach.sh`, the §7.13-pattern watchdog generalized to attach to a
+running driver — now the campaign standard).
+
+**Spectrum probe — the root cause** (`probe_tile_block_spectra_mi200k.py`, eigvalsh
+over a stratified 16-of-64-block sample): every tile Schur block is numerically
+singular (λ_min/λ_max ≈ 1e-17) with a **broad, separated near-null cluster**: the
+count below τ·λ_max plateaus at **~2,905 total columns (~0.9% of ports) for
+τ ∈ [1e-10, 1e-8]**, rising to ~3.7k at 1e-6, ~30k at 1e-4 — per-block counts range
+from 1 (well-grounded small tiles) to 307–460 (large B1 sub-tiles; worst single block:
+(2,4,1), 13,820 ports, 371 near-null directions). Block spectra are soft: ~91% of
+eigenvalues sit below 1e-2·λ_max.
+
+**Finding (the load-bearing one): the per-block near-null directions are TEARING
+ARTIFACTS, not physical low modes of S.** The champion's own 34-iteration cold solve
+proves the assembled `S` is well-conditioned under a diagonal+PoU preconditioner; the
+weakly-grounded port subsets each block sees are grounded *through neighboring tiles*
+in the assembled operator. Any base built from per-tile (pseudo-)inverses therefore
+amplifies ~2,900 manufactured singular directions the 65-column PoU space cannot
+cover — clip them up (reg=0: 1e10 response), shift them (reg>0: 1/reg response), or
+keep them (true-block BJ, §7.14: 262 iters) — while the diagonal base, built from
+assembled-S data, never sees them. This unifies §7.8/§7.9 (BJ collapse, bj+geneo
+stagnation), §7.14/§7.15 (true-block BJ loss, base-dependent DEF flip), and this
+section as ONE phenomenon, and explains why toy chain fixtures (no weakly-grounded
+subsets) show the literature's NN win while the real PDN shows the opposite.
+
+**GenEO-harvest arm killed by arithmetic before spending a run:** deflating the
+~2,905-column cluster fits the T'≤4096 cap, but the retained-SZ DEF projection at
+that T' costs ~+0.25 s/iter (2·n·T' twice per iteration) on top of the NN apply's
++0.19 — break-even vs the champion needs cold ≤ ~10 / warm ≤ ~5.2 iters, below the
+plausible outcome band given the soft bulk spectrum behind the gap (and the 574 s
+eigh build, now needing vectors too, lands on every prepare). Not pursued; the probe
+JSON retains the spectra if this is ever revisited.
+
+**fp32 note (Candidate 4a):** blocked at production rtol 1e-8 by the enforced fp32
+floors (1e-7 plain / 1e-6 deflated, §7.7's 166 nV accuracy gate at 1e-8 vs 1.66 µV at
+1e-7) — the remaining per-iteration-cost lever is a mixed-precision iterative-refinement
+wrapper (fp32 inner solves + fp64 residual correction), recorded as a future work
+package, not attempted here.
+
+**Decision: the champion `two_level[deflated](jacobi+PoU)` STANDS as the production
+configuration**, now validated against the full local-solve-base family (BJ slices,
+true BJ blocks, weighted NN across the regularization ladder). `interface_two_level_base`
+ships defaulting to the legacy path; `'neumann'` stays available for
+netlists whose tile blocks are well-grounded (the toy-fixture regime), where it is a
+genuine 6–17× iteration win.
+
+**Post-review verification cells (challenge: "NN slower than one-level BJ can't be
+right").** Two falsification runs settle it: (1) reprojection confound — mi200k NN
+reg=1e-3 with `interface_deflated_reproject_every=0` gives **281** iters vs 282 with
+the default 50 (explains nothing). (2) Healthy-regime fair pair — on the re-parsed
+36-tile bundle (`distributed_pkl_36t_v2`, tilewise/never-assemble path), cold DC
+@1e-8: jacobi+PoU **27** (identical to the assembled-path run — internal consistency
+check passed), **NN reg=1e-3 + PoU 111**, vs assembled true-block BJ+PoU 206. So the
+in-family ordering matches classical theory at every regime — NN beats true-block BJ
+1.9× at 36 tiles and ties it at 64 (282 vs 262) — and the measured surprise is
+precisely stated: **the assembled-diagonal base beats ALL local-block bases on this
+matrix family at every tiling** (27/34 vs 111+/206+/262+), consistent with the
+tearing-artifact mechanism (block conditioning is poor even at 36 tiles) plus the
+PDN's dense through-interior inter-tile coupling, which sits far from the thin-
+interface regime the polylog NN/BDD bounds assume. Side finding: the pre-Stage-1e
+36-tile bundle's assembled fallback was costing ~10× on DC prepare (350 s / 36-42 GB
+RSS vs **31.5 s / 4.9 GB** on `distributed_pkl_36t_v2`) — re-parse old bundles.
+
+**Mechanism deep-dive:** `docs/neumann_neumann_pathology.md` — the full derivation on
+a hand-checkable two-port example (port geometry, the severed-via-anchoring origin of
+the near-null clusters, the scalar exactness identity that makes weighted NN trusted,
+the per-mode weight analysis showing exactly where diagonal weights break, and the
+closed-form reg ladder / deflation-price / jacobi-immunity story).
+
+**Pedagogical reproduction** (`nn_pathology_demo.py`, 24 nodes): two tiles, 8 stripes
+crossing the cut, A-side stripe-pairs joined by rail stubs whose via anchors all lie
+in B (weak leaks 1e-3..1e-6 in A). Reproduces every measured signature: cond(S_A) =
+4.8e6 with a UNIFORM healthy diagonal (weak-mode diagonal/energy contrast 2.4e6 —
+cf. §7.8's measured x·Mx/x·Ax ~ 1e6); assembly heals it (λ_min 5e-7 → 2.44,
+κ(diag⁻¹S) = 2.0); weighted-NN κ(M⁻¹S) explodes monotonically as reg shrinks
+(199 → 19,055 → 381,821 at reg 1e-3/1e-5/1e-7 — the reg-grid's measured
+monotonicity), while CG pays ~one iteration per amplified direction (demo: 4
+directions → +5 iters over jacobi; mi200k: ~2,900 directions → hundreds/stagnation).
+
+Scripts: `run_neumann_h2h_mi200k.py`, `run_neumann_reg_grid_mi200k.py`,
+`probe_tile_block_spectra_mi200k.py`, `mem_watchdog_attach.sh`, `nn_pathology_demo.py`; raw JSONs:
+`results_champion_100step_mi200k.json`, `results_neumann_deflated_mi200k.json`,
+`results_neumann_reg_grid_mi200k.json`, `results_tile_block_spectra_mi200k.json`
+(+ `.memlog` files, gitignored logs alongside).
+
+### 7.17 Champion block-count scaling rows, 100-step protocol (2026-08-01, dev host)
+
+Same physical netlist (`netlist_brcm_sampled`), three tilings, identical protocol
+(cold DC @1e-8 + 100-step BE dt=5ps). **Base-uniformity caveat discovered by the first
+36-tile run:** the production `'auto'` base resolves per-regime — at 36 tiles the BJ
+byte estimate FITS its budget, so `'auto'` silently builds a bj base instead of the
+jacobi base the 64-tile row runs. Corrected attribution (the 36-tile bundle predates
+Stage 1e, so `interface_drop_s_global` silently fell back to the **S_global-assembling
+path** — see the operational notes below): the 36-tile bj base was therefore built from
+**assembled TRUE diagonal blocks** (path 1 of `_build_block_jacobi`), not never-assemble
+owner slices. Measured, `two_level[deflated](bj+PoU T'=37)`: **cold 206 iters / 83 s,
+warm 93.6 iters/step (max 183), 37.7 s/step** — converges (not the split regime) but
+7.6× cold / 6.8× warm vs the jacobi base on the identical bundle. This STRENGTHENS the
+§7.14 finding: even true assembled diagonal blocks — not just slices — lose massively
+to the plain diagonal on this problem, at BOTH 36 and 64 tiles (206-vs-27 and
+262-vs-34). Honest block-count scaling of the champion preconditioner requires forcing
+`interface_two_level_base='jacobi'` (newly possible via the §7.16 knob) at every
+tiling. Scaling rows below use the FORCED-jacobi base:
+
+| bundle | tiles | n_interface | base | cold DC iters | warm iters/step | s/step | peak RSS |
+|---|---|---|---|---|---|---|---|
+| `distributed_pkl` | 36 | 70,734 | jacobi (forced) | **27** / 12.5 s | **13.74** (max 25) | 6.493 (solve 5.80 → 0.42 s/iter) | 43 GB |
+| `distributed_pkl` | 36 | 70,734 | bj (auto-resolved) | 206 / 83 s | 93.6 (max 183) | 37.7 | 42 GB |
+| `distributed_pkl_mi200k_v2` | 64 | 168,586 | jacobi (auto-downgrade) | 34 / 10.5 s | 17.34 (max 29) | 5.254 (solve 4.59 → 0.26 s/iter) | 40 GB |
+| `distributed_pkl_mi100k_v2` | 116 | 355,693 | jacobi (forced) | **37** / 21.1 s | **20.99** (max 34) | 13.054 (solve 11.75 → 0.56 s/iter) | 103 GB driver / 171 GB system |
+
+**Scaling verdict.** Champion iterations are near-flat in block count: cold
+27 → 34 → 37 and warm 13.7 → 17.3 → 21.0 across 36 → 64 → 116 tiles — a 1.4–1.5×
+iteration growth over 3.2× blocks AND 5× interface size, versus the one-level
+behavior (assembled BJ 130 → 180 at 36 → 107 tiles, §7.7; never-assemble bj base
+93.6 iters/step already at 36 tiles). All three tilings produce the same physical
+peak (76.1611 mV @ 0.095 ns). s/step tracks per-iteration matvec work, not
+iteration count — the split regime's cost is per-iteration matvec work, which is the
+process-scaling axis (matvec_threads / Ray workers / future GPU), not the
+preconditioner's. **Matvec-mode caveat on the per-iter column:** the 36-tile rows ran
+the ASSEMBLED-CSR matvec (pre-Stage-1e bundle fallback, ~493M nnz → 0.42 s/iter),
+while the 64/116-tile rows ran the production threaded-tilewise matvec
+(0.26 / 0.56 s/iter ∝ Σn_p²) — iteration counts are mode-independent, absolute s/step
+across that boundary is not.
+
+36-tile jacobi-vs-bj on the identical bundle: **6.8× warm-iteration gap** (13.74 vs
+93.6) — the §7.15 hazard, now measured outside the split regime too.
+
+Operational notes from the mi100k campaign: (1) the pre-Stage-1e
+`distributed_pkl_mi100k` bundle has no connectivity summaries, so
+`interface_drop_s_global` silently falls back to the ASSEMBLING path — three
+watchdog-killed attempts at 228 GB (driver ballooning 59 → 110 GB mid-assembly of the
+355,693-unknown S_global) before the root cause surfaced in the fallback WARNING;
+re-parse (254 s, 630,684 summaries → `distributed_pkl_mi100k_v2`) fixed it and the
+run then peaked at 171 GB system, swap 0. Old bundles must be re-parsed before
+production-config runs at this scale. (2) `mem_watchdog_attach.sh` (225 GB used /
+10 GB avail / 2 GB swap-growth kill lines) caught all three failures pre-OOM with
+zero swap — campaign standard, keep using it.
+
 ### Cumulative projected BRCM end-to-end (from plan arithmetic)
 
 | Phase complete | Projected total | vs baseline 68,900 s |

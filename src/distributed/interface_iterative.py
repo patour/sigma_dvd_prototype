@@ -702,6 +702,66 @@ def resolve_coarse_max_bytes(setting: Any = 'auto') -> int:
     )
 
 
+# NN/BDD work package (Candidate 1 of docs/interface_precond_sota_research.md):
+# Neumann-Neumann fine-space memory budget.  The NN base materializes one
+# dense (pseudo-)inverse PER TILE, of exactly the tile Schur block's own
+# shape -- Sum(n_p_i^2) * itemsize, the SAME order as the
+# tile_schur_complements dict the tilewise matvec already retains (18.7 GB
+# fp64 at mi200k_v2) -- NOT the block-Jacobi budget's disjoint owned slices
+# (~n^2/T).  Like the BJ guard, this is a MEMORY guard, not a numerics
+# guard (the §7.13 lesson); the NN base has no known numeric collapse mode
+# to guard (it keeps the neighbor-tile coupling BJ discards).
+NEUMANN_MAX_FACTOR_BYTES = 64 * 1024 ** 3
+_AUTO_NEUMANN_MAX_BYTES_CAP = NEUMANN_MAX_FACTOR_BYTES
+_AUTO_NEUMANN_MAX_BYTES_FRACTION = 0.25
+# Eigenvalue clip (relative to the block's own lambda_max) for the eigh
+# pseudo-inverse fallback on singular tile Schur blocks (floating tiles /
+# weakly-grounded port subsets) -- same default as the block-Jacobi
+# fallback's _spd_safe_pseudo_solve_factor_ex.  The clipped tile-kernel
+# (near-constant) directions are exactly what the PoU coarse space
+# balances/deflates, per classical BDD.
+NEUMANN_EIGCLIP_EPS_REL = 1e-10
+# A numerically-singular PSD block can PASS cho_factor (tiny positive
+# pivots) and yield a finite but ~1/pivot^2-amplifying inverse -- the same
+# amplification pathology as the §7.8 BJ collapse, just along tile-kernel
+# directions.  Route blocks whose Cholesky pivot ratio implies
+# cond >~ 1e12 to the eigclip pseudo-inverse instead (which caps the
+# response at 1/(eps_rel*lambda_max)).
+NEUMANN_CHO_RCOND_MIN = 1e-12
+# Coefficient (stiffness) weighting is the default: Mandel-Brezina's BDD
+# subdomain-count-independence result requires coefficient-weighted D_i,
+# not plain multiplicity counting (docs/interface_precond_sota_research.md
+# §1.2 [4]).
+DEFAULT_NEUMANN_WEIGHT = 'stiffness'
+# Relative Tikhonov regularization for the NN local solves:
+# S~_i = S_i + reg * diag(diag(S_i)).  MEASURED NEED (first mi200k_v2 NN
+# run, 2026-08-01): every tile Schur block at the split regime is
+# numerically singular (cond >~ 1e12 -- the §7.8 weakly-grounded-port
+# cluster), so the raw eigclip pseudo-inverse amplifies ~1e10 along a
+# broad near-null cluster the 65-column PoU deflation cannot cover, and
+# cold DC stagnates (rel-res 1.6e-5 @ 2000 iters).  A reg > 0 bounds the
+# amplification at ~1/reg AND lets the block factor via fast Cholesky
+# (the all-eigh build measured 574 s vs ~2 min budget).  0.0 = off.
+DEFAULT_NEUMANN_REG = 0.0
+
+
+def resolve_neumann_max_bytes(setting: Any = 'auto') -> int:
+    """Resolve the ``interface_neumann_max_bytes`` setting to bytes.
+
+    'auto' (default) = min(64 GB, 0.25 * total system RAM), via psutil --
+    deliberately much larger than the block-Jacobi budget because the NN
+    inverses cost the same order as the already-retained tile Schur blocks
+    (a second ~Sum(n_p_i^2)*itemsize footprint), not disjoint owned
+    slices.  Consumed by ``InterfaceCGSolver._build_neumann`` to decide
+    whether to degrade to the 'jacobi' diagonal base.
+    """
+    return _resolve_memory_budget_bytes(
+        setting,
+        _AUTO_NEUMANN_MAX_BYTES_CAP,
+        _AUTO_NEUMANN_MAX_BYTES_FRACTION,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stage 2 helpers: thread-count / dtype / matvec-mode resolution, LPT
 # partitioning, kept-position (D1) slicing, SPD-safe pseudo-inverse.
@@ -829,10 +889,13 @@ def resolve_preconditioner(
         if interface_solver_resolved == 'cg' and matvec_mode_resolved == 'tilewise':
             return 'two_level'
         return 'block_jacobi'
-    if _norm not in ('block_jacobi', 'jacobi', 'none', 'amg', 'two_level'):
+    if _norm not in (
+        'block_jacobi', 'jacobi', 'none', 'amg', 'two_level', 'neumann',
+    ):
         raise ValueError(
             f"Invalid interface_preconditioner {setting!r}: expected 'auto', "
-            f"'block_jacobi', 'jacobi', 'none', 'amg', or 'two_level'."
+            f"'block_jacobi', 'jacobi', 'none', 'amg', 'two_level', or "
+            f"'neumann'."
         )
     return _norm
 
@@ -1174,6 +1237,24 @@ class InterfaceCGSolver:
         stats_dict: Optional[Dict[str, Any]] = None,
         strict: bool = True,
         block_jacobi_max_bytes: Optional[int] = None,
+        # NN/BDD work package: which base component 'two_level' builds --
+        # None/'auto' (legacy block_jacobi with its byte-budget jacobi
+        # downgrade), 'block_jacobi', 'jacobi' (skip the BJ estimate
+        # entirely), or 'neumann' (weighted Neumann-Neumann fine space,
+        # _build_neumann).  Ignored unless preconditioner=='two_level'.
+        two_level_base: Optional[str] = None,
+        # None-sentinel like block_jacobi_max_bytes: None = read the
+        # module-level NEUMANN_MAX_FACTOR_BYTES dynamically at build time
+        # (keeps monkeypatch-based test behaviour).
+        neumann_max_bytes: Optional[int] = None,
+        # 'stiffness' (default, Mandel-Brezina coefficient weights) or
+        # 'multiplicity' (plain 1/count PoU) -- resolved from
+        # DEFAULT_NEUMANN_WEIGHT dynamically when None.
+        neumann_weight: Optional[str] = None,
+        # Relative Tikhonov shift for the NN local solves (see
+        # DEFAULT_NEUMANN_REG's comment for the measured rationale) --
+        # resolved dynamically when None.
+        neumann_reg: Optional[float] = None,
         matvec_threads: Any = 'auto',
         matvec_dtype: Any = 'float64',
         strict_dtype_rtol: bool = True,
@@ -1357,11 +1438,11 @@ class InterfaceCGSolver:
                 "and tile_index_maps"
             )
         if preconditioner not in (
-            'block_jacobi', 'jacobi', 'none', 'amg', 'two_level',
+            'block_jacobi', 'jacobi', 'none', 'amg', 'two_level', 'neumann',
         ):
             raise ValueError(
                 f"preconditioner must be one of 'block_jacobi', 'jacobi', "
-                f"'none', 'amg', 'two_level'; got {preconditioner!r}"
+                f"'none', 'amg', 'two_level', 'neumann'; got {preconditioner!r}"
             )
 
         # D1 (item 1): fail loudly, HERE, if a caller passed a tile Schur
@@ -1480,6 +1561,45 @@ class InterfaceCGSolver:
         # Placeholder default here; always overwritten before being read
         # (both consumers only run after _augment_with_coarse_space has).
         self._base_precond_label: str = 'block_jacobi'
+
+        # --- NN/BDD work package: Neumann-Neumann base state ---------------
+        _tlb_norm = (
+            two_level_base.strip().lower()
+            if isinstance(two_level_base, str) else two_level_base
+        )
+        if _tlb_norm is None or _tlb_norm == 'auto':
+            _tlb_norm = 'block_jacobi'
+        if _tlb_norm not in ('block_jacobi', 'jacobi', 'neumann'):
+            raise ValueError(
+                f"two_level_base must be 'auto', 'block_jacobi', 'jacobi', "
+                f"or 'neumann'; got {two_level_base!r}."
+            )
+        self._two_level_base: str = _tlb_norm
+        self.neumann_max_bytes: Optional[int] = neumann_max_bytes
+        _nw_norm = (
+            neumann_weight.strip().lower()
+            if isinstance(neumann_weight, str) else neumann_weight
+        )
+        if _nw_norm is None:
+            _nw_norm = DEFAULT_NEUMANN_WEIGHT
+        if _nw_norm not in ('stiffness', 'multiplicity'):
+            raise ValueError(
+                f"neumann_weight must be 'stiffness' or 'multiplicity'; "
+                f"got {neumann_weight!r}."
+            )
+        self._neumann_weight: str = _nw_norm
+        self._neumann_reg: float = float(
+            neumann_reg if neumann_reg is not None else DEFAULT_NEUMANN_REG
+        )
+        if self._neumann_reg < 0.0:
+            raise ValueError(
+                f"neumann_reg must be >= 0; got {neumann_reg!r}."
+            )
+        # Set by the base builder that actually ran ('neumann' on NN
+        # success, 'jacobi' for an explicit two_level_base='jacobi'; None
+        # otherwise) -- consulted by _augment_with_coarse_space's label
+        # derivation ahead of the legacy _bj_downgraded/_bj_was_none flags.
+        self._base_builder_label: Optional[str] = None
 
         # --- A-DEF2 work package: apply-mode / warm-start-extrapolation state ---
         _apply_mode_norm = (
@@ -1949,17 +2069,31 @@ class InterfaceCGSolver:
         if self.preconditioner == 'block_jacobi':
             return self._build_block_jacobi()
 
+        if self.preconditioner == 'neumann':
+            # NN/BDD work package: standalone one-level NN base (exists for
+            # tests/ablation; production use is as the 'two_level' base
+            # below, where the PoU coarse space provides BDD's "balancing").
+            return self._build_neumann()
+
         if self.preconditioner == 'two_level':
             # Stage 3: the coarse-space TERM is layered on top AFTER
             # self._linear_op exists (see _augment_with_coarse_space, called
             # from __init__ right after _build_linear_op()) -- this builder
-            # only produces the BASE component here, identical to
-            # 'block_jacobi' (including its own memory-budget downgrade to
-            # 'jacobi', which self._build_block_jacobi() applies to
-            # self.preconditioner directly; _two_level_requested -- captured
-            # before this call -- is what the post-linear-op step keys off
-            # of, not self.preconditioner, so the coarse term still gets
-            # added even after a downgrade).
+            # only produces the BASE component here (including any
+            # memory-budget downgrade to 'jacobi', which the base builders
+            # apply to self.preconditioner directly; _two_level_requested --
+            # captured before this call -- is what the post-linear-op step
+            # keys off of, not self.preconditioner, so the coarse term still
+            # gets added even after a downgrade).  NN/BDD work package: the
+            # base component is selected by two_level_base ('auto' resolves
+            # to the legacy block_jacobi-with-downgrade path).
+            if self._two_level_base == 'neumann':
+                return self._build_neumann()
+            if self._two_level_base == 'jacobi':
+                # Explicitly-requested diagonal base -- not a downgrade
+                # (skips the BJ ownership/estimate work entirely).
+                self._base_builder_label = 'jacobi'
+                return self._build_jacobi_fallback()
             return self._build_block_jacobi()
 
         if self.preconditioner == 'amg':
@@ -1999,6 +2133,12 @@ class InterfaceCGSolver:
         # self._base_precond_label's docstring in __init__.
         if self._bj_was_none:
             self._base_precond_label = 'none'
+        elif self._base_builder_label is not None:
+            # NN/BDD work package: a non-BJ base builder ran and recorded
+            # its own name ('neumann', or the explicit-'jacobi' base) --
+            # the _bj_downgraded/else chain below only describes the
+            # legacy block_jacobi builder's outcomes.
+            self._base_precond_label = self._base_builder_label
         elif self._bj_downgraded:
             self._base_precond_label = 'jacobi'
         else:
@@ -2873,6 +3013,341 @@ class InterfaceCGSolver:
 
         return spla.LinearOperator(shape=(n, n), matvec=_diag_solve, dtype=np.float64)
 
+    def _build_neumann(self) -> Optional[spla.LinearOperator]:
+        """Weighted Neumann-Neumann / BDD fine-space preconditioner.
+
+        NN/BDD work package (Candidate 1 of
+        ``docs/interface_precond_sota_research.md``):
+
+            M^-1 = sum_i R_i^T D_i S~_i^+ D_i R_i   (+ diagonal complement)
+
+        One dense (pseudo-)inverse per FULL tile Schur block ``S_i`` -- not
+        the block-Jacobi owned slice, so the neighbor-tile coupling BJ
+        discards (up to 4.5x the kept Frobenius mass, §7.14) is retained --
+        reconciled across tiles by partition-of-unity weights ``D_i``
+        (``sum_i D_i = I`` on every tile-covered node).  Coefficient
+        (stiffness) weights by default: Mandel-Brezina's subdomain-count-
+        independence result requires coefficient weighting, not
+        multiplicity counting.
+
+        Conventions mirrored from the sibling builders:
+
+        * Dense inverses are MATERIALIZED at build time (cho_solve(eye),
+          symmetrized, or the eigh pseudo-inverse) so the apply is
+          contiguous GEMVs -- the §7.15 permuted-GEMV lesson.
+        * Tile blocks OVERLAP on shared interface nodes (unlike BJ's
+          disjoint ownership partition), so the apply is a scatter-ADD
+          tilewise pass: structurally ``_tilewise_matvec_serial/_threaded``
+          with ``B_i = D_i S~_i^+ D_i`` in place of ``S_i``.  The code
+          duplication between those matvec methods and ``_nn_apply_*``
+          below follows the existing matvec/matmat precedent in this file
+          -- the hot matvec is measurement-frozen and not refactored here.
+        * Island nodes (S_extra 1e5 penalty diagonal) are sliced OUT of
+          every block before factoring -- keeping them would inject
+          gratuitous near-null modes into ``S~_i`` (the same penalty-
+          inflation trap the GenEO ``island_local_mask`` handles) -- and
+          are served by the diagonal complement instead, whose full_diag
+          INCLUDES the S_extra penalty (so ``M^-1 S ~ 1`` there).
+        * Singular blocks (floating tiles / weakly-grounded port subsets)
+          fall back to the SPD-safe eigenclip pseudo-inverse; the clipped
+          tile-kernel directions are exactly what the PoU coarse space
+          balances/deflates (BDD's "balancing" step) -- this base is
+          intended to run under ``'two_level'``.
+        * The byte guard mirrors ``_build_block_jacobi``'s: a MEMORY
+          guard, not a numerics guard (§7.13); on breach the base degrades
+          to 'jacobi' with a WARNING.
+
+        Returns the LinearOperator, or degrades to
+        ``_build_jacobi_fallback()`` (never returns None while a diagonal
+        fallback is still buildable).
+        """
+        n = self.n
+        if not self.tile_schur_complements or self.tile_index_maps is None:
+            logger.warning(
+                "Neumann base: tile Schur blocks/index maps unavailable "
+                "(assembled-only construction); degrading %r -> 'jacobi' "
+                "(diagonal) for this solve.",
+                self.requested_preconditioner,
+            )
+            self.preconditioner = 'jacobi'
+            self._bj_downgraded = True
+            return self._build_jacobi_fallback()
+
+        _max_bytes = (
+            self.neumann_max_bytes if self.neumann_max_bytes is not None
+            else NEUMANN_MAX_FACTOR_BYTES
+        )
+        itemsize = np.dtype(self.matvec_dtype).itemsize
+        sizes = [
+            len(self.tile_index_maps[tid])
+            for tid in self.tile_schur_complements
+        ]
+        _max_k = max(sizes) if sizes else 0
+        # Retained inverses (matvec_dtype) + the largest block's transient
+        # fp64 build set (sub copy, cho_solve inverse, symmetrize temp,
+        # reassignment target -- the same 3-extra-arrays accounting as the
+        # BJ pre-flight, plus the sub copy the BJ path does not need).
+        est_bytes = sum(k * k * itemsize for k in sizes)
+        est_bytes += 4 * _max_k * _max_k * 8
+        if est_bytes > _max_bytes:
+            logger.warning(
+                "Neumann base: estimated inverse memory %.1f GB exceeds "
+                "budget %.1f GB (setting 'interface_neumann_max_bytes', "
+                "n_interface=%d, T=%d tiles, max_block=%d). Downgrading "
+                "requested preconditioner %r -> 'jacobi' (diagonal) for "
+                "this solve -- expect MORE CG iterations. The NN inverses "
+                "cost the same order as the retained tile Schur blocks "
+                "themselves (Sum(n_p_i^2) * %d bytes); raise the budget if "
+                "the host already holds the blocks comfortably.",
+                est_bytes / 1024 ** 3, _max_bytes / 1024 ** 3, n,
+                len(sizes), _max_k,
+                self.requested_preconditioner, itemsize,
+            )
+            self.preconditioner = 'jacobi'
+            self._bj_downgraded = True
+            return self._build_jacobi_fallback()
+
+        island = self._island_idx
+
+        # ---- pass 1: stiffness totals / multiplicities over ALL tiles ----
+        total_diag = np.zeros(n, dtype=np.float64)
+        counts = np.zeros(n, dtype=np.float64)
+        for tid, S_i in self.tile_schur_complements.items():
+            idx = np.asarray(self.tile_index_maps[tid], dtype=np.int64)
+            total_diag += np.bincount(
+                idx,
+                weights=np.ascontiguousarray(np.diag(S_i), dtype=np.float64),
+                minlength=n,
+            )
+            counts += np.bincount(idx, minlength=n)
+        # Diagonal for the complement term: the TRUE diagonal of S (tile
+        # sum + S_extra's island-penalty/package contributions -- same S4
+        # reasoning as _build_jacobi_fallback).
+        full_diag = total_diag.copy()
+        if self.S_extra is not None:
+            full_diag += np.asarray(
+                self.S_extra.tocsr().diagonal(), dtype=np.float64
+            )
+        full_diag = np.where(full_diag > 0, full_diag, 1.0)
+
+        # ---- pass 2: factor each tile block, fold in the PoU weights -----
+        covered = np.zeros(n, dtype=bool)
+        nn_tiles: List[Tuple[np.ndarray, np.ndarray]] = []
+        n_eigclip = 0
+        n_clip_dirs = 0
+        n_failed = 0
+        for tid, S_i in self.tile_schur_complements.items():
+            idx = np.asarray(self.tile_index_maps[tid], dtype=np.int64)
+            keep_mask: Optional[np.ndarray] = None
+            if island is not None:
+                keep_mask = ~np.isin(idx, island)
+                if keep_mask.all():
+                    keep_mask = None
+                else:
+                    idx = idx[keep_mask]
+            if len(idx) == 0:
+                continue
+            S_arr = np.asarray(S_i, dtype=np.float64)
+
+            def _extract_sub() -> np.ndarray:
+                if keep_mask is not None:
+                    return np.ascontiguousarray(
+                        S_arr[np.ix_(keep_mask, keep_mask)]
+                    )
+                return np.array(S_arr, dtype=np.float64, copy=True)
+
+            sub = _extract_sub()
+            diag_vals = np.ascontiguousarray(np.diag(sub))
+            if self._neumann_reg > 0.0:
+                # Relative Tikhonov shift: bounds the local-solve response
+                # along the block's near-null cluster at ~1/reg (relative
+                # to the diagonal scale) AND makes the Cholesky path
+                # succeed on the numerically-singular split-regime blocks
+                # (see DEFAULT_NEUMANN_REG's measured rationale).
+                sub[np.diag_indices_from(sub)] += (
+                    self._neumann_reg * diag_vals
+                )
+            Sinv: Optional[np.ndarray] = None
+            try:
+                cho = la.cho_factor(
+                    sub, check_finite=False, overwrite_a=True,
+                )
+                # Pivot-ratio condition estimate: cond(S_i) ~ (d_max/d_min)^2
+                # for Cholesky pivots d.  A PSD-singular block can pass
+                # cho_factor with tiny positive pivots and yield a finite
+                # but kernel-amplifying inverse (the §7.8 BJ pathology) --
+                # route those to the eigclip pseudo-inverse below.
+                _piv = np.abs(np.diag(cho[0]))
+                if (
+                    _piv.min() <= 0.0
+                    or (_piv.min() / _piv.max()) ** 2 < NEUMANN_CHO_RCOND_MIN
+                ):
+                    Sinv = None
+                else:
+                    Sinv = la.cho_solve(
+                        cho, np.eye(len(idx)), check_finite=False,
+                    )
+                    # cho_solve's explicitly-formed inverse is not exactly
+                    # symmetric -- same Finding-9 fix as the BJ
+                    # materialization loop: symmetrize so PCG's SPD-
+                    # preconditioner assumption holds.
+                    Sinv = 0.5 * (Sinv + Sinv.T)
+                    if not np.isfinite(Sinv).all():
+                        Sinv = None  # numerically-singular cho slipped through
+            except (la.LinAlgError, ValueError):
+                Sinv = None
+            if Sinv is None:
+                # overwrite_a=True destroyed `sub`; re-extract for eigh
+                # (re-applying the same Tikhonov shift, if any).
+                sub2 = _extract_sub()
+                if self._neumann_reg > 0.0:
+                    sub2[np.diag_indices_from(sub2)] += (
+                        self._neumann_reg * diag_vals
+                    )
+                res = _spd_safe_pseudo_solve_factor_ex(
+                    sub2, eps_rel=NEUMANN_EIGCLIP_EPS_REL,
+                )
+                if res is None:
+                    n_failed += 1
+                    logger.warning(
+                        "Neumann base: tile %r block (%d rows) has no "
+                        "positive spectrum; skipping it (its nodes fall "
+                        "back to neighbor tiles / the diagonal "
+                        "complement).",
+                        tid, len(idx),
+                    )
+                    continue
+                V, inv_w, _w = res
+                Sinv = (V * inv_w) @ V.T
+                n_eigclip += 1
+                # Diagnostic for the coarse-space-enrichment decision: how
+                # many directions per block sit below the clip (i.e. get
+                # the maximal 1/(eps_rel*lambda_max) response).
+                n_clip_dirs += int(
+                    np.sum(_w < NEUMANN_EIGCLIP_EPS_REL * float(_w.max()))
+                )
+            if self._neumann_weight == 'stiffness':
+                _t = total_diag[idx]
+                w_loc = diag_vals / np.where(_t > 0.0, _t, 1.0)
+            else:  # 'multiplicity'
+                _c = counts[idx]
+                w_loc = 1.0 / np.where(_c > 0.0, _c, 1.0)
+            # B_i = D_i S~_i^+ D_i, folded in place (row + column scaling).
+            Sinv *= w_loc[np.newaxis, :]
+            Sinv *= w_loc[:, np.newaxis]
+            B = np.ascontiguousarray(Sinv.astype(self.matvec_dtype, copy=False))
+            nn_tiles.append((idx, B))
+            covered[idx] = True
+
+        if not nn_tiles:
+            logger.warning(
+                "Neumann base: every tile block failed to factor; "
+                "degrading %r -> 'jacobi' (diagonal) for this solve.",
+                self.requested_preconditioner,
+            )
+            self.preconditioner = 'jacobi'
+            self._bj_downgraded = True
+            return self._build_jacobi_fallback()
+
+        # Exact-jacobi response on nodes NO tile covers (taps/package-only
+        # unknowns, islands, failed-block-only nodes); zero on covered
+        # nodes.  Keeps M SPD on all of R^n.
+        self._nn_comp_scale = np.where(covered, 0.0, 1.0 / full_diag)
+
+        # LPT partition + per-bin touched-index unions -- mirrors
+        # _prepare_tilewise_matvec_state (costs ~ k^2 per GEMV).
+        self._nn_n_bins = max(1, min(self.matvec_threads, len(nn_tiles)))
+        self._nn_partition = _lpt_partition(
+            [float(len(idx)) ** 2 for idx, _ in nn_tiles], self._nn_n_bins,
+        )
+        touched: List[np.ndarray] = []
+        for t in range(self._nn_n_bins):
+            part = self._nn_partition[t]
+            if part:
+                touched.append(
+                    np.unique(np.concatenate([nn_tiles[i][0] for i in part]))
+                )
+            else:
+                touched.append(np.empty(0, dtype=np.int64))
+        self._nn_touched = touched
+        self._nn_tiles = nn_tiles
+
+        self._base_builder_label = 'neumann'
+        logger.info(
+            "Neumann base: %d tile inverses (%d via eigclip pseudo-inverse "
+            "with %d total clipped directions, %d skipped), %.2f GB (%s), "
+            "weight='%s', reg=%g, %d/%d nodes covered.",
+            len(nn_tiles), n_eigclip, n_clip_dirs, n_failed,
+            sum(B.nbytes for _, B in nn_tiles) / 1024 ** 3,
+            np.dtype(self.matvec_dtype).name, self._neumann_weight,
+            self._neumann_reg, int(covered.sum()), n,
+        )
+        return spla.LinearOperator(
+            shape=(n, n), matvec=self._nn_apply, dtype=np.float64,
+        )
+
+    def _nn_apply(self, x: np.ndarray) -> np.ndarray:
+        """Neumann-Neumann apply dispatch (serial vs threaded)."""
+        if self.matvec_threads <= 1 or len(self._nn_tiles) < 2:
+            return self._nn_apply_serial(x)
+        return self._nn_apply_threaded(x)
+
+    def _nn_apply_serial(self, x: np.ndarray) -> np.ndarray:
+        """Serial NN apply: diagonal complement + per-tile gather / GEMV /
+        bincount scatter-add -- mirrors ``_tilewise_matvec_serial`` (see
+        ``_build_neumann``'s docstring for why the pattern is duplicated
+        rather than shared with the measurement-frozen matvec)."""
+        n = self.n
+        dtype = self.matvec_dtype
+        result = x * self._nn_comp_scale
+        for idx, B in self._nn_tiles:
+            x_local = x[idx]
+            if dtype != np.float64:
+                x_local = x_local.astype(dtype, copy=False)
+            y_local = np.asarray(B @ x_local, dtype=np.float64)
+            result += np.bincount(idx, weights=y_local, minlength=n)
+        return result
+
+    def _nn_apply_threaded(self, x: np.ndarray) -> np.ndarray:
+        """Threaded NN apply: LPT partition + compact per-bin buffers --
+        mirrors ``_tilewise_matvec_threaded``.  Tile blocks OVERLAP on
+        shared nodes, so unlike the disjoint-slice BJ apply this needs the
+        scatter-ADD design (compact touched-index unions, not disjoint
+        contiguous slices)."""
+        dtype = self.matvec_dtype
+        tiles = self._nn_tiles
+        part = self._nn_partition
+        touched = self._nn_touched
+        n_threads = self._nn_n_bins
+        local_bufs: List[np.ndarray] = [None] * n_threads  # type: ignore[list-item]
+
+        def work(t: int) -> None:
+            u = touched[t]
+            if len(u) == 0:
+                local_bufs[t] = np.zeros(0, dtype=np.float64)
+                return
+            buf = np.zeros(len(u), dtype=np.float64)
+            for i in part[t]:
+                idx, B = tiles[i]
+                x_local = x[idx]
+                if dtype != np.float64:
+                    x_local = x_local.astype(dtype, copy=False)
+                y_local = np.asarray(B @ x_local, dtype=np.float64)
+                pos = np.searchsorted(u, idx)
+                buf += np.bincount(pos, weights=y_local, minlength=len(u))
+            local_bufs[t] = buf
+
+        pool = self._get_pool()
+        with threadpoolctl.threadpool_limits(1):
+            list(pool.map(work, range(n_threads)))
+
+        result = x * self._nn_comp_scale
+        for t in range(n_threads):
+            u = touched[t]
+            if len(u):
+                result[u] += local_bufs[t]
+        return result
+
     def _build_amg(self) -> Optional[spla.LinearOperator]:
         """AMG preconditioner via pyamg (optional dependency).
 
@@ -3299,6 +3774,12 @@ def build_interface_solver(
     strict: bool = True,
     x0: Optional[np.ndarray] = None,
     block_jacobi_max_bytes: Optional[int] = None,
+    # NN/BDD work package: forwarded as-is to InterfaceCGSolver (same
+    # None-sentinel pattern as the coarse knobs below).
+    two_level_base: Optional[str] = None,
+    neumann_max_bytes: Optional[int] = None,
+    neumann_weight: Optional[str] = None,
+    neumann_reg: Optional[float] = None,
     factor_memory_budget_bytes: Optional[int] = None,
     n_interface_threshold: int = AUTO_CG_N_INTERFACE_THRESHOLD,
     coordinator_solver_config: Optional[Any] = None,
@@ -3519,6 +4000,10 @@ def build_interface_solver(
         stats_dict=cg_stats_dict,
         strict=strict,
         block_jacobi_max_bytes=block_jacobi_max_bytes,
+        two_level_base=two_level_base,
+        neumann_max_bytes=neumann_max_bytes,
+        neumann_weight=neumann_weight,
+        neumann_reg=neumann_reg,
         matvec_threads=matvec_threads,
         matvec_dtype=matvec_dtype,
         strict_dtype_rtol=strict_dtype_rtol,

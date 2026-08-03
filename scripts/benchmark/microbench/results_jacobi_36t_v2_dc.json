@@ -1,0 +1,14 @@
+{
+  "pkl_dir": "netlist/netlist_brcm_sampled/distributed_pkl_36t_v2",
+  "dt": 5e-12,
+  "t_end": 5e-10,
+  "n_steps": 100,
+  "config": "two_level[deflated](jacobi+PoU) geneo_k=0, tilewise CG, never-assemble, rtol 1e-08, extrapolation on, weight=stiffness, reg=0",
+  "dc": {
+    "prepare_s": 31.466689568944275,
+    "cold_solve_s": 5.138325797975995,
+    "cold_iters": 27,
+    "rss_gb": 6.48370176,
+    "label": "two_level[deflated](jacobi+geneo k=0, T'=37, rank=37)"
+  }
+}

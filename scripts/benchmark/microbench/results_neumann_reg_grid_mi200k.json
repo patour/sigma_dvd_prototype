@@ -1,0 +1,43 @@
+{
+  "pkl_dir": "/home/exx/workspace/sdvd/sigma_dvd_prototype/netlist/netlist_brcm_sampled/distributed_pkl_mi200k_v2",
+  "rtol": 1e-08,
+  "maxiter": 1500,
+  "rows": [
+    {
+      "reg": 0.001,
+      "cold_iters": 282,
+      "converged": true,
+      "prepare_s": 229.78689341497375,
+      "solve_s": 131.2308102179668,
+      "rss_gb": 38.634737664,
+      "label": "two_level[deflated](neumann+geneo k=0, T'=65, rank=65)"
+    },
+    {
+      "reg": 0.0001,
+      "cold_iters": 869,
+      "converged": true,
+      "prepare_s": 229.76853586098878,
+      "solve_s": 397.1751721079927,
+      "rss_gb": 76.212068352,
+      "label": "two_level[deflated](neumann+geneo k=0, T'=65, rank=65)"
+    },
+    {
+      "reg": 1e-05,
+      "cold_iters": 1500,
+      "converged": false,
+      "prepare_s": 231.68452139594592,
+      "solve_s": 691.5570265579736,
+      "rss_gb": 94.681862144,
+      "label": "two_level[deflated](neumann+geneo k=0, T'=65, rank=65)"
+    },
+    {
+      "reg": 1e-06,
+      "cold_iters": 1500,
+      "converged": false,
+      "prepare_s": 230.60004207398742,
+      "solve_s": 688.2865885379724,
+      "rss_gb": 95.978020864,
+      "label": "two_level[deflated](neumann+geneo k=0, T'=65, rank=65)"
+    }
+  ]
+}

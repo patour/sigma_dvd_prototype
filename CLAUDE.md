@@ -237,7 +237,7 @@ X_inst subckt n1 n2 ...    # subcircuit instance
 - **Parity notebooks** (must reproduce baseline JSONs): `notebooks/dynamic_irdrop_decomposition.ipynb`, `notebooks/transient_analysis_validation.ipynb`, `notebooks/distributed_transient_analysis_validation.ipynb`, `notebooks/distributed_dynamic_irdrop_decomposition.ipynb`
 - **Test netlists**: `netlist/netlist_test/` (small PDN, integration), `netlist/netlist_small/` (minimal unit fixtures), `netlist/netlist_sampled/` (distributed benchmark)
 - **Equivalence suite**: `tests/validation/test_equivalence.py` (marker `validation`)
-- **Interface-solve / CG docs**: `docs/cg_implementations_guide.md` (every CG implementation + rationale, new-hire oriented); `docs/brcm_distributed_runtime_optimization.md` (measurement log — record new measurement campaigns as §7.x sections there, with scripts + raw JSONs in `scripts/benchmark/microbench/`)
+- **Interface-solve / CG docs**: `docs/cg_implementations_guide.md` (every CG implementation + rationale, new-hire oriented); `docs/brcm_distributed_runtime_optimization.md` (measurement log — record new measurement campaigns as §7.x sections there, with scripts + raw JSONs in `scripts/benchmark/microbench/`); `docs/neumann_neumann_pathology.md` (why local-solve bases lose to the diagonal on torn PDN interfaces — two-port derivation + 24-node repro); `docs/interface_precond_sota_research.md` (SOTA survey behind the §7.16 campaign)
 - **Perf baseline**: `scripts/benchmark/baselines/perf_netlist_sampled.json`; runner: `scripts/benchmark/run_perf_baseline.py`
 - **API exports**: each `src/<pkg>/__init__.py`
 - **Copilot equivalent**: `.github/copilot-instructions.md` (overlapping content; this file is authoritative for Claude)
