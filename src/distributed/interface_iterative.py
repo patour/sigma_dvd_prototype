@@ -1255,6 +1255,14 @@ class InterfaceCGSolver:
         # DEFAULT_NEUMANN_REG's comment for the measured rationale) --
         # resolved dynamically when None.
         neumann_reg: Optional[float] = None,
+        # Docs Sec 7.13 recommended change 2: per-N-iteration true-residual
+        # progress logging (one extra matvec per report), settable at
+        # construction via the 'interface_cg_progress_every' setting/CLI
+        # flag.  <= 0 disables (the sibling reproject_every convention);
+        # the attribute stays directly assignable post-construction (the
+        # microbench pattern) -- the solve path reads it via getattr per
+        # call.
+        progress_every: Optional[int] = None,
         matvec_threads: Any = 'auto',
         matvec_dtype: Any = 'float64',
         strict_dtype_rtol: bool = True,
@@ -1595,6 +1603,9 @@ class InterfaceCGSolver:
             raise ValueError(
                 f"neumann_reg must be >= 0; got {neumann_reg!r}."
             )
+        # <= 0 disables (solve path gates on > 0); int() rejects garbage
+        # loudly at construction rather than silently per-solve.
+        self.progress_every: int = int(progress_every or 0)
         # Set by the base builder that actually ran ('neumann' on NN
         # success, 'jacobi' for an explicit two_level_base='jacobi'; None
         # otherwise) -- consulted by _augment_with_coarse_space's label
@@ -3780,6 +3791,9 @@ def build_interface_solver(
     neumann_max_bytes: Optional[int] = None,
     neumann_weight: Optional[str] = None,
     neumann_reg: Optional[float] = None,
+    # Docs Sec 7.13 recommended change 2: forwarded as-is (<= 0 / None
+    # disables progress logging).
+    progress_every: Optional[int] = None,
     factor_memory_budget_bytes: Optional[int] = None,
     n_interface_threshold: int = AUTO_CG_N_INTERFACE_THRESHOLD,
     coordinator_solver_config: Optional[Any] = None,
@@ -4004,6 +4018,7 @@ def build_interface_solver(
         neumann_max_bytes=neumann_max_bytes,
         neumann_weight=neumann_weight,
         neumann_reg=neumann_reg,
+        progress_every=progress_every,
         matvec_threads=matvec_threads,
         matvec_dtype=matvec_dtype,
         strict_dtype_rtol=strict_dtype_rtol,

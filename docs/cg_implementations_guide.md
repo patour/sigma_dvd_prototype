@@ -244,7 +244,8 @@ step** — silent for hours. Root cause chain, worth internalizing:
    iterations / 10 s; the BJ-base variant is flat at rel-res 1e-5 after 1500 iterations,
    having also spent +45 GB building the preconditioner that then fails).
 4. It *looked* like a hang because `maxiter` defaults to `3·n` = 362,883 (≈ days at this
-   regime) and the CG progress knob (`progress_every`) has no CLI flag.
+   regime) and the CG progress knob (`progress_every`) had no CLI flag at the time
+   (exposed 2026-08-03 as `--interface-cg-progress-every` / `interface_cg_progress_every`).
 
 Immediate unblock: `--interface-block-jacobi-max-bytes 1` (explicit values bypass the
 auto floor → forces the jacobi base) plus `--interface-cg-maxiter 2000` (fail in minutes,
@@ -327,9 +328,12 @@ matmat), and the warm-start state. Key contract points in `__call__`:
 - **Stats** (`cg_stats_dict` / `solver.stats`): per-solve iterations, time, `info`,
   `apply_algorithm` (`'deflated'` / `'additive'` / base name), cumulative totals, failure
   counts. The per-step iteration counts in the benchmark JSONs come from here.
-- **Observability**: `solver.progress_every = 50` logs true-residual progress every N
-  iterations (costs one matvec per report). Debug attribute only — no CLI flag as of
-  §7.13.
+- **Observability**: `progress_every = 50` logs true-residual progress every N
+  iterations (costs one matvec per report). Settable via
+  `--interface-cg-progress-every` / `interface_cg_progress_every` YAML key since
+  2026-08-03 (§7.13 recommended change 2); still assignable post-construction as
+  `solver.progress_every` for scripts. 0 disables (default) — healthy production
+  solves (≤34 iters) never fire at 50, a stagnating one shows its plateau live.
 
 ### 4.3 The two matvec modes
 
@@ -387,7 +391,12 @@ blocks exist. Implementation details that matter:
 - **`two_level`** — base plus the coarse-space correction. The auto default for
   CG+tilewise. The base is selected by `interface_two_level_base`
   (`'auto'`→block_jacobi with its budget downgrade | `'jacobi'` | `'neumann'`);
-  two apply modes — §4.5/§4.6.
+  two apply modes — §4.5/§4.6. CLI-exposed since 2026-08-03 as
+  `--interface-two-level-base` (also a `solver:` YAML key, as are the
+  YAML-only `interface_neumann_{weight,reg,max_bytes}`) — production
+  split-regime runs should pass `--interface-two-level-base jacobi` explicitly
+  instead of the historical `--interface-block-jacobi-max-bytes 1`
+  downgrade-forcing workaround (§3.8's BRCM hang unblock).
 
 ### 4.5 The coarse space (`interface_coarse.py`)
 
@@ -561,7 +570,7 @@ ratio), vs the 329 s/step CG baseline and the direct path that no longer fits.
 | `interface_coarse_apply_mode` | `deflated` | or `additive` |
 | `interface_deflated_reproject_every` | 50 | ≤0 disables re-projection |
 | `interface_warm_start_extrapolation` | `False` | opt-in `2x_prev − x_prev2` seeding |
-| `solver.progress_every` (attribute) | 0 | per-N-iteration true-residual logging (no CLI flag yet) |
+| `interface_cg_progress_every` | 0 | per-N-iteration true-residual logging; 0 disables (CLI `--interface-cg-progress-every`; also a plain attribute) |
 
 ## 8. File & test map
 

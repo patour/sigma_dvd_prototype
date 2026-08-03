@@ -136,6 +136,10 @@ _IFACE_SETTING_DEFAULTS: Dict[str, Any] = {
     'interface_cg_rtol': 1e-8,
     'interface_cg_atol': 1e-14,
     'interface_cg_maxiter': None,
+    # Docs Sec 7.13 recommended change 2: 0 = progress logging disabled
+    # (stable literal -- flipping it changes per-solve log volume, so any
+    # future default change belongs in a measurement note).
+    'interface_cg_progress_every': 0,
     'interface_cg_strict': True,
     'interface_factor_memory_budget': 'auto',
     'interface_block_jacobi_max_bytes': 'auto',
@@ -169,6 +173,18 @@ _IFACE_SETTING_DEFAULTS: Dict[str, Any] = {
     'interface_coarse_apply_mode': None,
     'interface_deflated_reproject_every': None,
     'interface_warm_start_extrapolation': None,
+    # NN/BDD work package (docs Sec 7.16): explicit two_level base selection.
+    # 'auto' = the legacy block_jacobi-with-byte-budget-downgrade path (a
+    # stable mode-selector literal, same as interface_solver/
+    # interface_preconditioner above -- NOT lazily resolved).  The neumann
+    # weight/reg canonical defaults live in interface_iterative
+    # (DEFAULT_NEUMANN_WEIGHT / DEFAULT_NEUMANN_REG) and follow the
+    # _ITERATIVE_DEFAULT_KEYS lazy pattern; max_bytes 'auto' is resolved by
+    # interface_iterative.resolve_neumann_max_bytes at build time.
+    'interface_two_level_base': 'auto',
+    'interface_neumann_weight': None,
+    'interface_neumann_reg': None,
+    'interface_neumann_max_bytes': 'auto',
 }
 
 # Finding 15: keys whose real default is resolved lazily via
@@ -188,6 +204,10 @@ _COARSE_DEFAULT_KEYS = frozenset((
 # needs to import a different module to resolve it.
 _ITERATIVE_DEFAULT_KEYS = frozenset((
     'interface_warm_start_extrapolation',
+    # NN/BDD work package: measured defaults (stiffness weighting, reg 0.0)
+    # live in interface_iterative.DEFAULT_NEUMANN_WEIGHT/_REG.
+    'interface_neumann_weight',
+    'interface_neumann_reg',
 ))
 
 
@@ -230,6 +250,10 @@ def _iface_default(key: str) -> Any:
         return {
             'interface_warm_start_extrapolation':
                 interface_iterative.DEFAULT_WARM_START_EXTRAPOLATION,
+            'interface_neumann_weight':
+                interface_iterative.DEFAULT_NEUMANN_WEIGHT,
+            'interface_neumann_reg':
+                interface_iterative.DEFAULT_NEUMANN_REG,
         }[key]
     return _IFACE_SETTING_DEFAULTS[key]
 
@@ -264,6 +288,7 @@ def _build_interface_settings(args: argparse.Namespace) -> Dict[str, Any]:
         'interface_cg_rtol': _get('interface_cg_rtol'),
         'interface_cg_atol': _get('interface_cg_atol'),
         'interface_cg_maxiter': getattr(args, 'interface_cg_maxiter', None),
+        'interface_cg_progress_every': _get('interface_cg_progress_every'),
         'interface_cg_strict': _get('interface_cg_strict'),
         'interface_factor_memory_budget': _get('interface_factor_memory_budget'),
         'interface_block_jacobi_max_bytes': _get('interface_block_jacobi_max_bytes'),
@@ -282,6 +307,11 @@ def _build_interface_settings(args: argparse.Namespace) -> Dict[str, Any]:
         'interface_coarse_apply_mode': _get('interface_coarse_apply_mode'),
         'interface_deflated_reproject_every': _get('interface_deflated_reproject_every'),
         'interface_warm_start_extrapolation': _get('interface_warm_start_extrapolation'),
+        # NN/BDD work package: two_level base selection + neumann knobs.
+        'interface_two_level_base': _get('interface_two_level_base'),
+        'interface_neumann_weight': _get('interface_neumann_weight'),
+        'interface_neumann_reg': _get('interface_neumann_reg'),
+        'interface_neumann_max_bytes': _get('interface_neumann_max_bytes'),
     }
 
 
@@ -929,6 +959,29 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     iface_grp.add_argument(
+        '--interface-two-level-base', type=str, default=None,
+        choices=['auto', 'block_jacobi', 'jacobi', 'neumann'],
+        dest='interface_two_level_base',
+        help=(
+            "Fine-space base of the 'two_level' preconditioner (docs Sec "
+            "7.16).  'auto' (default) = the legacy block_jacobi-with-memory-"
+            "budget-downgrade path: NOT numerics-aware, and at split regimes "
+            "where the BJ byte estimate fits its budget it silently builds "
+            "the block-Jacobi base whose cold CG stagnates (the Sec 7.13 "
+            "BRCM hang).  'jacobi' = the measured production base "
+            "(two_level[deflated](jacobi+PoU), Secs 7.14-7.18) -- pass this "
+            "explicitly for production split-regime runs instead of forcing "
+            "the downgrade via --interface-block-jacobi-max-bytes 1.  "
+            "'block_jacobi' = force the BJ base with no downgrade guard.  "
+            "'neumann' = weighted Neumann-Neumann/BDD base built from the "
+            "retained tile Schur blocks (measured DEAD at split regimes -- "
+            "tile-tearing near-null modes, Sec 7.16 / "
+            "docs/neumann_neumann_pathology.md -- kept for reproducibility; "
+            "its knobs interface_neumann_{weight,reg,max_bytes} are "
+            "YAML/settings-only)."
+        ),
+    )
+    iface_grp.add_argument(
         '--interface-cg-rtol', type=float, default=None,
         dest='interface_cg_rtol',
         help=(
@@ -950,6 +1003,19 @@ def _add_config_and_solver_args(parser: argparse.ArgumentParser) -> None:
         '--interface-cg-maxiter', type=int, default=None,
         dest='interface_cg_maxiter',
         help='Max CG iterations (default: None -> 3 * n_interface).',
+    )
+    iface_grp.add_argument(
+        '--interface-cg-progress-every', type=int, default=None,
+        dest='interface_cg_progress_every',
+        help=(
+            'Log CG progress (iteration count + TRUE relative residual, '
+            'costing one extra matvec per report) every N iterations; '
+            '0 disables (default). Observability knob for stagnation at '
+            'production scale (docs Sec 7.13: a non-converging interface '
+            'solve is otherwise silent until maxiter) -- ~50 is a good '
+            'value on BRCM-class runs: healthy solves (<50 iters) never '
+            'log, a stagnating one shows its residual plateau live.'
+        ),
     )
     iface_grp.add_argument(
         '--interface-cg-strict', dest='interface_cg_strict',
@@ -1493,6 +1559,7 @@ _VALID_SOLVER_YAML_KEYS = frozenset({
     'interface_preconditioner', 'interface_cg_rtol',
     # Stage 1: CG tolerance/budget plumbing
     'interface_cg_atol', 'interface_cg_maxiter', 'interface_cg_strict',
+    'interface_cg_progress_every',
     'interface_factor_memory_budget', 'interface_block_jacobi_max_bytes',
     # Stage 2: threaded tilewise matvec / fp32 / never-assemble-S_global
     'matvec_threads', 'interface_matvec_dtype', 'interface_strict_dtype_rtol',
@@ -1504,6 +1571,9 @@ _VALID_SOLVER_YAML_KEYS = frozenset({
     # A-DEF2 work package: deflated apply mode + warm-start extrapolation
     'interface_coarse_apply_mode', 'interface_deflated_reproject_every',
     'interface_warm_start_extrapolation',
+    # NN/BDD work package: two_level base selection + neumann knobs
+    'interface_two_level_base', 'interface_neumann_weight',
+    'interface_neumann_reg', 'interface_neumann_max_bytes',
     # B3: streaming Schur assembly + A2 step-column table
     'streaming_assembly', 'use_step_columns', 'max_table_mb',
     # Stage 1e: island detection strategy
@@ -1745,6 +1815,7 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
         'interface_solver', 'interface_matvec_mode',
         'interface_preconditioner', 'interface_cg_rtol',
         'interface_cg_atol', 'interface_cg_maxiter', 'interface_cg_strict',
+        'interface_cg_progress_every',
         'interface_factor_memory_budget', 'interface_block_jacobi_max_bytes',
         # Stage 2
         'matvec_threads', 'interface_matvec_dtype',
@@ -1756,6 +1827,9 @@ def _load_and_apply_config(args: argparse.Namespace) -> argparse.Namespace:
         # A-DEF2 work package
         'interface_coarse_apply_mode', 'interface_deflated_reproject_every',
         'interface_warm_start_extrapolation',
+        # NN/BDD work package
+        'interface_two_level_base', 'interface_neumann_weight',
+        'interface_neumann_reg', 'interface_neumann_max_bytes',
     )
     solver_cfg_iface = (
         _raw_config.get('solver', {}) if _raw_config is not None else {}

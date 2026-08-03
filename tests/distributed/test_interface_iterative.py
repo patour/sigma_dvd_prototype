@@ -1795,6 +1795,82 @@ class TestStage1DefaultRtol:
         ctx.release()
 
 
+class TestProgressEveryPlumbing:
+    """Docs Sec 7.13 recommended change 2: `progress_every` (true-residual
+    progress logging) is now settable at construction and plumbed from
+    `interface_cg_progress_every` in model.settings, instead of being a
+    post-construction-only debug attribute."""
+
+    def test_constructor_default_disabled(self):
+        from distributed.interface_iterative import InterfaceCGSolver
+
+        cg = InterfaceCGSolver(
+            n_interface=5, matvec_mode='assembled',
+            S_global=sp.eye(5, format='csr'), preconditioner='none',
+        )
+        assert cg.progress_every == 0
+
+    def test_factory_forwards(self):
+        from distributed.interface_iterative import build_interface_solver
+
+        _solve, mode, cg_solver = build_interface_solver(
+            S_global=sp.eye(5, format='csr'), interface_solver='cg',
+            progress_every=7,
+        )
+        assert mode == 'cg'
+        assert cg_solver.progress_every == 7
+
+    def test_settings_reach_solver_via_prepare(self):
+        from distributed.solver import DistributedDDMSolver
+
+        model = _build_dc_model(
+            interface_solver='cg', interface_cg_progress_every=3,
+        )
+        solver = DistributedDDMSolver(model)
+        ctx = solver.prepare()
+        assert ctx._cg_solver.progress_every == 3
+        ctx.release()
+
+    def _laplacian_solver(self, progress_every):
+        """CG solver on a 1-D Laplacian chain (needs >1 iteration)."""
+        from distributed.interface_iterative import build_interface_solver
+
+        n = 30
+        main = 2.0 * np.ones(n)
+        off = -1.0 * np.ones(n - 1)
+        S = sp.diags([off, main, off], [-1, 0, 1], format='csr')
+        solve, mode, cg_solver = build_interface_solver(
+            S_global=S, interface_solver='cg', preconditioner='none',
+            progress_every=progress_every,
+        )
+        assert mode == 'cg'
+        return solve, cg_solver
+
+    def test_progress_lines_logged(self, caplog):
+        import logging
+
+        solve, _cg = self._laplacian_solver(progress_every=1)
+        rhs = np.ones(30)
+        with caplog.at_level(logging.INFO,
+                             logger='distributed.interface_iterative'):
+            solve(rhs)
+        progress = [r for r in caplog.records
+                    if 'InterfaceCG progress' in r.getMessage()]
+        assert progress, "expected per-iteration progress records"
+        assert 'rel_res' in progress[0].getMessage()
+
+    def test_progress_disabled_is_silent(self, caplog):
+        import logging
+
+        solve, _cg = self._laplacian_solver(progress_every=0)
+        rhs = np.ones(30)
+        with caplog.at_level(logging.INFO,
+                             logger='distributed.interface_iterative'):
+            solve(rhs)
+        assert not any('InterfaceCG progress' in r.getMessage()
+                       for r in caplog.records)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # 10. Stage 1c: host-aware memory budgets (psutil)
 # ──────────────────────────────────────────────────────────────────────

@@ -171,6 +171,9 @@ class _InterfaceCgSettings:
     neumann_max_bytes: int
     neumann_weight: Any
     neumann_reg: float
+    # Docs Sec 7.13 recommended change 2: per-N-iteration true-residual
+    # progress logging (0 = disabled).
+    progress_every: int
     matvec_threads: Any
     matvec_dtype: Any
     strict_dtype_rtol: bool
@@ -293,6 +296,9 @@ def _read_interface_cg_settings(model: Optional[Any]) -> '_InterfaceCgSettings':
             ),
             'interface_neumann_reg',
         ),
+        # Passed through raw; InterfaceCGSolver.__init__'s int() is the
+        # single coercion/validation point (<= 0 disables).
+        progress_every=_settings.get('interface_cg_progress_every', 0),
         matvec_threads=_settings.get('matvec_threads', 'auto'),
         matvec_dtype=_settings.get('interface_matvec_dtype', 'float64'),
         strict_dtype_rtol=_coerce_bool(
@@ -1907,6 +1913,7 @@ def _factor_dc_context_no_s_global(
         neumann_max_bytes=_cg_settings.neumann_max_bytes,
         neumann_weight=_cg_settings.neumann_weight,
         neumann_reg=_cg_settings.neumann_reg,
+        progress_every=_cg_settings.progress_every,
         interface_coarse_apply_mode=_cg_settings.apply_mode,
         interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
         warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
@@ -2384,6 +2391,7 @@ def _factor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False) -
             neumann_max_bytes=_cg_settings.neumann_max_bytes,
             neumann_weight=_cg_settings.neumann_weight,
             neumann_reg=_cg_settings.neumann_reg,
+            progress_every=_cg_settings.progress_every,
             interface_coarse_apply_mode=_cg_settings.apply_mode,
             interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
             warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
@@ -3048,6 +3056,7 @@ def _refactor_dc_context(ctx: 'DistributedSolverContext', verbose: bool = False)
             neumann_max_bytes=_cg_settings.neumann_max_bytes,
             neumann_weight=_cg_settings.neumann_weight,
             neumann_reg=_cg_settings.neumann_reg,
+            progress_every=_cg_settings.progress_every,
             interface_coarse_apply_mode=_cg_settings.apply_mode,
             interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
             warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
@@ -3554,6 +3563,7 @@ def _factor_transient_context_no_s_global(
         neumann_max_bytes=_cg_settings.neumann_max_bytes,
         neumann_weight=_cg_settings.neumann_weight,
         neumann_reg=_cg_settings.neumann_reg,
+        progress_every=_cg_settings.progress_every,
         interface_coarse_apply_mode=_cg_settings.apply_mode,
         interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
         warm_start_extrapolation=_cg_settings.warm_start_extrapolation,
@@ -4126,6 +4136,7 @@ def _factor_transient_context(
             neumann_max_bytes=_cg_settings_td.neumann_max_bytes,
             neumann_weight=_cg_settings_td.neumann_weight,
             neumann_reg=_cg_settings_td.neumann_reg,
+            progress_every=_cg_settings_td.progress_every,
             interface_coarse_apply_mode=_cg_settings_td.apply_mode,
             interface_deflated_reproject_every=_cg_settings_td.deflated_reproject_every,
             warm_start_extrapolation=_cg_settings_td.warm_start_extrapolation,
@@ -4868,6 +4879,7 @@ def _refactor_transient_context(
             neumann_max_bytes=_cg_settings.neumann_max_bytes,
             neumann_weight=_cg_settings.neumann_weight,
             neumann_reg=_cg_settings.neumann_reg,
+            progress_every=_cg_settings.progress_every,
             interface_coarse_apply_mode=_cg_settings.apply_mode,
             interface_deflated_reproject_every=_cg_settings.deflated_reproject_every,
             warm_start_extrapolation=_cg_settings.warm_start_extrapolation,

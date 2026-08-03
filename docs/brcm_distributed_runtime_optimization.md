@@ -1469,7 +1469,13 @@ with exact spectra rather than inference.
 incl. the YAML-only `interface_neumann_{weight,reg,max_bytes}`) — §7.13's
 recommended change 1. Production split-regime runs pass
 `--interface-two-level-base jacobi` explicitly; the
-`--interface-block-jacobi-max-bytes 1` downgrade-forcing unblock is obsolete. Files: `run_h2h_multitile_campaign.sh`,
+`--interface-block-jacobi-max-bytes 1` downgrade-forcing unblock is obsolete.
+§7.13's recommended change 2 landed the same day: `progress_every` (per-N-iteration
+TRUE-residual logging, the observability defect behind the silent hang) is now
+constructor-plumbed and exposed as `--interface-cg-progress-every` /
+`interface_cg_progress_every` (default 0 = off, preserving measured behavior; ~50
+recommended on BRCM-class runs — healthy solves never fire it, a stagnating cold DC
+shows its residual plateau live instead of hours of silence). Files: `run_h2h_multitile_campaign.sh`,
 `analyze_interface_exact_multitile.py`,
 `results_{champion_100step,neumann_reg0,neumann_reg1em3,neumann_reg1em5,bj_neverassemble}_multitile.json`,
 `results_tile_block_spectra_multitile.json`,

@@ -563,6 +563,198 @@ class TestADef2CLIWiring:
         assert settings['interface_warm_start_extrapolation'] is True
 
 
+class TestTwoLevelBaseCliYaml:
+    """NN/BDD work package: --interface-two-level-base CLI flag + YAML
+    plumbing for interface_two_level_base and the neumann knobs
+    (interface_neumann_{weight,reg,max_bytes} are YAML/settings-only --
+    no CLI flags).  Same explicit-CLI > YAML > built-in-default precedence
+    machinery as every other interface key."""
+
+    def test_argparse_level_default_is_none(self):
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        assert args.interface_two_level_base is None
+
+    def test_explicit_flag_all_choices(self):
+        for base in ('auto', 'block_jacobi', 'jacobi', 'neumann'):
+            parser = build_parser()
+            args = parser.parse_args([
+                'solve', '/tmp/pkl', '--interface-two-level-base', base,
+            ])
+            assert args.interface_two_level_base == base
+
+    def test_invalid_base_rejected(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args([
+                'solve', '/tmp/pkl', '--interface-two-level-base', 'bogus',
+            ])
+
+    def test_defaults_resolve(self):
+        """Unset -> 'auto' base; neumann knobs resolve to the canonical
+        interface_iterative defaults (stiffness / 0.0 / 'auto')."""
+        from distributed.cli import _load_and_apply_config
+
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        args = _load_and_apply_config(args)
+        assert args.interface_two_level_base == 'auto'
+        assert args.interface_neumann_weight == 'stiffness'
+        assert args.interface_neumann_reg == 0.0
+        assert args.interface_neumann_max_bytes == 'auto'
+
+    def test_yaml_settings_applied(self, tmp_path):
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        # PyYAML float caveat: bare-mantissa exponents ("1e-3") parse as
+        # strings; use "1.0e-3".
+        config_path.write_text(
+            "solver:\n"
+            "  interface_two_level_base: neumann\n"
+            "  interface_neumann_weight: multiplicity\n"
+            "  interface_neumann_reg: 1.0e-3\n"
+            "  interface_neumann_max_bytes: 1073741824\n"
+        )
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_two_level_base == 'neumann'
+        assert args.interface_neumann_weight == 'multiplicity'
+        assert args.interface_neumann_reg == 1e-3
+        assert args.interface_neumann_max_bytes == 1073741824
+
+    def test_explicit_cli_beats_yaml(self, tmp_path):
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text("solver:\n  interface_two_level_base: auto\n")
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+            '--interface-two-level-base', 'jacobi',
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_two_level_base == 'jacobi'
+
+    def test_build_interface_settings_includes_nn_keys(self):
+        from distributed.cli import (
+            build_parser, _load_and_apply_config, _build_interface_settings,
+        )
+
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--interface-two-level-base', 'jacobi',
+        ])
+        args = _load_and_apply_config(args)
+        settings = _build_interface_settings(args)
+        assert settings['interface_two_level_base'] == 'jacobi'
+        assert settings['interface_neumann_weight'] == 'stiffness'
+        assert settings['interface_neumann_reg'] == 0.0
+        assert settings['interface_neumann_max_bytes'] == 'auto'
+
+    def test_neumann_defaults_resolve_dynamically(self, monkeypatch):
+        """Same Finding-6 lazy-resolution contract as
+        interface_warm_start_extrapolation: the CLI/YAML defaults for the
+        neumann knobs must read interface_iterative.DEFAULT_NEUMANN_WEIGHT/
+        _REG at resolution time, not a def-time-bound literal copy."""
+        import distributed.interface_iterative as interface_iterative
+        from distributed.cli import _load_and_apply_config
+
+        monkeypatch.setattr(
+            interface_iterative, 'DEFAULT_NEUMANN_WEIGHT', 'multiplicity',
+        )
+        monkeypatch.setattr(
+            interface_iterative, 'DEFAULT_NEUMANN_REG', 1e-3,
+        )
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        args = _load_and_apply_config(args)
+        assert args.interface_neumann_weight == 'multiplicity'
+        assert args.interface_neumann_reg == 1e-3
+
+    def test_run_subcommand_has_flag(self):
+        """run shares the interface flag group with solve."""
+        parser = build_parser()
+        args = parser.parse_args([
+            'run', '/tmp/netlist', '--interface-two-level-base', 'jacobi',
+        ])
+        assert args.interface_two_level_base == 'jacobi'
+
+
+class TestProgressEveryCliYaml:
+    """Docs Sec 7.13 recommended change 2: --interface-cg-progress-every
+    CLI flag + interface_cg_progress_every YAML key (0 = disabled default),
+    same precedence machinery as the other interface keys."""
+
+    def test_argparse_level_default_is_none(self):
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        assert args.interface_cg_progress_every is None
+
+    def test_default_resolves_to_zero(self):
+        from distributed.cli import _load_and_apply_config
+
+        parser = build_parser()
+        args = parser.parse_args(['solve', '/tmp/pkl'])
+        args = _load_and_apply_config(args)
+        assert args.interface_cg_progress_every == 0
+
+    def test_explicit_flag(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--interface-cg-progress-every', '50',
+        ])
+        assert args.interface_cg_progress_every == 50
+
+    def test_yaml_applied(self, tmp_path):
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text(
+            "solver:\n  interface_cg_progress_every: 25\n"
+        )
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_cg_progress_every == 25
+
+    def test_explicit_zero_beats_yaml(self, tmp_path):
+        """--interface-cg-progress-every 0 (equal to the built-in default)
+        must still beat a YAML value -- the Finding-2 None-sentinel
+        contract."""
+        from distributed.cli import build_parser, _load_and_apply_config
+
+        config_path = tmp_path / 'solver.yaml'
+        config_path.write_text(
+            "solver:\n  interface_cg_progress_every: 25\n"
+        )
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--config', str(config_path),
+            '--interface-cg-progress-every', '0',
+        ])
+        args = _load_and_apply_config(args)
+        assert args.interface_cg_progress_every == 0
+
+    def test_build_interface_settings_includes_key(self):
+        from distributed.cli import (
+            build_parser, _load_and_apply_config, _build_interface_settings,
+        )
+
+        parser = build_parser()
+        args = parser.parse_args([
+            'solve', '/tmp/pkl', '--interface-cg-progress-every', '50',
+        ])
+        args = _load_and_apply_config(args)
+        settings = _build_interface_settings(args)
+        assert settings['interface_cg_progress_every'] == 50
+
+
 class TestDecomposeParser:
     """Tests for decompose subcommand argument parsing."""
 
@@ -894,6 +1086,7 @@ class TestDecomposeDispatch:
                 'interface_cg_rtol': 1e-8,
                 'interface_cg_atol': 1e-14,
                 'interface_cg_maxiter': None,
+                'interface_cg_progress_every': 0,
                 'interface_cg_strict': True,
                 'interface_factor_memory_budget': 'auto',
                 'interface_block_jacobi_max_bytes': 'auto',
@@ -916,6 +1109,11 @@ class TestDecomposeDispatch:
                 'interface_coarse_apply_mode': 'deflated',
                 'interface_deflated_reproject_every': 50,
                 'interface_warm_start_extrapolation': False,
+                # NN/BDD work package: two_level base + neumann knobs.
+                'interface_two_level_base': 'auto',
+                'interface_neumann_weight': 'stiffness',
+                'interface_neumann_reg': 0.0,
+                'interface_neumann_max_bytes': 'auto',
             },
             island_detection='auto',
         )
