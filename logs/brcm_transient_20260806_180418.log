@@ -1,0 +1,72 @@
+18:04:18 distributed.cli INFO: Logging to file: /wv/bwdev1/patrasej/dev/sigma_dvd/mpower_testcases/BRCM/analysis/dynamic_ir/distributed/transient_20260806_180418.log
+18:04:20 distributed.model INFO: Loaded metadata from netlist/netlist_brcm/distributed_pkl_mi750k: 55 tiles, 195524 shared boundary nodes, 288329 connectivity summaries
+18:04:37 distributed.model INFO: Interface: 195690 nodes (195524 boundary + 309 die attachment)
+18:05:03 distributed.model INFO: Model created in 43.524s: 55 tile-worker handles, 30622646 interior nodes, 237403 boundary entries, 195690 interface nodes, island_detection=summaries
+18:05:03 distributed.cli INFO: Interface solver: cg (matvec=auto, precond=two_level, rtol=1.00e-08)
+18:13:17 distributed.solver_td INFO: Smoothing: 55 tiles, cache hits=0/55, per-tile wall: max=487.390s mean=92.756s
+18:13:17 distributed.solver_td INFO: VCS init: 12393200 total sources across 55 tiles (55 from cache)
+18:13:17 distributed.solver_td INFO:   init_vcs: 5.0753s
+18:13:17 distributed.solver_td INFO:   smooth_sources: 488.1265s
+18:24:50 distributed.interface_coarse INFO: build_coarse_space: n=120961, T'=56 (pou=56, geneo=0, dropped=0), Z_dense ~51.7 MB (SZ retained, deflated)
+18:24:52 distributed.interface_coarse INFO: build_coarse_space: S_c 56x56, rank=56 (eps_rank=1.0e-12), cond~1.393e+03 (0 structurally-deficient direction(s) dropped)
+18:24:52 distributed.interface_iterative INFO: InterfaceCGSolver: two_level preconditioner active -- two_level[deflated](jacobi+geneo k=0, T'=56, rank=56)
+18:24:52 distributed.interface_iterative INFO: Interface CG solver built: mode=tilewise, precond=two_level[deflated](jacobi+geneo k=0, T'=56, rank=56), rtol=1.00e-08, n=120961, threads=8, dtype=float64, build_time=3.052s
+18:24:52 distributed.result_factorization INFO: === Distributed DDM Prepare Statistics (never-assemble S_global) ===
+18:24:52 distributed.result_factorization INFO: Interface system: 120961 unknowns, 0 islands penalized, matvec_threads=8, matvec_dtype=float64
+18:24:52 distributed.result_factorization INFO:   gather_port_lists                    0.085s
+18:24:52 distributed.result_factorization INFO:   compute_ordering                     0.137s
+18:24:52 distributed.result_factorization INFO:   detect_interface_islands             1.211s
+18:24:52 distributed.result_factorization INFO:   factor_tiles                         690.799s
+18:24:52 distributed.result_factorization INFO:   build_s_extra                        0.006s
+18:24:52 distributed.result_factorization INFO: === Total Prepare: 695.291s ===
+18:24:52 distributed.result_factorization DEBUG: Transient (never-assemble) island detection: cache hit (0 islands), union-find skipped.
+18:35:42 distributed.interface_coarse INFO: build_coarse_space: n=120961, T'=56 (pou=56, geneo=0, dropped=0), Z_dense ~51.7 MB (SZ retained, deflated)
+18:35:43 distributed.interface_coarse INFO: build_coarse_space: S_c 56x56, rank=56 (eps_rank=1.0e-12), cond~1.258e+03 (0 structurally-deficient direction(s) dropped)
+18:35:44 distributed.interface_iterative INFO: InterfaceCGSolver: two_level preconditioner active -- two_level[deflated](jacobi+geneo k=0, T'=56, rank=56)
+18:35:44 distributed.interface_iterative INFO: Interface CG solver built: mode=tilewise, precond=two_level[deflated](jacobi+geneo k=0, T'=56, rank=56), rtol=1.00e-08, n=120961, threads=8, dtype=float64, build_time=2.640s
+18:35:44 distributed.result_factorization INFO: === Distributed DDM Prepare Transient Statistics (never-assemble S_global) ===
+18:35:44 distributed.result_factorization INFO: Method: be  |  dt: 5.0 ps  |  C_coeff: 0.2000
+18:35:44 distributed.result_factorization INFO: Transient interface: 120961 unknowns, 0 islands penalized, matvec_threads=8, matvec_dtype=float64
+18:35:44 distributed.result_factorization INFO:   gather_port_lists                    0.066s
+18:35:44 distributed.result_factorization INFO:   compute_ordering                     0.163s
+18:35:44 distributed.result_factorization INFO:   detect_interface_islands             0.001s
+18:35:44 distributed.result_factorization INFO:   factor_transient_tiles               648.714s
+18:35:44 distributed.result_factorization INFO:   build_s_extra                        0.007s
+18:35:44 distributed.result_factorization INFO:   factor_transient_interface           2.640s
+18:35:44 distributed.result_factorization INFO: === Total Prepare: 651.593s ===
+18:36:13 distributed.interface_iterative DEBUG: InterfaceCGSolver: 40 iters, info=0, 11.7076s (warm=False)
+18:36:16 distributed.solver_td INFO: A2 step columns: 55 tiles, tiers=['skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped'], 1.354s
+18:36:28 distributed.interface_iterative DEBUG: InterfaceCGSolver: 33 iters, info=0, 9.8227s (warm=False)
+18:36:29 distributed.solver_td INFO: Step 1/20 (t=5.000e-12 s): max_drop=0.0190 V, total_I=820.11 mA, cg_iters=33
+18:36:38 distributed.interface_iterative DEBUG: InterfaceCGSolver: 25 iters, info=0, 8.1161s (warm=True)
+18:36:48 distributed.interface_iterative DEBUG: InterfaceCGSolver: 24 iters, info=0, 7.8639s (warm=True)
+18:36:57 distributed.interface_iterative DEBUG: InterfaceCGSolver: 25 iters, info=0, 6.9356s (warm=True)
+18:37:08 distributed.interface_iterative DEBUG: InterfaceCGSolver: 25 iters, info=0, 8.6684s (warm=True)
+18:37:15 distributed.interface_iterative DEBUG: InterfaceCGSolver: 22 iters, info=0, 4.5767s (warm=True)
+18:37:23 distributed.interface_iterative DEBUG: InterfaceCGSolver: 22 iters, info=0, 6.3186s (warm=True)
+18:37:32 distributed.interface_iterative DEBUG: InterfaceCGSolver: 26 iters, info=0, 7.2600s (warm=True)
+18:37:41 distributed.interface_iterative DEBUG: InterfaceCGSolver: 25 iters, info=0, 6.9352s (warm=True)
+18:37:51 distributed.interface_iterative DEBUG: InterfaceCGSolver: 26 iters, info=0, 7.6093s (warm=True)
+18:37:58 distributed.interface_iterative DEBUG: InterfaceCGSolver: 25 iters, info=0, 5.2588s (warm=True)
+18:37:59 distributed.solver_td INFO: Step 11/20 (t=5.500e-11 s): max_drop=0.0182 V, total_I=877.48 mA, cg_iters=25
+18:38:05 distributed.interface_iterative DEBUG: InterfaceCGSolver: 22 iters, info=0, 4.3950s (warm=True)
+18:38:14 distributed.interface_iterative DEBUG: InterfaceCGSolver: 22 iters, info=0, 7.4104s (warm=True)
+18:38:22 distributed.interface_iterative DEBUG: InterfaceCGSolver: 21 iters, info=0, 6.6072s (warm=True)
+18:38:31 distributed.interface_iterative DEBUG: InterfaceCGSolver: 23 iters, info=0, 6.8568s (warm=True)
+18:38:41 distributed.interface_iterative DEBUG: InterfaceCGSolver: 22 iters, info=0, 7.3681s (warm=True)
+18:38:49 distributed.interface_iterative DEBUG: InterfaceCGSolver: 22 iters, info=0, 6.3887s (warm=True)
+18:38:56 distributed.interface_iterative DEBUG: InterfaceCGSolver: 20 iters, info=0, 4.5090s (warm=True)
+18:39:04 distributed.interface_iterative DEBUG: InterfaceCGSolver: 21 iters, info=0, 6.5997s (warm=True)
+18:39:11 distributed.interface_iterative DEBUG: InterfaceCGSolver: 22 iters, info=0, 4.8720s (warm=True)
+18:39:12 distributed.solver_td INFO: Step 20/20 (t=1.000e-10 s): max_drop=0.0961 V, total_I=846.58 mA, cg_iters=22
+18:39:12 distributed.solver_td INFO: === Distributed DDM Transient Solve Statistics ===
+18:39:12 distributed.solver_td INFO: Time steps: 20  |  t: [5ps, 0.1ns]  |  dt: 5ps  |  method: be
+18:39:12 distributed.solver_td INFO: DC initial condition: 30.865s
+18:39:12 distributed.solver_td INFO: Time loop: 175.97s (20 steps, avg 8.799s/step)
+18:39:12 distributed.solver_td INFO:   Transient RHS:     1.309s/step (per-tile: 0.027 / 0.607 / 1.940)
+18:39:12 distributed.solver_td INFO:   Assemble + solve:  6.721s/step (rhs_final: 0.0006s/step, pure solve: 6.7208s/step)
+18:39:12 distributed.solver_td INFO:   Interior recovery:  0.764s/step
+18:39:12 distributed.solver_td INFO:   CG iterations:      mean=23.6, max=33
+18:39:12 distributed.solver_td INFO: Peak IR-drop: 0.1049 V at t=0.095ns
+18:39:14 distributed.cli INFO: transient solve completed in 2095.967s: 20 time steps, peak IR-drop = 104.932 mV at t = 9.500e-11 s
+18:40:24 distributed.cli INFO: Results saved to /wv/bwdev1/patrasej/dev/sigma_dvd/mpower_testcases/BRCM/analysis/dynamic_ir/distributed/ddm_transient_result.pkl
