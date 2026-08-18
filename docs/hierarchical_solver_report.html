@@ -1,0 +1,2795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hierarchical Domain Decomposition Solver - Mathematical Proof</title>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script> MathJax = {
+        tex: {
+        inlineMath: [['\\(', '\\)']],
+        displayMath: [['\\[', '\\]']]
+        }
+    };
+    </script>
+
+    <script id="MathJax-script" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px;
+            line-height: 1.8;
+            color: #333;
+            background: #fafafa;
+        }
+        h1 {
+            color: #1a5276;
+            border-bottom: 3px solid #1a5276;
+            padding-bottom: 15px;
+            font-size: 2.2em;
+        }
+        h2 {
+            color: #2874a6;
+            margin-top: 50px;
+            border-left: 5px solid #2874a6;
+            padding-left: 15px;
+        }
+        h3 {
+            color: #2e86ab;
+            margin-top: 30px;
+        }
+        .equation-box {
+            background: linear-gradient(135deg, #e8f4f8 0%, #d4e9f7 100%);
+            border: 1px solid #aed6f1;
+            border-radius: 10px;
+            padding: 20px 30px;
+            margin: 25px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow-x: auto;
+        }
+        .definition-box {
+            background: linear-gradient(135deg, #fef9e7 0%, #fcf3cf 100%);
+            border: 1px solid #f9e79f;
+            border-left: 5px solid #f1c40f;
+            border-radius: 5px;
+            padding: 15px 25px;
+            margin: 20px 0;
+        }
+        .implementation-box {
+            background: #2d3436;
+            color: #dfe6e9;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9em;
+            overflow-x: auto;
+            white-space: pre-wrap;
+        }
+        .implementation-box .comment {
+            color: #74b9ff;
+        }
+        .implementation-box .keyword {
+            color: #fd79a8;
+        }
+        .implementation-box .function {
+            color: #55efc4;
+        }
+        .proof-box {
+            background: linear-gradient(135deg, #e8f8f5 0%, #d5f5e3 100%);
+            border: 1px solid #82e0aa;
+            border-left: 5px solid #27ae60;
+            border-radius: 5px;
+            padding: 20px 25px;
+            margin: 25px 0;
+        }
+        .hierarchy-diagram {
+            background: #fff;
+            border: 2px solid #3498db;
+            border-radius: 10px;
+            padding: 30px;
+            margin: 30px 0;
+            font-family: 'Consolas', monospace;
+            white-space: pre;
+            overflow-x: auto;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 25px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        th {
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+            color: white;
+            padding: 15px;
+            text-align: left;
+        }
+        td {
+            padding: 12px 15px;
+            border-bottom: 1px solid #ddd;
+        }
+        tr:nth-child(even) {
+            background: #f8f9fa;
+        }
+        tr:hover {
+            background: #e8f4f8;
+        }
+        .checkmark {
+            color: #27ae60;
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+        .phase-header {
+            background: linear-gradient(135deg, #8e44ad 0%, #9b59b6 100%);
+            color: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            margin: 40px 0 20px 0;
+            font-size: 1.3em;
+        }
+        .note {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        .flowchart {
+            background: #fff;
+            border: 2px solid #9b59b6;
+            border-radius: 10px;
+            padding: 25px;
+            margin: 25px 0;
+            font-family: 'Consolas', monospace;
+            font-size: 0.85em;
+            white-space: pre;
+            overflow-x: auto;
+        }
+        code {
+            background: #ecf0f1;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Consolas', monospace;
+            color: #c0392b;
+        }
+        .toc {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            padding: 25px 35px;
+            margin: 30px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .toc h3 {
+            margin-top: 0;
+            color: #2c3e50;
+        }
+        .toc ul {
+            list-style: none;
+            padding-left: 0;
+        }
+        .toc li {
+            padding: 5px 0;
+        }
+        .toc a {
+            color: #3498db;
+            text-decoration: none;
+        }
+        .toc a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Hierarchical Domain Decomposition Solver (Schur Complement Method)</h1>
+<h2 style="border:none; margin-top:10px; color:#666; font-weight:normal;">Mathematical Proof for NPART1=2, NPART2=2 (4×4 Resistor Grid)</h2>
+
+<div class="toc">
+    <h3>Table of Contents</h3>
+    <ul>
+        <li><a href="#section1">1. Partition Topology (4×4 Resistor Grid)</a></li>
+        <li><a href="#section2">2. Mathematical Setup</a></li>
+        <li><a href="#section3">3. Phase 1: Partition Schur Complement</a></li>
+        <li><a href="#section4">4. Phase 2: Assemble Intm Matrix</a></li>
+        <li><a href="#section5">5. Phase 3: Intm Schur Complement</a></li>
+        <li><a href="#section6">6. Phase 4: Assemble Intm2 Matrix</a></li>
+        <li><a href="#section7">7. Phase 5: RHS Compression</a></li>
+        <li><a href="#section8">8. Phase 6: Top-Level Solve</a></li>
+        <li><a href="#section9">9. Phase 7: Back-Propagation</a></li>
+        <li><a href="#section10">10. Complete Mathematical Proof</a></li>
+        <li><a href="#section11">11. Concrete Example: Matrix Dimensions &amp; Back-Propagation</a></li>
+        <li><a href="#section12">12. Implementation Trace</a></li>
+        <li><a href="#section13">13. Summary Mapping Table</a></li>
+        <li><a href="#section14">14. DC Solve Flow in ir_drop.cc</a></li>
+        <li><a href="#section15">15. Direct Solve vs Iterative (CG) Solve</a></li>
+        <li><a href="#section16">16. Distributed MPI Implementation (Default Layout)</a></li>
+    </ul>
+</div>
+
+<h2 id="section1">1. Partition Topology (4×4 Resistor Grid)</h2>
+
+<p>With <code>NPART1=2</code> and <code>NPART2=2</code>, we have the following hierarchy:</p>
+
+<div class="hierarchy-diagram">
+simIntm2 (top-level)
+├── simIntm[0] ─────┬── simPart[0]  (Part 0)
+│   (intm 0)        └── simPart[1]  (Part 1)
+│
+└── simIntm[1] ─────┬── simPart[2]  (Part 2)
+    (intm 1)        └── simPart[3]  (Part 3)
+</div>
+
+<p><strong>Total:</strong> 4 partitions arranged in 2 intermediate groups × 2 partitions each.</p>
+
+<h3>1.1 Circuit Topology</h3>
+
+<p>We use a 4×4 resistor grid as the running example throughout this document:</p>
+
+<div class="hierarchy-diagram">
+(0)---R---(1)       (2)---R---(3)
+ |         |         |         |
+ R         R         R         R
+ |         |         |         |
+(4)---R---(5)---R---(6)---R---(7)
+ |         |         |         |
+ R         R         R         R
+ |         |         |         |
+(8)---R---(9)---R---(10)--R---(11)
+ |         |         |         |
+ R         R         R         R
+ |         |         |         |
+(12)--R---(13)      (14)--R---(15)
+
+Note: No horizontal resistors between nodes 1-2 and 13-14.
+</div>
+
+<h3>1.2 Two-Level Partitioning</h3>
+
+<p><strong>Phase 1: Top-Level (GPORT)</strong> - Vertical split into 2 intms:</p>
+<ul>
+    <li>Intm 0: nodes {0,1,4,5,8,9,12,13} (left half)</li>
+    <li>Intm 1: nodes {2,3,6,7,10,11,14,15} (right half)</li>
+    <li>GPORT edges: 5-6, 9-10</li>
+    <li>GPORTs: node 5, node 9 (smaller intm ID becomes port)</li>
+</ul>
+
+<p><strong>Key Mechanism:</strong> GPORT nodes are <em>copied</em> into SubGraphs of other intms (from <code>OneGraph::extract_subgraph</code>):</p>
+<ul>
+    <li>Intm 1's SubGraph contains: internal nodes {2,3,6,7,10,11,14,15} + GPORT copies {5,9}</li>
+    <li>GPORT edges 5-6 and 9-10 are included in Intm 1</li>
+</ul>
+
+<p><strong>Phase 2: Sub-Level (LPORT)</strong> - Horizontal split within each intm:</p>
+
+<div class="definition-box">
+<strong>Intm 0:</strong>
+<ul>
+    <li>Part 0: nodes {0,1,4,5}</li>
+    <li>Part 1: nodes {8,9,12,13}</li>
+    <li>LPORT edges: 4-8, 5-9</li>
+    <li>Tearing nodes: tn0=node5 (GPORT|LPORT), tn1=node9 (GPORT), tn2=node4 (LPORT)</li>
+</ul>
+<strong>Intm 1:</strong>
+<ul>
+    <li>Part 2: nodes {2,3,6,7}</li>
+    <li>Part 3: nodes {10,11,14,15}</li>
+    <li>LPORT edges within Intm 1: 6-10, 7-11</li>
+    <li>GPORT edges (from copies): 5-6, 9-10</li>
+    <li>Tearing nodes: tn0=node5 (GPORT copy), tn1=node9 (GPORT copy), tn2=node6 (LPORT), tn3=node7 (LPORT)</li>
+</ul>
+</div>
+
+<h3>1.3 Port Counting</h3>
+
+<p>Port counting follows from <code>SubGraph::pre_extract()</code>:</p>
+<ol>
+    <li>If a node is a port and belongs to partition P → P gets a port</li>
+    <li>If an edge owned by partition P connects to a port node → P gets a port</li>
+</ol>
+
+<table>
+    <tr>
+        <th>Partition</th>
+        <th>Intm</th>
+        <th>nport</th>
+        <th>nint</th>
+        <th>Port Connections (to tearing nodes)</th>
+    </tr>
+    <tr>
+        <td>Part 0</td>
+        <td>Intm 0</td>
+        <td>2</td>
+        <td>2</td>
+        <td>tn0 (n5), tn2 (n4)</td>
+    </tr>
+    <tr>
+        <td>Part 1</td>
+        <td>Intm 0</td>
+        <td><strong>3</strong></td>
+        <td>3</td>
+        <td>tn0 (n5 via edge 5-9), tn1 (n9 belongs here), tn2 (n4 via edge 4-8)</td>
+    </tr>
+    <tr>
+        <td>Part 2</td>
+        <td>Intm 1</td>
+        <td>3</td>
+        <td>2</td>
+        <td>tn0 (n5 via edge 5-6), tn2 (n6), tn3 (n7)</td>
+    </tr>
+    <tr>
+        <td>Part 3</td>
+        <td>Intm 1</td>
+        <td><strong>3</strong></td>
+        <td>4</td>
+        <td>tn1 (n9 via edge 9-10), tn2 (n6 via edge 6-10), tn3 (n7 via edge 7-11)</td>
+    </tr>
+</table>
+
+<div class="note">
+    <strong>Important:</strong> Part 1 has 3 ports (not 1), and Part 3 has 3 ports (not 0). This is because edges owned by these partitions connect to tearing nodes in other partitions.
+</div>
+
+<h3>1.4 Hierarchical Structure Diagram</h3>
+
+<div class="hierarchy-diagram">
+                              ┌─────────────────────────────────────┐
+                              │             simIntm2                │
+                              │         ntnode = 2                  │
+                              │    ┌────────┐    ┌────────┐         │
+                              │    │tnode 0 │    │tnode 1 │         │
+                              │    │(node 5)│    │(node 9)│         │
+                              │    └───┬────┘    └───┬────┘         │
+                              └────────┼────────────┼───────────────┘
+                                       │            │
+           ┌───────────────────────────┴────────────┴───────────────────────────┐
+           │                                                                    │
+           ▼                                                                    ▼
+┌─────────────────────────────┐                          ┌─────────────────────────────┐
+│         simIntm 0           │                          │         simIntm 1           │
+│   ntnode=3, nport=2         │                          │   ntnode=4, nport=2         │
+│                             │                          │                             │
+│ Tearing nodes:              │                          │ Tearing nodes:              │
+│  tn0=n5 (GPORT) → intm2     │                          │  tn0=n5 (GPORT) → intm2     │
+│  tn1=n9 (GPORT) → intm2     │                          │  tn1=n9 (GPORT) → intm2     │
+│  tn2=n4 (LPORT, internal)   │                          │  tn2=n6 (LPORT, internal)   │
+│                             │                          │  tn3=n7 (LPORT, internal)   │
+├──────────────┬──────────────┤                          ├──────────────┬──────────────┤
+│   Part 0     │   Part 1     │                          │   Part 2     │   Part 3     │
+│  nport=2     │  nport=3     │                          │  nport=3     │  nport=3     │
+│  nint=2      │  nint=3      │                          │  nint=2      │  nint=4      │
+│              │              │                          │              │              │
+│ ports:       │ ports:       │                          │ ports:       │ ports:       │
+│  →tn0(n5)    │  →tn0(n5)    │                          │  →tn0(n5)    │  →tn1(n9)    │
+│  →tn2(n4)    │  →tn1(n9)    │                          │  →tn2(n6)    │  →tn2(n6)    │
+│              │  →tn2(n4)    │                          │  →tn3(n7)    │  →tn3(n7)    │
+│              │              │                          │              │              │
+│ internal:    │ internal:    │                          │ internal:    │ internal:    │
+│  n0, n1      │  n8,n12,n13  │                          │  n2, n3      │ n10,n11,     │
+│              │              │                          │              │ n14,n15      │
+└──────────────┴──────────────┘                          └──────────────┴──────────────┘
+</div>
+
+<h2 id="section2">2. Mathematical Setup</h2>
+
+<h3>2.1 Global System</h3>
+
+<p>The original circuit equation (e.g., for DC or one time-step of transient):</p>
+
+<div class="equation-box">
+    \[ \mathbf{M} \mathbf{v} = \mathbf{b} \]
+</div>
+
+<p>Where:</p>
+<ul>
+    <li>\(\mathbf{M}\) = system matrix (e.g., \(G + C/h\) for transient)</li>
+    <li>\(\mathbf{v}\) = unknown node voltages</li>
+    <li>\(\mathbf{b}\) = RHS (current sources, history terms)</li>
+</ul>
+
+<h3>2.2 Partition-Level Notation</h3>
+
+<p>For partition \((i,j)\) (intm \(i\), part \(j\)), define:</p>
+<ul>
+    <li>\(\mathbf{v}_{i,j}^{(\text{int})}\) = internal node voltages</li>
+    <li>\(\mathbf{v}_{i,j}^{(\text{port})}\) = port/boundary node voltages</li>
+</ul>
+
+<p>The local system for partition \((i,j)\):</p>
+
+<div class="equation-box">
+    \[
+    \begin{bmatrix}
+        \mathbf{A}_{i,j} & \mathbf{B}_{i,j} \\
+        \mathbf{B}_{i,j}^T & \mathbf{D}_{i,j}
+    \end{bmatrix}
+    \begin{bmatrix}
+        \mathbf{v}_{i,j}^{(\text{int})} \\
+        \mathbf{v}_{i,j}^{(\text{port})}
+    \end{bmatrix} =
+    \begin{bmatrix}
+        \mathbf{b}_{i,j}^{(\text{int})} \\
+        \mathbf{b}_{i,j}^{(\text{port})}
+    \end{bmatrix}
+    \]
+</div>
+
+<div class="definition-box">
+    <strong>Matrix Definitions:</strong>
+    <ul>
+        <li>\(\mathbf{A}_{i,j}\) = <code>mtx</code> in <code>mtxPart</code> (internal-internal, sparse)</li>
+        <li>\(\mathbf{B}_{i,j}\) = <code>cmtx</code> in <code>mtxPart</code> (internal-port coupling, sparse)</li>
+        <li>\(\mathbf{D}_{i,j}\) = <code>intm</code> <em>or</em> <code>schur</code> in <code>mtxPart</code> (port-port, before Schur reduction)</li>
+    </ul>
+    <p><strong>Sparse vs dense port block:</strong> <code>mtxPart::init_part_mtx1</code> (mtxPart.cc:180-192) allocates
+    <em>exactly one</em> of the two. When <code>Opts::EXACT_PART_MTX</code> is true (the default, main.cc:219)
+    <em>and</em> the level is <code>bottom_level</code> — i.e. at the partition level — it allocates the
+    <strong>dense</strong> <code>schur</code> (<code>dsMatrix</code>); otherwise — notably at the intm level — it
+    allocates the <strong>sparse</strong> <code>intm</code> (<code>spMatrix</code>). This distinction matters for
+    sparsification: see Section 15.</p>
+</div>
+
+<h3>2.3 Implementation: Matrix Entry Routing</h3>
+
+<div class="implementation-box">
+<span class="comment">// mtxPart.h:645-670 - add_mtx_entry routes based on row/col indices</span>
+<span class="comment">// (offset == nnode - nport; internal indices come first, ports last)</span>
+<span class="keyword">inline void</span> <span class="function">mtxPart::add_mtx_entry</span>(<span class="keyword">int</span> row, <span class="keyword">int</span> col, <span class="keyword">double</span> val) {
+  <span class="keyword">if</span> (row < 0 || col < 0)
+    <span class="keyword">return</span>;
+
+  <span class="keyword">if</span> (row < nnode - nport) {
+    <span class="keyword">if</span> (col < nnode - nport)
+      mtx->add_triplex_entry(row, col, val);          <span class="comment">// → A_{i,j}</span>
+    <span class="keyword">else</span>
+      cmtx->add_triplex_entry(row, col-offset, val);  <span class="comment">// → B_{i,j}</span>
+  }
+  <span class="keyword">else if</span> (col >= nnode - nport) {
+    <span class="keyword">if</span> (intm)                                         <span class="comment">// sparse D (may be NULL)</span>
+      intm->add_triplex_entry(row-offset, col-offset, val);
+    <span class="keyword">if</span> (schur)                                        <span class="comment">// dense D (may be NULL)</span>
+      schur->add_entry(row-offset, col-offset, val);
+  }
+  <span class="keyword">else if</span> (intm && !intm->is_sym())                   <span class="comment">// package/asymmetric only</span>
+    bmtx->add_triplex_entry(row-offset, col, val);
+}
+</div>
+
+<!-- ============== PHASE 1 ============== -->
+
+<div class="phase-header">Phase 1: Partition Schur Complement</div>
+
+<h2 id="section3">3. Partition Schur Complement</h2>
+
+<h3>3.1 Mathematical Derivation</h3>
+
+<p>For partition \((i,j)\), from the block system:</p>
+
+<div class="equation-box">
+    \[
+    \mathbf{A}_{i,j} \mathbf{v}_{i,j}^{(\text{int})} + \mathbf{B}_{i,j} \mathbf{v}_{i,j}^{(\text{port})} = \mathbf{b}_{i,j}^{(\text{int})} \quad (1)
+    \]
+    \[
+    \mathbf{B}_{i,j}^T \mathbf{v}_{i,j}^{(\text{int})} + \mathbf{D}_{i,j} \mathbf{v}_{i,j}^{(\text{port})} = \mathbf{b}_{i,j}^{(\text{port})} \quad (2)
+    \]
+</div>
+
+<p>From equation (1), solve for internal voltages:</p>
+
+<div class="equation-box">
+    \[
+    \mathbf{v}_{i,j}^{(\text{int})} = \mathbf{A}_{i,j}^{-1} \left( \mathbf{b}_{i,j}^{(\text{int})} - \mathbf{B}_{i,j} \mathbf{v}_{i,j}^{(\text{port})} \right) \quad (3)
+    \]
+</div>
+
+<p>Substitute (3) into (2):</p>
+
+<div class="equation-box">
+    \[
+    \mathbf{B}_{i,j}^T \mathbf{A}_{i,j}^{-1} \left( \mathbf{b}_{i,j}^{(\text{int})} - \mathbf{B}_{i,j} \mathbf{v}_{i,j}^{(\text{port})} \right) + \mathbf{D}_{i,j} \mathbf{v}_{i,j}^{(\text{port})} = \mathbf{b}_{i,j}^{(\text{port})}
+    \]
+</div>
+
+<p>Rearranging:</p>
+
+<div class="equation-box">
+    \[
+    \underbrace{\left( \mathbf{D}_{i,j} - \mathbf{B}_{i,j}^T \mathbf{A}_{i,j}^{-1} \mathbf{B}_{i,j} \right)}_{\mathbf{S}_{i,j}^{(\text{part})}} \mathbf{v}_{i,j}^{(\text{port})} = \underbrace{\mathbf{b}_{i,j}^{(\text{port})} - \mathbf{B}_{i,j}^T \mathbf{A}_{i,j}^{-1} \mathbf{b}_{i,j}^{(\text{int})}}_{\tilde{\mathbf{b}}_{i,j}^{(\text{port})}} \quad (4)
+    \]
+</div>
+
+<div class="definition-box">
+    <strong>Definition:</strong> The <em>Partition Schur Complement</em> is:
+    \[
+    \mathbf{S}_{i,j}^{(\text{part})} = \mathbf{D}_{i,j} - \mathbf{B}_{i,j}^T \mathbf{A}_{i,j}^{-1} \mathbf{B}_{i,j}
+    \]
+</div>
+
+<h3>3.2 Implementation</h3>
+
+<p><strong>Step 1: Factor \(\mathbf{A}_{i,j}\)</strong> (<code>mtxPart::reorder_factor_mtx</code>, mtxPart.cc:118-140):</p>
+
+<div class="implementation-box">
+<span class="keyword">bool</span> <span class="function">mtxPart::reorder_factor_mtx</span>() {
+  mtx->build_compact();       <span class="comment">// Convert to CSC format</span>
+  cmtx->build_compact();
+  mtx->reorder_symfact();     <span class="comment">// AMD ordering + symbolic Cholesky</span>
+  mtx->factor();              <span class="comment">// Numerical factorization: A = L * L^T</span>
+  mtx->destroy_mtx();         <span class="comment">// Free original (keep factors)</span>
+}
+</div>
+
+<p><strong>Step 2: Compute Schur</strong> (<code>schur_complement</code> in <code>mtxOpts.cc:105-270</code>):</p>
+
+<div class="implementation-box">
+<span class="keyword">void</span> <span class="function">schur_complement</span>(spMatrix *schur,   <span class="comment">// sparse D/S (intm-level)</span>
+                      dsMatrix *dschur,  <span class="comment">// dense  D/S (partition-level)</span>
+                      spMatrix *mtx1,    <span class="comment">// A (already factored)</span>
+                      spMatrix *mtx2,    <span class="comment">// B (coupling matrix)</span>
+                      double threshold, cholmod_common *common,
+                      <span class="keyword">int</span> intm_id, <span class="keyword">int</span> id) {
+  cholmod_factor *lu = mtx1->get_lu_mtx();
+  cholmod_sparse *m2 = mtx2->get_cholmod_mtx();
+
+  <span class="comment">// Step 2a: C = L^{-1} * P * B  (permuted forward solve)</span>
+#ifdef PERC_CHOLMOD
+  b = cholmod_spsolve(CHOLMOD_P, lu, m2, common);   <span class="comment">// apply permutation</span>
+  c = cholmod_spsolve(CHOLMOD_L, lu, b,  common);   <span class="comment">// then forward solve</span>
+#else
+  c = cholmod_spsolve(CHOLMOD_LP, lu, m2, common);  <span class="comment">// fused P then L</span>
+#endif
+
+  <span class="comment">// Step 2b: S = D - C^T * W * C, accumulated into schur and/or dschur.</span>
+  <span class="comment">// Two variants, selected by Opts::MTX_SUPERNODAL_FACTOR:</span>
+  <span class="comment">//   true  (LL^T ): W = I         -> svmult(..., val)</span>
+  <span class="comment">//   false (LDL^T): W = D_L^{-1}  -> svmult(..., d, val)   <-- DEFAULT</span>
+  <span class="comment">// Only the lower triangle is formed (j starts at i+1 for off-diagonals).</span>
+
+  <span class="keyword">for</span> (i = 0; i < c->ncol; i++)          <span class="comment">// diagonals first</span>
+    <span class="keyword">if</span> (svmult(col_i, col_i, ..., val)) {
+      <span class="keyword">if</span> (schur)  schur->add_triplex_entry(i, i, -val);
+      <span class="keyword">if</span> (dschur) dschur->add_entry(i, i, -val);
+    }
+
+  <span class="keyword">for</span> (i = 0; i < c->ncol; i++) {
+    <span class="keyword">if</span> (schur) di = schur->get_diag(i)*threshold;
+    <span class="keyword">for</span> (j = i+1; j < c->ncol; j++) {   <span class="comment">// off-diagonals, lower triangle</span>
+      <span class="keyword">if</span> (schur) dj = schur->get_diag(j)*threshold;
+      <span class="keyword">if</span> (svmult(col_i, col_j, ..., val)) {
+        <span class="keyword">if</span> (schur) {                    <span class="comment">// SPARSE path: sparsify here</span>
+          <span class="keyword">if</span> (di > 0 && dj > 0 &&
+              fabs(val) < fabs(di) && fabs(val) < fabs(dj)) {
+            schur->add_triplex_entry(i, i, -val);  <span class="comment">// lump onto</span>
+            schur->add_triplex_entry(j, j, -val);  <span class="comment">// the diagonal</span>
+          }
+          <span class="keyword">else</span> schur->add_triplex_entry(j, i, -val);
+        }
+        <span class="keyword">if</span> (dschur) dschur->add_entry(j, i, -val);  <span class="comment">// DENSE: never dropped</span>
+      }
+    }
+  }
+}
+</div>
+
+<div class="proof-box">
+    <strong>Mathematical Correctness Verification:</strong>
+    <ul>
+        <li>\(\mathbf{A}_{i,j} = \mathbf{L}\mathbf{D}_L\mathbf{L}^T\) by default
+            (<code>MTX_SUPERNODAL_FACTOR = false</code>, main.cc:291), or \(\mathbf{L}\mathbf{L}^T\) when it is true</li>
+        <li>\(\mathbf{C} = \mathbf{L}^{-1}\mathbf{B}_{i,j}\) (forward substitution, permutation applied)</li>
+        <li>\(\mathbf{B}_{i,j}^T \mathbf{A}_{i,j}^{-1} \mathbf{B}_{i,j}
+            = \mathbf{B}_{i,j}^T \mathbf{L}^{-T}\mathbf{D}_L^{-1}\mathbf{L}^{-1}\mathbf{B}_{i,j}
+            = \mathbf{C}^T \mathbf{D}_L^{-1} \mathbf{C}\) — the \(\mathbf{D}_L^{-1}\) weighting is the
+            <code>d[]</code> array passed to <code>svmult</code>. In the \(\mathbf{L}\mathbf{L}^T\) case
+            \(\mathbf{D}_L = \mathbf{I}\) and this reduces to \(\mathbf{C}^T\mathbf{C}\).</li>
+    </ul>
+    <p>The port block initially contains \(\mathbf{D}_{i,j}\), and \(\mathbf{C}^T\mathbf{D}_L^{-1}\mathbf{C}\)
+    is subtracted, giving \(\mathbf{S}_{i,j}^{(\text{part})}\). <span class="checkmark">✓</span></p>
+    <p><strong>Note:</strong> sparsification (the diagonal-lumping branch) applies only to the
+    <em>sparse</em> <code>schur</code> output. The <em>dense</em> <code>dschur</code> — which is what the
+    partition level uses by default — receives every entry unconditionally. Lumping onto the diagonal
+    rather than discarding preserves row sums, so the lumped matrix still annihilates the constant
+    vector (see Section 15).</p>
+</div>
+
+<!-- ============== PHASE 2 ============== -->
+
+<div class="phase-header">Phase 2: Assemble Intm Matrix</div>
+
+<h2 id="section4">4. Assemble Intm Matrix</h2>
+
+<h3>4.1 Mathematical Formulation</h3>
+
+<p>For intm \(i\) with partitions \(j \in \{0,1\}\), the tearing nodes are shared. Let:</p>
+<ul>
+    <li>\(\mathbf{u}_i\) = all tearing node voltages in intm \(i\)</li>
+    <li>\(\mathbf{P}_{i,j}\) = permutation/mapping matrix from local partition ports to global intm tearing nodes</li>
+</ul>
+
+<p>The intm system is assembled as:</p>
+
+<div class="equation-box">
+    \[
+    \mathbf{M}_i^{(\text{intm})} = \sum_{j=0}^{1} \mathbf{P}_{i,j} \mathbf{S}_{i,j}^{(\text{part})} \mathbf{P}_{i,j}^T
+    \]
+</div>
+
+<p>This is the <strong>sum of partition Schur complements</strong> mapped to the common tearing node indices.</p>
+
+<h3>4.2 Implementation</h3>
+
+<p><strong>Port mapping</strong> (<code>simPart::create_port_map</code>):</p>
+<p>The <code>port_map[local_port] = global_tnode_id</code> array implements \(\mathbf{P}_{i,j}\).</p>
+
+<div class="implementation-box">
+<span class="comment">// mtxPart::fill_intm_mtx (mtxPart.cc:407-510) - mtxPart* overload</span>
+<span class="keyword">void</span> <span class="function">mtxPart::fill_intm_mtx</span>(mtxPart *intm_mtx, <span class="keyword">int</span> *port_map, ...) {
+  <span class="comment">// schur is S_{i,j}^{part}, size nport x nport</span>
+  <span class="keyword">for</span> (i = 0; i < nport; i++) {
+    new_col = port_map[i];           <span class="comment">// Map local col to global</span>
+    <span class="keyword">for</span> (j = 0; j < nport; j++) {
+      new_row = port_map[j];         <span class="comment">// Map local row to global</span>
+      d = schur->get_data(j, i);     <span class="comment">// S_{i,j}^{part}[j,i]</span>
+
+      <span class="comment">// Add to intm matrix at mapped location</span>
+      intm_mtx->add_mtx_entry(new_row, new_col, d);
+    }
+  }
+}
+</div>
+
+<div class="implementation-box">
+<span class="comment">// simIntm::collect_intm_mtx</span>
+<span class="keyword">void</span> <span class="function">simIntm::collect_intm_mtx</span>() {
+  intm_mtx->init_part_mtx(nunknown_int + nunknown_port, nunknown_port);
+
+  <span class="keyword">for</span> (<span class="keyword">int</span> j = 0; j < npart; j++)   <span class="comment">// npart = 2</span>
+    parts[j]->fill_intm_mtx(intm_mtx, tol);  <span class="comment">// Adds S_{i,j} to M_i^{intm}</span>
+
+  intm_mtx->compact_mtx();
+}
+</div>
+
+<div class="proof-box">
+    <strong>Mathematical Correctness:</strong>
+    <p>Each <code>fill_intm_mtx</code> adds the partition's Schur complement to the intm matrix using the <code>port_map</code> as the index transformation. Since the tearing nodes are shared, entries at the same global index are summed (Kirchhoff's current law at shared nodes). <span class="checkmark">✓</span></p>
+</div>
+
+<!-- ============== PHASE 3 ============== -->
+
+<div class="phase-header">Phase 3: Intm Schur Complement</div>
+
+<h2 id="section5">5. Intm Schur Complement</h2>
+
+<h3>5.1 Mathematical Formulation</h3>
+
+<p>Now intm \(i\) has its own internal/port structure:</p>
+
+<div class="equation-box">
+    \[
+    \begin{bmatrix}
+        \mathbf{A}_i^{(\text{intm})} & \mathbf{B}_i^{(\text{intm})} \\
+        \left(\mathbf{B}_i^{(\text{intm})}\right)^T & \mathbf{D}_i^{(\text{intm})}
+    \end{bmatrix}
+    \begin{bmatrix}
+        \mathbf{u}_i^{(\text{int})} \\
+        \mathbf{u}_i^{(\text{port})}
+    \end{bmatrix} =
+    \begin{bmatrix}
+        \tilde{\mathbf{b}}_i^{(\text{int})} \\
+        \tilde{\mathbf{b}}_i^{(\text{port})}
+    \end{bmatrix}
+    \]
+</div>
+
+<p>Where:</p>
+<ul>
+    <li>\(\mathbf{u}_i^{(\text{int})}\) = tearing nodes internal to intm \(i\)</li>
+    <li>\(\mathbf{u}_i^{(\text{port})}\) = tearing nodes connected to intm2</li>
+</ul>
+
+<p>The <strong>Intm Schur complement</strong>:</p>
+
+<div class="equation-box">
+    \[
+    \mathbf{S}_i^{(\text{intm})} = \mathbf{D}_i^{(\text{intm})} - \left(\mathbf{B}_i^{(\text{intm})}\right)^T \left(\mathbf{A}_i^{(\text{intm})}\right)^{-1} \mathbf{B}_i^{(\text{intm})} \quad (5)
+    \]
+</div>
+
+<h3>5.2 Implementation</h3>
+
+<p>Same process as partition level:</p>
+
+<div class="implementation-box">
+<span class="keyword">void</span> <span class="function">simIntm::build_schur</span>(<span class="keyword">void</span> *threshold_) {
+  intm_mtx->reorder_factor_mtx();  <span class="comment">// Factor A_i^{intm}</span>
+  intm_mtx->build_schur(method, threshold);  <span class="comment">// Compute S_i^{intm}</span>
+}
+</div>
+
+<!-- ============== PHASE 4 ============== -->
+
+<div class="phase-header">Phase 4: Assemble Intm2 Matrix</div>
+
+<h2 id="section6">6. Assemble Intm2 Matrix</h2>
+
+<h3>6.1 Mathematical Formulation</h3>
+
+<p>The top-level matrix is:</p>
+
+<div class="equation-box">
+    \[
+    \mathbf{M}^{(\text{intm2})} = \sum_{i=0}^{1} \mathbf{Q}_i \mathbf{S}_i^{(\text{intm})} \mathbf{Q}_i^T
+    \]
+</div>
+
+<p>Where \(\mathbf{Q}_i\) is the mapping from intm \(i\)'s ports to intm2's global tearing nodes.</p>
+
+<h3>6.2 Implementation</h3>
+
+<div class="implementation-box">
+<span class="keyword">void</span> <span class="function">simIntm2::collect_intm2_mtx</span>() {
+  intm2_mtx = <span class="keyword">new</span> spMatrix(nunknown, nunknown, <span class="keyword">true</span>);
+  intm2_mtx->init_triplex_entry();
+
+  <span class="keyword">for</span> (<span class="keyword">int</span> i = 0; i < nintm; i++)   <span class="comment">// nintm = 2 (NPART1)</span>
+    intms[i]->fill_intm2_mtx(intm2_mtx);  <span class="comment">// Uses port_map[i]</span>
+
+  intm2_mtx->build_compact();
+}
+</div>
+
+<!-- ============== PHASE 5 ============== -->
+
+<div class="phase-header">Phase 5: RHS Compression</div>
+
+<h2 id="section7">7. RHS Compression</h2>
+
+<h3>7.1 Mathematical Formulation</h3>
+
+<p>At each level, the RHS must be transformed consistently with the Schur complement.</p>
+
+<p><strong>Partition level</strong> (from equation 4):</p>
+
+<div class="equation-box">
+    \[
+    \tilde{\mathbf{b}}_{i,j}^{(\text{port})} = \mathbf{b}_{i,j}^{(\text{port})} - \mathbf{B}_{i,j}^T \mathbf{A}_{i,j}^{-1} \mathbf{b}_{i,j}^{(\text{int})} \quad (6)
+    \]
+</div>
+
+<p><strong>Intm level</strong>:</p>
+
+<div class="equation-box">
+    \[
+    \tilde{\mathbf{b}}_i^{(\text{port})} = \mathbf{b}_i^{(\text{port})} - \left(\mathbf{B}_i^{(\text{intm})}\right)^T \left(\mathbf{A}_i^{(\text{intm})}\right)^{-1} \mathbf{b}_i^{(\text{int})} \quad (7)
+    \]
+</div>
+
+<p>Where \(\mathbf{b}_i^{(\text{int})}\) is assembled from \(\tilde{\mathbf{b}}_{i,j}^{(\text{port})}\) of partitions.</p>
+
+<h3>7.2 Implementation</h3>
+
+<p><strong>Partition RHS compression</strong> (<code>mtxPart::compress_rhs</code>, mtxPart.cc:778-792):</p>
+
+<div class="implementation-box">
+<span class="keyword">void</span> <span class="function">mtxPart::compress_rhs</span>() {
+  <span class="comment">// Input: r1 = b_{i,j}^{int}, r2 = b_{i,j}^{port}</span>
+  <span class="comment">// Output: work2 = b^{port} - B^T * A^{-1} * b^{int}</span>
+
+  mtx->solve(&r1, &work1);     <span class="comment">// work1 = A^{-1} * r1</span>
+  work2 = r2;                   <span class="comment">// work2 = r2</span>
+  cmtx->ymAtx(&work2, &work1); <span class="comment">// work2 = r2 - B^T * work1</span>
+
+  <span class="comment">// Result: work2 = tilde{b}_{i,j}^{port}</span>
+}
+</div>
+
+<div class="proof-box">
+    <strong>Mathematical Correctness:</strong>
+    <ul>
+        <li><code>mtx->solve(&r1, &work1)</code> computes \(\mathbf{A}_{i,j}^{-1} \mathbf{b}_{i,j}^{(\text{int})}\)</li>
+        <li><code>cmtx->ymAtx(&work2, &work1)</code> computes \(\text{work2} = \text{work2} - \mathbf{B}_{i,j}^T \cdot \text{work1}\)</li>
+        <li>Result: \(\tilde{\mathbf{b}}_{i,j}^{(\text{port})}\) per equation (6). <span class="checkmark">✓</span></li>
+    </ul>
+</div>
+
+<p><strong>Collecting RHS</strong> (<code>mtxPart::fill_intm_rhs</code>, mtxPart.cc:728-732):</p>
+
+<div class="implementation-box">
+<span class="keyword">void</span> <span class="function">mtxPart::fill_intm_rhs</span>(Vector *intm_rhs, <span class="keyword">int</span> *port_map) {
+  <span class="keyword">for</span> (<span class="keyword">int</span> i = 0; i < nport; i++)
+    (*intm_rhs)[port_map[i]] += work2[i];  <span class="comment">// Add compressed RHS to intm</span>
+}
+</div>
+
+<p>The <code>+=</code> operation implements the summation at shared tearing nodes.</p>
+
+<!-- ============== PHASE 6 ============== -->
+
+<div class="phase-header">Phase 6: Top-Level Solve</div>
+
+<h2 id="section8">8. Top-Level Solve</h2>
+
+<h3>8.1 Mathematical Formulation</h3>
+
+<p>After all assembly, we solve:</p>
+
+<div class="equation-box">
+    \[
+    \mathbf{M}^{(\text{intm2})} \mathbf{w} = \tilde{\mathbf{b}}^{(\text{intm2})} \quad (8)
+    \]
+</div>
+
+<p>Where \(\mathbf{w}\) contains the voltages at all intm2 tearing nodes.</p>
+
+<h3>8.2 Implementation</h3>
+
+<div class="implementation-box">
+<span class="keyword">void</span> <span class="function">simIntm2::build_direct</span>() {
+  intm2_mtx->reorder_symfact();  <span class="comment">// AMD + symbolic Cholesky</span>
+  intm2_mtx->factor();           <span class="comment">// Numerical factorization</span>
+}
+
+<span class="keyword">void</span> <span class="function">simIntm2::solve_direct</span>() {
+  intm2_mtx->solve(rhs, sol);    <span class="comment">// Solve M^{intm2} * w = b^{intm2}</span>
+
+  <span class="comment">// Copy solution to tearing nodes</span>
+  <span class="keyword">for</span> (<span class="keyword">int</span> i = 0; i < ntnode; i++) {
+    <span class="keyword">int</span> tid = tnodes[i].get_tid();
+    tnodes[i].update_v0((*sol)[tid]);
+  }
+}
+</div>
+
+<!-- ============== PHASE 7 ============== -->
+
+<div class="phase-header">Phase 7: Back-Propagation</div>
+
+<h2 id="section9">9. Back-Propagation</h2>
+
+<h3>9.1 Mathematical Formulation</h3>
+
+<p>Now we have \(\mathbf{w}\) (intm2 tearing node voltages). We recover all unknowns by reversing the Schur complement elimination.</p>
+
+<p><strong>Level 1: Intm internal nodes</strong></p>
+
+<div class="equation-box">
+    \[
+    \mathbf{u}_i^{(\text{int})} = \left(\mathbf{A}_i^{(\text{intm})}\right)^{-1} \left( \tilde{\mathbf{b}}_i^{(\text{int})} - \mathbf{B}_i^{(\text{intm})} \mathbf{u}_i^{(\text{port})} \right) \quad (9)
+    \]
+</div>
+
+<p>Where \(\mathbf{u}_i^{(\text{port})}\) is extracted from \(\mathbf{w}\) via <code>port_map[i]</code>.</p>
+
+<p><strong>Level 2: Partition internal nodes</strong></p>
+
+<p>From equation (3):</p>
+
+<div class="equation-box">
+    \[
+    \mathbf{v}_{i,j}^{(\text{int})} = \mathbf{A}_{i,j}^{-1} \left( \mathbf{b}_{i,j}^{(\text{int})} - \mathbf{B}_{i,j} \mathbf{v}_{i,j}^{(\text{port})} \right) \quad (10)
+    \]
+</div>
+
+<p>Where \(\mathbf{v}_{i,j}^{(\text{port})}\) comes from intm \(i\)'s tearing nodes.</p>
+
+<h3>9.2 Implementation</h3>
+
+<p><strong>Step 1: Copy intm2 solution to intm ports</strong> (<code>simIntm::update_port_intm</code>):</p>
+
+<div class="implementation-box">
+<span class="keyword">void</span> <span class="function">simIntm::update_port_intm</span>(Vector *sol) {
+  <span class="comment">// sol is the intm2 solution vector w</span>
+  <span class="comment">// Copy w[port_map[i]] to local port solution s2[i]</span>
+  intm_mtx->update_port(sol, port_map);
+}
+</div>
+
+<p><strong>Step 2: Propagate within intm</strong> (<code>mtxPart::propagate</code>, mtxPart.cc:806-824):</p>
+
+<div class="implementation-box">
+<span class="keyword">void</span> <span class="function">mtxPart::propagate</span>() {
+  <span class="comment">// Given: s2 = u_i^{port} (from intm2 solution)</span>
+  <span class="comment">// Compute: s1 = A^{-1} * (r1 - B * s2)</span>
+
+  <span class="keyword">if</span> (nport == 0) {
+    s1 = work1;  <span class="comment">// work1 already has A^{-1} * r1</span>
+    <span class="keyword">return</span>;
+  }
+
+  work1 = r1;                    <span class="comment">// work1 = r1 = tilde{b}_i^{int}</span>
+  cmtx->ymAx(&work1, &s2);       <span class="comment">// work1 = r1 - B * s2</span>
+  mtx->solve(&work1, &s1);       <span class="comment">// s1 = A^{-1} * work1</span>
+}
+</div>
+
+<div class="proof-box">
+    <strong>Mathematical Correctness for Intm Propagate:</strong>
+    <ul>
+        <li>Input: <code>s2</code> = \(\mathbf{u}_i^{(\text{port})}\) (from <code>update_port_intm</code>)</li>
+        <li><code>work1 = r1</code> sets work1 = \(\tilde{\mathbf{b}}_i^{(\text{int})}\)</li>
+        <li><code>cmtx->ymAx(&work1, &s2)</code> computes work1 = \(\tilde{\mathbf{b}}_i^{(\text{int})} - \mathbf{B}_i^{(\text{intm})} \mathbf{u}_i^{(\text{port})}\)</li>
+        <li><code>mtx->solve(&work1, &s1)</code> computes s1 = \(\left(\mathbf{A}_i^{(\text{intm})}\right)^{-1}\) work1</li>
+    </ul>
+    <p>Result: <code>s1</code> = \(\mathbf{u}_i^{(\text{int})}\) per equation (9). <span class="checkmark">✓</span></p>
+</div>
+
+<div class="note">
+    <strong>Important Note:</strong> At the partition level, <code>r1</code> contains the <strong>original</strong> \(\mathbf{b}_{i,j}^{(\text{int})}\), not the compressed version. The compression only affects the port RHS for assembly into higher levels. This is critical for correctness.
+</div>
+
+<!-- ============== PROOF ============== -->
+
+<div class="phase-header">Mathematical Proof</div>
+
+<h2 id="section10">10. Complete Mathematical Proof</h2>
+
+<div class="proof-box">
+    <h3>Theorem: The hierarchical solve produces the exact solution.</h3>
+
+    <p><strong>Proof:</strong></p>
+
+    <p>Let the original global system be \(\mathbf{M}\mathbf{v} = \mathbf{b}\).</p>
+
+    <p><strong>Step 1:</strong> For each partition, the Schur complement
+    \(\mathbf{S}_{i,j}^{(\text{part})} = \mathbf{D}_{i,j} - \mathbf{B}_{i,j}^T \mathbf{A}_{i,j}^{-1} \mathbf{B}_{i,j}\)
+    eliminates the internal unknowns \(\mathbf{v}_{i,j}^{(\text{int})}\), creating an equivalent system on the port nodes.</p>
+
+    <p><strong>Step 2:</strong> Assembling partition Schurs:
+    \[
+    \mathbf{M}_i^{(\text{intm})} = \sum_j \mathbf{P}_{i,j} \mathbf{S}_{i,j}^{(\text{part})} \mathbf{P}_{i,j}^T
+    \]
+    This is mathematically equivalent to eliminating all partition-internal nodes from the global system, leaving only the intm tearing nodes.</p>
+
+    <p><strong>Step 3:</strong> The intm Schur complement \(\mathbf{S}_i^{(\text{intm})}\) further eliminates intm-internal tearing nodes.</p>
+
+    <p><strong>Step 4:</strong> The intm2 system \(\mathbf{M}^{(\text{intm2})} \mathbf{w} = \tilde{\mathbf{b}}^{(\text{intm2})}\) is the final reduced system containing only the top-level tearing nodes.</p>
+
+    <p><strong>Step 5:</strong> Solving this gives the exact voltages at intm2 tearing nodes.</p>
+
+    <p><strong>Step 6:</strong> Back-substitution at each level:</p>
+    <ul>
+        <li>Equation (9) recovers intm-internal tearing nodes exactly</li>
+        <li>Equation (10) recovers partition-internal nodes exactly</li>
+    </ul>
+
+    <p>Since each step is an exact algebraic transformation (no approximation except optional sparsification), the final solution \(\mathbf{v}\) satisfies the original system \(\mathbf{M}\mathbf{v} = \mathbf{b}\) exactly. <strong>∎</strong></p>
+</div>
+
+<!-- ============== EXAMPLE ============== -->
+
+<h2 id="section11">11. Concrete Example: Matrix Dimensions &amp; Back-Propagation</h2>
+
+<p>Using the 4×4 resistor grid from Section 1, this section provides the concrete matrix dimensions and back-propagation formulas for each level of the hierarchy.</p>
+
+<h3>11.1 Matrix Dimensions</h3>
+
+<table>
+    <tr>
+        <th>Level</th>
+        <th>Component</th>
+        <th>\(\mathbf{A}\)</th>
+        <th>\(\mathbf{B}\)</th>
+        <th>\(\mathbf{D}/\mathbf{S}\)</th>
+        <th>RHS</th>
+    </tr>
+    <tr>
+        <td rowspan="4">Partition</td>
+        <td>Part 0</td>
+        <td>2×2</td>
+        <td>2×2</td>
+        <td>2×2</td>
+        <td>2×1</td>
+    </tr>
+    <tr>
+        <td>Part 1</td>
+        <td>3×3</td>
+        <td>3×3</td>
+        <td>3×3</td>
+        <td>3×1</td>
+    </tr>
+    <tr>
+        <td>Part 2</td>
+        <td>2×2</td>
+        <td>2×3</td>
+        <td>3×3</td>
+        <td>3×1</td>
+    </tr>
+    <tr>
+        <td>Part 3</td>
+        <td>4×4</td>
+        <td>4×3</td>
+        <td>3×3</td>
+        <td>3×1</td>
+    </tr>
+    <tr>
+        <td rowspan="2">Intm</td>
+        <td>Intm 0 (ntnode=3, nport=2)</td>
+        <td>1×1</td>
+        <td>1×2</td>
+        <td>2×2</td>
+        <td>2×1</td>
+    </tr>
+    <tr>
+        <td>Intm 1 (ntnode=4, nport=2)</td>
+        <td>2×2</td>
+        <td>2×2</td>
+        <td>2×2</td>
+        <td>2×1</td>
+    </tr>
+    <tr>
+        <td>Intm2</td>
+        <td>Top (ntnode=2)</td>
+        <td>-</td>
+        <td>-</td>
+        <td>2×2</td>
+        <td>2×1</td>
+    </tr>
+</table>
+
+<h3>11.2 Generic Matrix Structure at Each Level</h3>
+
+<p>This section describes the generic form of matrices at each level of the hierarchy.</p>
+
+<h4>Level 1: Partition Matrices</h4>
+
+<p>Each partition \(p\) has \(n_{\text{int}}\) internal nodes and \(n_{\text{port}}\) port connections to tearing nodes. The local system is:</p>
+
+<div class="equation-box">
+\[
+\begin{bmatrix}
+\mathbf{A}_p & \mathbf{B}_p \\
+\mathbf{B}_p^T & \mathbf{D}_p
+\end{bmatrix}
+\begin{bmatrix}
+\mathbf{v}_p^{(\text{int})} \\
+\mathbf{v}_p^{(\text{port})}
+\end{bmatrix}
+=
+\begin{bmatrix}
+\mathbf{b}_p^{(\text{int})} \\
+\mathbf{b}_p^{(\text{port})}
+\end{bmatrix}
+\]
+</div>
+
+<div class="definition-box">
+<strong>Matrix Definitions:</strong>
+<ul>
+    <li>\(\mathbf{A}_p \in \mathbb{R}^{n_{\text{int}} \times n_{\text{int}}}\) — Internal-internal conductance matrix (stamped from edges between internal nodes)</li>
+    <li>\(\mathbf{B}_p \in \mathbb{R}^{n_{\text{int}} \times n_{\text{port}}}\) — Internal-port coupling matrix (stamped from edges between internal and port nodes)</li>
+    <li>\(\mathbf{D}_p \in \mathbb{R}^{n_{\text{port}} \times n_{\text{port}}}\) — Port-port conductance matrix (stamped from edges between port nodes, plus diagonal contributions from internal-port edges)</li>
+</ul>
+</div>
+
+<p>The <strong>Partition Schur Complement</strong> eliminates internal nodes:</p>
+
+<div class="equation-box">
+\[
+\mathbf{S}_p = \mathbf{D}_p - \mathbf{B}_p^T \mathbf{A}_p^{-1} \mathbf{B}_p \quad \in \mathbb{R}^{n_{\text{port}} \times n_{\text{port}}}
+\]
+</div>
+
+<h5>4×4 Grid Example: Partition Matrices</h5>
+
+<p>Assuming all resistors have conductance \(G = 1\):</p>
+
+<p><strong>Part 0</strong> — Internal: [n0, n1], Ports: [n5, n4]</p>
+<p>Edges: 0-1 (int-int), 0-4 (int-port), 1-5 (int-port), 4-5 (port-port)</p>
+
+<div class="equation-box">
+\[
+\mathbf{A}_0 = \begin{bmatrix} 2 & -1 \\ -1 & 2 \end{bmatrix}, \quad
+\mathbf{B}_0 = \begin{bmatrix} 0 & -1 \\ -1 & 0 \end{bmatrix}, \quad
+\mathbf{D}_0 = \begin{bmatrix} 2 & -1 \\ -1 & 2 \end{bmatrix}
+\]
+</div>
+
+<p><strong>Part 1</strong> — Internal: [n8, n12, n13], Ports: [n5, n9, n4]</p>
+<p>Edges: 8-9, 8-12, 9-13, 12-13 (within partition), 4-8, 5-9 (to external ports)</p>
+
+<div class="equation-box">
+\[
+\mathbf{A}_1 = \begin{bmatrix} 3 & -1 & 0 \\ -1 & 2 & -1 \\ 0 & -1 & 2 \end{bmatrix}, \quad
+\mathbf{B}_1 = \begin{bmatrix} 0 & -1 & -1 \\ 0 & 0 & 0 \\ 0 & -1 & 0 \end{bmatrix}, \quad
+\mathbf{D}_1 = \begin{bmatrix} 1 & -1 & 0 \\ -1 & 3 & 0 \\ 0 & 0 & 1 \end{bmatrix}
+\]
+</div>
+
+<p><strong>Part 2</strong> — Internal: [n2, n3], Ports: [n5, n6, n7]</p>
+<p>Edges: 2-3 (int-int), 2-6, 3-7 (int-port), 5-6, 6-7 (port-port)</p>
+
+<div class="equation-box">
+\[
+\mathbf{A}_2 = \begin{bmatrix} 2 & -1 \\ -1 & 2 \end{bmatrix}, \quad
+\mathbf{B}_2 = \begin{bmatrix} 0 & -1 & 0 \\ 0 & 0 & -1 \end{bmatrix}, \quad
+\mathbf{D}_2 = \begin{bmatrix} 1 & -1 & 0 \\ -1 & 3 & -1 \\ 0 & -1 & 2 \end{bmatrix}
+\]
+</div>
+
+<p><strong>Part 3</strong> — Internal: [n10, n11, n14, n15], Ports: [n9, n6, n7]</p>
+<p>Edges: 10-11, 10-14, 11-15, 14-15 (int-int), 9-10, 6-10, 7-11 (port-int)</p>
+
+<div class="equation-box">
+\[
+\mathbf{A}_3 = \begin{bmatrix} 4 & -1 & -1 & 0 \\ -1 & 3 & 0 & -1 \\ -1 & 0 & 2 & -1 \\ 0 & -1 & -1 & 2 \end{bmatrix}, \quad
+\mathbf{B}_3 = \begin{bmatrix} -1 & -1 & 0 \\ 0 & 0 & -1 \\ 0 & 0 & 0 \\ 0 & 0 & 0 \end{bmatrix}, \quad
+\mathbf{D}_3 = \begin{bmatrix} 1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1 \end{bmatrix}
+\]
+</div>
+
+<h5>4×4 Grid Example: Partition Schur Complements</h5>
+
+<div class="equation-box">
+<strong>Part 0:</strong> \(\mathbf{A}_0^{-1} = \frac{1}{3}\begin{bmatrix} 2 & 1 \\ 1 & 2 \end{bmatrix}\)
+\[
+\mathbf{S}_0 = \begin{bmatrix} 2 & -1 \\ -1 & 2 \end{bmatrix} - \frac{1}{3}\begin{bmatrix} 2 & 1 \\ 1 & 2 \end{bmatrix} = \frac{1}{3}\begin{bmatrix} 4 & -4 \\ -4 & 4 \end{bmatrix}
+\]
+Port ordering: [n5, n4]
+</div>
+
+<div class="equation-box">
+<strong>Part 1:</strong> \(\mathbf{A}_1^{-1} = \frac{1}{7}\begin{bmatrix} 3 & 2 & 1 \\ 2 & 6 & 3 \\ 1 & 3 & 5 \end{bmatrix}\)
+\[
+\mathbf{S}_1 = \begin{bmatrix} 1 & -1 & 0 \\ -1 & \frac{11}{7} & -\frac{4}{7} \\ 0 & -\frac{4}{7} & \frac{4}{7} \end{bmatrix}
+\]
+Port ordering: [n5, n9, n4]
+</div>
+
+<div class="equation-box">
+<strong>Part 2:</strong> \(\mathbf{A}_2^{-1} = \frac{1}{3}\begin{bmatrix} 2 & 1 \\ 1 & 2 \end{bmatrix}\)
+\[
+\mathbf{S}_2 = \begin{bmatrix} 1 & -1 & 0 \\ -1 & \frac{7}{3} & -\frac{4}{3} \\ 0 & -\frac{4}{3} & \frac{4}{3} \end{bmatrix}
+\]
+Port ordering: [n5, n6, n7]
+</div>
+
+<div class="equation-box">
+<strong>Part 3:</strong> \(\det \mathbf{A}_3 = 18\), so
+\(\mathbf{A}_3^{-1} = \frac{1}{18}\begin{bmatrix} 7 & 4 & 6 & 5 \\ 4 & 10 & 6 & 8 \\ 6 & 6 & 18 & 12 \\ 5 & 8 & 12 & 19 \end{bmatrix}\)
+\[
+\mathbf{S}_3 = \begin{bmatrix} \frac{11}{18} & -\frac{7}{18} & -\frac{2}{9} \\ -\frac{7}{18} & \frac{11}{18} & -\frac{2}{9} \\ -\frac{2}{9} & -\frac{2}{9} & \frac{4}{9} \end{bmatrix}
+\]
+Port ordering: [n9, n6, n7]
+</div>
+
+<h4>Level 2: Intm Matrices</h4>
+
+<p>Each intm \(i\) assembles partition Schur complements at shared tearing nodes. Let intm \(i\) have \(n_{\text{tnode}}\) tearing nodes, of which \(n_{\text{port}}\) are GPORTs (connected to intm2).</p>
+
+<p><strong>Assembly:</strong> The intm matrix is built by summing partition Schurs using port mappings:</p>
+
+<div class="equation-box">
+\[
+\mathbf{M}_i^{(\text{intm})} = \sum_{p \in \text{partitions of intm } i} \mathbf{P}_p \mathbf{S}_p \mathbf{P}_p^T \quad \in \mathbb{R}^{n_{\text{tnode}} \times n_{\text{tnode}}}
+\]
+where \(\mathbf{P}_p\) is the port mapping matrix from partition \(p\)'s local port indices to intm \(i\)'s tearing node indices.
+</div>
+
+<p><strong>Block Structure:</strong> After reordering to separate internal tearing nodes (LPORTs) from port tearing nodes (GPORTs):</p>
+
+<div class="note">
+    <strong>Two different orderings — do not confuse them.</strong> <code>simIntm</code> keeps its tearing nodes
+    in the <code>tnodes[]</code> array with <em>GPORTs first</em>: indices <code>0 .. nport-1</code> are GPORTs
+    and <code>nport .. ntnode-1</code> are LPORTs (<code>SubGraph::pre_extract</code> comments this as
+    "global_port, local_port, internal nodes"). But <code>simIntm::assign_int_unknown</code>
+    (simIntm.cc:203-214) assigns <em>matrix unknown indices</em> in the opposite order — LPORTs are numbered
+    first (giving <code>nunknown_int</code>), GPORTs last (giving <code>nunknown_port</code>):
+    <div class="implementation-box"><span class="keyword">for</span> (i = nport; i &lt; ntnode; i++)   <span class="comment">// LPORTs -> unknowns 0 .. nunknown_int-1</span>
+  tnodes[i].assign_unknown(nunknown);
+nunknown_int = nunknown;
+<span class="keyword">for</span> (i = 0; i &lt; nport; i++)        <span class="comment">// GPORTs -> the trailing unknowns</span>
+  tnodes[i].assign_unknown(nunknown);
+nunknown_port = nunknown - nunknown_int;</div>
+    So in the <em>matrix</em> index space internal nodes come first and ports last, matching the
+    <code>mtxPart</code> convention (<code>index &lt; nnode - nport</code> ⇒ internal), and the
+    \(\begin{bmatrix}\mathbf{A}&\mathbf{B}\\\mathbf{B}^T&\mathbf{D}\end{bmatrix}\) block form above is
+    correct. The worked example below lists tearing nodes in <em>array</em> order (e.g. [n5, n9, n4] for
+    Intm 0) and then states the internal/port split explicitly.
+</div>
+
+<div class="equation-box">
+\[
+\mathbf{M}_i^{(\text{intm})} =
+\begin{bmatrix}
+\mathbf{A}_i^{(\text{intm})} & \mathbf{B}_i^{(\text{intm})} \\
+\mathbf{B}_i^{(\text{intm})T} & \mathbf{D}_i^{(\text{intm})}
+\end{bmatrix}
+\]
+</div>
+
+<div class="definition-box">
+<strong>Matrix Definitions:</strong>
+<ul>
+    <li>\(\mathbf{A}_i^{(\text{intm})} \in \mathbb{R}^{(n_{\text{tnode}} - n_{\text{port}}) \times (n_{\text{tnode}} - n_{\text{port}})}\) — Internal tearing nodes (LPORTs only)</li>
+    <li>\(\mathbf{B}_i^{(\text{intm})} \in \mathbb{R}^{(n_{\text{tnode}} - n_{\text{port}}) \times n_{\text{port}}}\) — Coupling between internal and port tearing nodes</li>
+    <li>\(\mathbf{D}_i^{(\text{intm})} \in \mathbb{R}^{n_{\text{port}} \times n_{\text{port}}}\) — Port tearing nodes (GPORTs)</li>
+</ul>
+</div>
+
+<p>The <strong>Intm Schur Complement</strong> eliminates internal tearing nodes:</p>
+
+<div class="equation-box">
+\[
+\mathbf{S}_i^{(\text{intm})} = \mathbf{D}_i^{(\text{intm})} - \mathbf{B}_i^{(\text{intm})T} \left(\mathbf{A}_i^{(\text{intm})}\right)^{-1} \mathbf{B}_i^{(\text{intm})} \quad \in \mathbb{R}^{n_{\text{port}} \times n_{\text{port}}}
+\]
+</div>
+
+<h5>4×4 Grid Example: Port Mapping Matrices</h5>
+
+<p>The port mapping matrix \(\mathbf{P}_p \in \mathbb{R}^{n_{\text{tnode}} \times n_{\text{port}}^{(p)}}\) maps partition \(p\)'s local port indices to the intm's tearing node indices. Entry \(\mathbf{P}_p[i,j] = 1\) if partition port \(j\) corresponds to tearing node \(i\).</p>
+
+<p><strong>Intm 0</strong> — Tearing nodes: [tn0=n5, tn1=n9, tn2=n4] (3 tearing nodes)</p>
+
+<div class="equation-box">
+<strong>Part 0</strong> ports [n5, n4] → tearing nodes [tn0, tn2]:
+\[
+\mathbf{P}_0 = \begin{bmatrix} 1 & 0 \\ 0 & 0 \\ 0 & 1 \end{bmatrix} \quad (3 \times 2)
+\]
+
+<strong>Part 1</strong> ports [n5, n9, n4] → tearing nodes [tn0, tn1, tn2]:
+\[
+\mathbf{P}_1 = \begin{bmatrix} 1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1 \end{bmatrix} = \mathbf{I}_3 \quad (3 \times 3)
+\]
+</div>
+
+<p><strong>Intm 1</strong> — Tearing nodes: [tn0=n5, tn1=n9, tn2=n6, tn3=n7] (4 tearing nodes)</p>
+
+<div class="equation-box">
+<strong>Part 2</strong> ports [n5, n6, n7] → tearing nodes [tn0, tn2, tn3]:
+\[
+\mathbf{P}_2 = \begin{bmatrix} 1 & 0 & 0 \\ 0 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1 \end{bmatrix} \quad (4 \times 3)
+\]
+
+<strong>Part 3</strong> ports [n9, n6, n7] → tearing nodes [tn1, tn2, tn3]:
+\[
+\mathbf{P}_3 = \begin{bmatrix} 0 & 0 & 0 \\ 1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1 \end{bmatrix} \quad (4 \times 3)
+\]
+</div>
+
+<h5>4×4 Grid Example: Intm Matrices</h5>
+
+<p><strong>Intm 0</strong> — Tearing nodes: [tn0=n5, tn1=n9, tn2=n4], Ports to intm2: [n5, n9]</p>
+
+<div class="equation-box">
+Using \(\mathbf{M}_0^{(\text{intm})} = \mathbf{P}_0 \mathbf{S}_0 \mathbf{P}_0^T + \mathbf{P}_1 \mathbf{S}_1 \mathbf{P}_1^T\):
+\[
+\mathbf{M}_0^{(\text{intm})} = \begin{bmatrix}
+\frac{4}{3} + 1 & -1 & -\frac{4}{3} + 0 \\
+-1 & \frac{11}{7} & -\frac{4}{7} \\
+-\frac{4}{3} + 0 & -\frac{4}{7} & \frac{4}{3} + \frac{4}{7}
+\end{bmatrix} = \begin{bmatrix}
+\frac{7}{3} & -1 & -\frac{4}{3} \\
+-1 & \frac{11}{7} & -\frac{4}{7} \\
+-\frac{4}{3} & -\frac{4}{7} & \frac{40}{21}
+\end{bmatrix}
+\]
+Tearing node ordering: [n5, n9, n4]
+</div>
+
+<p>Partitioning \(\mathbf{M}_0^{(\text{intm})}\) into internal (n4) and ports (n5, n9):</p>
+
+<div class="equation-box">
+\[
+\mathbf{A}_0^{(\text{intm})} = \begin{bmatrix} \frac{40}{21} \end{bmatrix}, \quad
+\mathbf{B}_0^{(\text{intm})} = \begin{bmatrix} -\frac{4}{3} & -\frac{4}{7} \end{bmatrix}, \quad
+\mathbf{D}_0^{(\text{intm})} = \begin{bmatrix} \frac{7}{3} & -1 \\ -1 & \frac{11}{7} \end{bmatrix}
+\]
+Internal: [n4], Ports: [n5, n9]
+</div>
+
+<p><strong>Intm 1</strong> — Tearing nodes: [tn0=n5, tn1=n9, tn2=n6, tn3=n7], Ports to intm2: [n5, n9]</p>
+
+<div class="equation-box">
+Using \(\mathbf{M}_1^{(\text{intm})} = \mathbf{P}_2 \mathbf{S}_2 \mathbf{P}_2^T + \mathbf{P}_3 \mathbf{S}_3 \mathbf{P}_3^T\):
+\[
+\mathbf{M}_1^{(\text{intm})} = \begin{bmatrix}
+1 & 0 & -1 & 0 \\
+0 & \frac{11}{18} & -\frac{7}{18} & -\frac{2}{9} \\
+-1 & -\frac{7}{18} & \frac{7}{3} + \frac{11}{18} & -\frac{4}{3} - \frac{2}{9} \\
+0 & -\frac{2}{9} & -\frac{4}{3} - \frac{2}{9} & \frac{4}{3} + \frac{4}{9}
+\end{bmatrix} = \begin{bmatrix}
+1 & 0 & -1 & 0 \\
+0 & \frac{11}{18} & -\frac{7}{18} & -\frac{2}{9} \\
+-1 & -\frac{7}{18} & \frac{53}{18} & -\frac{14}{9} \\
+0 & -\frac{2}{9} & -\frac{14}{9} & \frac{16}{9}
+\end{bmatrix}
+\]
+Tearing node ordering: [n5, n9, n6, n7]
+</div>
+
+<p>Partitioning \(\mathbf{M}_1^{(\text{intm})}\) into internal (n6, n7) and ports (n5, n9):</p>
+
+<div class="equation-box">
+\[
+\mathbf{A}_1^{(\text{intm})} = \begin{bmatrix} \frac{53}{18} & -\frac{14}{9} \\ -\frac{14}{9} & \frac{16}{9} \end{bmatrix}, \quad
+\mathbf{B}_1^{(\text{intm})} = \begin{bmatrix} -1 & -\frac{7}{18} \\ 0 & -\frac{2}{9} \end{bmatrix}, \quad
+\mathbf{D}_1^{(\text{intm})} = \begin{bmatrix} 1 & 0 \\ 0 & \frac{11}{18} \end{bmatrix}
+\]
+Internal: [n6, n7], Ports: [n5, n9]
+</div>
+
+<h5>4×4 Grid Example: Intm Schur Complements</h5>
+
+<div class="equation-box">
+<strong>Intm 0:</strong>
+\[
+\mathbf{S}_0^{(\text{intm})} = \mathbf{D}_0^{(\text{intm})} - \mathbf{B}_0^{(\text{intm})T} \left(\mathbf{A}_0^{(\text{intm})}\right)^{-1} \mathbf{B}_0^{(\text{intm})} = \begin{bmatrix} \frac{7}{5} & -\frac{7}{5} \\ -\frac{7}{5} & \frac{7}{5} \end{bmatrix}
+\]
+Port ordering: [n5, n9]
+</div>
+
+<div class="equation-box">
+<strong>Intm 1:</strong>
+\[
+\mathbf{S}_1^{(\text{intm})} = \mathbf{D}_1^{(\text{intm})} - \mathbf{B}_1^{(\text{intm})T} \left(\mathbf{A}_1^{(\text{intm})}\right)^{-1} \mathbf{B}_1^{(\text{intm})} = \begin{bmatrix} \frac{7}{19} & -\frac{7}{19} \\ -\frac{7}{19} & \frac{7}{19} \end{bmatrix}
+\]
+Port ordering: [n5, n9]
+</div>
+
+<h4>Level 3: Intm2 Matrix</h4>
+
+<p>The top-level matrix assembles intm Schur complements at shared GPORT nodes:</p>
+
+<div class="equation-box">
+\[
+\mathbf{M}^{(\text{intm2})} = \sum_{i=0}^{\text{NPART1}-1} \mathbf{Q}_i \mathbf{S}_i^{(\text{intm})} \mathbf{Q}_i^T \quad \in \mathbb{R}^{n_{\text{gport}} \times n_{\text{gport}}}
+\]
+where \(\mathbf{Q}_i\) is the port mapping matrix from intm \(i\)'s GPORT indices to intm2's global tearing node indices, and \(n_{\text{gport}}\) is the total number of unique GPORT nodes.
+</div>
+
+<p>This is the final reduced system to be solved:</p>
+
+<div class="equation-box">
+\[
+\mathbf{M}^{(\text{intm2})} \mathbf{v}^{(\text{gport})} = \tilde{\mathbf{b}}^{(\text{intm2})}
+\]
+where \(\mathbf{v}^{(\text{gport})}\) contains the voltages at all GPORT nodes.
+</div>
+
+<h5>4×4 Grid Example: Intm2 Port Mapping Matrices</h5>
+
+<p>The port mapping matrix \(\mathbf{Q}_i \in \mathbb{R}^{n_{\text{gport}} \times n_{\text{port}}^{(i)}}\) maps intm \(i\)'s port indices to intm2's global tearing node indices. Entry \(\mathbf{Q}_i[j,k] = 1\) if intm port \(k\) corresponds to intm2 tearing node \(j\).</p>
+
+<p><strong>Intm2</strong> — Tearing nodes: [tnode0=n5, tnode1=n9] (2 GPORT nodes)</p>
+
+<div class="equation-box">
+<strong>Intm 0</strong> ports [n5, n9] → intm2 tearing nodes [tnode0, tnode1]:
+\[
+\mathbf{Q}_0 = \begin{bmatrix} 1 & 0 \\ 0 & 1 \end{bmatrix} = \mathbf{I}_2 \quad (2 \times 2)
+\]
+
+<strong>Intm 1</strong> ports [n5, n9] → intm2 tearing nodes [tnode0, tnode1]:
+\[
+\mathbf{Q}_1 = \begin{bmatrix} 1 & 0 \\ 0 & 1 \end{bmatrix} = \mathbf{I}_2 \quad (2 \times 2)
+\]
+</div>
+
+<div class="note">
+<strong>Note:</strong> In this example, both \(\mathbf{Q}_0\) and \(\mathbf{Q}_1\) are identity matrices because both intms have the same port ordering [n5, n9] which matches intm2's tearing node ordering. In general, when intms share all GPORTs with the same ordering, the Q matrices are identity matrices and the assembly simplifies to a direct sum.
+</div>
+
+<h5>4×4 Grid Example: Intm2 Matrix</h5>
+
+<p>Using \(\mathbf{M}^{(\text{intm2})} = \mathbf{Q}_0 \mathbf{S}_0^{(\text{intm})} \mathbf{Q}_0^T + \mathbf{Q}_1 \mathbf{S}_1^{(\text{intm})} \mathbf{Q}_1^T = \mathbf{S}_0^{(\text{intm})} + \mathbf{S}_1^{(\text{intm})}\):</p>
+
+<div class="equation-box">
+\[
+\mathbf{M}^{(\text{intm2})} = \begin{bmatrix} \frac{7}{5} & -\frac{7}{5} \\ -\frac{7}{5} & \frac{7}{5} \end{bmatrix} + \begin{bmatrix} \frac{7}{19} & -\frac{7}{19} \\ -\frac{7}{19} & \frac{7}{19} \end{bmatrix} = \begin{bmatrix} \frac{7}{5} + \frac{7}{19} & -\frac{7}{5} - \frac{7}{19} \\ -\frac{7}{5} - \frac{7}{19} & \frac{7}{5} + \frac{7}{19} \end{bmatrix}
+\]
+\[
+\mathbf{M}^{(\text{intm2})} = \begin{bmatrix} \frac{168}{95} & -\frac{168}{95} \\ -\frac{168}{95} & \frac{168}{95} \end{bmatrix}
+\]
+Tearing node ordering: [n5, n9]
+</div>
+
+<div class="note">
+<strong>Verification:</strong> Every row of \(\mathbf{M}^{(\text{intm2})}\) sums to <em>zero</em>, and so does every
+row of each \(\mathbf{S}_p\), \(\mathbf{M}_i^{(\text{intm})}\) and \(\mathbf{S}_i^{(\text{intm})}\) above. This is the
+expected result and a useful self-check: the grid is a pure resistor network with no connection to ground,
+so its conductance matrix is a graph Laplacian and annihilates the constant vector \(\mathbf{1}\). Schur
+complementation preserves that property — if \(\mathbf{M}\mathbf{1} = \mathbf{0}\) then
+\(\mathbf{S}\mathbf{1} = \mathbf{0}\) — so the reduced matrix at every level must also have zero row sums,
+and \(\mathbf{M}^{(\text{intm2})}\) is singular. In a real IR-drop solve the system is made non-singular by
+voltage sources (grounded nodes), which is what breaks the zero-row-sum structure; this example has none.
+</div>
+
+<div class="note">
+<strong>End-to-end check:</strong> Eliminating all 14 non-port nodes directly from the full 16×16 grid
+Laplacian gives
+\(\begin{bmatrix} 168/95 & -168/95 \\ -168/95 & 168/95 \end{bmatrix}\) — identical to the hierarchically
+assembled \(\mathbf{M}^{(\text{intm2})}\) above. This confirms Theorem (Section 10) numerically on this
+example: the two-level Schur reduction reproduces the monolithic reduction exactly.
+</div>
+
+<h3>11.3 RHS Compression at Each Level</h3>
+
+<p>During the forward solve phase, the RHS vector is compressed at each level using the Schur complement. This section shows the RHS compression formulas and their application to the 4×4 grid example.</p>
+
+<h4>Level 1: Partition RHS Compression</h4>
+
+<p>For each partition \(p\), the original RHS is split into internal and port components. The compressed port RHS eliminates the internal contribution:</p>
+
+<div class="equation-box">
+\[
+\tilde{\mathbf{b}}_p^{(\text{port})} = \mathbf{b}_p^{(\text{port})} - \mathbf{B}_p^T \mathbf{A}_p^{-1} \mathbf{b}_p^{(\text{int})}
+\]
+</div>
+
+<h5>4×4 Grid Example: Partition RHS Compression</h5>
+
+<p>Assuming current sources inject current \(I\) at node n0 and extract at node n15 (i.e., \(b_0 = I\), \(b_{15} = -I\), all others zero):</p>
+
+<p><strong>Part 0</strong> — Internal RHS: \(\mathbf{b}_0^{(\text{int})} = [I, 0]^T\), Port RHS: \(\mathbf{b}_0^{(\text{port})} = [0, 0]^T\)</p>
+
+<div class="equation-box">
+\[
+\mathbf{A}_0^{-1} = \frac{1}{3}\begin{bmatrix} 2 & 1 \\ 1 & 2 \end{bmatrix}, \quad
+\mathbf{A}_0^{-1} \mathbf{b}_0^{(\text{int})} = \frac{1}{3}\begin{bmatrix} 2I \\ I \end{bmatrix}
+\]
+\[
+\mathbf{B}_0^T \mathbf{A}_0^{-1} \mathbf{b}_0^{(\text{int})} = \begin{bmatrix} 0 & -1 \\ -1 & 0 \end{bmatrix} \frac{1}{3}\begin{bmatrix} 2I \\ I \end{bmatrix} = \begin{bmatrix} -I/3 \\ -2I/3 \end{bmatrix}
+\]
+\[
+\tilde{\mathbf{b}}_0^{(\text{port})} = \begin{bmatrix} 0 \\ 0 \end{bmatrix} - \begin{bmatrix} -I/3 \\ -2I/3 \end{bmatrix} = \begin{bmatrix} I/3 \\ 2I/3 \end{bmatrix}
+\]
+Port ordering: [n5, n4]
+</div>
+
+<p><strong>Part 1</strong> — Internal RHS: \(\mathbf{b}_1^{(\text{int})} = [0, 0, 0]^T\), Port RHS: \(\mathbf{b}_1^{(\text{port})} = [0, 0, 0]^T\)</p>
+
+<div class="equation-box">
+\[
+\tilde{\mathbf{b}}_1^{(\text{port})} = \mathbf{b}_1^{(\text{port})} - \mathbf{B}_1^T \mathbf{A}_1^{-1} \mathbf{0} = \begin{bmatrix} 0 \\ 0 \\ 0 \end{bmatrix}
+\]
+Port ordering: [n5, n9, n4]
+</div>
+
+<p><strong>Part 2</strong> — Internal RHS: \(\mathbf{b}_2^{(\text{int})} = [0, 0]^T\), Port RHS: \(\mathbf{b}_2^{(\text{port})} = [0, 0, 0]^T\)</p>
+
+<div class="equation-box">
+\[
+\tilde{\mathbf{b}}_2^{(\text{port})} = \begin{bmatrix} 0 \\ 0 \\ 0 \end{bmatrix}
+\]
+Port ordering: [n5, n6, n7]
+</div>
+
+<p><strong>Part 3</strong> — Internal RHS: \(\mathbf{b}_3^{(\text{int})} = [0, 0, 0, -I]^T\) (node n15 has \(-I\)), Port RHS: \(\mathbf{b}_3^{(\text{port})} = [0, 0, 0]^T\)</p>
+
+<div class="equation-box">
+\[
+\mathbf{A}_3^{-1} \mathbf{b}_3^{(\text{int})} = \mathbf{A}_3^{-1} \begin{bmatrix} 0 \\ 0 \\ 0 \\ -I \end{bmatrix}
+= -\frac{I}{18}\begin{bmatrix} 5 \\ 8 \\ 12 \\ 19 \end{bmatrix}
+\]
+(the 4th column of \(\mathbf{A}_3^{-1}\), scaled by \(-I\)). Then:
+\[
+\tilde{\mathbf{b}}_3^{(\text{port})} = \mathbf{0} - \mathbf{B}_3^T \left(-\frac{I}{18}\begin{bmatrix} 5 \\ 8 \\ 12 \\ 19 \end{bmatrix}\right)
+= \begin{bmatrix} -\frac{5I}{18} \\ -\frac{5I}{18} \\ -\frac{4I}{9} \end{bmatrix}
+\]
+Port ordering: [n9, n6, n7]
+</div>
+
+<h4>Level 2: Intm RHS Assembly and Compression</h4>
+
+<p>The intm RHS is assembled from partition compressed RHS vectors using the port mapping matrices:</p>
+
+<div class="equation-box">
+\[
+\mathbf{b}_i^{(\text{intm})} = \sum_{p \in \text{intm } i} \mathbf{P}_p \tilde{\mathbf{b}}_p^{(\text{port})}
+\]
+</div>
+
+<p>This assembled RHS is then split into internal (LPORT) and port (GPORT) components, and compressed:</p>
+
+<div class="equation-box">
+\[
+\tilde{\mathbf{b}}_i^{(\text{port})} = \mathbf{b}_i^{(\text{port})} - \mathbf{B}_i^{(\text{intm})T} \left(\mathbf{A}_i^{(\text{intm})}\right)^{-1} \tilde{\mathbf{b}}_i^{(\text{int})}
+\]
+</div>
+
+<h5>4×4 Grid Example: Intm RHS Assembly and Compression</h5>
+
+<p><strong>Intm 0</strong> — Tearing nodes [n5, n9, n4]; n4 is LPORT (internal), [n5, n9] are GPORTs (ports)</p>
+
+<div class="equation-box">
+Assembly from Part 0 and Part 1:
+\[
+\mathbf{b}_0^{(\text{intm})} = \mathbf{P}_0 \tilde{\mathbf{b}}_0^{(\text{port})} + \mathbf{P}_1 \tilde{\mathbf{b}}_1^{(\text{port})}
+\]
+\[
+= \begin{bmatrix} 1 & 0 \\ 0 & 0 \\ 0 & 1 \end{bmatrix} \begin{bmatrix} I/3 \\ 2I/3 \end{bmatrix} + \mathbf{I}_3 \begin{bmatrix} 0 \\ 0 \\ 0 \end{bmatrix}
+= \begin{bmatrix} I/3 \\ 0 \\ 2I/3 \end{bmatrix}
+\]
+Tearing node ordering: [n5, n9, n4]
+
+<p>Split: \(\tilde{\mathbf{b}}_0^{(\text{int})} = [2I/3]\) (n4), \(\mathbf{b}_0^{(\text{port})} = [I/3, 0]^T\) ([n5, n9])</p>
+
+Compression:
+\[
+\tilde{\mathbf{b}}_0^{(\text{port})} = \begin{bmatrix} I/3 \\ 0 \end{bmatrix} - \mathbf{B}_0^{(\text{intm})T} \left(\mathbf{A}_0^{(\text{intm})}\right)^{-1} \begin{bmatrix} \tfrac{2I}{3} \end{bmatrix}
+= \begin{bmatrix} I/3 \\ 0 \end{bmatrix} - \begin{bmatrix} -\tfrac{4}{3} \\ -\tfrac{4}{7} \end{bmatrix}\tfrac{21}{40}\cdot\tfrac{2I}{3}
+= \begin{bmatrix} \tfrac{4I}{5} \\ \tfrac{I}{5} \end{bmatrix}
+\]
+Port ordering: [n5, n9]
+</div>
+
+<p><strong>Intm 1</strong> — Tearing nodes [n5, n9, n6, n7]; [n6, n7] are LPORTs (internal), [n5, n9] are GPORTs (ports)</p>
+
+<div class="equation-box">
+Assembly from Part 2 and Part 3:
+\[
+\mathbf{b}_1^{(\text{intm})} = \mathbf{P}_2 \tilde{\mathbf{b}}_2^{(\text{port})} + \mathbf{P}_3 \tilde{\mathbf{b}}_3^{(\text{port})}
+= \begin{bmatrix} 0 \\ 0 \\ 0 \\ 0 \end{bmatrix} + \begin{bmatrix} 0 \\ -\tfrac{5I}{18} \\ -\tfrac{5I}{18} \\ -\tfrac{4I}{9} \end{bmatrix}
+= \begin{bmatrix} 0 \\ -\tfrac{5I}{18} \\ -\tfrac{5I}{18} \\ -\tfrac{4I}{9} \end{bmatrix}
+\]
+Tearing node ordering: [n5, n9, n6, n7]
+
+<p>Split: \(\tilde{\mathbf{b}}_1^{(\text{int})} = \left[-\tfrac{5I}{18}, -\tfrac{4I}{9}\right]^T\) ([n6, n7]),
+\(\mathbf{b}_1^{(\text{port})} = \left[0, -\tfrac{5I}{18}\right]^T\) ([n5, n9])</p>
+
+Compression:
+\[
+\tilde{\mathbf{b}}_1^{(\text{port})} = \mathbf{b}_1^{(\text{port})} - \mathbf{B}_1^{(\text{intm})T} \left(\mathbf{A}_1^{(\text{intm})}\right)^{-1} \tilde{\mathbf{b}}_1^{(\text{int})}
+= \begin{bmatrix} -\tfrac{8I}{19} \\ -\tfrac{11I}{19} \end{bmatrix}
+\]
+Port ordering: [n5, n9]
+</div>
+
+<h4>Level 3: Intm2 RHS Assembly</h4>
+
+<p>The intm2 RHS is assembled from intm compressed port RHS vectors using the Q mapping matrices:</p>
+
+<div class="equation-box">
+\[
+\tilde{\mathbf{b}}^{(\text{intm2})} = \sum_{i=0}^{1} \mathbf{Q}_i \tilde{\mathbf{b}}_i^{(\text{port})}
+\]
+</div>
+
+<h5>4×4 Grid Example: Intm2 RHS Assembly</h5>
+
+<div class="equation-box">
+\[
+\tilde{\mathbf{b}}^{(\text{intm2})} = \mathbf{Q}_0 \tilde{\mathbf{b}}_0^{(\text{port})} + \mathbf{Q}_1 \tilde{\mathbf{b}}_1^{(\text{port})}
+\]
+Since \(\mathbf{Q}_0 = \mathbf{Q}_1 = \mathbf{I}_2\):
+\[
+\tilde{\mathbf{b}}^{(\text{intm2})} = \tilde{\mathbf{b}}_0^{(\text{port})} + \tilde{\mathbf{b}}_1^{(\text{port})}
+= \begin{bmatrix} \tfrac{4I}{5} \\ \tfrac{I}{5} \end{bmatrix} + \begin{bmatrix} -\tfrac{8I}{19} \\ -\tfrac{11I}{19} \end{bmatrix}
+= \begin{bmatrix} \tfrac{36I}{95} \\ -\tfrac{36I}{95} \end{bmatrix}
+\]
+Tearing node ordering: [n5, n9]
+</div>
+
+<div class="note">
+<strong>End-to-end check:</strong> Compressing the RHS directly on the full 16×16 system — eliminating all
+14 non-port nodes in one step — also yields \(\left[\tfrac{36I}{95},\, -\tfrac{36I}{95}\right]^T\), matching
+the hierarchically assembled result. Note the two entries sum to zero, as they must: the reduced RHS is a
+current balance, and the only sources are \(+I\) at n0 and \(-I\) at n15.
+</div>
+
+<div class="note">
+<strong>On solving this example:</strong> as noted in Section 11.2, \(\mathbf{M}^{(\text{intm2})}\) is singular
+here (zero row sums, no grounded node), so \(\mathbf{M}^{(\text{intm2})}\mathbf{w} = \tilde{\mathbf{b}}^{(\text{intm2})}\)
+determines \(v_5 - v_9 = \tfrac{36}{95}\cdot\tfrac{95}{168}I = \tfrac{3}{14}I\) but not the absolute
+voltages. This is the expected behaviour of a floating network, not a defect of the method; adding a single
+voltage source removes the null space.
+</div>
+
+<div class="note">
+<strong>Physical Interpretation:</strong> The RHS compression propagates external current injections up through the hierarchy. Current injected at internal nodes creates an "equivalent current" at port nodes through the Schur complement transformation. This ensures current conservation: the total current entering the circuit equals the total current leaving.
+</div>
+
+<h3>11.4 Back-Propagation</h3>
+
+<p><strong>Step 1: Solve top-level</strong></p>
+<div class="equation-box">
+    \[
+    \mathbf{M}^{(\text{intm2})} \mathbf{x}^{(\text{gport})} = \tilde{\mathbf{b}}^{(\text{intm2})}
+    \]
+    Solution: \(\mathbf{x}^{(\text{gport})} = [v_5, v_9]^T\) (2×1)
+</div>
+
+<p><strong>Step 2: Propagate to intm internal tearing nodes</strong></p>
+<div class="equation-box">
+    For each intm \(i\):
+    \[
+    \mathbf{x}_i^{(\text{int})} = \mathbf{A}_i^{(\text{intm})-1} \left( \tilde{\mathbf{b}}_i^{(\text{int})} - \mathbf{B}_i^{(\text{intm})} \mathbf{x}_i^{(\text{port})} \right)
+    \]
+
+    <strong>Intm 0:</strong> \(\mathbf{x}_{\text{intm0}}^{(\text{int})} = [v_4]^T\) (1×1), given \(\mathbf{x}_{\text{intm0}}^{(\text{port})} = [v_5, v_9]^T\)
+
+    <strong>Intm 1:</strong> \(\mathbf{x}_{\text{intm1}}^{(\text{int})} = [v_6, v_7]^T\) (2×1), given \(\mathbf{x}_{\text{intm1}}^{(\text{port})} = [v_5, v_9]^T\)
+</div>
+
+<p><strong>Step 3: Propagate to partition internal nodes</strong></p>
+<div class="equation-box">
+    For each partition \(p\):
+    \[
+    \mathbf{x}_p^{(\text{int})} = \mathbf{A}_p^{-1} \left( \mathbf{b}_p^{(\text{int})} - \mathbf{B}_p \mathbf{x}_p^{(\text{port})} \right)
+    \]
+
+    <strong>Part 0:</strong> \(\mathbf{x}_0^{(\text{int})} = [v_0, v_1]^T\) (2×1), given \(\mathbf{x}_0^{(\text{port})} = [v_5, v_4]^T\)
+
+    <strong>Part 1:</strong> \(\mathbf{x}_1^{(\text{int})} = [v_8, v_{12}, v_{13}]^T\) (3×1), given \(\mathbf{x}_1^{(\text{port})} = [v_5, v_9, v_4]^T\)
+
+    <strong>Part 2:</strong> \(\mathbf{x}_2^{(\text{int})} = [v_2, v_3]^T\) (2×1), given \(\mathbf{x}_2^{(\text{port})} = [v_5, v_6, v_7]^T\)
+
+    <strong>Part 3:</strong> \(\mathbf{x}_3^{(\text{int})} = [v_{10}, v_{11}, v_{14}, v_{15}]^T\) (4×1), given \(\mathbf{x}_3^{(\text{port})} = [v_9, v_6, v_7]^T\)
+</div>
+
+<!-- ============== TRACE ============== -->
+
+<h2 id="section12">12. Implementation Trace for 2×2</h2>
+
+<div class="note">
+    <strong>Sequential presentation.</strong> The trace below is linearised for readability. In the real code
+    (<code>simIntm2::build_mtx_intms</code>, simIntm2.cc:984, and <code>build_mtx_intm2</code>, simIntm2.cc:1116)
+    the per-intm and per-partition steps are dispatched to a <code>ThreadPool</code> and run concurrently,
+    with <code>join_threads()</code> as the barrier between stages; <code>build_mtx_intm2</code> additionally
+    sorts the intms by port count before dispatch, so the <code>build_schur</code> calls do not necessarily
+    execute in index order. Under MPI each rank handles only its own slice <code>[rank*npp, (rank+1)*npp)</code>.
+    The data dependencies are exactly as shown — only the execution order within a stage differs.
+</div>
+
+<div class="flowchart">
+build_matrices(step):        // simIntm2.cc:4364 - wrapper, calls the two below
+│
+build_mtx_intms(step):       // simIntm2.cc:984  (called at 4399)
+│
+├─► intms[0]->build_mtx_parts(&step):          // Intm 0: nodes {0,1,4,5,8,9,12,13}
+│   ├─► parts[0]->stamp_mtx_build_schur(&tol): // Part 0: nodes {0,1,4,5}
+│   │   ├── stamp_mtx()          // Fill A₀, B₀, D₀
+│   │   ├── create_port_map()    // Map local ports → intm0 tearing nodes
+│   │   └── build_schur()        // Factor A₀, compute S₀^{part}
+│   │
+│   └─► parts[1]->stamp_mtx_build_schur(&tol): // Part 1: nodes {8,9,12,13}
+│       └── (same steps for partition 1)
+│
+├─► intms[0]->collect_intm_mtx():
+│   ├── parts[0]->fill_intm_mtx(intm_mtx)  // Add S₀ to M₀^{intm}
+│   └── parts[1]->fill_intm_mtx(intm_mtx)  // Add S₁ to M₀^{intm}
+│
+├─► intms[1]->build_mtx_parts(&step):          // Intm 1: nodes {2,3,6,7,10,11,14,15} + GPORT copies
+│   ├─► parts[2]->stamp_mtx_build_schur(&tol): // Part 2: nodes {2,3,6,7}
+│   └─► parts[3]->stamp_mtx_build_schur(&tol): // Part 3: nodes {10,11,14,15}
+│
+├─► intms[1]->collect_intm_mtx():
+│   ├── parts[2]->fill_intm_mtx(intm_mtx)  // Add S₂ to M₁^{intm}
+│   └── parts[3]->fill_intm_mtx(intm_mtx)  // Add S₃ to M₁^{intm}
+│
+build_mtx_intm2():           // simIntm2.cc:1116 (called at 4405)
+│
+├─► intms[0]->build_schur(&threshold):
+│   ├── intm_mtx->reorder_factor_mtx()  // Factor A₀^{intm}
+│   └── intm_mtx->build_schur()         // Compute S₀^{intm}
+│
+├─► intms[1]->build_schur(&threshold):
+│   ├── intm_mtx->reorder_factor_mtx()  // Factor A₁^{intm}
+│   └── intm_mtx->build_schur()         // Compute S₁^{intm}
+│
+└─► collect_intm2_mtx():
+    ├── intms[0]->fill_intm2_mtx(intm2_mtx)  // Add S₀^{intm}
+    └── intms[1]->fill_intm2_mtx(intm2_mtx)  // Add S₁^{intm}
+
+compress_collect(time):
+│
+├─► For each partition: stamp_rhs(), compress_rhs()
+│   // b̃_{i,j}^{port} = b_{i,j}^{port} - B_{i,j}^T A_{i,j}^{-1} b_{i,j}^{int}
+│
+├─► For each intm: collect_intm_rhs(), compress_rhs()
+│   // b̃_i^{port} = b_i^{port} - (B_i^{intm})^T (A_i^{intm})^{-1} b_i^{int}
+│
+└─► collect_intm2_rhs()
+    // Assemble b̃^{intm2}
+
+build_direct():
+│
+└── intm2_mtx->factor()  // Factor M^{intm2}
+
+solve_direct():
+│
+└── intm2_mtx->solve(rhs, sol)  // Solve M^{intm2} · w = b̃^{intm2}
+
+update_propagate():
+│
+├─► For each intm i:
+│   ├── update_port_intm(sol)  // u_i^{port} ← w[port_map[i]]
+│   ├── propagate_intm()       // u_i^{int} = (A_i^{intm})^{-1}(b_i^{int} - B_i u_i^{port})
+│   │
+│   └─► For each partition (i,j):
+│       ├── update_port()      // v_{i,j}^{port} ← u_i[port_map[j]]
+│       └── propagate()        // v_{i,j}^{int} = A_{i,j}^{-1}(b_{i,j}^{int} - B_{i,j} v_{i,j}^{port})
+</div>
+
+<!-- ============== MAPPING TABLE ============== -->
+
+<h2 id="section13">13. Summary: Mathematical ↔ Implementation Mapping</h2>
+
+<table>
+    <tr>
+        <th>Mathematical Concept</th>
+        <th>Implementation</th>
+    </tr>
+    <tr>
+        <td>\(\mathbf{A}_{i,j}\) (internal matrix)</td>
+        <td><code>part_mtx->mtx</code></td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{B}_{i,j}\) (coupling)</td>
+        <td><code>part_mtx->cmtx</code></td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{D}_{i,j}\) (port matrix)</td>
+        <td><code>part_mtx->intm</code> (initial)</td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{S}_{i,j}^{(\text{part})}\)</td>
+        <td><code>part_mtx->schur</code> (dense) or <code>part_mtx->intm</code> (sparse)</td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{b}_{i,j}^{(\text{int})}\)</td>
+        <td><code>part_mtx->r1</code></td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{b}_{i,j}^{(\text{port})}\)</td>
+        <td><code>part_mtx->r2</code></td>
+    </tr>
+    <tr>
+        <td>\(\tilde{\mathbf{b}}_{i,j}^{(\text{port})}\)</td>
+        <td><code>part_mtx->work2</code> (after compress_rhs)</td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{v}_{i,j}^{(\text{int})}\)</td>
+        <td><code>part_mtx->s1</code></td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{v}_{i,j}^{(\text{port})}\)</td>
+        <td><code>part_mtx->s2</code></td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{P}_{i,j}\) (port mapping)</td>
+        <td><code>simPart::port_map[]</code></td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{Q}_i\) (intm port mapping)</td>
+        <td><code>simIntm::port_map[]</code></td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{A}_{i,j}^{-1}\mathbf{x}\)</td>
+        <td><code>mtx->solve(&x, &result)</code></td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{y} - \mathbf{B}^T\mathbf{x}\)</td>
+        <td><code>cmtx->ymAtx(&y, &x)</code></td>
+    </tr>
+    <tr>
+        <td>\(\mathbf{y} - \mathbf{B}\mathbf{x}\)</td>
+        <td><code>cmtx->ymAx(&y, &x)</code></td>
+    </tr>
+</table>
+
+<!-- ============== DC SOLVE FLOW ============== -->
+
+<div class="phase-header">DC Solve Application</div>
+
+<h2 id="section14">14. DC Solve Flow in ir_drop.cc</h2>
+
+<p>This section describes how the hierarchical solver is applied for DC analysis in the <code>ir_drop.cc</code> implementation.</p>
+
+<h3>14.1 Entry Point: static_IR()</h3>
+
+<p>The main DC solve entry point is <code>IRDrop::static_IR()</code> (ir_drop.cc:240-323):</p>
+
+<div class="implementation-box">
+<span class="keyword">void</span> <span class="function">IRDrop::static_IR</span>(<span class="keyword">int</span> iter, <span class="keyword">int</span> maxiter)
+{
+  simIntm2 *intm2 = sim->get_intm2();
+
+  <span class="comment">// Configure solver settings. Note slv_type is forced to ITERATIVE</span>
+  <span class="comment">// unconditionally here: static IR always uses the CG path, regardless</span>
+  <span class="comment">// of any user setting. (The previous int_method is saved and restored.)</span>
+  Opts::int_method = BE;        <span class="comment">// Backward Euler</span>
+  Opts::sol_method = V;         <span class="comment">// Voltage-based</span>
+  Opts::slv_type = ITERATIVE;   <span class="comment">// CG, hierarchical direct solve as preconditioner</span>
+
+  <span class="comment">// Phase 1-4: Build all matrices and Schur complements</span>
+  <span class="keyword">if</span> (iter == 0) {
+    intm2->build_matrices(0);   <span class="comment">// Encompasses phases 1-4</span>
+  }
+
+  <span class="comment">// Phase 5: RHS compression</span>
+  intm2->set_isrc_average_voltage(<span class="keyword">true</span>);  <span class="comment">// reset to disable scaling</span>
+  intm2->compress_collect_partial(iter * 1.0);
+
+  <span class="comment">// Phase 6: Iterative solve at top level</span>
+  intm2->solve_iter(Opts::CG_MAX_ITERATION_NUMBER_DC,
+                    Opts::CG_MIN_ITERATION_NUMBER,
+                    Opts::CG_RESD_TOLERANCE_DC);
+
+  <span class="comment">// Phase 7: Back-propagate solution to all partitions</span>
+  intm2->update_propagate_partial();
+}
+</div>
+
+<h3>14.2 Key Method Mapping to Hierarchical Phases</h3>
+
+<table>
+    <tr>
+        <th>ir_drop.cc Call</th>
+        <th>Hierarchical Phase</th>
+        <th>Description</th>
+    </tr>
+    <tr>
+        <td><code>intm2->build_matrices(0)</code></td>
+        <td>1-4</td>
+        <td>Build partition matrices, factor A, compute all Schur complements</td>
+    </tr>
+    <tr>
+        <td><code>intm2->compress_collect_partial()</code></td>
+        <td>5</td>
+        <td>Stamp RHS, compress via \(\tilde{\mathbf{b}} = \mathbf{b} - \mathbf{B}^T \mathbf{A}^{-1} \mathbf{b}_{\text{int}}\)</td>
+    </tr>
+    <tr>
+        <td><code>intm2->solve_iter()</code></td>
+        <td>6</td>
+        <td>CG solve of reduced system \(\mathbf{M}^{(\text{intm2})} \mathbf{w} = \tilde{\mathbf{b}}^{(\text{intm2})}\)</td>
+    </tr>
+    <tr>
+        <td><code>intm2->update_propagate_partial()</code></td>
+        <td>7</td>
+        <td>Recover \(\mathbf{v}_{\text{int}} = \mathbf{A}^{-1}(\mathbf{b}_{\text{int}} - \mathbf{B} \mathbf{v}_{\text{port}})\) at each level</td>
+    </tr>
+</table>
+
+<h3>14.3 Current Source Scaling (Optional)</h3>
+
+<p>For improved accuracy, the DC solve can iterate with voltage-dependent current scaling (ir_drop.cc:287-300):</p>
+
+<div class="implementation-box">
+<span class="keyword">if</span> (Opts::USE_CURRENT_SRC_SCALING && !Opts::DC_mode_tran_DC) {
+  <span class="keyword">for</span> (<span class="keyword">int</span> i = 1; i < Opts::CURRENT_SRC_SCALING_DC_MAXITER; i++) {
+    intm2->set_isrc_average_voltage(<span class="keyword">false</span>);   <span class="comment">// enable scaling</span>
+    intm2->compress_collect_partial(i);       <span class="comment">// re-stamp with scaled currents</span>
+    intm2->solve_iter(...);
+    intm2->update_propagate_partial();
+  }
+}
+</div>
+
+<h3>14.4 Grid Resistance Analysis</h3>
+
+<p>The <code>grid_resistance()</code> function (ir_drop.cc:589) uses the same hierarchical framework for point-to-point resistance calculation:</p>
+
+<div class="implementation-box">
+<span class="keyword">void</span> <span class="function">IRDrop::grid_resistance</span>()
+{
+  intm2->build_matrices(0);              <span class="comment">// Phase 1-4</span>
+
+  <span class="keyword">for</span> (each instance) {
+    intm2->reset_sol();
+    intm2->setup_rhs(arg);               <span class="comment">// Inject 1A at probe points</span>
+    intm2->compress_collect_partial(0);  <span class="comment">// Phase 5</span>
+    intm2->solve_iter(...);              <span class="comment">// Phase 6</span>
+    intm2->update_propagate_partial();   <span class="comment">// Phase 7</span>
+
+    found = intm2->get_sols(arg, psol, nsol);  <span class="comment">// R = V/I</span>
+  }
+}
+</div>
+
+<h3>14.5 Data Flow Diagram</h3>
+
+<div class="flowchart">
+┌─────────────────────────────────────────────────────────────────────┐
+│                        build_matrices(0)                            │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐               │
+│  │ simPart[i,j]│   │ simPart[i,j]│   │ simPart[i,j]│               │
+│  │ Factor A    │   │ Factor A    │   │ Factor A    │   (parallel)  │
+│  │ S = D-B'A⁻¹B│   │ S = D-B'A⁻¹B│   │ S = D-B'A⁻¹B│               │
+│  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘               │
+│         │    fill_intm_mtx│                 │                       │
+│         └─────────┬───────┴─────────────────┘                       │
+│                   ▼                                                 │
+│           ┌──────────────┐                                         │
+│           │   simIntm[i] │    (assemble partition Schurs)          │
+│           │  S_intm = ΣS │                                         │
+│           └──────┬───────┘                                         │
+│                  │ fill_intm2_mtx                                   │
+│                  ▼                                                 │
+│           ┌──────────────┐                                         │
+│           │   simIntm2   │    (assemble intm Schurs)               │
+│           │ M_intm2 = ΣS │                                         │
+│           └──────────────┘                                         │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                   compress_collect_partial()                        │
+│  ┌─────────────┐                                                   │
+│  │ simPart[i,j]│  stamp_rhs(): b_int, b_port from sources          │
+│  │ compress_rhs│  b̃_port = b_port - B'A⁻¹b_int                     │
+│  └──────┬──────┘                                                   │
+│         │ fill_intm_rhs (add to tearing node RHS)                   │
+│         ▼                                                          │
+│  ┌──────────────┐                                                  │
+│  │  simIntm[i]  │  compress intm RHS similarly                     │
+│  └──────┬───────┘                                                  │
+│         │ fill_intm2_rhs                                            │
+│         ▼                                                          │
+│  ┌──────────────┐                                                  │
+│  │   simIntm2   │  final reduced RHS b̃_intm2                       │
+│  └──────────────┘                                                  │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                         solve_iter()                                │
+│  ┌──────────────┐                                                  │
+│  │   simIntm2   │  CG solve: M_intm2 · w = b̃_intm2                 │
+│  │              │  w = voltages at top-level tearing nodes         │
+│  └──────────────┘                                                  │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    update_propagate_partial()                       │
+│  ┌──────────────┐                                                  │
+│  │   simIntm2   │  w already known                                 │
+│  └──────┬───────┘                                                  │
+│         │ update_port_intm (copy w to intm ports)                   │
+│         ▼                                                          │
+│  ┌──────────────┐                                                  │
+│  │  simIntm[i]  │  propagate_intm: u_int = A⁻¹(b_int - B·u_port)   │
+│  └──────┬───────┘                                                  │
+│         │ update_port (copy to partition ports)                     │
+│         ▼                                                          │
+│  ┌─────────────┐                                                   │
+│  │ simPart[i,j]│  propagate: v_int = A⁻¹(b_int - B·v_port)         │
+│  │             │  → All node voltages recovered                    │
+│  └─────────────┘                                                   │
+└─────────────────────────────────────────────────────────────────────┘
+</div>
+
+<!-- ============== DIRECT VS CG ============== -->
+
+<div class="phase-header">Direct Solve vs Iterative Solve</div>
+
+<h2 id="section15">15. Direct Solve vs Iterative (CG) Solve</h2>
+
+<p>This section explains why the iterative Conjugate Gradient (CG) solver is used instead of relying solely on the hierarchical direct solve.</p>
+
+<h3>15.1 Key Finding: Direct Solve is NOT Exact Due to Sparsification</h3>
+
+<p>The hierarchical Schur complement solver uses <strong>sparsification</strong> to reduce memory usage and improve performance. Small entries are dropped from Schur complements:</p>
+
+<div class="implementation-box">
+<span class="comment">// utils/options/option_globals.h:54-55 - namespace OptionDefaultValues (defaults only)</span>
+<span class="keyword">constexpr double</span> LEVEL1_SCHUR_TOL = 1.0e-4;
+<span class="keyword">constexpr double</span> LEVEL2_SCHUR_TOL = 1.0e-4;
+
+<span class="comment">// simulator/admin/global.h:298-300 - the actual mutable options</span>
+<span class="keyword">namespace</span> Opts {
+  <span class="keyword">extern double</span> LEVEL1_SCHUR_TOL;  <span class="comment">// LEVEL1/LEVEL2 are for the preconditioner</span>
+  <span class="keyword">extern double</span> LEVEL2_SCHUR_TOL;
+  <span class="keyword">extern double</span> PART_SCHUR_TOL;    <span class="comment">// stores an accurate but sparsified per-part schur</span>
+}
+
+<span class="comment">// simulator/admin/main.cc:259-261 - definitions and defaults</span>
+<span class="keyword">double</span> LEVEL1_SCHUR_TOL = OptionDefaultValues::LEVEL1_SCHUR_TOL;  <span class="comment">// 1e-4</span>
+<span class="keyword">double</span> LEVEL2_SCHUR_TOL = OptionDefaultValues::LEVEL2_SCHUR_TOL;  <span class="comment">// 1e-4</span>
+<span class="keyword">double</span> PART_SCHUR_TOL   = 1.0e-5;
+</div>
+
+<div class="note">
+    <strong>Important:</strong> The <code>constexpr</code> values in <code>option_globals.h</code> are
+    <em>defaults</em> living in <code>namespace OptionDefaultValues</code>. The variables actually read at
+    runtime are the mutable <code>double</code>s in <code>namespace Opts</code> (defined in
+    <code>admin/main.cc</code>), which is why code elsewhere can assign
+    <code>Opts::LEVEL1_SCHUR_TOL = 0</code> (Section 15.6).
+</div>
+
+<div class="note">
+    <strong>What sparsification actually does:</strong> a small off-diagonal entry is not simply discarded —
+    it is <em>lumped onto the two diagonal entries</em> of its row and column
+    (<code>mtxOpts.cc</code>, <code>mtxPart::fill_intm_mtx</code>). This preserves row sums, so the sparsified
+    matrix remains a valid conductance matrix, but it is no longer the exact Schur complement.
+</div>
+
+<h3>15.2 Available Solver Types</h3>
+
+<p>The solver type is controlled by <code>Opts::slv_type</code>, declared in <code>admin/global.h:38</code>:</p>
+
+<div class="implementation-box">
+<span class="keyword">enum</span> SOLVER_TYPE { DIRECT = 1, AMG, ITERATIVE, FULLAMG };
+</div>
+
+<p>and dispatched in <code>tran.cc:374-423</code>:</p>
+
+<table>
+    <tr>
+        <th>slv_type</th>
+        <th>Method</th>
+        <th>Converges to the exact solution?</th>
+        <th>Description</th>
+    </tr>
+    <tr>
+        <td><code>DIRECT</code></td>
+        <td><code>solve_direct()</code> (tran.cc:381)</td>
+        <td><span style="color: #c0392b;">No</span></td>
+        <td>Single hierarchical pass using the sparsified intm/intm2 Schur complements</td>
+    </tr>
+    <tr>
+        <td><code>ITERATIVE</code></td>
+        <td><code>solve_iter()</code> (CG, tran.cc:398/402)</td>
+        <td><span class="checkmark">✓ Yes</span></td>
+        <td>CG on the exact (dense, un-sparsified) partition Schur operator, preconditioned by the hierarchical direct solve</td>
+    </tr>
+    <tr>
+        <td><code>AMG</code></td>
+        <td><code>solve_amg(100, 1.0e-6)</code> (tran.cc:383)</td>
+        <td><span style="color: #c0392b;">No</span></td>
+        <td>Approximate AMG solve</td>
+    </tr>
+    <tr>
+        <td><code>FULLAMG</code></td>
+        <td><code>solve_amgfull(100, 1.0e-6)</code> (tran.cc:422)</td>
+        <td><span style="color: #c0392b;">No</span></td>
+        <td>Full AMG at all levels</td>
+    </tr>
+</table>
+
+<div class="note">
+    <strong>Note:</strong> "No" here means the method stops at whatever accuracy its approximation provides;
+    it does not mean the result is unusable. Conversely <code>ITERATIVE</code> converges to the exact answer
+    only up to the CG tolerance and iteration cap actually configured
+    (<code>CG_RESD_TOLERANCE_DC</code>, <code>CG_MAX_ITERATION_NUMBER_DC</code>).
+</div>
+
+<h3>15.3 CG Architecture: Hierarchical Solve as Preconditioner</h3>
+
+<p>The key insight is that the hierarchical direct solve is used as a <strong>preconditioner</strong> inside the CG iteration, not as the final solver:</p>
+
+<div class="hierarchy-diagram">
+┌─────────────────────────────────────────────────────────────────┐
+│                    Outer CG Iteration                           │
+│  Solving: S_global · v_ports = b_ports                         │
+│  (operates on partition port nodes via Schur multiplication)   │
+└───────────────────────────────────────────┬─────────────────────┘
+                                            │
+                    ┌───────────────────────▼───────────────────────┐
+                    │           Preconditioner: precond_solve()     │
+                    │  ┌────────────────────────────────────────┐   │
+                    │  │  1. collect_compress_intm() - RHS comp │   │
+                    │  │  2. collect_intm2_rhs()                │   │
+                    │  │  3. solve_direct() ◄── Hierarchical    │   │
+                    │  │  4. propagate_intm()      direct solve │   │
+                    │  │  5. update_port_part()                 │   │
+                    │  └────────────────────────────────────────┘   │
+                    └───────────────────────────────────────────────┘
+</div>
+
+<h3>15.4 Implementation Details</h3>
+
+<p><strong>The solve_iter() method</strong> (simIntm2.h:272-274):</p>
+
+<div class="implementation-box">
+<span class="keyword">int</span> <span class="function">simIntm2::solve_iter</span>(<span class="keyword">int</span> maxiter, <span class="keyword">int</span> miniter, <span class="keyword">double</span> tol,
+                          <span class="keyword">bool</span> force_small_residual_cg_iter = <span class="keyword">false</span>) {
+  <span class="keyword">return</span> solve_cg_dist(*<span class="keyword">this</span>, maxiter, miniter, tol, force_small_residual_cg_iter);
+}
+</div>
+
+<p><strong>The precond_solve() method</strong> uses the hierarchical direct solve (simIntm2.cc:2371-2469):</p>
+
+<div class="implementation-box">
+<span class="keyword">double</span> <span class="function">simIntm2::precond_solve</span>()
+{
+  <span class="comment">// ... RHS compression at partition and intm levels ...</span>
+  rnorm = collect_intm2_rhs();
+
+  solve_direct();   <span class="comment">// ← Hierarchical direct solve as PRECONDITIONER</span>
+
+  <span class="comment">// ... back-propagation to all levels ...</span>
+}
+</div>
+
+<p><strong>Matrix-vector product in CG</strong> (<code>simPart.h:870-877</code>):</p>
+
+<div class="implementation-box">
+<span class="keyword">inline void</span> <span class="function">simPart::zAp_zdotp</span>()
+{
+  Vector *z = part_mtx->get_compressed_sol();
+  part_mtx->mult_schur(z, p);  <span class="comment">// z = S_part * p</span>
+  w = 0.0;
+  <span class="keyword">for</span> (<span class="keyword">int</span> i = 0; i < nunknown_port; i++)
+    w += (*z)[i]*(*p)[i];
+}
+
+<span class="comment">// mtxPart.cc:1043-1054 - what mult_schur actually does</span>
+<span class="keyword">void</span> <span class="function">mtxPart::mult_schur</span>(Vector *y, Vector *x)
+{
+  <span class="keyword">if</span> (schur)
+    schur->mult(y, x);   <span class="comment">// dense stored S  (partition level, default)</span>
+  <span class="keyword">else</span>
+    intm->mult(y, x);    <span class="comment">// sparse stored S</span>
+}
+</div>
+
+<div class="proof-box">
+    <strong>Key Distinction — corrected:</strong>
+    <p><code>mult_schur</code> multiplies by the <em>stored</em> partition Schur matrix. It does <strong>not</strong>
+    recompute \(\mathbf{B}^T\mathbf{A}^{-1}\mathbf{B}\mathbf{p}\) through the factorization on each CG
+    iteration; there is no triangular solve in this path. The distinction that makes CG worthwhile is
+    therefore about <em>which stored matrix</em> is used, and how accurate it is:</p>
+    <ul>
+        <li><strong>CG operator</strong> — the partition-level Schur. By default
+            <code>Opts::EXACT_PART_MTX</code> is <code>true</code> (main.cc:219), so at the bottom level this is
+            the <em>dense</em> <code>dsMatrix schur</code>, which <code>schur_complement</code> fills
+            <em>unconditionally</em> — no entry is ever dropped or lumped. Hence the CG operator is the
+            exact partition Schur complement (to round-off), which is what lets CG converge to the true
+            solution. It is exact because it is dense and un-sparsified, not because it is recomputed.</li>
+        <li><strong>Preconditioner</strong> — <code>precond_solve()</code> runs the hierarchical direct solve
+            over the <em>intm</em> and <em>intm2</em> matrices, which <em>are</em> sparsified
+            (<code>LEVEL1_SCHUR_TOL</code>, <code>LEVEL2_SCHUR_TOL</code>). It is therefore approximate.</li>
+    </ul>
+    <p>So the accuracy split is dense-partition-Schur (exact) as the operator vs. sparsified-upper-levels
+    (approximate) as the preconditioner. If <code>EXACT_PART_MTX</code> were false, the partition level would
+    use the sparse <code>intm</code> path and the CG operator would itself become approximate.</p>
+</div>
+
+<h3>15.5 Sparsification Points</h3>
+
+<table>
+    <tr>
+        <th>Location</th>
+        <th>Tolerance Variable</th>
+        <th>Default Value</th>
+        <th>Effect</th>
+    </tr>
+    <tr>
+        <td>Partition Schur — <code>build_schur</code> via <code>simIntm::build_mtx_parts</code> (simIntm.cc:350), <code>simPart.h:823</code></td>
+        <td><code>PART_SCHUR_TOL</code></td>
+        <td>1e-5</td>
+        <td><strong>No effect by default.</strong> With <code>EXACT_PART_MTX = true</code> the partition uses the dense <code>dsMatrix</code>, and the sparsification branch in <code>schur_complement</code> applies only to the sparse output. Relevant only if the sparse path is enabled.</td>
+    </tr>
+    <tr>
+        <td>Partition→intm assembly — <code>fill_intm_mtx</code> and <code>intm_mtx-&gt;sparsify</code> (simIntm.cc:323, 326)</td>
+        <td><code>LEVEL1_SCHUR_TOL</code></td>
+        <td>1e-4</td>
+        <td>Sparsifies the intm matrix. Preconditioner approximation.</td>
+    </tr>
+    <tr>
+        <td>Intm→intm2 assembly — <code>intm2_mtx-&gt;sparsify</code> (simIntm2.cc:902, 957) and <code>build_mtx_intm2</code> (simIntm2.cc:1119)</td>
+        <td><code>LEVEL2_SCHUR_TOL</code></td>
+        <td>1e-4</td>
+        <td>Sparsifies the intm2 matrix. Preconditioner approximation.</td>
+    </tr>
+</table>
+
+<div class="note">
+    <strong>Naming caution:</strong> the level numbers do not line up with the three hierarchy tiers in the
+    obvious way. <code>PART_SCHUR_TOL</code> — not <code>LEVEL1_SCHUR_TOL</code> — is the partition-level knob;
+    <code>LEVEL1</code> and <code>LEVEL2</code> govern the intm and intm2 matrices respectively, and the header
+    comment in <code>global.h:298</code> labels both as "for preconditioner".
+</div>
+
+<h3>15.6 When Direct Solve Could Be Exact</h3>
+
+<p>If sparsification is disabled (tolerances set to 0), the direct solve would give the exact solution:</p>
+
+<div class="implementation-box">
+<span class="comment">// From simIntm2.cc:1801-1805</span>
+<span class="keyword">if</span> (maxunknown == 0) {
+  msg.print(SIM_LOG, <span class="string">"Top level is empty, disable matrix sparsification"</span>);
+  Opts::LEVEL1_SCHUR_TOL = 0;
+  Opts::LEVEL2_SCHUR_TOL = 0;
+}
+</div>
+
+<h3>15.7 Summary: Why CG is Necessary</h3>
+
+<div class="proof-box">
+    <strong>CG is necessary for exact solution because:</strong>
+    <ol>
+        <li><strong>The upper-level Schur matrices are sparsified</strong> — the intm and intm2 matrices have
+            small off-diagonal entries lumped onto the diagonal (default 1e-4 relative tolerance), so the
+            hierarchical direct solve is approximate.</li>
+        <li><strong>Preconditioner vs Solver</strong> — the hierarchical direct solve acts as a preconditioner,
+            not the final solver. It gives a good approximation that CG refines.</li>
+        <li><strong>Exact operator</strong> — the CG matrix-vector product uses the <em>dense, un-sparsified</em>
+            partition Schur complement (default <code>EXACT_PART_MTX = true</code>). It multiplies by the
+            stored dense matrix rather than recomputing \(\mathbf{B}^T\mathbf{A}^{-1}\mathbf{B}\mathbf{p}\),
+            but because that stored matrix had nothing dropped, the operator is exact to round-off.</li>
+        <li><strong>Convergence guarantee</strong> — CG on SPD matrices converges to the exact solution
+            (within floating-point precision), regardless of preconditioner quality — provided the
+            <em>operator</em> is exact, which is the point of item 3.</li>
+    </ol>
+    <p>The design trades memory/speed (sparsified upper-level Schur storage and fast preconditioner
+    application) for iteration count (typically few CG iterations needed due to good preconditioning).</p>
+</div>
+
+<h3>15.8 Performance Trade-offs</h3>
+
+<table>
+    <tr>
+        <th>Scenario</th>
+        <th>Direct Solve Result</th>
+        <th>CG Needed?</th>
+        <th>Typical CG Iterations</th>
+    </tr>
+    <tr>
+        <td>Default (tol=1e-4)</td>
+        <td>Approximate</td>
+        <td><strong>Yes</strong></td>
+        <td>5-20</td>
+    </tr>
+    <tr>
+        <td>Zero tolerance</td>
+        <td>Exact</td>
+        <td>No</td>
+        <td>N/A</td>
+    </tr>
+    <tr>
+        <td>Large circuits</td>
+        <td>Approximate (memory/speed tradeoff)</td>
+        <td><strong>Yes</strong></td>
+        <td>10-50</td>
+    </tr>
+    <tr>
+        <td>Tight tolerance (tol=1e-6)</td>
+        <td>Near-exact</td>
+        <td>Optional</td>
+        <td>1-5</td>
+    </tr>
+</table>
+
+<!-- ============== DISTRIBUTED MPI IMPLEMENTATION ============== -->
+
+<div class="phase-header">Distributed MPI Implementation</div>
+
+<h2 id="section16">16. Distributed MPI Implementation (Default Layout)</h2>
+
+<p>This section maps the single-process hierarchy onto the default MPI implementation
+(<code>__DP_MPI__</code> with <code>Opts::USE_MUMPS == false</code>). The mathematics and the
+seven phases from Sections 3-9 do not change. MPI changes <em>ownership</em> and adds
+communication between phases:</p>
+
+<div class="note">
+    <strong>Mental model.</strong> MPI does not split one <code>simPart</code> or one
+    <code>simIntm</code> matrix across ranks. A rank owns complete intms and all of their
+    simParts. Rank 0 alone owns, factors, and solves the final
+    \(\mathbf{M}^{(\mathrm{intm2})}\). The optional MUMPS layout is outside this section.
+</div>
+
+<table>
+    <tr>
+        <th>Object</th>
+        <th>Default MPI owner</th>
+    </tr>
+    <tr>
+        <td>Parse-time tile graph</td>
+        <td>The rank assigned that input tile</td>
+    </tr>
+    <tr>
+        <td><code>simIntm[i]</code> and its <code>simPart</code> children</td>
+        <td>Exactly one rank</td>
+    </tr>
+    <tr>
+        <td>Top-level tearing nodes, \(\mathbf{M}^{(\mathrm{intm2})}\), factorization, and direct solve</td>
+        <td>Rank 0</td>
+    </tr>
+</table>
+
+<h3>16.1 Ownership and End-to-End Flow</h3>
+
+<p>In an MPI run, the configured <code>NPART1</code> is the number of intms per rank.
+<code>do_partition()</code> multiplies it by the process count before
+<code>simEnv::build_simenv()</code>. If \(p\) is the number of ranks and \(k\) is the
+configured <code>NPART1</code>, the global number of intms is \(pk\), and rank \(r\) owns:</p>
+
+<div class="equation-box">
+\[
+rk \le i &lt; (r+1)k.
+\]
+</div>
+
+<p><code>NPART2</code> is not multiplied: every owned intm is split locally into
+<code>NPART2</code> simParts.</p>
+
+<div class="hierarchy-diagram">
+rank 0:
+  simIntm[0] ... simIntm[k-1]
+    each contains NPART2 complete simParts
+
+rank 1:
+  simIntm[k] ... simIntm[2k-1]
+    each contains NPART2 complete simParts
+
+...
+
+rank 0 only:
+  simIntm2 tearing nodes
+  M^(intm2), its factorization, and the top-level direct solve
+</div>
+
+<p>The complete setup and solve flow is:</p>
+
+<div class="flowchart">
+1. Assign and parse the input tiles
+     partition_info tile grid
+       -> weight each tile by its approximate node count
+       -> recursive METIS divides the grid into p parser-rank groups
+       -> rank r parses the tiles in group r
+
+2. Stitch matching boundary-node copies into one distributed circuit
+3. Consolidate those copies before CSR construction
+4. Partition the stitched graph into global simIntm IDs
+5. Move each intm subgraph to its owning rank
+6. Split every owned intm locally into NPART2 simParts
+7. Build rank-0 top-level tearing-node and port maps
+8. Run the same seven Schur phases, communicating only at the intm2 boundary
+</div>
+
+<h3>16.2 Parse Distribution Is Not Solver Distribution</h3>
+
+<p><code>parallel_parser_node_based()</code> is the MPI parser entry point for tiled input.
+It reads the tile-grid dimensions from <code>partition_info</code>, then
+<code>part_tile()</code> treats each tile as a weighted graph vertex, using its node count as
+the approximate parsing load. Recursive METIS divides this tile graph into \(p\) parts while
+balancing that load and favoring groups of connected tiles. METIS part \(r\) is assigned to
+rank \(r\), which parses only those tiles. The parser then applies the collected stitch-node
+names before <code>DGraph::stitch()</code>.</p>
+
+<table>
+    <tr>
+        <th>Distribution</th>
+        <th>Unit</th>
+        <th>Purpose</th>
+        <th>Does it define final intm ownership?</th>
+    </tr>
+    <tr>
+        <td>Parallel parsing</td>
+        <td>Input tiles</td>
+        <td>Balance file I/O and initial graph creation while grouping connected tiles</td>
+        <td>No, except that tile-constrained mode deliberately preserves the rank seam</td>
+    </tr>
+    <tr>
+        <td>First-level solver partitioning</td>
+        <td>Stitched circuit vertices</td>
+        <td>Create the global <code>simIntm</code> decomposition</td>
+        <td>Yes</td>
+    </tr>
+</table>
+
+<p>This distinction is essential in global ParMETIS mode: a vertex parsed on rank 0 may
+ultimately belong to an intm owned by rank 1.</p>
+
+<h3>16.3 Building and Stitching the Distributed Graph</h3>
+
+<p>After tile parsing, <code>DGraph::synchronize_muts()</code> reconciles distributed
+mutual-inductor metadata. Boundary-node identity is handled separately by the stitching flow
+below.</p>
+
+<div class="definition-box">
+    <strong>Stitching node.</strong> A stitching node is an ordinary <code>Node</code> marked
+    as a candidate for cross-rank name matching. It is not yet a tearing node or an external
+    node. For tiled device lines, <code>Parser::fix_node_name()</code> removes the leading
+    <code>*</code> boundary marker and causes <code>Graph::add_elem()</code> to mark the
+    device's terminal nodes. The non-owner package pass can also collect names and mark them
+    later with <code>Graph::set_stitching()</code>.
+</div>
+
+<p><code>DGraph::stitch()</code> broadcasts only marked nodes. A receiving rank creates a
+temporary virtual identity link only when it has the same normalized node name and that local
+node is also marked. The link means “these parse-time copies are the same electrical node”; it
+is not a resistor and contributes no matrix stamp.</p>
+
+<h4>Figure 16.3-1. From tile-local copies to one distributed circuit</h4>
+
+<div class="hierarchy-diagram" role="img" aria-label="The Section 1.1 grid is parsed on two ranks. Pull nodes selects rank 0 as the canonical owner of node 5, transfers the resistor element from rank 1 to rank 0, and leaves an element-free peer edge on rank 1.">
+A. PARSE-TIME STORAGE (Section 1.1 grid)
+
+rank 0 / tile A                  | rank 1 / tile B
+                                  |
+ n0 --R-- n1                     |                       n2 --R-- n3
+ |        |                      |                       |        |
+ R        R                      |                       R        R
+ |        |                      |                       |        |
+ n4 --R-- n5@0                   | n5@1 --[R element]-- n6 --R-- n7
+ |        |                      | (copy)                 |        |
+ R        R                      |                        R        R
+ |        |                      |                        |        |
+ n8 --R-- n9@0                   | n9@1 --[R element]-- n10-R-- n11
+ |        |                      | (copy)                  |        |
+ R        R                      |                         R        R
+ |        |                      |                         |        |
+ n12-R-- n13                     |                       n14-R-- n15
+
+Only rank 1 initially stores each seam resistor element.
+
+
+B. DGraph::stitch(): IDENTITY ONLY
+
+rank 0                                             rank 1
+ [n5@0] ===== same electrical node; no element ===== [n5@1]--[R]--[n6]
+ [n9@0] ===== same electrical node; no element ===== [n9@1]--[R]--[n10]
+
+
+C. DOneGraph::pull_nodes(): CHOOSE OWNER AND TRANSFER
+
+ stitched copies of n5 are on ranks {0, 1}
+ canonical node owner = minimum rank = rank 0
+
+rank 1                                                     rank 0
+ { n5@1 state + edge(n5,n6) + [R element] } =============&gt; merge into n5@0
+
+ after sending:
+ [n6] ---- peer record to remote n5@rank0
+          [no resistor element; no resistor stamp]
+
+
+D. AFTER pull_nodes(): ONE RESISTOR, TWO DISTRIBUTED EDGE RECORDS
+
+rank 0: OWNER RECORD
+ [n5] -- [R element] -- [remote n6@rank1]      owns and stamps R
+
+rank 1: PEER RECORD
+ [n6] ---------------- [remote n5@rank0]       topology only; no R element
+
+Logical circuit:                 [n5] -------- R -------- [n6]
+Resistor-element copies:                         1
+
+The n9--R--n10 connection follows the same transfer:
+ rank 0 owns [n9]--[R element]--[remote n10@rank1];
+ rank 1 keeps the element-free peer record at n10.
+</div>
+
+<p><strong>Figure 16.3-1.</strong> In this two-rank example,
+<code>DOneGraph::pull_nodes()</code> selects the lowest rank containing a stitched copy as
+the canonical node owner. Rank 1 serializes the physical edge and its resistor element to rank
+0, then removes the element from its local peer edge. Both ranks retain enough edge metadata
+to traverse the cross-rank connection, but only rank 0's record owns and stamps the resistor.
+This is graph ownership immediately after <code>pull_nodes()</code>; later intm extraction may
+move the element to the final intm owner.</p>
+
+<p><code>DGraph::sanity_cleanup()</code> then performs the ordinary cleanup consistently
+across process boundaries. It communicates node replacement after shorts, grounding of
+boundary nodes, and connected boundary-node groups. The result is one cleaned logical circuit
+whose storage remains distributed.</p>
+
+<h3>16.4 First-Level Partitioning and Extraction</h3>
+
+<p>After stitching and cleanup, <code>DOneGraph</code> creates the top-level intms. The
+<code>USE_TILE_PARTITIONING</code> option selects where the first-level partitioner is allowed
+to cut:</p>
+
+<div class="note">
+    <strong>Partition-count parameters.</strong> Let \(p=\texttt{nproc}\) and let
+    \(k=\texttt{npart1}\), where <code>npart1</code> is the requested first-level count per
+    rank. <code>do_partition()</code> passes \(pk\) as the global first-level count. Both
+    modes therefore create \(pk\) intms. <code>npart2</code> is not used by this first-level
+    partitioner; afterward, each intm is split locally into <code>npart2</code> simParts.
+</div>
+
+<table>
+    <tr>
+        <th></th>
+        <th><code>USE_TILE_PARTITIONING == false</code></th>
+        <th><code>USE_TILE_PARTITIONING == true</code></th>
+    </tr>
+    <tr>
+        <td>Partitioner input</td>
+        <td>The full stitched distributed graph</td>
+        <td>Each rank's local graph; cross-rank edges are omitted from METIS adjacency</td>
+    </tr>
+    <tr>
+        <td>Partitioner</td>
+        <td><code>ParMETIS_V3_PartKway()</code> across participating ranks with <code>nparts = p*k</code></td>
+        <td>One independent <code>OneGraph::metis()</code> call per rank with <code>nparts = k</code>; \(p\) calls produce \(pk\) intms</td>
+    </tr>
+    <tr>
+        <td>Can a first-level part cross the parser-rank seam?</td>
+        <td>Yes, before extraction</td>
+        <td>No</td>
+    </tr>
+    <tr>
+        <td>Final intm ID ownership</td>
+        <td>Renumbered into equal rank blocks, then migrated</td>
+        <td>Local ID plus <code>rank * k</code></td>
+    </tr>
+</table>
+
+<h4>16.4.1 Global mode: <code>USE_TILE_PARTITIONING == false</code></h4>
+
+<ol>
+    <li><strong>Build distributed global CSR.</strong> <code>DOneGraph::build_csr(GPORT)</code>
+        first builds local CSR rows, exchanges remote endpoint IDs for cross-rank edges, creates
+        <code>vtxdist</code> from the per-rank vertex counts, and rebases every adjacency entry
+        into global ParMETIS numbering. The rows remain distributed; no rank gathers the whole
+        graph.</li>
+    <li><strong>Partition the stitched graph.</strong> <code>DOneGraph::metis()</code> calls
+        <code>ParMETIS_V3_PartKway()</code> with \(pk\) target parts. Cross-rank physical
+        connections therefore affect the cut.</li>
+    <li><strong>Assign an owner to every raw part.</strong> <code>adjust_partid()</code>
+        measures how many vertices of each raw ParMETIS part are currently on each rank. It
+        prefers the rank with the largest share, subject to the requirement that every rank
+        receive exactly \(k\) intm IDs. It then renumbers IDs so
+        <code>owner(i) = i / k</code>.</li>
+    <li><strong>Mark ports and migrate fragments.</strong> <code>mark_part()</code> exchanges
+        the partition IDs at cross-rank edges and marks the resulting GPORT nodes.
+        <code>pre_extract()</code> computes global node and port offsets.
+        <code>extract_subgraph()</code> moves each fragment to its intm owner, which rebuilds
+        the complete subgraph.</li>
+</ol>
+
+<h4>Figure 16.4-1. Global ParMETIS may cross the parser-rank seam</h4>
+
+<div class="hierarchy-diagram" role="img" aria-label="The Section 1.1 grid has distributed global CSR numbering. ParMETIS labels may cross the parser-rank boundary, after which extraction moves complete intms to their owners.">
+1. Distributed CSR for the stitched Section 1.1 circuit
+
+rank 0 rows                               rank 1 rows
+ n0{g0}  --R-- n1{g1}                     n2{g8}  --R-- n3{g9}
+ |             |                          |             |
+ n4{g2}  --R-- n5{g3}     ===== R =====   n6{g10} --R-- n7{g11}
+ |             |                          |             |
+ n8{g4}  --R-- n9{g5}     ===== R =====   n10{g12}--R-- n11{g13}
+ |             |                          |             |
+ n12{g6} --R-- n13{g7}                    n14{g14}--R-- n15{g15}
+
+ {gi} = global ParMETIS vertex ID
+      = vtxdist[rank] + that rank's local CSR-row ID
+ Example: n5{g3} means circuit node n5 is global graph vertex 3.
+ These graph IDs are not circuit names, partition IDs, or solver unknown IDs.
+
+ vtxdist is the prefix array of per-rank CSR-row counts:
+   rank r owns [vtxdist[r], vtxdist[r+1])
+   [0, 8, 16] means rank 0 owns g0..g7, rank 1 owns g8..g15,
+   and the distributed graph contains 16 vertices.
+
+ cross-rank adjacency: g3 &lt;-&gt; g10 and g5 &lt;-&gt; g12
+
+2. One illustrative ParMETIS result with p=nproc=2, k=npart1=2,
+   and nparts=p*k=4 raw parts: <span style="color:#1565c0;font-weight:bold;">A</span>, <span style="color:#c2410c;font-weight:bold;">B</span>, <span style="color:#2e7d32;font-weight:bold;">C</span>, <span style="color:#7b1fa2;font-weight:bold;">D</span>
+
+rank 0                                    rank 1
+ <span style="color:#1565c0;font-weight:bold;">n0[A]</span>   --R-- <span style="color:#1565c0;font-weight:bold;">n1[A]</span>                      <span style="color:#c2410c;font-weight:bold;">n2[B]</span>   --R-- <span style="color:#c2410c;font-weight:bold;">n3[B]</span>
+ |             |                          |             |
+ <span style="color:#1565c0;font-weight:bold;">n4[A]</span>   --R-- <span style="color:#c2410c;font-weight:bold;">n5[B]</span>      ===== R =====   <span style="color:#c2410c;font-weight:bold;">n6[B]</span>   --R-- <span style="color:#c2410c;font-weight:bold;">n7[B]</span>
+ |             |                          |             |
+ <span style="color:#1565c0;font-weight:bold;">n8[A]</span>   --R-- <span style="color:#2e7d32;font-weight:bold;">n9[C]</span>      ===== R =====   <span style="color:#7b1fa2;font-weight:bold;">n10[D]</span>  --R-- <span style="color:#7b1fa2;font-weight:bold;">n11[D]</span>
+ |             |                          |             |
+ <span style="color:#2e7d32;font-weight:bold;">n12[C]</span>  --R-- <span style="color:#2e7d32;font-weight:bold;">n13[C]</span>                     <span style="color:#7b1fa2;font-weight:bold;">n14[D]</span>  --R-- <span style="color:#7b1fa2;font-weight:bold;">n15[D]</span>
+
+Raw part <span style="color:#c2410c;font-weight:bold;">B</span> spans both parser ranks.
+
+3. Owner assignment and extraction, for k = 2
+
+rank 0 owns: <span style="color:#1565c0;font-weight:bold;">A</span> -> simIntm[0], <span style="color:#2e7d32;font-weight:bold;">C</span> -> simIntm[1]
+rank 1 owns: <span style="color:#c2410c;font-weight:bold;">B</span> -> simIntm[2], <span style="color:#7b1fa2;font-weight:bold;">D</span> -> simIntm[3]
+
+The n5 fragment moves to rank 1 so simIntm[2] becomes a complete local object.
+Each extracted intm is then split locally into NPART2 simParts.
+</div>
+
+<p><strong>Figure 16.4-1.</strong> The labels are illustrative, not a guaranteed ParMETIS
+result. They show why parser ownership is temporary: global partitioning can place
+<code>n5</code> in a part mostly resident on rank 1, and extraction then moves that fragment
+to the selected owner.</p>
+
+<h4>16.4.2 Tile-constrained mode: <code>USE_TILE_PARTITIONING == true</code></h4>
+
+<p>Tile-constrained mode still runs <code>DGraph::stitch()</code>; the solver must retain the
+real cross-rank circuit connections. The difference is only the graph presented to the
+first-level partitioner. <code>OneGraph::build_csr()</code> omits external edges from local
+METIS adjacency, and <code>DOneGraph::build_csr(GPORT)</code> returns before remote-ID exchange
+and <code>vtxdist</code> construction.</p>
+
+<p><code>DOneGraph::metis()</code> enters with the global member
+<code>npart = p*k</code>. In tile-constrained mode it temporarily divides that value by
+<code>nproc</code>, so the local <code>OneGraph::metis()</code> call receives
+<code>nparts = k</code>. After local METIS returns, it restores the global count and converts
+each local label to
+<code>global_intm_id = local_METIS_label + rank*k</code>. Thus rank \(r\) creates \(k\)
+first-level parts with IDs \([rk,(r+1)k)\), and all ranks together still create \(pk\)
+intms.</p>
+
+<h4>Figure 16.4-2. Tile-constrained local METIS preserves the rank seam</h4>
+
+<div class="hierarchy-diagram" role="img" aria-label="The Section 1.1 grid remains split at the parser-rank seam. Each rank partitions its local half independently, while the seam resistors remain part of the circuit but not of local METIS adjacency.">
+rank 0: local METIS                         rank 1: local METIS
+ n0[r0.0]-R--n1[r0.0]                       n2[r1.0]-R--n3[r1.0]
+ |             |                            |             |
+ n4[r0.0]-R--n5[r0.0] == circuit R == n6[r1.0]-R--n7[r1.0]
+ |             |                            |             |
+ n8[r0.1]-R--n9[r0.1] == circuit R == n10[r1.1]-R--n11[r1.1]
+ |             |                            |             |
+ n12[r0.1]-R--n13[r0.1]                    n14[r1.1]-R--n15[r1.1]
+
+The two seam resistors remain in the circuit, but local METIS does not see them.
+
+For k = 2:
+  rank 0: r0.0 -> simIntm[0], r0.1 -> simIntm[1]
+  rank 1: r1.0 -> simIntm[2], r1.1 -> simIntm[3]
+</div>
+
+<p><strong>Figure 16.4-2.</strong> No local METIS decision can put <code>n5</code> and
+<code>n6</code> in the same first-level part because their rank seam is fixed. This trades
+global cut quality for preservation of the parser's tile-to-rank distribution.</p>
+
+<h3>16.5 Building Local simParts and the Rank-0 Top Level</h3>
+
+<p>After first-level extraction, <code>simIntm2::build_intm2()</code> creates objects only for
+the current rank's intm range. Each owned intm's extracted <code>SubGraph</code> is then
+partitioned locally into <code>NPART2</code> simParts, exactly as in the single-process
+second-level partitioning flow.</p>
+
+<p>A <strong>global tearing node</strong> is the single <code>simIntm2</code>
+representation of a physical GPORT node shared by multiple first-level intms. When a circuit
+edge crosses an intm boundary, extraction retains the selected GPORT in each intm that needs
+that interface. These local GPORT views all represent the same circuit-node voltage, so
+<code>simIntm2</code> maps them to one top-level tearing node and one top-level unknown.
+After the intm-interior unknowns have been eliminated, these shared voltages form the final
+reduced system. Promoted synthetic ports are added to the same top-level set; the figure below
+shows only physical GPORTs.</p>
+
+<h4>Figure 16.5-1. Global tearing nodes and rank-0 <code>simIntm2</code> construction</h4>
+
+<div class="hierarchy-diagram" role="img" aria-label="The partitioned four-by-four resistor grid identifies six physical GPORT nodes. Each extracted intm has a local view of the GPORTs it uses, and rank 0 merges equal circuit-node identities into one simIntm2 global tearing node.">
+1. Partitioned circuit from Figure 16.4-1
+   * marks the selected GPORT endpoint of each cross-intm connection.
+   One endpoint is selected per cut edge; the other remains an ordinary node.
+
+ <span style="color:#1565c0;font-weight:bold;">n0[A]</span>   --R-- <span style="color:#1565c0;font-weight:bold;">n1*[A]</span>                     <span style="color:#c2410c;font-weight:bold;">n2[B]</span>   --R-- <span style="color:#c2410c;font-weight:bold;">n3[B]</span>
+ |             |                          |             |
+ <span style="color:#1565c0;font-weight:bold;">n4*[A]</span>  --R-- <span style="color:#c2410c;font-weight:bold;">n5[B]</span>      ===== R =====   <span style="color:#c2410c;font-weight:bold;">n6*[B]</span>  --R-- <span style="color:#c2410c;font-weight:bold;">n7*[B]</span>
+ |             |                          |             |
+ <span style="color:#1565c0;font-weight:bold;">n8*[A]</span>  --R-- <span style="color:#2e7d32;font-weight:bold;">n9*[C]</span>     ===== R =====   <span style="color:#7b1fa2;font-weight:bold;">n10[D]</span>  --R-- <span style="color:#7b1fa2;font-weight:bold;">n11[D]</span>
+ |             |                          |             |
+ <span style="color:#2e7d32;font-weight:bold;">n12[C]</span>  --R-- <span style="color:#2e7d32;font-weight:bold;">n13[C]</span>                     <span style="color:#7b1fa2;font-weight:bold;">n14[D]</span>  --R-- <span style="color:#7b1fa2;font-weight:bold;">n15[D]</span>
+
+ Physical GPORT identities: n1, n4, n8, n9, n6, n7
+
+
+2. After extraction: each complete simIntm has local views of its GPORTs
+
+ rank 0                                             rank 1
+ +-----------------------------+                    +-----------------------------+
+ | simIntm[0] = <span style="color:#1565c0;font-weight:bold;">A</span>            |                    | simIntm[2] = <span style="color:#c2410c;font-weight:bold;">B</span>            |
+ | GPORT views: n1, n4, n8     |                    | GPORT views: n1, n4, n9,    |
+ +-----------------------------+                    |              n6, n7         |
+ +-----------------------------+                    +-----------------------------+
+ | simIntm[1] = <span style="color:#2e7d32;font-weight:bold;">C</span>            |                    +-----------------------------+
+ | GPORT views: n8, n9         |                    | simIntm[3] = <span style="color:#7b1fa2;font-weight:bold;">D</span>            |
+ +-----------------------------+                    | GPORT views: n9, n6, n7     |
+                                                    +-----------------------------+
+
+
+3. Rank 0 constructs one simIntm2 node for each shared circuit-node identity
+   (one illustrative top-node index assignment)
+
+ +-------------------------------------------------------------------+
+ |                        simIntm2 on rank 0                          |
+ |                                                                   |
+ | local GPORT views                         global tearing node      |
+ | {intm[0], intm[2]}: n1  ----------------> tnode 0 = n1             |
+ | {intm[0], intm[2]}: n4  ----------------> tnode 1 = n4             |
+ | {intm[0], intm[1]}: n8  ----------------> tnode 2 = n8             |
+ | {intm[1], intm[2], intm[3]}: n9  --------> tnode 3 = n9             |
+ | {intm[2], intm[3]}: n6  ----------------> tnode 4 = n6             |
+ | {intm[2], intm[3]}: n7  ----------------> tnode 5 = n7             |
+ +-------------------------------------------------------------------+
+
+ All local views of n9, for example, map to tnode 3 and therefore share one
+ voltage unknown in M_intm2.
+</div>
+
+<p><strong>Figure 16.5-1.</strong> The GPORT choice follows the same smaller-intm-ID
+convention used by the report's single-process example. A global tearing node is not another
+copy of the circuit node: it is rank 0's canonical top-level representation of all local
+GPORT views with that node identity.</p>
+
+<p>These global tearing-node objects themselves exist only on rank 0. Setup therefore
+reconstructs the single-process maps with compact integer exchanges:</p>
+
+<ol>
+    <li><code>extract_intm2()</code> collects each intm's physical and promoted synthetic port
+        counts. Rank 0 allocates the complete global tearing-node set.</li>
+    <li>Every owned intm stores the global tearing-node index corresponding to each local
+        port. <code>build_connectivity()</code> sends worker indices to rank 0, which builds
+        the tearing-node connection lists.</li>
+    <li>Each rank assigns unknowns inside its owned intms and simParts. Rank 0 assigns the
+        global tearing-node unknown IDs and broadcasts the total count.</li>
+    <li><code>create_port_map()</code> sends worker top-node indices to rank 0. Rank 0 converts
+        them to top-level unknown IDs and returns each intm's \(\mathbf{Q}_i\) map.</li>
+</ol>
+
+<div class="hierarchy-diagram">
+rank r, for every owned simIntm[i]:
+
+  complete simPart matrices
+        -> local partition Schur complements
+        -> local M_intm(i)
+        -> local intm Schur complement S_intm(i)
+        -> compact contribution through Q_i
+
+rank 0:
+
+  M_intm2 = Sum_i Q_i^T S_intm(i) Q_i
+  factor(M_intm2)
+</div>
+
+<h3>16.6 The Seven Solve Phases under MPI</h3>
+
+<table>
+    <tr>
+        <th>Single-process phase</th>
+        <th>Default MPI execution</th>
+    </tr>
+    <tr>
+        <td>1. Partition Schur complement</td>
+        <td>Each rank stamps, factors, and reduces its owned simParts locally.</td>
+    </tr>
+    <tr>
+        <td>2. Assemble intm matrix</td>
+        <td>Each owned intm assembles its child Schur complements locally and applies the existing level-1 sparsification.</td>
+    </tr>
+    <tr>
+        <td>3. Intm Schur complement</td>
+        <td>Each rank factors and reduces its owned intms locally.</td>
+    </tr>
+    <tr>
+        <td>4. Assemble and factor intm2</td>
+        <td>Rank 0 adds its local intm contributions directly. Workers send compact sparse intm contributions; rank 0 remaps them through each <code>port_map</code>, assembles and sparsifies the complete \(\mathbf{M}^{(\mathrm{intm2})}\), then factors it.</td>
+    </tr>
+    <tr>
+        <td>5. RHS compression</td>
+        <td>Every rank compresses RHS vectors through its simParts and intms. Workers send only compressed intm port vectors; rank 0 accumulates them through <code>port_map</code>.</td>
+    </tr>
+    <tr>
+        <td>6. Top-level solve</td>
+        <td><code>solve_direct()</code> returns immediately on workers. Rank 0 solves the factored top-level matrix and sends each worker only the solution entries required by its owned intms.</td>
+    </tr>
+    <tr>
+        <td>7. Back-propagation</td>
+        <td>Each rank propagates the received intm port values through its owned intms and simParts to recover local internal unknowns.</td>
+    </tr>
+</table>
+
+<div class="note">
+    <strong>Default matrix layout.</strong> Lower-level matrices are distributed by complete
+    object ownership. The final sparse \(\mathbf{M}^{(\mathrm{intm2})}\) is not block-row
+    distributed; it exists and is factorized only on rank 0.
+</div>
+
+<h3>16.7 Distributed CG</h3>
+
+<p><code>solve_cg_dist()</code> keeps the interpretation from Section 15: the hierarchical
+direct solve is the preconditioner, and the partition Schur matrices provide the operator
+application.</p>
+
+<ol>
+    <li>Each rank stores and updates \(\mathbf{x}\), \(\mathbf{p}\), \(\mathbf{r}\), and
+        \(\mathbf{z}\) for its owned simParts and performs the local Schur matrix-vector
+        products.</li>
+    <li><code>simIntm2::precond_solve()</code> performs local intm compression, gathers the
+        compressed top-level RHS on rank 0, runs the rank-0 direct solve, scatters the needed
+        port solution values, and back-propagates locally.</li>
+    <li>Each rank computes local contributions to
+        \(\mathbf{r}^{T}\mathbf{z}\) and
+        \(\mathbf{p}^{T}\mathbf{A}\mathbf{p}\). Rank 0 sums and broadcasts those scalars so all
+        ranks use the same \(\alpha\), \(\beta\), and convergence state.</li>
+    <li>Final partition-internal recovery remains local to the owning rank.</li>
+</ol>
+
+<p>Thus the default MPI solver distributes parsing, graph construction, intm/simPart
+ownership, RHS work, and CG vector work, while centralizing only the final intm2 direct
+matrix and solve on rank 0.</p>
+
+<hr style="margin-top: 50px;">
+<p style="text-align: center; color: #666; font-size: 0.9em;">
+    Generated for mPower Simulator - Hierarchical Domain Decomposition Solver Documentation
+</p>
+
+</body>
+</html>
