@@ -1,0 +1,1174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Textbook PCG → mPower Hierarchical Solver</title>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script> MathJax = {
+        tex: {
+        inlineMath: [['\\(', '\\)']],
+        displayMath: [['\\[', '\\]']]
+        }
+    };
+    </script>
+    <script id="MathJax-script" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px;
+            line-height: 1.8;
+            color: #333;
+            background: #fafafa;
+        }
+        h1 {
+            color: #1a5276;
+            border-bottom: 3px solid #1a5276;
+            padding-bottom: 15px;
+            font-size: 2.2em;
+        }
+        h2 {
+            color: #2874a6;
+            margin-top: 50px;
+            border-left: 5px solid #2874a6;
+            padding-left: 15px;
+        }
+        h3 { color: #2e86ab; margin-top: 30px; }
+        h4 { color: #34798f; margin-top: 24px; }
+        .equation-box {
+            background: linear-gradient(135deg, #e8f4f8 0%, #d4e9f7 100%);
+            border: 1px solid #aed6f1;
+            border-radius: 10px;
+            padding: 20px 30px;
+            margin: 25px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow-x: auto;
+        }
+        .definition-box {
+            background: linear-gradient(135deg, #fef9e7 0%, #fcf3cf 100%);
+            border: 1px solid #f9e79f;
+            border-left: 5px solid #f1c40f;
+            border-radius: 5px;
+            padding: 15px 25px;
+            margin: 20px 0;
+        }
+        .proof-box {
+            background: linear-gradient(135deg, #e8f8f5 0%, #d5f5e3 100%);
+            border: 1px solid #82e0aa;
+            border-left: 5px solid #27ae60;
+            border-radius: 5px;
+            padding: 20px 25px;
+            margin: 25px 0;
+        }
+        .diagram {
+            background: #fff;
+            border: 2px solid #3498db;
+            border-radius: 10px;
+            padding: 25px 30px;
+            margin: 30px 0;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.88em;
+            line-height: 1.45;
+            white-space: pre;
+            overflow-x: auto;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .diagram-title {
+            font-family: 'Segoe UI', sans-serif;
+            font-weight: 600;
+            color: #1a5276;
+            margin-bottom: 4px;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 25px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            background: #fff;
+        }
+        th {
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+            color: white;
+            padding: 14px;
+            text-align: left;
+            vertical-align: top;
+        }
+        td {
+            padding: 12px 15px;
+            border-bottom: 1px solid #ddd;
+            vertical-align: top;
+        }
+        tr:nth-child(even) { background: #f8f9fa; }
+        .checkmark { color: #27ae60; font-weight: bold; font-size: 1.2em; }
+        .note {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        .warn {
+            background: #fdecea;
+            border: 1px solid #e74c3c;
+            border-left: 5px solid #c0392b;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        code {
+            background: #ecf0f1;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Consolas', monospace;
+            color: #c0392b;
+        }
+        th code { background: rgba(255,255,255,0.15); color: #fff; }
+        .toc {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            padding: 25px 35px;
+            margin: 30px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .toc h3 { margin-top: 0; color: #2c3e50; }
+        .toc ul { list-style: none; padding-left: 0; }
+        .toc li { padding: 5px 0; }
+        .toc a { color: #3498db; text-decoration: none; }
+        .toc a:hover { text-decoration: underline; }
+
+        /* ---- algorithm listing: each line is its own block, so line breaks
+               never depend on source whitespace (MathJax-safe) ---- */
+        .algo {
+            background: #fff;
+            border: 2px solid #16a085;
+            border-radius: 8px;
+            padding: 18px 22px;
+            margin: 25px 0;
+            overflow-x: auto;
+        }
+        .algo .aline {
+            display: block;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.95em;
+            line-height: 2.0;
+            padding: 1px 0;
+            white-space: nowrap;
+        }
+        .algo .ln {
+            display: inline-block;
+            width: 2.4em;
+            color: #16a085;
+            font-weight: bold;
+            user-select: none;
+        }
+        .algo .ind1 { padding-left: 2.4em; }
+        .algo .kw   { color: #8e44ad; font-weight: bold; }
+        .algo .cmt  { color: #7f8c8d; font-style: italic; font-family: 'Segoe UI', sans-serif; }
+        .algo .hl   { background: #fff9c4; border-radius: 3px; padding: 1px 4px; }
+        .algo .sep  { border-top: 1px dashed #bdc3c7; margin: 10px 0; }
+
+        /* side-by-side algorithm comparison */
+        .sbs { display: flex; gap: 18px; flex-wrap: wrap; margin: 25px 0; }
+        .sbs > div { flex: 1 1 460px; border-radius: 8px; padding: 16px 20px; }
+        .sbs .left  { background: #eef6fb; border: 2px solid #5dade2; }
+        .sbs .right { background: #eafaf1; border: 2px solid #52be80; }
+        .sbs h4 { margin-top: 0; }
+        .legend { font-family:'Segoe UI',sans-serif; font-size:0.9em; color:#555; margin-top:8px; }
+
+        /* framed panels: CSS borders instead of ASCII box-drawing, so that
+           font fallback on a glyph can never break the right-hand edge */
+        .panel {
+            border-radius: 8px;
+            padding: 14px 22px;
+            margin: 16px 0;
+        }
+        .panel .hdr {
+            font-family: 'Segoe UI', sans-serif;
+            font-weight: 700;
+            letter-spacing: .02em;
+            margin-bottom: 6px;
+        }
+        .panel .tag {
+            float: right;
+            font-weight: 700;
+            font-size: .85em;
+            padding: 1px 10px;
+            border-radius: 10px;
+        }
+        .panel-exact  { background:#eafaf1; border:2px solid #27ae60; }
+        .panel-exact  .hdr { color:#1e8449; }
+        .panel-exact  .tag { background:#27ae60; color:#fff; }
+        .panel-approx { background:#fdf2e9; border:2px solid #e67e22; }
+        .panel-approx .hdr { color:#b9770e; }
+        .panel-approx .tag { background:#e67e22; color:#fff; }
+        .panel-neutral{ background:#eef6fb; border:2px solid #5dade2; }
+        .panel-neutral .hdr { color:#21618c; }
+        .panel-neutral .tag { background:#5dade2; color:#fff; }
+        .panel .art {
+            font-family: 'Consolas','Monaco',monospace;
+            font-size: 0.86em;
+            line-height: 1.45;
+            white-space: pre;
+            overflow-x: auto;
+            margin: 10px 0 4px 0;
+        }
+        .panel ul { margin: 6px 0 2px 0; }
+    </style>
+</head>
+<body>
+
+<h1>Textbook PCG → mPower's Hierarchical Solver</h1>
+<h2 style="border:none; margin-top:10px; color:#666; font-weight:normal;">
+Default configuration: <code>EXACT_PART_MTX = true</code>, <code>LEVEL1_SCHUR_TOL = LEVEL2_SCHUR_TOL = 1e-4</code>
+</h2>
+
+<div class="toc">
+    <h3>Table of Contents</h3>
+    <ul>
+        <li><a href="#s1">1. Executive Summary</a></li>
+        <li><a href="#s2">2. Textbook PCG</a></li>
+        <li><a href="#s3">3. The Hierarchical PCG System in mPower</a></li>
+        <li><a href="#s4">4. Side-by-Side Algorithm Mapping</a></li>
+        <li><a href="#s5">5. Anatomy of One Iteration</a></li>
+        <li><a href="#s6">6. Convergence Criteria</a></li>
+        <li><a href="#s7">7. Asymmetric Systems: the <code>is_pkg</code> Path</a></li>
+        <li><a href="#s7-5">7.5 Diagnostics and release validation</a></li>
+        <li><a href="#s8">8. Appendix</a>
+            <ul style="padding-left:22px; margin:4px 0 0 0;">
+                <li><a href="#a1">A.1 &nbsp;Vector typing in the duplicated space</a></li>
+                <li><a href="#a2">A.2 &nbsp;"Eliminate LPORTs" — the intm-level Schur step</a></li>
+                <li><a href="#a3">A.3 &nbsp;Where each step lives in the code</a></li>
+            </ul>
+        </li>
+    </ul>
+</div>
+
+<h2 id="s1">1. Executive Summary</h2>
+
+<p>mPower's DC/IR solve is a <strong>preconditioned conjugate gradient</strong> iteration. It looks unfamiliar
+because no single object is "the matrix" and no single vector is "the residual" — both are spread across
+partitions and never assembled. The mapping to textbook PCG is nonetheless exact, once three ideas are clear:</p>
+
+<div class="definition-box">
+<ol>
+    <li><strong>The unknowns are port voltages, not node voltages.</strong> CG runs only on the tearing nodes
+        left after each partition's interior is Schur-complemented away. Interior voltages are recovered
+        afterwards by back-substitution — CG never sees them.</li>
+    <li><strong>The vectors are <em>duplicated</em>, not assembled.</strong> Each partition keeps a private
+        copy of every port it touches, so a node shared by three partitions occupies three slots. Assembly
+        happens only <em>inside</em> the preconditioner.</li>
+    <li><strong>Exactness and approximation live in different places.</strong> The <em>operator</em> is exact;
+        the <em>preconditioner</em> is approximate. That split is the whole design: an exact operator makes CG
+        converge to the right answer, a cheap approximate preconditioner makes it converge fast.</li>
+</ol>
+</div>
+
+<h2 id="s2">2. Textbook PCG</h2>
+
+<p>The standard algorithm for \(\mathbf{A}\mathbf{u}=\mathbf{b}\), with \(\mathbf{A}\) symmetric positive
+definite and preconditioner \(\mathbf{M}\approx\mathbf{A}\):</p>
+
+<div class="algo">
+<div class="aline"><span class="ln">1</span> \(\mathbf{u}_0\) given, \(\quad \mathbf{p}_0=\mathbf{0}, \quad \rho_{-1}=1\)</div>
+<div class="aline"><span class="ln">2</span> \(\mathbf{r}_0=\mathbf{b}-\mathbf{A}\mathbf{u}_0\) <span class="cmt">&nbsp;&nbsp;initial residual</span></div>
+<div class="sep"></div>
+<div class="aline"><span class="ln">3</span> <span class="kw">for</span> \(k=1,2,3,\dots\)</div>
+<div class="aline ind1"><span class="ln">4</span> <span class="hl">\(\mathbf{z}_k=\mathbf{M}^{-1}\mathbf{r}_{k-1}\)</span> <span class="cmt">&nbsp;&nbsp;preconditioner solve</span></div>
+<div class="aline ind1"><span class="ln">5</span> \(\rho_k=\mathbf{r}_{k-1}^{T}\mathbf{z}_k\) <span class="cmt">&nbsp;&nbsp;inner product</span></div>
+<div class="aline ind1"><span class="ln">6</span> \(\beta_k=\rho_k/\rho_{k-1}\)</div>
+<div class="aline ind1"><span class="ln">7</span> \(\mathbf{p}_k=\mathbf{z}_k+\beta_k\,\mathbf{p}_{k-1}\) <span class="cmt">&nbsp;&nbsp;search direction</span></div>
+<div class="aline ind1"><span class="ln">8</span> <span class="hl">\(\mathbf{q}_k=\mathbf{A}\,\mathbf{p}_k\)</span> <span class="cmt">&nbsp;&nbsp;matrix–vector product</span></div>
+<div class="aline ind1"><span class="ln">9</span> \(\alpha_k=\rho_k/(\mathbf{p}_k^{T}\mathbf{q}_k)\) <span class="cmt">&nbsp;&nbsp;inner product</span></div>
+<div class="aline ind1"><span class="ln">10</span> \(\mathbf{u}_k=\mathbf{u}_{k-1}+\alpha_k\,\mathbf{p}_k\)</div>
+<div class="aline ind1"><span class="ln">11</span> \(\mathbf{r}_k=\mathbf{r}_{k-1}-\alpha_k\,\mathbf{q}_k\)</div>
+<div class="aline ind1"><span class="ln">12</span> <span class="kw">if</span> converged <span class="kw">break</span></div>
+<div class="aline"><span class="ln">13</span> <span class="kw">end</span></div>
+</div>
+
+<p>Two structural properties matter, because mPower exploits both:</p>
+
+<ul>
+    <li><strong>The matrices are never needed explicitly.</strong> Only three things touch \(\mathbf{A}\) and
+        \(\mathbf{M}\): one mat-vec (line 8), one preconditioner solve (line 4), and inner products
+        (lines 5, 9). Anything that can <em>apply</em> \(\mathbf{A}\) to a vector will do. This is what
+        permits a matrix-free, partition-distributed implementation.</li>
+    <li><strong>The two highlighted lines have opposite requirements.</strong> \(\mathbf{A}\) must be applied
+        <em>exactly</em> — an inconsistent operator breaks the Krylov relations and CG converges to the wrong
+        answer, or not at all. \(\mathbf{M}^{-1}\) may be any SPD approximation; its quality affects only the
+        iteration count. mPower places its approximation entirely on the \(\mathbf{M}^{-1}\) side.</li>
+</ul>
+
+<h2 id="s3">3. The Hierarchical PCG System in mPower</h2>
+
+<p>Three questions answer themselves in order: <em>which</em> system is being solved, <em>how</em> its vectors
+are stored, and <em>where</em> the approximation sits. Everything else in the solver follows from these.</p>
+
+<h3>3.1 The system CG solves: a reduced port system</h3>
+
+<p>Start from the circuit system \(\mathbf{G}\mathbf{v}=\mathbf{b}\) and split each partition \(p\) into its
+interior and its ports:</p>
+
+<div class="equation-box">
+\[
+\begin{bmatrix} \mathbf{A}_p & \mathbf{B}_p \\ \mathbf{B}_p^T & \mathbf{D}_p \end{bmatrix}
+\begin{bmatrix} \mathbf{v}_p^{(\text{int})} \\ \mathbf{v}_p^{(\text{port})} \end{bmatrix}
+= \begin{bmatrix} \mathbf{b}_p^{(\text{int})} \\ \mathbf{b}_p^{(\text{port})} \end{bmatrix}
+\]
+</div>
+
+<p>Eliminating the interior gives the partition Schur complement and compressed right-hand side:</p>
+
+<div class="equation-box">
+\[
+\mathbf{S}_p=\mathbf{D}_p-\mathbf{B}_p^T\mathbf{A}_p^{-1}\mathbf{B}_p,
+\qquad
+\tilde{\mathbf{b}}_p=\mathbf{b}_p^{(\text{port})}-\mathbf{B}_p^T\mathbf{A}_p^{-1}\mathbf{b}_p^{(\text{int})}
+\]
+</div>
+
+<p>With \(\mathbf{R}_p\) the boolean map from global tearing nodes to partition \(p\)'s local port ordering,
+the exact reduced system is:</p>
+
+<div class="equation-box">
+\[
+\boxed{\;\hat{\mathbf{S}}\,\mathbf{u}=\hat{\mathbf{b}},
+\qquad
+\hat{\mathbf{S}}=\sum_p \mathbf{R}_p^T\mathbf{S}_p\mathbf{R}_p,
+\qquad
+\hat{\mathbf{b}}=\sum_p \mathbf{R}_p^T\tilde{\mathbf{b}}_p\;}
+\]
+</div>
+
+<p><strong>This is the system CG solves.</strong> It is SPD whenever the circuit is, since it is a Schur
+complement of an SPD matrix. Afterwards each partition recovers its own interior independently:
+\(\mathbf{v}_p^{(\text{int})}=\mathbf{A}_p^{-1}(\mathbf{b}_p^{(\text{int})}-\mathbf{B}_p\mathbf{v}_p^{(\text{port})})\).</p>
+
+<h3>3.2 How the vectors are stored: the duplicated port space</h3>
+
+<p>Here mPower departs from the textbook picture. It <strong>never builds \(\hat{\mathbf{S}}\), and its CG
+vectors are not of length \(n_{\text{tnode}}\)</strong>. Instead every partition holds private copies of its
+own ports, so shared nodes are stored more than once:</p>
+
+<div class="diagram-title">Figure 1 — assembled view (conceptual) vs duplicated view (what CG actually stores)</div>
+<div class="diagram">
+   ASSEMBLED  (never built)                    DUPLICATED  (the real CG vectors)
+
+   5 distinct tearing nodes                    11 slots, one per partition-port
+
+   ┌───────────────────────┐                   P0 ▸ [ n5 ][ n4 ]
+   │  n4  n5  n6  n7  n9   │   ── R ──▶        P1 ▸ [ n5 ][ n9 ][ n4 ]
+   │                       │                   P2 ▸ [ n5 ][ n6 ][ n7 ]
+   │      dim = 5          │   ◀── Rᵀ ──       P3 ▸ [ n9 ][ n6 ][ n7 ]
+   └───────────────────────┘                        dim = 2+3+3+3 = 11
+
+           n5 is stored 3 times  (P0, P1, P2)
+           n4, n6, n7, n9 stored 2 times each
+</div>
+
+<p>The two maps between these views are the whole of the inter-partition coupling:</p>
+
+<div class="diagram-title">Figure 2 — the only two communication primitives</div>
+<div class="diagram">
+   SCATTER  R          (assembled ──▶ duplicated)      "="   copy
+   ─────────────────────────────────────────────────────────────────
+                     n5 = 0.7
+                    ╱    │    ╲
+                  ╱      │      ╲
+            P0: 0.7   P1: 0.7   P2: 0.7        every owner sees
+                                               the same voltage
+
+
+   GATHER  Rᵀ          (duplicated ──▶ assembled)      "+="  sum
+   ─────────────────────────────────────────────────────────────────
+            P0: 0.2 ╲
+            P1: 0.5 ──────▶  n5 = 1.0          currents into a shared
+            P2: 0.3 ╱                          node add  (Kirchhoff)
+</div>
+
+<p>Stacking the \(\mathbf{R}_p\) into \(\mathbf{R}\) and the \(\mathbf{S}_p\) into a block-diagonal operator
+gives the identity that makes the whole scheme valid:</p>
+
+<div class="proof-box">
+\[
+\mathbf{R}^{T}\,\underbrace{\operatorname{blockdiag}(\mathbf{S}_0,\mathbf{S}_1,\dots)}_{\textstyle \mathbf{A}_{\text{dup}}}\,\mathbf{R}
+\;=\;\sum_p \mathbf{R}_p^T\mathbf{S}_p\mathbf{R}_p\;=\;\hat{\mathbf{S}}
+\]
+<p>Working in the duplicated space with a block-diagonal operator is therefore <em>equivalent</em> to working
+in the assembled space with \(\hat{\mathbf{S}}\).</p>
+</div>
+
+<p>Duplication has one consequence worth stating up front, because the inner products depend on it: the CG
+vectors are not all duplicated in the same way. Voltage-like vectors (\(\mathbf{u},\mathbf{p},\mathbf{z}\))
+hold the <em>same</em> value in every copy; current-like vectors (\(\mathbf{r},\mathbf{q}\)) hold a
+<em>share</em> in each copy, and only their sum is meaningful. Pairing one of each is what lets the dot
+products be computed locally and simply added up. <a href="#a1">Appendix A.1</a> works this through.</p>
+
+<h3>3.3 Where the approximation sits: exact operator, approximate preconditioner</h3>
+
+<p>This is the single most important thing to understand about the solver, and the easiest to get backwards.</p>
+
+<div class="diagram-title">Figure 3 — the exact/approximate split</div>
+
+<div class="panel panel-exact">
+    <div class="hdr"><span class="tag">EXACT</span>
+        OPERATOR &nbsp; \(\mathbf{A}_{\text{dup}} = \operatorname{blockdiag}(\mathbf{S}_p)\)</div>
+    <ul>
+        <li>Each \(\mathbf{S}_p\) is the <strong>dense</strong> partition Schur complement.</li>
+        <li>With <code>EXACT_PART_MTX = true</code> (default), nothing is ever dropped or lumped from it.</li>
+        <li>⟹ \(\mathbf{R}^{T}\mathbf{A}_{\text{dup}}\mathbf{R} = \hat{\mathbf{S}}\) exactly, to round-off.</li>
+        <li>⟹ <strong>CG converges to the true solution.</strong></li>
+    </ul>
+</div>
+
+<div class="panel panel-approx">
+    <div class="hdr"><span class="tag">APPROXIMATE</span>
+        PRECONDITIONER &nbsp; \(\mathbf{M}^{-1}\) — a two-stage cascade</div>
+    <ul>
+        <li>The hierarchical direct solve, built on intm and intm2 matrices that <strong>are</strong>
+            sparsified: <code>LEVEL1_SCHUR_TOL = 1e-4</code> (intm), <code>LEVEL2_SCHUR_TOL = 1e-4</code>
+            (intm2). Small off-diagonals are lumped onto the diagonal rather than dropped
+            (mechanism detail in <a href="#s7">§7.4</a>).</li>
+        <li>⟹ affects the <strong>iteration count only</strong> — never the answer.</li>
+    </ul>
+</div>
+
+<p>The preconditioner is a cascade of two restrictions with a Schur elimination between them — it descends
+through two <em>different</em> maps, and never forms an \(n_{\text{tnode}}\times n_{\text{tnode}}\) inverse
+at all:</p>
+
+<div class="equation-box">
+\[
+\mathbf{M}^{-1}\;=\;
+\mathbf{R}_1\,\Bigl[\,\mathcal{E}^{-1}\circ\bigl(\mathbf{R}_2\,\tilde{\mathbf{S}}_{GG}^{-1}\,\mathbf{R}_2^{T}\bigr)\circ\mathcal{E}\,\Bigr]\,\mathbf{R}_1^{T}
+\]
+</div>
+
+<table>
+<tr><th style="width:16%">Symbol</th><th style="width:30%">Map</th><th style="width:54%">On the 4×4 grid example</th></tr>
+<tr>
+    <td>\(\mathbf{R}_1\)</td>
+    <td>partition ports → intm tearing nodes<br>(<code>simPart::port_map</code>)</td>
+    <td>11 partition-port slots → <strong>7</strong> intm tearing slots. Note 7, not 5: n5 and n9 belong to
+        <em>both</em> intms, so the intm level is <strong>still duplicated</strong>.</td>
+</tr>
+<tr>
+    <td>\(\mathcal{E}\)</td>
+    <td>eliminate LPORTs (Schur step, <a href="#a2">A.2</a>)</td>
+    <td>Within each intm, removes the LPORT block, leaving only GPORTs: intm 0 drops n4, intm 1 drops n6, n7.</td>
+</tr>
+<tr>
+    <td>\(\mathbf{R}_2\)</td>
+    <td>intm GPORTs → intm2 nodes<br>(<code>simIntm::port_map</code>)</td>
+    <td>4 GPORT slots (2 per intm) → <strong>2</strong> intm2 nodes {n5, n9}.</td>
+</tr>
+<tr>
+    <td>\(\tilde{\mathbf{S}}_{GG}\)</td>
+    <td>the only matrix actually inverted</td>
+    <td><strong>2×2</strong>, spanning GPORTs only — <em>not</em> a 5×5 inverse of \(\hat{\mathbf{S}}\).</td>
+</tr>
+</table>
+
+<p>Two consequences follow:</p>
+
+<ul>
+    <li><strong>The LPORTs never reach the top level.</strong> They are eliminated by \(\mathcal{E}\) on the
+        way down and recovered by \(\mathcal{E}^{-1}\) on the way back up, entirely inside their own intm.
+        Only GPORTs pass through \(\mathbf{R}_2\).</li>
+    <li><strong>Duplication is removed in two stages, not one.</strong> 11 → 7 → 2 in this example. The
+        intermediate space is still duplicated across intms, which is exactly why a second gather/scatter
+        level exists.</li>
+</ul>
+
+<p>Sparsification, where it does apply, does not simply discard a small entry — it <em>lumps</em> it onto the
+two diagonal entries of its row and column. That preserves row sums, so the sparsified matrix stays a
+legitimate conductance matrix and remains SPD. This matters: CG requires an SPD preconditioner, so an
+SPD-preserving approximation is what lets the tolerance be loosened for speed without breaking the iteration.</p>
+
+<div class="proof-box">
+<strong>The design in one sentence.</strong> Exact operator ⟹ CG converges to the <em>right</em> answer;
+cheap approximate preconditioner ⟹ CG converges <em>quickly</em>. Loosening the sparsification tolerances
+trades iteration count against per-iteration cost and memory, and <strong>cannot change the converged
+result</strong>.
+</div>
+
+<div class="note">
+If <code>EXACT_PART_MTX</code> were set to <code>false</code>, the partition level would switch to a sparse,
+thresholded Schur matrix. The CG operator would itself become approximate and this guarantee would be lost.
+</div>
+
+<h2 id="s4">4. Side-by-Side Algorithm Mapping</h2>
+
+<p>Same algorithm, two vector spaces. The left column is the textbook; the right is what mPower does with
+each line.</p>
+
+<div class="sbs">
+<div class="left">
+<h4>Textbook PCG — assembled space</h4>
+<div class="algo" style="border:none; padding:0; background:transparent;">
+<div class="aline">\(\mathbf{r}=\mathbf{b}-\mathbf{A}\mathbf{u}_0\)</div>
+<div class="aline">\(\mathbf{z}=\mathbf{M}^{-1}\mathbf{r}\)</div>
+<div class="aline">\(\rho=\mathbf{r}^{T}\mathbf{z}\)</div>
+<div class="aline">\(\mathbf{p}=\mathbf{z}+\beta\mathbf{p}\)</div>
+<div class="aline">\(\mathbf{q}=\mathbf{A}\mathbf{p}\)</div>
+<div class="aline">\(\alpha=\rho/(\mathbf{p}^{T}\mathbf{q})\)</div>
+<div class="aline">\(\mathbf{u}\mathrel{+}=\alpha\mathbf{p}\)</div>
+<div class="aline">\(\mathbf{r}\mathrel{-}=\alpha\mathbf{q}\)</div>
+</div>
+<div class="legend">One global vector of length \(n_{\text{tnode}}\); \(\mathbf{A}=\hat{\mathbf{S}}\) formed explicitly.</div>
+</div>
+
+<div class="right">
+<h4>mPower — duplicated space</h4>
+<div class="algo" style="border:none; padding:0; background:transparent;">
+<div class="aline">\(\mathbf{r}_p \mathrel{-}= \mathbf{S}_p\mathbf{x}_p\) <span class="cmt">per partition</span></div>
+<div class="aline">gather → elim → solve → scatter</div>
+<div class="aline">local dots, then sum</div>
+<div class="aline">\(\mathbf{p}_p=\mathbf{z}_p+\beta\mathbf{p}_p\) <span class="cmt">per partition</span></div>
+<div class="aline">\(\mathbf{q}_p=\mathbf{S}_p\mathbf{p}_p\) <span class="cmt">per partition</span></div>
+<div class="aline">local dots, then sum</div>
+<div class="aline">\(\mathbf{u}_p\mathrel{+}=\alpha\mathbf{p}_p\) <span class="cmt">fused</span></div>
+<div class="aline">\(\mathbf{r}_p\mathrel{-}=\alpha\mathbf{q}_p\) <span class="cmt">with above</span></div>
+</div>
+<div class="legend">One private vector per partition; \(\hat{\mathbf{S}}\) never formed.</div>
+</div>
+</div>
+
+<p>Line by line, with the cost that matters at scale:</p>
+
+<table>
+<tr>
+    <th style="width:22%">Textbook step</th>
+    <th style="width:44%">mPower realisation</th>
+    <th style="width:34%">Communication</th>
+</tr>
+<tr>
+    <td>\(\mathbf{r}_0=\mathbf{b}-\mathbf{A}\mathbf{u}_0\)</td>
+    <td>Each partition subtracts \(\mathbf{S}_p\mathbf{x}_p\) from its own residual. \(\mathbf{u}_0\) is a warm start from the previous solve when one exists.</td>
+    <td><strong>None</strong></td>
+</tr>
+<tr>
+    <td>\(\mathbf{z}=\mathbf{M}^{-1}\mathbf{r}\)</td>
+    <td><strong>Gather</strong> partition residuals to intm and eliminate its LPORTs → gather to intm2 and <strong>solve</strong> the sparsified GPORT system → <strong>back-substitute</strong> to recover the LPORTs → <strong>scatter</strong> to every partition. Also returns \(\|\mathbf{R}^T\mathbf{r}\|\) for the stopping test.</td>
+    <td>Gather + scatter — <em>the only place partitions exchange vector data</em></td>
+</tr>
+<tr>
+    <td>\(\rho=\mathbf{r}^{T}\mathbf{z}\)</td>
+    <td>Each partition dots its private slices; the partials are summed.</td>
+    <td>1 scalar reduction</td>
+</tr>
+<tr>
+    <td>\(\beta=\rho_k/\rho_{k-1}\)</td>
+    <td>Scalar arithmetic, identical.</td>
+    <td>None</td>
+</tr>
+<tr>
+    <td>\(\mathbf{p}=\mathbf{z}+\beta\mathbf{p}\)</td>
+    <td>Per-partition AXPY on private slices.</td>
+    <td><strong>None</strong></td>
+</tr>
+<tr>
+    <td>\(\mathbf{q}=\mathbf{A}\mathbf{p}\)<br>and \(\mathbf{p}^{T}\mathbf{q}\)</td>
+    <td><strong>Fused.</strong> Each partition computes \(\mathbf{q}_p=\mathbf{S}_p\mathbf{p}_p\) with its dense exact Schur matrix and accumulates its share of \(\mathbf{p}^T\mathbf{q}\) in the same pass.</td>
+    <td><strong>None</strong> for the mat-vec; 1 scalar reduction for the dot</td>
+</tr>
+<tr>
+    <td>\(\mathbf{u}\mathrel{+}=\alpha\mathbf{p}\)<br>\(\mathbf{r}\mathrel{-}=\alpha\mathbf{q}\)</td>
+    <td><strong>Fused</strong> into a single loop over each partition's slices.</td>
+    <td><strong>None</strong></td>
+</tr>
+<tr>
+    <td>Convergence test</td>
+    <td>Relative residual of the <em>assembled</em> system, plus a minimum-iteration floor and a divergence guard (Section 6).</td>
+    <td>None (scalars already reduced)</td>
+</tr>
+</table>
+
+<h2 id="s5">5. Anatomy of One Iteration</h2>
+
+<p>Putting the pieces together, one CG iteration has exactly three kinds of work, with very different costs:</p>
+
+<div class="diagram-title">Figure 4 — dataflow of a single iteration (4 partitions shown)</div>
+
+<div class="panel panel-approx">
+    <div class="hdr"><span class="tag">APPROXIMATE</span>
+        ① PRECONDITIONER &nbsp; \(\mathbf{z}=\mathbf{M}^{-1}\mathbf{r}\) &nbsp;— the only coupling</div>
+<div class="art">
+  DOWN  (eliminate)                                  UP  (back-substitute)
+
+    r₀   r₁   r₂   r₃                                z₀   z₁   z₂   z₃
+     │    │    │    │                                 ▲    ▲    ▲    ▲
+     └────┴─┬──┴────┘  gather Rᵀ           scatter R  └────┴─┬──┴────┘
+            ▼          ("+=" shared)       ("=" copy)        │
+      ┌───────────┐                              ┌───────────┴┐
+      │   intm    │  b_G − Bᵀ A⁻¹ b_L            │   intm     │  u_L = A⁻¹(b_L − B·u_G)
+      │  (LPORT)  │  eliminate LPORTs            │  (LPORT)   │  recover LPORTs
+      └─────┬─────┘  ← sparsified 1e-4           └─────▲──────┘
+            │                                          │  u_G
+            ▼                                          │
+      ┌───────────┐                              ┌─────┴──────┐
+      │   intm2   │ ───────────────────────────▶ │   intm2    │
+      │  (GPORT)  │   Cholesky solve  →  u_G     │  (GPORT)   │
+      └───────────┘   ← sparsified 1e-4          └────────────┘
+
+  z_p carries BOTH: GPORT entries from u_G, LPORT entries from u_L.
+</div>
+<p style="font-family:'Segoe UI',sans-serif; font-size:0.93em; margin:10px 0 2px 0;">
+Each partition's port list mixes GPORTs (shared between intms, resolved at the top level) and LPORTs
+(interior to one intm). The sweep goes <strong>down then up</strong>: LPORTs are eliminated into the GPORT
+system on the way down, the small GPORT system is solved at the top, then LPORTs are recovered on the way
+back up. Only after that back-substitution does every entry of \(\mathbf{z}_p\) have a value.
+</p>
+</div>
+
+<p><a href="#a2">Appendix A.2</a> gives the algebra of the "eliminate LPORTs" step.</p>
+
+<div class="panel panel-exact">
+    <div class="hdr"><span class="tag">EXACT</span>
+        ② OPERATOR &nbsp; \(\mathbf{q}=\mathbf{A}\mathbf{p}\) &nbsp;— fully parallel, no communication</div>
+<div class="art">
+    p₀        p₁        p₂        p₃
+     │         │         │         │
+     ▼         ▼         ▼         ▼
+  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐     dense · exact · independent
+  │  S₀  │ │  S₁  │ │  S₂  │ │  S₃  │
+  └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘
+     ▼        ▼        ▼        ▼
+    q₀       q₁       q₂       q₃
+</div>
+</div>
+
+<div class="panel panel-neutral">
+    <div class="hdr"><span class="tag">2 REDUCTIONS</span>
+        ③ SCALARS &nbsp; \(\rho=\mathbf{r}^{T}\mathbf{z}\) &nbsp;and&nbsp; \(\mathbf{p}^{T}\mathbf{q}\)</div>
+    <p style="margin:6px 0 2px 0;">Each partition contributes a partial sum, reduced across threads and MPI
+    ranks. Two reductions per iteration is the theoretical minimum for CG.</p>
+</div>
+
+<p>Reading the figure:</p>
+<ul>
+    <li><strong>① is the expensive, coupled step</strong> — and it is the <em>approximate</em> one. Everything
+        that makes partitions talk to each other is confined here.</li>
+    <li><strong>② is cheap and perfectly parallel</strong> — and it is the <em>exact</em> one. No partition
+        needs anything from another.</li>
+    <li><strong>③ is two scalars.</strong> Two reductions per iteration is the theoretical minimum for CG, so
+        the hierarchical structure adds no synchronisation beyond what the algorithm inherently requires.</li>
+</ul>
+
+<div class="note">
+<strong>Parallelism.</strong> Within a machine, partitions run concurrently on a thread pool with a barrier
+between stages; each touches only its own slices, so no locking is needed. Across MPI ranks, each rank owns a
+contiguous block of intms, and only the two scalars in ③ plus the gather/scatter in ① cross rank boundaries.
+</div>
+
+<h2 id="s6">6. Convergence Criteria</h2>
+
+<p>The stopping rule is richer than a plain residual threshold. In words, CG stops when:</p>
+
+<ol>
+    <li><strong>The relative residual is below tolerance</strong> — measured on the <em>gathered</em> residual
+        \(\|\mathbf{R}^T\mathbf{r}\|/\|\hat{\mathbf{b}}\|\), i.e. the residual of the assembled system
+        \(\hat{\mathbf{S}}\mathbf{u}=\hat{\mathbf{b}}\). This is the correct quantity to test, not the
+        duplicated-space norm.</li>
+    <li><strong>and</strong> it has improved by at least a half-decade relative to the first iteration
+        (\(\text{resid}\le\text{resid}_1/\sqrt{10}\)) — preventing a premature exit when the starting residual
+        happened to be small already.</li>
+    <li><strong>and</strong> a minimum iteration count has been passed — bypassed only when the absolute
+        residual is already below \(10^{-15}\).</li>
+</ol>
+
+<p>Two additional exits: an <strong>absolute-tolerance</strong> mode used for certain analyses, and a
+<strong>divergence guard</strong> that aborts if the residual more than doubles — which an approximate
+preconditioner plus finite precision can occasionally cause.</p>
+
+<h4>Defaults for the DC path</h4>
+
+<table>
+<tr><th>Option</th><th>Default</th><th>Role</th></tr>
+<tr><td><code>CG_MAX_ITERATION_NUMBER_DC</code></td><td>1000</td><td>Iteration cap</td></tr>
+<tr><td><code>CG_MIN_ITERATION_NUMBER</code></td><td>1</td><td>Iteration floor</td></tr>
+<tr><td><code>CG_RESD_TOLERANCE_DC</code></td><td>1e-9</td><td>Relative residual target</td></tr>
+<tr><td><code>CG_USE_REL_RNORM</code></td><td><code>true</code></td><td><code>true</code>: normalise by \(\|\mathbf{b}\|\); <code>false</code>: by \(\|\mathbf{r}_0\|\)</td></tr>
+<tr><td><code>EXACT_PART_MTX</code></td><td><code>true</code></td><td>Dense partition Schur ⟹ <strong>exact CG operator</strong></td></tr>
+<tr><td><code>LEVEL1_SCHUR_TOL</code></td><td>1e-4</td><td>Sparsifies intm (preconditioner only) — via both assembly-time and post-assembly lumping (<a href="#s7">§7.4</a>)</td></tr>
+<tr><td><code>LEVEL2_SCHUR_TOL</code></td><td>1e-4</td><td>Sparsifies intm2 (preconditioner only) — post-assembly; method-1 directed pruning is enabled for CPM asymmetric storage (<a href="#s7">§7.4</a>)</td></tr>
+<tr><td><code>sparsification_method</code></td><td>1</td><td>Basic fixed-threshold sparsification used by the default flow</td></tr>
+</table>
+
+<h4>Exit codes</h4>
+
+<table>
+<tr><th>Code</th><th>Name</th><th>Meaning</th></tr>
+<tr><td>0</td><td><code>CG_DIST_CONVERGED</code></td><td>A convergence criterion was met</td></tr>
+<tr><td>2</td><td><code>CG_DIST_ITER_LIMIT</code></td><td>Iteration cap exhausted without converging</td></tr>
+<tr><td>3</td><td><code>CG_DIST_DEGENERATE_RHS</code></td><td>RHS norm non-finite or negligible — benign decoupled-port case; solution forced to zero</td></tr>
+<tr><td>4</td><td><code>CG_DIST_SOLVER_FAILURE</code></td><td>RHS healthy but the preconditioner returned non-finite — a genuine breakdown, e.g. a rank-deficient sub-block</td></tr>
+</table>
+
+<div class="note">
+Codes 3 and 4 both force a zero solution to stop NaN propagating, but they mean different things: 3 is an
+expected artifact of a port with nothing attached, 4 is a real failure that callers should surface.
+</div>
+
+<h2 id="s7">7. Asymmetric Systems: the <code>is_pkg</code> Path</h2>
+
+<p>Sections 1–6 describe the default SPD flow. This section covers the CPM asymmetric path with
+<code>EXACT_PART_MTX = true</code>, <code>sparsification_method = 1</code>, and KLU for general sparse
+factorizations. It describes what the implementation does; it does <em>not</em> imply that classical PCG is
+mathematically valid for a general matrix.</p>
+
+<div class="note">
+<strong>CPM mode selection.</strong> <code>HIGH_ORDER_CPM=1</code> selects the symmetric CPM reference
+(<code>FORCE_SYMMETRIC_VSRC</code> remains true); <code>HIGH_ORDER_CPM=2</code> selects the directed CPM
+path (<code>FORCE_SYMMETRIC_VSRC=false</code>). <code>ENABLE_ASYM_SPARSIFICATION</code> is an internal
+derived control, not a user or Tcl option: it follows
+<code>!FORCE_SYMMETRIC_VSRC</code>.
+</div>
+
+<p>The switch is the per-matrix flag <code>mtxPart::is_pkg</code> (<code>mtx/mtxPart.h:40</code>). Despite its
+name, the flag means “use general-matrix storage and factorization” rather than only “this is a package.”</p>
+
+<h3>7.1 What makes the matrix asymmetric</h3>
+
+<p>Despite the name, <code>is_pkg</code> is set by two independent conditions
+(<code>sim/simPart.cc:386</code>):</p>
+
+<div class="algo">
+<div class="aline"><code>part_mtx-&gt;Setpkg(Getpkgnodes() || (!Opts::FORCE_SYMMETRIC_VSRC));</code></div>
+</div>
+
+<table>
+<tr><th style="width:28%">Trigger</th><th style="width:36%">Origin</th><th style="width:36%">Why it breaks symmetry</th></tr>
+<tr>
+    <td><code>Getpkgnodes()</code><br><em>package nodes present</em></td>
+    <td>The partition contains a node marked for controlled-source/package handling
+        (<code>part/SubGraph.cc:351</code>).</td>
+    <td>Controlled-source stamps can place a transconductance or gain in one matrix direction without the
+        corresponding transpose entry.</td>
+</tr>
+<tr>
+    <td><code>!FORCE_SYMMETRIC_VSRC</code><br><em>asymmetric MNA</em></td>
+    <td>Global option, default <code>true</code> (<code>admin/main.cc:354</code>). Also settable from the
+        environment (<code>main.cc:522</code>).</td>
+    <td>Selects the flipped-current MNA stamp for voltage sources: the branch-current row is the
+        <em>negative</em> transpose of its column rather than the same transpose
+        (<code>sim/simVSrc.cc:139-172</code>).</td>
+</tr>
+</table>
+
+<p>Asymmetric contributions are stamped into a separate matrix, <code>CSmtx</code>, which is the only one
+allocated unsymmetric (<code>mtx/mtxPart.cc:262-267</code>). Note the contrast in how it is merged
+(<code>mtxPart.cc:896-913</code>): <code>Gmtx</code> and <code>Cmtx</code> are merged with an explicit
+<code>add_mtx_entry(i, row, ...)</code> mirror pass, whereas <code>CSmtx</code> is merged one-way only. That
+missing mirror <em>is</em> the asymmetry.</p>
+
+<h3>7.2 The structural consequence: a fourth block</h3>
+
+<p>For a genuinely general block matrix, the lower-left block is independent of the upper-right block:</p>
+
+<div class="equation-box">
+\[
+\begin{bmatrix}\mathbf{A}&amp;\mathbf{B}\\\mathbf{C}&amp;\mathbf{D}\end{bmatrix}
+\begin{bmatrix}\mathbf{x}_I\\\mathbf{x}_P\end{bmatrix}
+=
+\begin{bmatrix}\mathbf{b}_I\\\mathbf{b}_P\end{bmatrix},
+\qquad
+\mathbf{S}=\mathbf{D}-\mathbf{C}\mathbf{A}^{-1}\mathbf{B},
+\qquad
+	ilde{\mathbf{b}}_P=\mathbf{b}_P-\mathbf{C}\mathbf{A}^{-1}\mathbf{b}_I.
+\]
+</div>
+
+<p>mPower stores \(\mathbf{B}\) in <code>cmtx</code>. Its explicit \(\mathbf{C}\) block is <code>bmtx</code>,
+described in the header as “balancing current equations” (<code>mtxPart.h:49</code>). The important detail is
+that <code>bmtx</code> is allocated only for the intm matrix, not for bottom-level partitions.</p>
+
+<div class="diagram-title">Figure 5 — actual block treatment in the default asymmetric hierarchy</div>
+<div class="diagram">
+   BOTTOM-LEVEL PARTITION                    INTM LEVEL
+
+   ┌─────────────┬───────────┐              ┌─────────────┬───────────┐
+   │     mtx     │   cmtx    │              │     mtx     │   cmtx    │
+   │    (A)      │    (B)    │              │    (A)      │    (B)    │
+   ├─────────────┼───────────┤              ├─────────────┼───────────┤
+   │ not retained│   schur   │              │    bmtx     │   intm    │
+   │ Bᵀ assumed  │    (D)    │              │  stored (C) │    (D)    │
+   └─────────────┴───────────┘              └─────────────┴───────────┘
+
+       Sstored = D − Bᵀ A⁻¹ B                    S = D − C A⁻¹ B
+       rstored = bP − Bᵀ A⁻¹ bI                  r = bP − C A⁻¹ bI
+</div>
+
+<p>The allocation guard is <code>is_pkg &amp;&amp; !bottom_level</code> (<code>mtxPart.cc:170</code>).
+<code>bottom_level</code> starts as <code>true</code> for partition matrices and is cleared by
+<code>set_intm()</code> before the intm matrix is initialized (<code>simIntm.cc:319</code>). At stamp time, a
+lower-left entry is routed to <code>bmtx</code> only when a general sparse <code>intm</code> exists
+(<code>mtxPart.h:667-668</code>). A bottom-level partition therefore does not retain an independent
+\(\mathbf{C}\) block.</p>
+
+<p>The two levels consequently use different reductions:</p>
+
+<table>
+<tr><th style="width:24%">Level</th><th style="width:38%">Stored reduction</th><th style="width:38%">Consequence</th></tr>
+<tr>
+    <td><strong>Partition</strong><br>dense <code>schur</code></td>
+    <td><code>schur_complement_pkg</code> explicitly transposes <code>cmtx</code>:<br>
+        \(\mathbf{D}-\mathbf{B}^{T}\mathbf{A}^{-1}\mathbf{B}\).<br>
+        <code>compress_rhs</code> likewise uses \(\mathbf{B}^{T}\).</td>
+    <td>This is an exact reduction of the <em>stored surrogate</em> that assumes
+        \(\mathbf{C}=\mathbf{B}^{T}\), but it is not the Schur complement of a fully general original block
+        unless that equality actually holds. It can still be asymmetric because \(\mathbf{A}\) and
+        \(\mathbf{D}\) may be asymmetric.</td>
+</tr>
+<tr>
+    <td><strong>Intm</strong><br>sparse blocks</td>
+    <td><code>schur_complement_pkg</code> uses <code>bmtx</code>:<br>
+        \(\mathbf{D}-\mathbf{C}\mathbf{A}^{-1}\mathbf{B}\).<br>
+        <code>compress_rhs</code> likewise uses \(\mathbf{C}\).</td>
+    <td>The independent lower-left coupling is preserved while LPORTs are eliminated into the intm2
+        GPORT system.</td>
+</tr>
+<tr>
+    <td><strong>Back-substitution</strong></td>
+    <td colspan="2">Both levels recover the eliminated interior from
+        \(\mathbf{x}_I=\mathbf{A}^{-1}(\mathbf{b}_I-\mathbf{B}\mathbf{x}_P)\), so
+        <code>propagate</code> correctly uses <code>cmtx</code> in both cases.</td>
+</tr>
+<tr>
+    <td><strong>Factorization</strong></td>
+    <td colspan="2">General sparse matrices use KLU LU rather than CHOLMOD's symmetric factorization
+        (<code>spMatrix.cc:523,574</code>).</td>
+</tr>
+</table>
+
+<div class="note">
+<strong>Naming trap.</strong> In the intm branch of <code>schur_complement_pkg</code>, the variable holding
+<code>bmtx</code> is named <code>mtx2_T</code> (<code>mtx/mtxOpts.cc:363-374</code>). No transpose is performed
+there: the object already stores \(\mathbf{C}\). In the dense partition branch, however, the code really does
+transpose <code>cmtx</code>. The same function therefore means two different things depending on which output
+pointer is present.
+</div>
+
+<h3>7.3 How the unchanged CG driver consumes it</h3>
+
+<p>The matrix setup changes, but the iterative driver does not. In the default single-process path,
+<code>is_pkg</code> propagates from an affected partition to its containing intm; if any intm is affected,
+intm2 also uses general storage. The affected hierarchy path therefore uses KLU LU, while unaffected sibling
+intms may remain symmetric and use CHOLMOD. When <code>FORCE_SYMMETRIC_VSRC = false</code>, every partition and
+intm is marked general.</p>
+
+<div class="diagram-title">Figure 6 — where asymmetry lives in the hierarchy</div>
+<div class="diagram">
+   LEVEL        MATRIX                   HANDLED BY             USED BY CG AS
+   ──────────────────────────────────────────────────────────────────────────
+   partition    mtx (general interior)   KLU LU                 setup
+                dense surrogate Schur    full dense mat-vec  ▶  OPERATOR A
+   ──────────────────────────────────────────────────────────────────────────
+    affected     intm + bmtx              KLU LU                 ┐
+    intm         (unaffected siblings may remain symmetric)      │
+    intm2        general if any intm is affected; KLU LU         ┘ PRECOND M⁻¹
+   ──────────────────────────────────────────────────────────────────────────
+
+   CG's two matrix touches, neither of which has an asymmetric branch:
+
+        q_p = S_p · p_p     a dense mat-vec    (mtxPart::mult_schur)
+        z   = M⁻¹ r         a black-box solve  (simIntm2::precond_solve)
+</div>
+
+<p>CG itself never inspects a matrix. Its two matrix touches are <code>mult_schur</code>
+(<code>mtxPart.cc:1043</code>), a dense mat-vec against the stored \(\mathbf{S}_p\), and
+<code>precond_solve</code>, a black-box hierarchical solve. Neither has an asymmetric branch, and neither
+needs a storage-specific one: <code>dsMatrix::mult</code> and <code>spMatrix</code> dispatch internally on
+their symmetry flags. The gather/scatter primitives are unchanged because they are pure vector operations.</p>
+
+<p>A <code>dsMatrix</code> constructed with
+<code>sym=false</code> allocates full \(n^2\) storage rather than packed triangular
+(<code>dsMatrix.h:126-131</code>), and its <code>mult</code> takes the general branch rather than the
+symmetric one (<code>dsMatrix.h:197-214</code>). <code>spMatrix::mult</code> does the same
+(<code>spMatrix.cc</code>). The stored general matrix is therefore multiplied as stored. Full dense storage
+uses nearly twice the memory of packed symmetric storage, while the dense mat-vec arithmetic remains of the
+same \(O(n^2)\) order and similar operation count.</p>
+
+<div class="warn">
+<strong>The Krylov method does not change, so classical PCG theory no longer applies.</strong> There is one
+distributed iterative driver in the codebase, <code>solve_cg_dist</code>
+(<code>mtx/iterSolve.cc:110</code>), and it always uses the ordinary CG recurrences
+\(\rho=\mathbf{r}^{T}\mathbf{z}\),
+\(\beta=\rho_k/\rho_{k-1}\), and
+\(\alpha=\rho/(\mathbf{p}^{T}\mathbf{A}\mathbf{p})\). Neither <code>is_pkg</code> nor matrix symmetry
+selects a nonsymmetric Krylov method.
+<br><br>
+Classical CG is derived under the assumption that \(\mathbf{A}\) is symmetric positive definite: the
+three-term recurrence that makes it cheap relies on \(\mathbf{A}\)-orthogonality, which is not an inner
+product when \(\mathbf{A}\neq\mathbf{A}^{T}\). A general LU preconditioner is not guaranteed SPD either.
+The implementation may converge, stall, or diverge; its denominator, non-finite-value, iteration-limit, and
+residual-growth checks detect some breakdowns but do not supply a convergence guarantee.
+</div>
+
+<div class="note">
+<strong>Meaning of “exact operator” in this path.</strong> The mat-vec applies the stored dense partition
+Schur without sparsifying it. It is exact for that stored surrogate operator, not necessarily for the
+original fully general partition matrix, because the bottom-level reduction substitutes
+\(\mathbf{B}^{T}\) for an independently stamped \(\mathbf{C}\).
+</div>
+
+<h3>7.4 Default method-1 sparsification</h3>
+
+<p>The default flow has two places where fixed-threshold sparsification can occur:</p>
+
+<table>
+<tr><th style="width:20%">Mechanism</th><th style="width:32%">Where</th><th style="width:26%">Lumping rule</th><th style="width:22%">Symmetry-gated?</th></tr>
+<tr>
+    <td><strong>A — drop-and-lump<br>during assembly</strong></td>
+    <td><code>mtxPart::fill_intm_mtx</code><br>(mtxPart.cc:365, 407)</td>
+    <td>If \(|d| &lt; \tau|d_{ii}|\) and \(|d| &lt; \tau|d_{jj}|\), add \(d\) to both diagonals instead of
+        placing it off-diagonal.</td>
+    <td><strong>No.</strong> Runs for asymmetric matrices too; only the <em>traversal</em> adapts.</td>
+</tr>
+<tr>
+    <td><strong>B — post-assembly<br>sweep</strong></td>
+    <td><code>spMatrix::sparsify(method, tol)</code><br>(spMatrix.cc:1580)</td>
+    <td>Same rule, applied to the already-assembled triplet list.</td>
+    <td><strong>No for enabled method 1.</strong> Symmetric and directed matrices each use their own
+        traversal and policy; other methods retain their documented guards.</td>
+</tr>
+</table>
+
+<p>The two hierarchy levels call these mechanisms differently:</p>
+
+<div class="diagram-title">Figure 7 — which sparsification actually runs, per level</div>
+<div class="diagram">
+  LEVEL 1   partition schur  ──▶  intm
+  ─────────────────────────────────────────────────────────────────────────
+    A  fill_intm_mtx(intm_mtx, port_map, method=1,
+                    LEVEL1_SCHUR_TOL)                          simPart.h:328
+      threshold = 1e-4                                              ACTIVE
+
+   B  intm_mtx->sparsify(method, LEVEL1_SCHUR_TOL)             simIntm.cc:326
+      inside #ifdef SPARSIFYSUM, which IS defined (simIntm.cc:76)
+      symmetric → symmetric policy       directed method 1 → directed policy
+
+
+  LEVEL 2   intm  ──▶  intm2
+  ─────────────────────────────────────────────────────────────────────────
+   A  fill_intm_mtx(intm2_mtx, port_map)                        simIntm.h:385
+      no threshold argument → defaults to 0 (mtxPart.h:197)          INERT
+      drop test becomes  |d| < |d*0|  → never true
+
+   B  intm2_mtx->sparsify(method, LEVEL2_SCHUR_TOL)           simIntm2.cc:957
+      symmetric → symmetric policy       directed method 1 → aggregate directed policy
+</div>
+
+<div class="proof-box">
+<strong>Directed CPM result.</strong> Method 1 now prunes directed off-diagonals at both upper levels.
+At level 2, the local intm contributions are assembled into the aggregate intm2 matrix before the
+post-assembly sweep. In distributed MUMPS operation, the diagonal reference is globally reduced before
+pruning and the before/after/candidate/drop/retain counts are reduced and reported once by rank 0; the
+collected serial path reports the assembled aggregate directly. The stored dense partition operator is
+unchanged.
+</div>
+
+<p>For directed method 1, every diagonal is retained. Each stored off-diagonal \(A_{r,c}\) is tested
+independently using
+\(|A_{r,c}| &lt; \tau|A_{r,r}|\) and \(|A_{r,c}| &lt; \tau|A_{c,c}|\). A dropped entry is lumped onto both
+endpoint diagonals, and the reverse entry is never synthesized. Assembly adapts its traversal to general
+storage; the full square is walked rather than one triangle, and the mirror write is suppressed. This
+preserves directed entries instead of silently symmetrizing them.</p>
+
+<div class="warn">
+<strong>Diagonal lumping has no general asymmetric guarantee.</strong> For a directed off-diagonal
+\(d=A_{ji}\), the code removes \(d\) and adds it to both endpoint diagonals. Unlike the symmetric
+conductance case, this does not generally preserve every row sum and does not preserve SPD, because a general
+matrix was not SPD to begin with. It is a preconditioner heuristic in this path, not a structure-preserving
+transformation.
+</div>
+
+<div class="proof-box">
+<strong>Summary.</strong> In the default serial flow, <code>is_pkg</code> selects general storage and KLU LU,
+preserves an explicit lower-left <code>bmtx</code> at the intm level, and method-1 directed sparsification
+is applied at both intm and aggregate intm2. Bottom-level partitions are different: they do not retain
+<code>bmtx</code>, so their dense operator uses the surrogate reduction
+\(\mathbf{D}-\mathbf{B}^{T}\mathbf{A}^{-1}\mathbf{B}\). None of these choices changes the CG recurrence.
+The implementation therefore supports applying and preconditioning stored general matrices, but it does not
+provide the convergence guarantees of a nonsymmetric Krylov solver.
+</div>
+
+<h3 id="s7-5">7.5 Diagnostics and release validation</h3>
+
+<p>The simulator emits <code>SIM_DBG</code> sparsification diagnostics to <code>mpower.log</code>. The intm
+and intm2 records identify whether the effective storage is symmetric or directed and include the matrix
+size, threshold, candidate count, dropped and retained off-diagonals, and before/after nnz. The intm2
+path also emits a pre-factorization record and a completion marker. These records are the authoritative
+diagnostic evidence for which policy ran.</p>
+
+<div class="implementation-box">Intm2 sparsification effective=1 kind=directed size=2148 threshold=0.0001 candidates=1447863 dropped=1216454 retained=231409 before_nnz=1450011 after_nnz=233557
+Intm2 pre_factorization size=2148 nnz=233557 effective=1 kind=directed threshold=0.0001</div>
+
+<p><strong>Minion release gate — passed.</strong> The refreshed <code>HIGH_ORDER_CPM=2</code> run produced a
+2148 × 2148 intm2, reduced 1,450,011 to 233,557 directed nnz (5.062%), and produced 236 ports/states
+with stable output. It completed in 4m04 wall time with approximately 18.6 GB peak memory.</p>
+
+<p>The refreshed <code>HIGH_ORDER_CPM=1</code> symmetric comparison produced a 2123 × 2123 intm2 with
+110,300 nnz (4.85%) and 236 ports. Its output was byte-identical to the historical output. The
+pre-existing warning that 236/236 poles were unstable belongs to that symmetric reference and is unrelated
+to the directed change.</p>
+
+<div class="warn">
+<strong>BRCM gate not measured.</strong> The BRCM-only external watchdog was implemented, reviewed, and
+mock-tested, but its guarded run was correctly blocked before launch: host kernel
+<code>4.18.0-553.97.1.el8_10</code> lacks <code>pidfd_open</code>, cgroups are v1-only and non-writable, and
+no safe identity-preserving fallback is available. Therefore the BRCM nnz/port target was not measured
+and must not be claimed.
+</div>
+
+<h2 id="s8">8. Appendix</h2>
+
+<p>The detail behind three points asserted in Section 3 and Section 5, for readers who need to go deeper.</p>
+
+<h3 id="a1">A.1 Vector typing in the duplicated space</h3>
+
+<p>Think of the difference physically. A <strong>voltage</strong> at a shared node is one number that every
+partition must agree on. A <strong>current</strong> into a shared node is a sum: each partition delivers part
+of it, and only the total is meaningful. Duplicated storage represents these two situations differently:</p>
+
+<div class="diagram-title">Figure A1 — the two vector types at a node shared by P0, P1, P2</div>
+<div class="diagram">
+  CONSISTENT  ("shared value" — like a voltage)     produced by SCATTER
+
+        P0: 0.7    P1: 0.7    P2: 0.7
+        └──────────────┴──────────────┘
+                  all equal
+        true value of the node = 0.7   (read any one slot)
+
+
+  DISTRIBUTED ("split contribution" — like a current)  produced locally
+
+        P0: 0.2    P1: 0.5    P2: 0.3
+        └──────────────┴──────────────┘
+                    sum
+        true value of the node = 1.0   (must gather to read it)
+</div>
+
+<div class="definition-box">
+<strong>How each CG vector is typed, and why:</strong>
+<ul>
+    <li>\(\mathbf{p}\) and \(\mathbf{u}\) (search direction, iterate) — <strong>consistent</strong>. They are
+        voltage-like. \(\mathbf{u}\) must be, because a node has one voltage.</li>
+    <li>\(\mathbf{z}=\mathbf{M}^{-1}\mathbf{r}\) — <strong>consistent</strong>, and necessarily so: the
+        preconditioner <em>ends with a scatter</em>, which copies one solved value into every owner.</li>
+    <li>\(\mathbf{r}\) and \(\mathbf{q}=\mathbf{A}\mathbf{p}\) — <strong>distributed</strong>. They are
+        current-like. Each partition computes only <em>its own</em> contribution
+        (\(\mathbf{q}_p=\mathbf{S}_p\mathbf{p}_p\) uses partition \(p\)'s conductances alone), so no single
+        slot holds the node's true residual; only the sum over owners does.</li>
+</ul>
+</div>
+
+<p>The typing is not a convention someone chose — it falls out of how each vector is produced. A scatter
+yields consistent vectors; a purely local computation yields distributed ones. And the two types are
+preserved by the algorithm: line 7 builds \(\mathbf{p}\) from \(\mathbf{z}\) and \(\mathbf{p}\) (both
+consistent, so \(\mathbf{p}\) stays consistent); line 11 updates \(\mathbf{r}\) using \(\mathbf{q}\) (both
+distributed, so \(\mathbf{r}\) stays distributed). The types never leak across.</p>
+
+<h4>Why this makes the dot products come out right</h4>
+
+<p>Both CG dot products pair a <em>distributed</em> vector with a <em>consistent</em> one —
+\(\mathbf{r}^T\mathbf{z}\) and \(\mathbf{p}^T\mathbf{q}\) — and for that pairing, naively summing the local
+dot products gives the true assembled answer, with no weighting and no correction:</p>
+
+<div class="equation-box">
+\[
+\sum_p \mathbf{r}_p^{T}\mathbf{z}_p
+\;=\;(\mathbf{R}^{T}\mathbf{r})^{T}\,\mathbf{z}_{\text{asm}}
+\;=\;\hat{\mathbf{r}}^{T}\hat{\mathbf{z}}
+\]
+<p style="margin-bottom:0">because the consistent vector contributes the same value \(\hat z\) at every copy,
+so summing over copies performs the gather \(\mathbf{R}^T\) on the distributed one for free.</p>
+</div>
+
+<p>This is why <code>rdotz</code> and <code>zAp_zdotp</code> can simply accumulate
+<code>w += z[i]*r[i]</code> over each partition's private slice and add up the partials. No partition needs
+to know that a node is shared, or with how many others.</p>
+
+<div class="warn">
+<strong>What goes wrong if the types are mixed.</strong> Pair two <em>consistent</em> vectors and every shared
+node is counted once per owner, inflating the dot product by its multiplicity. On the 4×4 grid — where n5 has
+3 owners and n4, n6, n7, n9 have 2 each — a dot product that should be 16 evaluates to 28. Since
+\(\rho\) and \(\mathbf{p}^T\mathbf{q}\) set \(\alpha\) and \(\beta\), corrupted scalars break the conjugacy
+relations and CG stalls or diverges. Pairing two <em>distributed</em> vectors is wrong in the opposite
+direction, under-counting the cross terms between partitions.
+</div>
+
+<div class="proof-box">
+<strong>The rule in one line:</strong> every CG inner product must pair one distributed vector with one
+consistent vector. mPower satisfies this automatically because \(\mathbf{r},\mathbf{q}\) are always
+distributed and \(\mathbf{z},\mathbf{p},\mathbf{u}\) are always consistent.
+<span class="checkmark">✓</span>
+</div>
+
+<h3 id="a2">A.2 "Eliminate LPORTs" — the intm-level Schur step</h3>
+
+<p>It is one Schur-complement step, the same algebra used to remove partition interiors in §3.1, applied one
+level up. Order each intm's tearing nodes as LPORT block \(L\) then GPORT block \(G\):</p>
+
+<div class="equation-box">
+\[
+\begin{bmatrix}\mathbf{A}_{LL} & \mathbf{B}_{LG}\\ \mathbf{B}_{LG}^{T} & \mathbf{D}_{GG}\end{bmatrix}
+\begin{bmatrix}\mathbf{u}_L\\ \mathbf{u}_G\end{bmatrix}=
+\begin{bmatrix}\mathbf{b}_L\\ \mathbf{b}_G\end{bmatrix}
+\]
+</div>
+
+<div class="definition-box">
+<ul style="margin-bottom:4px">
+    <li><strong>Down (eliminate).</strong> Factor \(\mathbf{A}_{LL}\) and form the reduced GPORT system
+        \(\bigl(\mathbf{D}_{GG}-\mathbf{B}_{LG}^{T}\mathbf{A}_{LL}^{-1}\mathbf{B}_{LG}\bigr)\mathbf{u}_G
+        = \mathbf{b}_G-\mathbf{B}_{LG}^{T}\mathbf{A}_{LL}^{-1}\mathbf{b}_L\).
+        The LPORT unknowns are now gone; only their <em>effect</em> on the GPORTs remains. This reduced
+        matrix is what gets assembled into intm2 — and what the 1e-4 sparsification is applied to.</li>
+    <li><strong>Up (back-substitute).</strong> Once the top level returns \(\mathbf{u}_G\), recover the
+        LPORTs with \(\mathbf{u}_L=\mathbf{A}_{LL}^{-1}\bigl(\mathbf{b}_L-\mathbf{B}_{LG}\mathbf{u}_G\bigr)\),
+        reusing the factorization from the downward pass.</li>
+</ul>
+The elimination is only half a solve; without the upward pass the LPORT entries of \(\mathbf{z}\) would be
+undefined and \(\mathbf{M}^{-1}\) would not be a solve at all.
+</div>
+
+<h3 id="a3">A.3 Where each step lives in the code</h3>
+
+<p>One entry point per algorithm step. The driver
+(<code>solve_cg_dist</code>, <code>mtx/iterSolve.cc:110</code>) contains the algorithm and nothing else — it
+knows no matrices. It calls into <code>simIntm2</code>, which fans out to <code>simIntm</code>, which fans
+out to <code>simPart</code>, where the arithmetic happens.</p>
+
+<table>
+<tr><th style="width:30%">Algorithm step</th><th style="width:38%">Entry point</th><th style="width:32%">Notes</th></tr>
+<tr><td>Initialise, warm start</td><td><code>simPart::init_cg</code> (simPart.h:826)</td><td>Allocates \(\mathbf{x}\), \(\mathbf{p}\)</td></tr>
+<tr><td>\(\mathbf{r}\mathrel{-}=\mathbf{A}\mathbf{u}_0\)</td><td><code>simPart::rmAx_cg</code> (simPart.h:880)</td><td></td></tr>
+<tr><td><strong>Preconditioner</strong> \(\mathbf{M}^{-1}\)</td><td><code>simIntm2::precond_solve</code> (simIntm2.cc:2371)</td><td>Two-stage cascade: gather → eliminate LPORTs → GPORT solve → back-substitute → scatter</td></tr>
+<tr><td><strong>Operator</strong> \(\mathbf{A}\)</td><td><code>mtxPart::mult_schur</code> (mtxPart.cc:1043)</td><td>Multiplies the <em>stored</em> dense Schur</td></tr>
+<tr><td>Gather \(\mathbf{R}_1^{T}\) (partition → intm)</td><td><code>mtxPart::fill_intm_rhs</code> (mtxPart.cc:728)</td><td>Note the <code>+=</code>. The intm → intm2 gather \(\mathbf{R}_2^{T}\) is <code>simIntm::fill_intm2_rhs</code>.</td></tr>
+<tr><td>Scatter \(\mathbf{R}_1\) (intm → partition)</td><td><code>mtxPart::update_port</code> (mtxPart.cc:794)</td><td>Note the <code>=</code>. The intm2 → intm scatter \(\mathbf{R}_2\) is <code>simIntm::update_port_intm</code>.</td></tr>
+<tr><td>\(\rho=\mathbf{r}^{T}\mathbf{z}\)</td><td><code>simIntm2::rdotz</code> (simIntm2.cc:2471)</td><td>Fan-out + reduction</td></tr>
+<tr><td>\(\mathbf{p}=\mathbf{z}+\beta\mathbf{p}\)</td><td><code>simPart::update_p</code> (simPart.h:860)</td><td></td></tr>
+<tr><td>\(\mathbf{q}=\mathbf{A}\mathbf{p}\), \(\mathbf{p}^{T}\mathbf{q}\)</td><td><code>simPart::zAp_zdotp</code> (simPart.h:870)</td><td>Fused</td></tr>
+<tr><td>\(\mathbf{u},\mathbf{r}\) updates</td><td><code>simPart::xr_axpy</code> (simPart.h:898)</td><td>Fused; driver passes \(-\alpha\)</td></tr>
+<tr><td>Hand off to back-substitution</td><td><code>simPart::term_cg</code> (simPart.h:842)</td><td></td></tr>
+</table>
+
+<div class="warn">
+<strong>One trap worth knowing.</strong> \(\mathbf{z}\) and \(\mathbf{q}\) share a single buffer
+(<code>mtxPart::s2</code>). This is safe only because of the strict ordering in the loop: \(\rho\) and the
+\(\mathbf{p}\) update both consume \(\mathbf{z}\) <em>before</em> the mat-vec overwrites it with
+\(\mathbf{q}\). Reordering those calls would silently corrupt the iteration.
+</div>
+
+<hr style="margin-top: 50px;">
+<p style="text-align: center; color: #666; font-size: 0.9em;">
+    mPower Simulator — PCG ↔ Hierarchical Solver Mapping.
+    Companion to <code>hierarchical_solver_report.html</code>.
+</p>
+
+</body>
+</html>
