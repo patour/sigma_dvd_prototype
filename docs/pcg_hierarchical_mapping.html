@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Textbook PCG → mPower Hierarchical Solver</title>
-    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
     <script> MathJax = {
         tex: {
         inlineMath: [['\\(', '\\)']],
@@ -116,6 +115,17 @@
             border-radius: 5px;
             padding: 15px;
             margin: 15px 0;
+        }
+        .implementation-box {
+            background: #2d3436;
+            color: #dfe6e9;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9em;
+            overflow-x: auto;
+            white-space: pre-wrap;
         }
         code {
             background: #ecf0f1;
@@ -241,6 +251,7 @@ Default configuration: <code>EXACT_PART_MTX = true</code>, <code>LEVEL1_SCHUR_TO
                 <li><a href="#a1">A.1 &nbsp;Vector typing in the duplicated space</a></li>
                 <li><a href="#a2">A.2 &nbsp;"Eliminate LPORTs" — the intm-level Schur step</a></li>
                 <li><a href="#a3">A.3 &nbsp;Where each step lives in the code</a></li>
+                <li><a href="#a4">A.4 &nbsp;Line-by-line equivalence: the duplicated loop is PCG on the assembled system</a></li>
             </ul>
         </li>
     </ul>
@@ -272,7 +283,7 @@ partitions and never assembled. The mapping to textbook PCG is nonetheless exact
 definite and preconditioner \(\mathbf{M}\approx\mathbf{A}\):</p>
 
 <div class="algo">
-<div class="aline"><span class="ln">1</span> \(\mathbf{u}_0\) given, \(\quad \mathbf{p}_0=\mathbf{0}, \quad \rho_{-1}=1\)</div>
+<div class="aline"><span class="ln">1</span> \(\mathbf{u}_0\) given, \(\quad \mathbf{p}_0=\mathbf{0}, \quad \rho_{0}=1\)</div>
 <div class="aline"><span class="ln">2</span> \(\mathbf{r}_0=\mathbf{b}-\mathbf{A}\mathbf{u}_0\) <span class="cmt">&nbsp;&nbsp;initial residual</span></div>
 <div class="sep"></div>
 <div class="aline"><span class="ln">3</span> <span class="kw">for</span> \(k=1,2,3,\dots\)</div>
@@ -388,6 +399,47 @@ own ports, so shared nodes are stored more than once:</p>
             P2: 0.3 ╱                          node add  (Kirchhoff)
 </div>
 
+<p>Written out for the 4×4 grid, with the assembled tearing nodes ordered
+[n4,&nbsp;n5,&nbsp;n6,&nbsp;n7,&nbsp;n9] as listed in Figure 1 (any fixed ordering serves — this space is
+never materialised), each \(\mathbf{R}_p\) has one row per local port slot, with a single 1 marking the
+tearing node that slot copies:</p>
+
+<div class="diagram-title">Figure 2b — the four maps and their stack, written out ("·" = 0)</div>
+<div class="diagram">
+        n4 n5 n6 n7 n9                    n4 n5 n6 n7 n9
+  n5  [  ·  1  ·  ·  · ]            n5  [  ·  1  ·  ·  · ]
+  n4  [  1  ·  ·  ·  · ]            n9  [  ·  ·  ·  ·  1 ]
+                                    n4  [  1  ·  ·  ·  · ]
+        R₀  (2×5)                         R₁  (3×5)
+
+        n4 n5 n6 n7 n9                    n4 n5 n6 n7 n9
+  n5  [  ·  1  ·  ·  · ]            n9  [  ·  ·  ·  ·  1 ]
+  n6  [  ·  ·  1  ·  · ]            n6  [  ·  ·  1  ·  · ]
+  n7  [  ·  ·  ·  1  · ]            n7  [  ·  ·  ·  1  · ]
+        R₂  (3×5)                         R₃  (3×5)
+
+
+  stacked R (11×5) — one row per partition-port slot of Figure 1:
+
+               n4 n5 n6 n7 n9
+    P0 ▸ n5  [  ·  1  ·  ·  · ]
+    P0 ▸ n4  [  1  ·  ·  ·  · ]
+    P1 ▸ n5  [  ·  1  ·  ·  · ]
+    P1 ▸ n9  [  ·  ·  ·  ·  1 ]
+    P1 ▸ n4  [  1  ·  ·  ·  · ]
+    P2 ▸ n5  [  ·  1  ·  ·  · ]
+    P2 ▸ n6  [  ·  ·  1  ·  · ]
+    P2 ▸ n7  [  ·  ·  ·  1  · ]
+    P3 ▸ n9  [  ·  ·  ·  ·  1 ]
+    P3 ▸ n6  [  ·  ·  1  ·  · ]
+    P3 ▸ n7  [  ·  ·  ·  1  · ]
+
+  Applying R copies an assembled value into every slot whose row carries its
+  column's 1 — Figure 2's "=".  Applying Rᵀ sums each column's slots — the
+  "+=".  The column totals are Figure 1's multiplicities:
+  RᵀR = diag(2, 3, 2, 2, 2), and 2+3+2+2+2 = 11 slots.
+</div>
+
 <p>Stacking the \(\mathbf{R}_p\) into \(\mathbf{R}\) and the \(\mathbf{S}_p\) into a block-diagonal operator
 gives the identity that makes the whole scheme valid:</p>
 
@@ -450,8 +502,10 @@ at all:</p>
 <tr><th style="width:16%">Symbol</th><th style="width:30%">Map</th><th style="width:54%">On the 4×4 grid example</th></tr>
 <tr>
     <td>\(\mathbf{R}_1\)</td>
-    <td>partition ports → intm tearing nodes<br>(<code>simPart::port_map</code>)</td>
-    <td>11 partition-port slots → <strong>7</strong> intm tearing slots. Note 7, not 5: n5 and n9 belong to
+    <td>scatter: intm tearing nodes → partition ports<br>(\(\mathbf{R}_1^T\) is the gather; both read
+        <code>simPart::port_map</code>)</td>
+    <td>\(\mathbf{R}_1^T\) gathers 11 partition-port slots → <strong>7</strong> intm tearing slots;
+        \(\mathbf{R}_1\) scatters back. Note 7, not 5: n5 and n9 belong to
         <em>both</em> intms, so the intm level is <strong>still duplicated</strong>.</td>
 </tr>
 <tr>
@@ -461,8 +515,10 @@ at all:</p>
 </tr>
 <tr>
     <td>\(\mathbf{R}_2\)</td>
-    <td>intm GPORTs → intm2 nodes<br>(<code>simIntm::port_map</code>)</td>
-    <td>4 GPORT slots (2 per intm) → <strong>2</strong> intm2 nodes {n5, n9}.</td>
+    <td>scatter: intm2 nodes → intm GPORTs<br>(\(\mathbf{R}_2^T\) is the gather; both read
+        <code>simIntm::port_map</code>)</td>
+    <td>\(\mathbf{R}_2^T\) gathers 4 GPORT slots (2 per intm) → <strong>2</strong> intm2 nodes {n5, n9};
+        \(\mathbf{R}_2\) scatters back.</td>
 </tr>
 <tr>
     <td>\(\tilde{\mathbf{S}}_{GG}\)</td>
@@ -470,6 +526,17 @@ at all:</p>
     <td><strong>2×2</strong>, spanning GPORTs only — <em>not</em> a 5×5 inverse of \(\hat{\mathbf{S}}\).</td>
 </tr>
 </table>
+
+<div class="note">
+<strong>Direction convention.</strong> As in §3.1 and Figure 2, each \(\mathbf{R}\) denotes the
+<em>scatter</em> (coarse → duplicated-fine) and each \(\mathbf{R}^T\) the <em>gather</em>. Read the formula
+right-to-left: the residual is gathered down (\(\mathbf{R}_1^T\), then \(\mathcal{E}\), then
+\(\mathbf{R}_2^T\)), solved at the top, and scattered back up — matching the code map in
+<a href="#a3">A.3</a>. Do not read the operator direction off the <code>port_map</code> arrays: they store
+local → global indices (<code>port_map[local] = global</code>), and that one array implements <em>both</em>
+operators — the scatter reads <code>v[i] = u[port_map[i]]</code>, the gather accumulates
+<code>b[port_map[i]] += r[i]</code>.
+</div>
 
 <p>Two consequences follow:</p>
 
@@ -502,7 +569,9 @@ thresholded Schur matrix. The CG operator would itself become approximate and th
 <h2 id="s4">4. Side-by-Side Algorithm Mapping</h2>
 
 <p>Same algorithm, two vector spaces. The left column is the textbook; the right is what mPower does with
-each line.</p>
+each line. <a href="#a4">Appendix A.4</a> verifies the equivalence line by line: each right-column
+operation, viewed through the gather \(\mathbf{R}^{T}\), is exactly its left-column counterpart on
+\(\hat{\mathbf{S}}\).</p>
 
 <div class="sbs">
 <div class="left">
@@ -777,7 +846,7 @@ missing mirror <em>is</em> the asymmetry.</p>
 \qquad
 \mathbf{S}=\mathbf{D}-\mathbf{C}\mathbf{A}^{-1}\mathbf{B},
 \qquad
-	ilde{\mathbf{b}}_P=\mathbf{b}_P-\mathbf{C}\mathbf{A}^{-1}\mathbf{b}_I.
+\tilde{\mathbf{b}}_P=\mathbf{b}_P-\mathbf{C}\mathbf{A}^{-1}\mathbf{b}_I.
 \]
 </div>
 
@@ -905,6 +974,13 @@ three-term recurrence that makes it cheap relies on \(\mathbf{A}\)-orthogonality
 product when \(\mathbf{A}\neq\mathbf{A}^{T}\). A general LU preconditioner is not guaranteed SPD either.
 The implementation may converge, stall, or diverge; its denominator, non-finite-value, iteration-limit, and
 residual-growth checks detect some breakdowns but do not supply a convergence guarantee.
+</div>
+
+<div class="note">
+<strong>Proposed remedy.</strong> A transpose-free nonsymmetric Krylov driver — preconditioned
+BiCGSTAB — can run on this same infrastructure with the operator, preconditioner, and gather/scatter
+primitives unchanged, replacing only the recurrence. The full mapping, including the one new communication
+primitive it needs, is developed in <code>bicgstab_hierarchical_mapping.html</code>.
 </div>
 
 <div class="note">
@@ -1164,10 +1240,138 @@ out to <code>simPart</code>, where the arithmetic happens.</p>
 \(\mathbf{q}\). Reordering those calls would silently corrupt the iteration.
 </div>
 
+<h3 id="a4">A.4 Line-by-line equivalence: the duplicated loop is PCG on \(\hat{\mathbf{S}}\)</h3>
+
+<p>Section 3.2's identity \(\hat{\mathbf{S}}=\mathbf{R}^{T}\mathbf{A}_{\text{dup}}\mathbf{R}\) is never
+evaluated as a matrix product — the code holds only its three factors separately
+(\(\mathbf{R}\) = <code>update_port</code> scatter, \(\mathbf{R}^{T}\) = <code>fill_intm_rhs</code> gather,
+\(\mathbf{A}_{\text{dup}}\) = per-partition <code>mult_schur</code>). What the identity provides is an
+<em>invariant</em>: every line of the Section 4 loop, read through the gather, is exactly the corresponding
+textbook line on the assembled system. The dictionary is the typing of <a href="#a1">A.1</a>: a consistent
+vector stores \(\mathbf{x}=\mathbf{R}\hat{\mathbf{x}}\) (any copy reads back \(\hat{\mathbf{x}}\)); a
+distributed vector stores shares whose gather \(\hat{\mathbf{r}}=\mathbf{R}^{T}\mathbf{r}\) is the
+assembled value.</p>
+
+<table>
+<tr>
+    <th style="width:26%">Duplicated-space line (§4)</th>
+    <th style="width:41%">Algebra behind it</th>
+    <th style="width:33%">Assembled line it equals</th>
+</tr>
+<tr>
+    <td>\(\mathbf{r}_p \mathrel{-}= \mathbf{S}_p\mathbf{x}_p\) per partition</td>
+    <td>\(\mathbf{R}^{T}(\tilde{\mathbf{b}}-\mathbf{A}_{\text{dup}}\mathbf{R}\hat{\mathbf{u}}_0)
+        =\hat{\mathbf{b}}-(\mathbf{R}^{T}\mathbf{A}_{\text{dup}}\mathbf{R})\hat{\mathbf{u}}_0\)
+        — <em>the identity, first firing</em></td>
+    <td>\(\hat{\mathbf{r}}_0=\hat{\mathbf{b}}-\hat{\mathbf{S}}\hat{\mathbf{u}}_0\)</td>
+</tr>
+<tr>
+    <td>gather → elim → solve → scatter</td>
+    <td>\(\mathbf{z}=\mathbf{R}\,\hat{\mathbf{M}}^{-1}(\mathbf{R}^{T}\mathbf{r})=\mathbf{R}\hat{\mathbf{z}}\)</td>
+    <td>\(\hat{\mathbf{z}}=\hat{\mathbf{M}}^{-1}\hat{\mathbf{r}}\)
+        (\(\hat{\mathbf{M}}\) = the sparsified hierarchical matrix)</td>
+</tr>
+<tr>
+    <td>local dots, then sum (\(\rho\))</td>
+    <td>\(\sum_p \mathbf{r}_p^{T}\mathbf{z}_p=\mathbf{r}^{T}(\mathbf{R}\hat{\mathbf{z}})
+        =(\mathbf{R}^{T}\mathbf{r})^{T}\hat{\mathbf{z}}\)</td>
+    <td>\(\rho=\hat{\mathbf{r}}^{T}\hat{\mathbf{z}}\) (A.1 pairing: distributed × consistent)</td>
+</tr>
+<tr>
+    <td>\(\mathbf{p}_p=\mathbf{z}_p+\beta\mathbf{p}_p\)</td>
+    <td>\(\mathbf{R}\hat{\mathbf{z}}+\beta\,\mathbf{R}\hat{\mathbf{p}}
+        =\mathbf{R}(\hat{\mathbf{z}}+\beta\hat{\mathbf{p}})\)</td>
+    <td>\(\hat{\mathbf{p}}\leftarrow\hat{\mathbf{z}}+\beta\hat{\mathbf{p}}\), executed on every copy at
+        once</td>
+</tr>
+<tr>
+    <td>\(\mathbf{q}_p=\mathbf{S}_p\mathbf{p}_p\)</td>
+    <td>\(\mathbf{R}^{T}\mathbf{q}=\mathbf{R}^{T}\mathbf{A}_{\text{dup}}(\mathbf{R}\hat{\mathbf{p}})
+        =\hat{\mathbf{S}}\hat{\mathbf{p}}\)
+        — <em>the identity, per iteration</em></td>
+    <td>\(\hat{\mathbf{q}}=\hat{\mathbf{S}}\hat{\mathbf{p}}\)</td>
+</tr>
+<tr>
+    <td>local dots, then sum (\(\mathbf{p}^{T}\mathbf{q}\))</td>
+    <td>\(\sum_p \mathbf{p}_p^{T}\mathbf{q}_p
+        =(\mathbf{R}\hat{\mathbf{p}})^{T}\mathbf{A}_{\text{dup}}(\mathbf{R}\hat{\mathbf{p}})
+        =\hat{\mathbf{p}}^{T}(\mathbf{R}^{T}\mathbf{A}_{\text{dup}}\mathbf{R})\hat{\mathbf{p}}\)
+        — <em>the identity, sandwiched twice</em></td>
+    <td>\(\hat{\mathbf{p}}^{T}\hat{\mathbf{S}}\hat{\mathbf{p}}\), the denominator of \(\alpha\)</td>
+</tr>
+<tr>
+    <td>\(\mathbf{u}_p\mathrel{+}=\alpha\mathbf{p}_p\), \(\;\mathbf{r}_p\mathrel{-}=\alpha\mathbf{q}_p\)</td>
+    <td>\(\mathbf{R}(\hat{\mathbf{u}}+\alpha\hat{\mathbf{p}})\); \(\;\mathbf{R}^{T}(\mathbf{r}-\alpha\mathbf{q})
+        =\hat{\mathbf{r}}-\alpha\hat{\mathbf{S}}\hat{\mathbf{p}}\)</td>
+    <td>\(\hat{\mathbf{u}},\hat{\mathbf{r}}\) updates, by linearity of \(\mathbf{R}\), \(\mathbf{R}^{T}\)</td>
+</tr>
+<tr>
+    <td>convergence on \(\|\mathbf{R}^{T}\mathbf{r}\|\)</td>
+    <td>—</td>
+    <td>\(\|\hat{\mathbf{r}}\|/\|\hat{\mathbf{b}}\|\), the assembled residual (Section 6)</td>
+</tr>
+</table>
+
+<p>The identity therefore fires in exactly three disguises — the initial residual, the gathered meaning of
+the mat-vec, and the curvature scalar — always <em>sandwiched between consistent vectors</em>:
+\((\mathbf{R}\hat{\mathbf{x}})^{T}\mathbf{A}_{\text{dup}}(\mathbf{R}\hat{\mathbf{y}})
+=\hat{\mathbf{x}}^{T}\hat{\mathbf{S}}\hat{\mathbf{y}}\). That sandwich is why blockwise local work plus
+scalar sums suffices. Note in particular that \(\mathbf{q}\) is never gathered: its only consumers are the
+dot product (where the consistent partner performs the gather implicitly) and the \(\mathbf{r}\) update
+(where distributed stays distributed).</p>
+
+<div class="diagram-title">Figure A2 — the mat-vec identity on the 4×4 grid: p̂ = unit vector at n5</div>
+<div class="diagram">
+  scatter  p = R p̂ :  a 1 in every n5 slot         P0 ▸ [ 1 ][ 0 ]
+                                                   P1 ▸ [ 1 ][ 0 ][ 0 ]
+                                                   P2 ▸ [ 1 ][ 0 ][ 0 ]
+                                                   P3 ▸ [ 0 ][ 0 ][ 0 ]   (no n5 copy)
+
+  local mat-vecs  q_p = S_p p_p   (each partition, its own conductances only):
+
+    P0:  n5 column of S₀   →   n5: 4/3     n4: −4/3
+    P1:  n5 column of S₁   →   n5:  1      n9: −1      n4: 0
+    P2:  n5 column of S₂   →   n5:  1      n6: −1      n7: 0
+    P3:  0
+
+  gather  Rᵀq   (Kirchhoff sum per node):
+
+    n5: 4/3 + 1 + 1 = 10/3     n4: −4/3     n9: −1     n6: −1     n7: 0
+
+  — exactly the n5 column of  Ŝ = Σ_p R_pᵀ S_p R_p.   And the fused dot needs
+  no gather at all:
+
+    Σ_p p_pᵀ q_p  =  1·(4/3) + 1·(1) + 1·(1)  =  10/3  =  p̂ᵀ Ŝ p̂,
+
+  because the consistent p holds the same 1 in every n5 copy, so summing over
+  copies performs the gather (A.1).
+</div>
+
+<div class="proof-box">
+<strong>The invariant, once.</strong> If at the top of an iteration \(\mathbf{u},\mathbf{p}\) are consistent
+(\(\mathbf{u}=\mathbf{R}\hat{\mathbf{u}}\), \(\mathbf{p}=\mathbf{R}\hat{\mathbf{p}}\)) and
+\(\mathbf{R}^{T}\mathbf{r}=\hat{\mathbf{r}}\), then after one pass of the Section 4 loop the same relations
+hold for the textbook-updated \(\hat{\mathbf{u}},\hat{\mathbf{p}},\hat{\mathbf{r}}\), and every scalar
+(\(\rho,\beta,\alpha\)) mPower computes equals its textbook value. By induction the duplicated loop
+<em>is</em> PCG on \(\hat{\mathbf{S}}=\mathbf{R}^{T}\mathbf{A}_{\text{dup}}\mathbf{R}\) — with
+\(\hat{\mathbf{S}}\) existing only as a theorem about the code, never as a data structure.
+<span class="checkmark">✓</span>
+</div>
+
+<div class="warn">
+<strong>Why consistency is load-bearing.</strong> Were \(\mathbf{p}\) not consistent,
+<code>mult_schur</code> would apply each \(\mathbf{S}_p\) to a <em>different</em> per-copy value, and
+\(\mathbf{R}^{T}\mathbf{q}\) would gather to something that is not
+\(\hat{\mathbf{S}}\hat{\mathbf{p}}\) — indeed not the product of any matrix with any vector. The typing
+discipline of A.1 is what keeps the sandwich identity applicable at every iteration.
+</div>
+
 <hr style="margin-top: 50px;">
 <p style="text-align: center; color: #666; font-size: 0.9em;">
     mPower Simulator — PCG ↔ Hierarchical Solver Mapping.
-    Companion to <code>hierarchical_solver_report.html</code>.
+    Companion to <code>hierarchical_solver_report.html</code>.<br>
+    Extension: <code>bicgstab_hierarchical_mapping.html</code> — proposed BiCGSTAB driver for the
+    asymmetric path (§7).
 </p>
 
 </body>

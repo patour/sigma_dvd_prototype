@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hierarchical Domain Decomposition Solver - Mathematical Proof</title>
-    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
     <script> MathJax = {
         tex: {
         inlineMath: [['\\(', '\\)']],
@@ -40,6 +39,8 @@
             color: #2e86ab;
             margin-top: 30px;
         }
+        h4 { color: #34798f; margin-top: 24px; }
+        h5 { color: #46869c; margin-top: 20px; }
         .equation-box {
             background: linear-gradient(135deg, #e8f4f8 0%, #d4e9f7 100%);
             border: 1px solid #aed6f1;
@@ -76,6 +77,9 @@
         }
         .implementation-box .function {
             color: #55efc4;
+        }
+        .implementation-box .string {
+            color: #ffeaa7;
         }
         .proof-box {
             background: linear-gradient(135deg, #e8f8f5 0%, #d5f5e3 100%);
@@ -1370,7 +1374,7 @@ where \(\mathbf{v}^{(\text{gport})}\) contains the voltages at all GPORT nodes.
 </div>
 
 <div class="note">
-<strong>Note:</strong> In this example, both \(\mathbf{Q}_0\) and \(\mathbf{Q}_1\) are identity matrices because both intms have the same port ordering [n5, n9] which matches intm2's tearing node ordering. In general, when intms share all GPORTs with the same ordering, the Q matrices are identity matrices and the assembly simplifies to a direct sum.
+<strong>Note:</strong> In this example, both \(\mathbf{Q}_0\) and \(\mathbf{Q}_1\) are identity matrices because both intms have the same port ordering [n5, n9] which matches intm2's tearing node ordering. In general, when intms share all GPORTs with the same ordering, the Q matrices are identity matrices and the assembly simplifies to an ordinary entrywise matrix sum, \(\mathbf{M}^{(\text{intm2})} = \sum_i \mathbf{S}_i^{(\text{intm})}\).
 </div>
 
 <h5>4×4 Grid Example: Intm2 Matrix</h5>
@@ -1631,7 +1635,8 @@ voltage source removes the null space.
     the per-intm and per-partition steps are dispatched to a <code>ThreadPool</code> and run concurrently,
     with <code>join_threads()</code> as the barrier between stages; <code>build_mtx_intm2</code> additionally
     sorts the intms by port count before dispatch, so the <code>build_schur</code> calls do not necessarily
-    execute in index order. Under MPI each rank handles only its own slice <code>[rank*npp, (rank+1)*npp)</code>.
+    execute in index order. Under MPI each rank handles only its own slice <code>[rank*npp, (rank+1)*npp)</code> of intms, where
+    <code>npp</code> is the number of intms per rank (the configured <code>NPART1</code> — the \(k\) of Section 16.1).
     The data dependencies are exactly as shown — only the execution order within a stage differs.
 </div>
 
@@ -1958,6 +1963,12 @@ update_propagate():
 <h2 id="section15">15. Direct Solve vs Iterative (CG) Solve</h2>
 
 <p>This section explains why the iterative Conjugate Gradient (CG) solver is used instead of relying solely on the hierarchical direct solve.</p>
+
+<div class="note">
+    <strong>Companion document:</strong> <code>pcg_hierarchical_mapping.html</code> gives the line-by-line
+    mapping of this CG driver onto textbook PCG — the duplicated port-vector space, the gather/scatter
+    primitives, the preconditioner cascade, and the convergence tests.
+</div>
 
 <h3>15.1 Key Finding: Direct Solve is NOT Exact Due to Sparsification</h3>
 
@@ -2715,7 +2726,7 @@ rank r, for every owned simIntm[i]:
 
 rank 0:
 
-  M_intm2 = Sum_i Q_i^T S_intm(i) Q_i
+  M_intm2 = Sum_i Q_i S_intm(i) Q_i^T
   factor(M_intm2)
 </div>
 
@@ -2788,7 +2799,8 @@ matrix and solve on rank 0.</p>
 
 <hr style="margin-top: 50px;">
 <p style="text-align: center; color: #666; font-size: 0.9em;">
-    Generated for mPower Simulator - Hierarchical Domain Decomposition Solver Documentation
+    Generated for mPower Simulator - Hierarchical Domain Decomposition Solver Documentation.<br>
+    Companion: <code>pcg_hierarchical_mapping.html</code> — line-by-line mapping of the CG driver onto textbook PCG.
 </p>
 
 </body>
