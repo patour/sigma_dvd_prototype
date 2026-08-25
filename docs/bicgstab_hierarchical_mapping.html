@@ -1,0 +1,1208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Textbook BiCGSTAB → mPower Hierarchical Solver</title>
+    <script> MathJax = {
+        tex: {
+        inlineMath: [['\\(', '\\)']],
+        displayMath: [['\\[', '\\]']]
+        }
+    };
+    </script>
+    <script id="MathJax-script" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px;
+            line-height: 1.8;
+            color: #333;
+            background: #fafafa;
+        }
+        h1 {
+            color: #1a5276;
+            border-bottom: 3px solid #1a5276;
+            padding-bottom: 15px;
+            font-size: 2.2em;
+        }
+        h2 {
+            color: #2874a6;
+            margin-top: 50px;
+            border-left: 5px solid #2874a6;
+            padding-left: 15px;
+        }
+        h3 { color: #2e86ab; margin-top: 30px; }
+        h4 { color: #34798f; margin-top: 24px; }
+        .equation-box {
+            background: linear-gradient(135deg, #e8f4f8 0%, #d4e9f7 100%);
+            border: 1px solid #aed6f1;
+            border-radius: 10px;
+            padding: 20px 30px;
+            margin: 25px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow-x: auto;
+        }
+        .definition-box {
+            background: linear-gradient(135deg, #fef9e7 0%, #fcf3cf 100%);
+            border: 1px solid #f9e79f;
+            border-left: 5px solid #f1c40f;
+            border-radius: 5px;
+            padding: 15px 25px;
+            margin: 20px 0;
+        }
+        .proof-box {
+            background: linear-gradient(135deg, #e8f8f5 0%, #d5f5e3 100%);
+            border: 1px solid #82e0aa;
+            border-left: 5px solid #27ae60;
+            border-radius: 5px;
+            padding: 20px 25px;
+            margin: 25px 0;
+        }
+        .diagram {
+            background: #fff;
+            border: 2px solid #3498db;
+            border-radius: 10px;
+            padding: 25px 30px;
+            margin: 30px 0;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.88em;
+            line-height: 1.45;
+            white-space: pre;
+            overflow-x: auto;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .diagram-title {
+            font-family: 'Segoe UI', sans-serif;
+            font-weight: 600;
+            color: #1a5276;
+            margin-bottom: 4px;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 25px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            background: #fff;
+        }
+        th {
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+            color: white;
+            padding: 14px;
+            text-align: left;
+            vertical-align: top;
+        }
+        td {
+            padding: 12px 15px;
+            border-bottom: 1px solid #ddd;
+            vertical-align: top;
+        }
+        tr:nth-child(even) { background: #f8f9fa; }
+        .checkmark { color: #27ae60; font-weight: bold; font-size: 1.2em; }
+        .note {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        .warn {
+            background: #fdecea;
+            border: 1px solid #e74c3c;
+            border-left: 5px solid #c0392b;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        .implementation-box {
+            background: #2d3436;
+            color: #dfe6e9;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9em;
+            overflow-x: auto;
+            white-space: pre-wrap;
+        }
+        .implementation-box .comment { color: #74b9ff; }
+        .implementation-box .keyword { color: #fd79a8; }
+        .implementation-box .function { color: #55efc4; }
+        .implementation-box .string  { color: #ffeaa7; }
+        code {
+            background: #ecf0f1;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Consolas', monospace;
+            color: #c0392b;
+        }
+        th code { background: rgba(255,255,255,0.15); color: #fff; }
+        .toc {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            padding: 25px 35px;
+            margin: 30px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .toc h3 { margin-top: 0; color: #2c3e50; }
+        .toc ul { list-style: none; padding-left: 0; }
+        .toc li { padding: 5px 0; }
+        .toc a { color: #3498db; text-decoration: none; }
+        .toc a:hover { text-decoration: underline; }
+
+        .algo {
+            background: #fff;
+            border: 2px solid #16a085;
+            border-radius: 8px;
+            padding: 18px 22px;
+            margin: 25px 0;
+            overflow-x: auto;
+        }
+        .algo .aline {
+            display: block;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.95em;
+            line-height: 2.0;
+            padding: 1px 0;
+            white-space: nowrap;
+        }
+        .algo .ln {
+            display: inline-block;
+            width: 2.4em;
+            color: #16a085;
+            font-weight: bold;
+            user-select: none;
+        }
+        .algo .ind1 { padding-left: 2.4em; }
+        .algo .kw   { color: #8e44ad; font-weight: bold; }
+        .algo .cmt  { color: #7f8c8d; font-style: italic; font-family: 'Segoe UI', sans-serif; }
+        .algo .hl   { background: #fff9c4; border-radius: 3px; padding: 1px 4px; }
+        .algo .sep  { border-top: 1px dashed #bdc3c7; margin: 10px 0; }
+
+        .sbs { display: flex; gap: 18px; flex-wrap: wrap; margin: 25px 0; }
+        .sbs > div { flex: 1 1 460px; border-radius: 8px; padding: 16px 20px; }
+        .sbs .left  { background: #eef6fb; border: 2px solid #5dade2; }
+        .sbs .right { background: #eafaf1; border: 2px solid #52be80; }
+        .sbs h4 { margin-top: 0; }
+        .legend { font-family:'Segoe UI',sans-serif; font-size:0.9em; color:#555; margin-top:8px; }
+
+        .panel {
+            border-radius: 8px;
+            padding: 14px 22px;
+            margin: 16px 0;
+        }
+        .panel .hdr {
+            font-family: 'Segoe UI', sans-serif;
+            font-weight: 700;
+            letter-spacing: .02em;
+            margin-bottom: 6px;
+        }
+        .panel .tag {
+            float: right;
+            font-weight: 700;
+            font-size: .85em;
+            padding: 1px 10px;
+            border-radius: 10px;
+        }
+        .panel-exact  { background:#eafaf1; border:2px solid #27ae60; }
+        .panel-exact  .hdr { color:#1e8449; }
+        .panel-exact  .tag { background:#27ae60; color:#fff; }
+        .panel-approx { background:#fdf2e9; border:2px solid #e67e22; }
+        .panel-approx .hdr { color:#b9770e; }
+        .panel-approx .tag { background:#e67e22; color:#fff; }
+        .panel-neutral{ background:#eef6fb; border:2px solid #5dade2; }
+        .panel-neutral .hdr { color:#21618c; }
+        .panel-neutral .tag { background:#5dade2; color:#fff; }
+        .panel .art {
+            font-family: 'Consolas','Monaco',monospace;
+            font-size: 0.86em;
+            line-height: 1.45;
+            white-space: pre;
+            overflow-x: auto;
+            margin: 10px 0 4px 0;
+        }
+        .panel ul { margin: 6px 0 2px 0; }
+
+        .status {
+            background: #eef2ff;
+            border: 2px solid #6c7ae0;
+            border-radius: 8px;
+            padding: 15px 22px;
+            margin: 20px 0;
+        }
+        .status .hdr { color: #3b46a8; font-weight: 700; }
+        .tag-existing {
+            background:#27ae60; color:#fff; font-weight:700; font-size:.8em;
+            padding:1px 8px; border-radius:10px; white-space:nowrap;
+        }
+        .tag-new {
+            background:#6c7ae0; color:#fff; font-weight:700; font-size:.8em;
+            padding:1px 8px; border-radius:10px; white-space:nowrap;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Textbook BiCGSTAB → mPower's Hierarchical Solver</h1>
+<h2 style="border:none; margin-top:10px; color:#666; font-weight:normal;">
+Proposed nonsymmetric Krylov driver for the asymmetric (<code>is_pkg</code>) path —
+extension of <code>pcg_hierarchical_mapping.html</code> §7
+</h2>
+
+<div class="status">
+<span class="hdr">Status: design extension, not yet implemented.</span>
+The algorithm mapping below is exact mathematics on the documented infrastructure. Code entry points
+tagged <span class="tag-existing">EXISTING</span> are documented in the companions
+(<code>pcg_hierarchical_mapping.html</code>, <code>hierarchical_solver_report.html</code>) and are reused
+unchanged; pieces tagged <span class="tag-new">NEW</span> do not exist in the codebase yet and are
+specified here. Option names, defaults, and exit codes in Section 8 are proposals mirroring the CG
+conventions of companion §6.
+</div>
+
+<div class="toc">
+    <h3>Table of Contents</h3>
+    <ul>
+        <li><a href="#s1">1. Executive Summary</a></li>
+        <li><a href="#s2">2. Why BiCGSTAB (and not BiCG, QMR, CGS, or GMRES)</a></li>
+        <li><a href="#s3">3. Textbook Preconditioned BiCGSTAB</a></li>
+        <li><a href="#s4">4. Vector Typing: the One New Rule</a></li>
+        <li><a href="#s5">5. The Third Primitive: <code>assemble</code> = scatter ∘ gather</a></li>
+        <li><a href="#s6">6. Side-by-Side Algorithm Mapping</a></li>
+        <li><a href="#s7">7. Anatomy of One Iteration</a></li>
+        <li><a href="#s8">8. Convergence, Breakdowns, and Restarts</a></li>
+        <li><a href="#s9">9. What This Fixes — and What It Does Not</a></li>
+        <li><a href="#s10">10. Implementation Map</a></li>
+        <li><a href="#a0">Appendix</a>
+            <ul style="padding-left:22px; margin:4px 0 0 0;">
+                <li><a href="#a1">A.1 &nbsp;Dot-product rules in the duplicated space</a></li>
+                <li><a href="#a2">A.2 &nbsp;The fused-scalar identities and their numerical caveat</a></li>
+                <li><a href="#a3">A.3 &nbsp;The full distributed loop</a></li>
+            </ul>
+        </li>
+    </ul>
+</div>
+
+<h2 id="s1">1. Executive Summary</h2>
+
+<p>Companion §7 documents the asymmetric path honestly: when <code>is_pkg</code> marks the hierarchy general
+(package/controlled-source stamps, or the flipped-current voltage-source stamp), the stored matrices are
+genuinely nonsymmetric, KLU replaces CHOLMOD — <em>and the driver still runs classical CG</em>, whose
+three-term recurrence is derived from a symmetry that no longer exists. The implementation may converge,
+stall, or diverge, and its guards only detect some of the failures after the fact.</p>
+
+<p>This document maps <strong>preconditioned BiCGSTAB</strong> — a Krylov method <em>derived</em> for general
+nonsingular matrices — onto the same hierarchical infrastructure. Three facts make the extension small:</p>
+
+<div class="definition-box">
+<ol>
+    <li><strong>BiCGSTAB is transpose-free.</strong> It applies only \(\mathbf{A}\) and \(\mathbf{M}^{-1}\),
+        never \(\mathbf{A}^{T}\) or \(\mathbf{M}^{-T}\). The two matrix touches the infrastructure already
+        provides — the stored dense partition Schur mat-vec and the black-box hierarchical solve — are
+        exactly the two touches BiCGSTAB needs. No new matrix kernel is required.</li>
+    <li><strong>The duplicated-space typing discipline carries over, with one new rule.</strong> The operator
+        still converts consistent → distributed and the preconditioner distributed → consistent, exactly as
+        in CG. But BiCGSTAB's scalars pair two <em>distributed</em> vectors
+        (\(\mathbf{t}^{T}\mathbf{s}\), \(\mathbf{t}^{T}\mathbf{t}\)), which the CG local-dot trick cannot
+        evaluate. Section 4 shows the two-part fix: store the shadow residual <em>consistently</em>, and
+        evaluate the remaining pairs on gathered (assembled) slices.</li>
+    <li><strong>Everything new lives in the driver.</strong> One new loop
+        (<code>solve_bicgstab_dist</code>) beside <code>solve_cg_dist</code>, one new communication
+        primitive composed from four existing calls, four extra per-partition vectors. The matrices,
+        factorizations, sparsification, gather/scatter machinery, and MPI layout are untouched.</li>
+</ol>
+</div>
+
+<p>With the schedule of Section 7, the loop keeps CG's <strong>two scalar reductions per iteration</strong>;
+the extra cost is one preconditioner solve, one mat-vec, and one gather round per iteration — the
+unavoidable price of a method that is actually valid for the matrix being solved.</p>
+
+<h2 id="s2">2. Why BiCGSTAB (and not BiCG, QMR, CGS, or GMRES)</h2>
+
+<p>The decisive constraint is the <em>preconditioner transpose</em>. The hierarchical solve is a cascade —
+gather, eliminate LPORTs, top-level KLU solve, back-substitute, scatter. Applying \(\mathbf{M}^{-T}\) would
+require running that cascade <em>mirrored</em>: transposed KLU solves exist, but the traversal itself
+(scatter and gather swap roles, the elimination \(\mathcal{E}\) transposes) would be a second, parallel code
+path through <code>simIntm2</code> / <code>simIntm</code> / <code>simPart</code>. Avoiding that is worth
+more than any per-iteration nicety.</p>
+
+<table>
+<tr><th style="width:16%">Method</th><th style="width:22%">Needs \(\mathbf{A}^{T}\), \(\mathbf{M}^{-T}\)?</th><th style="width:34%">Memory / communication</th><th style="width:28%">Verdict here</th></tr>
+<tr>
+    <td><strong>BiCG</strong></td>
+    <td>Yes — both, every iteration</td>
+    <td>Like CG ×2</td>
+    <td>Rejected: mirrored cascade required.</td>
+</tr>
+<tr>
+    <td><strong>QMR</strong></td>
+    <td>Yes (classical form)</td>
+    <td>Like BiCG, smoother residuals</td>
+    <td>Rejected for the same reason.</td>
+</tr>
+<tr>
+    <td><strong>CGS</strong></td>
+    <td>No</td>
+    <td>Like BiCGSTAB</td>
+    <td>Rejected: squares the BiCG polynomial — residuals so erratic that BiCGSTAB was invented to
+        replace it.</td>
+</tr>
+<tr>
+    <td><strong>GMRES(m)</strong></td>
+    <td>No</td>
+    <td>Stores \(m\) duplicated-space basis vectors; orthogonalisation costs \(O(m)\) reductions per
+        iteration (or one, with stability risk)</td>
+    <td>Robust fallback if BiCGSTAB stagnates, but breaks the fixed-memory, two-reduction structure the
+        driver is built around.</td>
+</tr>
+<tr>
+    <td><strong>BiCGSTAB</strong></td>
+    <td><strong>No</strong></td>
+    <td>Fixed: 8 per-partition vectors, 2 reductions/iteration (Section 7)</td>
+    <td><strong>Selected.</strong> Transpose-free, fixed memory, drops into the existing driver
+        pattern.</td>
+</tr>
+</table>
+
+<div class="note">
+<strong>Future options.</strong> BiCGSTAB's degree-1 stabilisation step is known to weaken on spectra with
+large imaginary parts — plausible for package/controlled-source systems. If that is observed,
+BiCGSTAB(ℓ) (ℓ = 2) and IDR(s) are the standard transpose-free escalations; both reuse this document's
+typing and communication analysis unchanged. They are out of scope here.</div>
+
+<h2 id="s3">3. Textbook Preconditioned BiCGSTAB</h2>
+
+<p>The standard algorithm (van der Vorst 1992; Barrett et&nbsp;al., <em>Templates</em>, 1994) for
+\(\mathbf{A}\mathbf{u}=\mathbf{b}\) with \(\mathbf{A}\) nonsingular — no symmetry assumed — and
+preconditioner \(\mathbf{M}\approx\mathbf{A}\), applied on the <strong>right</strong> (the reason for that
+choice follows the listing):</p>
+
+<div class="algo">
+<div class="aline"><span class="ln">1</span> \(\mathbf{u}_0\) given, \(\quad \hat{\mathbf{r}}_0\) chosen, \(\quad \mathbf{p}_0=\mathbf{v}_0=\mathbf{0}, \quad \rho_0=\alpha=\omega_0=1\)</div>
+<div class="aline"><span class="ln">2</span> \(\mathbf{r}_0=\mathbf{b}-\mathbf{A}\mathbf{u}_0\) <span class="cmt">&nbsp;&nbsp;initial residual</span></div>
+<div class="sep"></div>
+<div class="aline"><span class="ln">3</span> <span class="kw">for</span> \(k=1,2,3,\dots\)</div>
+<div class="aline ind1"><span class="ln">4</span> \(\rho_k=\hat{\mathbf{r}}_0^{T}\,\mathbf{r}_{k-1}\) <span class="cmt">&nbsp;&nbsp;shadow inner product — breakdown if zero</span></div>
+<div class="aline ind1"><span class="ln">5</span> \(\beta_k=(\rho_k/\rho_{k-1})\,(\alpha/\omega_{k-1})\) <span class="cmt">&nbsp;&nbsp;α carried over from the previous iteration</span></div>
+<div class="aline ind1"><span class="ln">6</span> \(\mathbf{p}_k=\mathbf{r}_{k-1}+\beta_k\,(\mathbf{p}_{k-1}-\omega_{k-1}\,\mathbf{v}_{k-1})\)</div>
+<div class="aline ind1"><span class="ln">7</span> <span class="hl">\(\hat{\mathbf{p}}=\mathbf{M}^{-1}\mathbf{p}_k\)</span> <span class="cmt">&nbsp;&nbsp;preconditioner solve #1</span></div>
+<div class="aline ind1"><span class="ln">8</span> <span class="hl">\(\mathbf{v}_k=\mathbf{A}\,\hat{\mathbf{p}}\)</span> <span class="cmt">&nbsp;&nbsp;mat-vec #1</span></div>
+<div class="aline ind1"><span class="ln">9</span> \(\alpha=\rho_k\,/\,(\hat{\mathbf{r}}_0^{T}\mathbf{v}_k)\) <span class="cmt">&nbsp;&nbsp;breakdown if denominator zero</span></div>
+<div class="aline ind1"><span class="ln">10</span> \(\mathbf{s}=\mathbf{r}_{k-1}-\alpha\,\mathbf{v}_k\)</div>
+<div class="aline ind1"><span class="ln">11</span> <span class="kw">if</span> \(\|\mathbf{s}\|\) small: \(\;\mathbf{u}_k=\mathbf{u}_{k-1}+\alpha\,\hat{\mathbf{p}}\), <span class="kw">break</span> <span class="cmt">&nbsp;&nbsp;half-step exit</span></div>
+<div class="aline ind1"><span class="ln">12</span> <span class="hl">\(\hat{\mathbf{s}}=\mathbf{M}^{-1}\mathbf{s}\)</span> <span class="cmt">&nbsp;&nbsp;preconditioner solve #2</span></div>
+<div class="aline ind1"><span class="ln">13</span> <span class="hl">\(\mathbf{t}=\mathbf{A}\,\hat{\mathbf{s}}\)</span> <span class="cmt">&nbsp;&nbsp;mat-vec #2</span></div>
+<div class="aline ind1"><span class="ln">14</span> \(\omega_k=(\mathbf{t}^{T}\mathbf{s})\,/\,(\mathbf{t}^{T}\mathbf{t})\) <span class="cmt">&nbsp;&nbsp;residual minimisation — breakdown if zero</span></div>
+<div class="aline ind1"><span class="ln">15</span> \(\mathbf{u}_k=\mathbf{u}_{k-1}+\alpha\,\hat{\mathbf{p}}+\omega_k\,\hat{\mathbf{s}}\)</div>
+<div class="aline ind1"><span class="ln">16</span> \(\mathbf{r}_k=\mathbf{s}-\omega_k\,\mathbf{t}\)</div>
+<div class="aline ind1"><span class="ln">17</span> <span class="kw">if</span> converged <span class="kw">break</span></div>
+<div class="aline"><span class="ln">18</span> <span class="kw">end</span></div>
+</div>
+
+<p>Structural notes, in the same spirit as companion §2:</p>
+
+<ul>
+    <li><strong>Two preconditioner solves and two mat-vecs per iteration</strong> — one BiCGSTAB iteration is
+        two CG-like half-steps. Per-iteration comparisons against CG should be read per mat-vec.</li>
+    <li><strong>Right preconditioning is deliberate.</strong> \(\mathbf{r}_k\) remains the <em>true</em>
+        residual \(\mathbf{b}-\mathbf{A}\mathbf{u}_k\) of the unpreconditioned system, so the stopping test
+        keeps exactly the meaning it has in companion §6 (\(\|\mathbf{R}^T\mathbf{r}\|/\|\hat{\mathbf{b}}\|\)),
+        and \(\mathbf{M}^{-1}\) is consumed as the same black box the CG driver already calls
+        (distributed vector in, consistent vector out). Left preconditioning would change both.</li>
+    <li><strong>The shadow residual \(\hat{\mathbf{r}}_0\) is a free parameter.</strong> Any vector with
+        \(\hat{\mathbf{r}}_0^{T}\mathbf{r}_0\neq 0\) is admissible; the textbook default is
+        \(\hat{\mathbf{r}}_0=\mathbf{r}_0\). Section 4 exploits this freedom — the choice made there is what
+        keeps the distributed dot products cheap.</li>
+    <li><strong>No SPD requirement anywhere.</strong> Neither \(\mathbf{A}\) nor \(\mathbf{M}\) needs to be
+        symmetric or definite — only nonsingular. Companion §7.4's warning that directed diagonal lumping
+        does not preserve SPD therefore stops being a <em>validity</em> concern and becomes purely a
+        <em>quality</em> concern (Section 9).</li>
+    <li><strong>Initialisation convention:</strong> with \(\mathbf{p}_0=\mathbf{v}_0=\mathbf{0}\) and
+        \(\rho_0=\alpha=\omega_0=1\), the first pass through lines 4–6 is well-defined and reduces to
+        \(\mathbf{p}_1=\mathbf{r}_0\) — the same guard-value convention as the (corrected) CG listing in
+        companion §2.</li>
+</ul>
+
+<h3>3.1 The system being solved is unchanged</h3>
+
+<p>Everything from companion §3 carries over verbatim: CG and BiCGSTAB solve the same reduced tearing-node
+system</p>
+
+<div class="equation-box">
+\[
+\hat{\mathbf{S}}\,\mathbf{u}=\hat{\mathbf{b}},
+\qquad
+\hat{\mathbf{S}}=\sum_p \mathbf{R}_p^T\mathbf{S}_p\mathbf{R}_p,
+\qquad
+\hat{\mathbf{b}}=\sum_p \mathbf{R}_p^T\tilde{\mathbf{b}}_p,
+\]
+</div>
+
+<p>stored in the duplicated port space, with the identity
+\(\mathbf{R}^{T}\operatorname{blockdiag}(\mathbf{S}_p)\,\mathbf{R}=\hat{\mathbf{S}}\) doing the work. That
+identity is pure index algebra — <strong>it never used symmetry</strong> — so it holds equally when each
+\(\mathbf{S}_p\) is the general dense surrogate Schur of the <code>is_pkg</code> path (companion §7.2).
+The exact/approximate split also survives intact: the operator is the stored dense
+\(\mathbf{S}_p\) applied as stored (<code>mult_schur</code>, general <code>dsMatrix::mult</code> branch);
+the preconditioner is the hierarchical direct solve over the sparsified intm/intm2 matrices, factored by KLU
+in this path. What "exact operator" means here is the caveat of companion §7.3: exact for the <em>stored
+surrogate</em> system, whose bottom level substitutes \(\mathbf{B}^{T}\) for an independently stamped
+\(\mathbf{C}\).</p>
+
+<h2 id="s4">4. Vector Typing: the One New Rule</h2>
+
+<p>Companion A.1's discipline: <em>consistent</em> vectors (voltage-like — every copy holds the same value;
+produced by a scatter) versus <em>distributed</em> vectors (current-like — each copy holds a share; produced
+by local mat-vecs), with the rule that a dot product computed as local dots plus a sum is exact precisely
+when it pairs one of each. Typing every BiCGSTAB vector by how it is produced:</p>
+
+<table>
+<tr><th style="width:22%">Vector</th><th style="width:18%">Type</th><th style="width:60%">Why</th></tr>
+<tr><td>\(\mathbf{u}\) (iterate)</td><td><strong>consistent</strong></td>
+    <td>Voltages. Updated only from \(\hat{\mathbf{p}},\hat{\mathbf{s}}\) (both consistent) — stays
+        consistent.</td></tr>
+<tr><td>\(\mathbf{r}\), \(\mathbf{s}\)</td><td><strong>distributed</strong></td>
+    <td>\(\tilde{\mathbf{b}}_p\) is a per-partition share; \(\mathbf{S}_p\)-products are local shares;
+        their linear combinations stay distributed.</td></tr>
+<tr><td>\(\hat{\mathbf{p}}=\mathbf{M}^{-1}\mathbf{p}\), \(\hat{\mathbf{s}}=\mathbf{M}^{-1}\mathbf{s}\)</td>
+    <td><strong>consistent</strong></td>
+    <td>The preconditioner ends with a scatter — same as CG's \(\mathbf{z}\).</td></tr>
+<tr><td>\(\mathbf{v}=\mathbf{A}\hat{\mathbf{p}}\), \(\mathbf{t}=\mathbf{A}\hat{\mathbf{s}}\)</td>
+    <td><strong>distributed</strong></td>
+    <td>Computed locally as \(\mathbf{S}_p\,(\cdot)_p\) — same as CG's \(\mathbf{q}\).</td></tr>
+<tr><td>\(\mathbf{p}\) (search vector)</td><td><strong>distributed</strong></td>
+    <td>Built from \(\mathbf{r}\) and \(\mathbf{v}\) (line 6) — both distributed. <em>Unlike CG</em>, where
+        \(\mathbf{p}\) was consistent: in right-preconditioned BiCGSTAB the search vector lives in residual
+        space, and it is \(\hat{\mathbf{p}}\) that plays CG-\(\mathbf{p}\)'s role.</td></tr>
+<tr><td>\(\hat{\mathbf{r}}_0\) (shadow residual)</td><td><strong>consistent — by construction</strong></td>
+    <td>A design choice, not a consequence. See below; this is the load-bearing decision of the whole
+        mapping.</td></tr>
+</table>
+
+<p>The type circuit is the same alternation as CG, run twice per iteration — the operator always consumes
+consistent and produces distributed, the preconditioner the reverse:</p>
+
+<div class="diagram-title">Figure 1 — the type circuit of one iteration</div>
+<div class="diagram">
+   DISTRIBUTED                      CONSISTENT
+
+     p ────────── M⁻¹ (precond #1) ──────▶ p̂
+     ▲                                     │
+     │ line 6                              │ A (mat-vec #1)
+     │                                     ▼
+   r, v ◀──────────────────────────────── v
+     │
+     ├─ s = r − α·v
+     │
+     s ────────── M⁻¹ (precond #2) ──────▶ ŝ
+     ▲                                     │
+     │                                     │ A (mat-vec #2)
+     │                                     ▼
+     r = s − ω·t ◀──────────────────────── t
+                                           │
+                          u += α·p̂ + ω·ŝ ◀─┘   (consistent update)
+</div>
+
+<h3>4.1 The problem: BiCGSTAB pairs distributed with distributed</h3>
+
+<p>Now type the five scalars the loop needs:</p>
+
+<table>
+<tr><th style="width:30%">Scalar</th><th style="width:30%">Pairing</th><th style="width:40%">Local dots valid?</th></tr>
+<tr><td>\(\rho_k=\hat{\mathbf{r}}_0^{T}\mathbf{r}_{k-1}\) (line 4)</td>
+    <td>shadow × distributed</td>
+    <td>Only if \(\hat{\mathbf{r}}_0\) is consistent</td></tr>
+<tr><td>\(\hat{\mathbf{r}}_0^{T}\mathbf{v}_k\) (line 9)</td>
+    <td>shadow × distributed</td>
+    <td>Only if \(\hat{\mathbf{r}}_0\) is consistent</td></tr>
+<tr><td>\(\mathbf{t}^{T}\mathbf{s}\) (line 14)</td>
+    <td><strong>distributed × distributed</strong></td>
+    <td><span style="color:#c0392b;font-weight:bold;">Never</span></td></tr>
+<tr><td>\(\mathbf{t}^{T}\mathbf{t}\) (line 14)</td>
+    <td><strong>distributed × distributed</strong></td>
+    <td><span style="color:#c0392b;font-weight:bold;">Never</span></td></tr>
+<tr><td>\(\|\mathbf{s}\|,\ \|\mathbf{r}_k\|\) (lines 11, 17)</td>
+    <td>distributed with itself</td>
+    <td><span style="color:#c0392b;font-weight:bold;">Never</span></td></tr>
+</table>
+
+<div class="warn">
+<strong>Why "never".</strong> For two distributed vectors, the naive sum
+\(\sum_p \mathbf{t}_p^{T}\mathbf{s}_p\) misses every cross-partition term. Concretely, at a node shared by
+two partitions holding shares \(0.3\) and \(0.7\) of \(\mathbf{t}\): the true assembled contribution to
+\(\mathbf{t}^{T}\mathbf{t}\) is \((0.3+0.7)^2 = 1.0\); the naive local sum gives
+\(0.3^2+0.7^2 = 0.58\). The error is the cross term \(2\cdot 0.3\cdot 0.7\), and it can carry either sign
+for mixed-sign shares. Since \(\omega_k\) is the ratio of two such products, corrupted values break the
+residual-minimisation property silently — the same class of failure companion A.1 warns about for CG, now
+affecting the method's core scalars rather than a hypothetical mistake.
+</div>
+
+<h3>4.2 The fix, part one: a consistent shadow residual</h3>
+
+<p>\(\hat{\mathbf{r}}_0\) is a free parameter. Choose it as the <strong>consistent twin of the initial
+residual</strong>:</p>
+
+<div class="equation-box">
+\[
+\hat{\mathbf{r}}_0 \;:=\; \mathbf{R}\,(\mathbf{R}^{T}\mathbf{r}_0)
+\qquad\text{(gather \(\mathbf{r}_0\), scatter the assembled result back — Section 5)}
+\]
+</div>
+
+<p>Three properties, each earning its keep:</p>
+
+<ul>
+    <li><strong>Lines 4 and 9 become local.</strong> With \(\hat{\mathbf{r}}_0\) consistent, both shadow
+        products pair consistent × distributed, so
+        \(\sum_p \hat{\mathbf{r}}_{0,p}^{T}\mathbf{x}_p\) is exact (companion A.1's identity, restated in
+        <a href="#a1">A.1</a>). Had the textbook default \(\hat{\mathbf{r}}_0=\mathbf{r}_0\) (distributed)
+        been kept, lines 4 and 9 would each need a gather — two extra communication rounds per
+        iteration.</li>
+    <li><strong>Breakdown-hardened start.</strong>
+        \(\rho_1=\sum_p\hat{\mathbf{r}}_{0,p}^{T}\mathbf{r}_{0,p}
+        =(\mathbf{R}^{T}\mathbf{r}_0)^{T}(\mathbf{R}^{T}\mathbf{r}_0)=\|\mathbf{R}^{T}\mathbf{r}_0\|^2&gt;0\)
+        unless the start is already converged. The textbook's \(\rho_1\neq 0\) precondition is satisfied
+        <em>by construction</em>, not by luck.</li>
+    <li><strong>Nearly free.</strong> The setup must gather \(\mathbf{r}_0\) anyway to obtain
+        \(\|\mathbf{R}^{T}\mathbf{r}_0\|\) (and \(\|\hat{\mathbf{b}}\|\) for the relative test); the shadow
+        costs only the one extra scatter of that already-gathered vector, once per solve.</li>
+</ul>
+
+<h3>4.3 The fix, part two: gathered slices for the distributed pairs</h3>
+
+<p>\(\mathbf{t}^{T}\mathbf{s}\), \(\mathbf{t}^{T}\mathbf{t}\), and the residual norms are inner products of
+the <em>assembled</em> system — the duplicated-space values are not merely inconvenient, they are
+undefined as norms (companion §6 makes the same point for CG's stopping test). So evaluate them where they
+are defined: on the gathered vectors
+\(\mathbf{s}_g=\mathbf{R}^{T}\mathbf{s}\), \(\mathbf{t}_g=\mathbf{R}^{T}\mathbf{t}\).</p>
+
+<p>The infrastructure makes this cheaper than it sounds, because after the two-level gather every unique
+tearing node has <strong>exactly one fully-summed slot</strong>:</p>
+
+<div class="diagram-title">Figure 2 — where each unique node's fully-summed slot lives (4×4 grid of the companions)</div>
+<div class="diagram">
+  unique tearing node     kind      fully-summed after      lives in
+  ─────────────────────────────────────────────────────────────────────────
+  n4                      LPORT     R₁ᵀ  (intm 0 gather)    intm 0 array
+  n6                      LPORT     R₁ᵀ  (intm 1 gather)    intm 1 array
+  n7                      LPORT     R₁ᵀ  (intm 1 gather)    intm 1 array
+  n5                      GPORT     R₂ᵀ  (intm2 gather)     intm2 array (rank 0)
+  n9                      GPORT     R₂ᵀ  (intm2 gather)     intm2 array (rank 0)
+
+  An LPORT is interior to one intm, so ALL of its owners are partitions of
+  that same intm: one R₁ᵀ gather fully sums it.  Only GPORT slots need the
+  second, cross-intm gather.
+
+  t_gᵀ s_g  =   Σ (LPORT slots, per intm)  +  Σ (GPORT slots, at intm2)
+                each unique node counted exactly once
+</div>
+
+<p>So the dot products are sums over intm-local LPORT slices plus the intm2 GPORT slice — partial sums that
+reduce across threads and MPI ranks exactly like the CG scalars (companion §16.7 pattern: rank-local partials,
+one all-reduce). Section 7 shows that \(\mathbf{s}_g\) is <em>already computed</em> by preconditioner solve
+#2's own down-sweep, so only \(\mathbf{t}\) needs a dedicated gather — one extra round per iteration, with
+no solve attached.</p>
+
+<div class="proof-box">
+<strong>The one new rule, stated once.</strong> Consistent × distributed pairs are local (CG's rule,
+unchanged). Distributed × distributed pairs must be evaluated on gathered slices, where each unique node
+appears exactly once. BiCGSTAB needs the second rule three times per iteration
+(\(\mathbf{t}^{T}\mathbf{s}\), \(\mathbf{t}^{T}\mathbf{t}\), and the residual norm — the last obtained
+algebraically from the first two, <a href="#a2">A.2</a>). Everything else about the duplicated space is
+inherited from the CG mapping verbatim.
+</div>
+
+<h2 id="s5">5. The Third Primitive: <code>assemble</code> = scatter ∘ gather</h2>
+
+<p>Companion Figure 2 established the two communication primitives: <strong>gather</strong>
+\(\mathbf{R}^{T}\) ("+=", currents sum) and <strong>scatter</strong> \(\mathbf{R}\) ("=", voltages copy).
+The BiCGSTAB driver needs their composition as a first-class operation — a <em>type converter</em> from
+distributed to consistent:</p>
+
+<div class="equation-box">
+\[
+\operatorname{assemble}(\mathbf{x}) \;=\; \mathbf{R}\,(\mathbf{R}^{T}\mathbf{x})
+\qquad\text{distributed in} \;\longrightarrow\; \text{consistent out,}
+\qquad \text{no solve involved.}
+\]
+</div>
+
+<div class="diagram-title">Figure 3 — assemble: the preconditioner's communication skeleton without the solve</div>
+<div class="diagram">
+  ASSEMBLE  (distributed ──▶ consistent)
+
+      P0: 0.2 ╲                              ╱  P0: 1.0
+      P1: 0.5 ──▶  gather Rᵀ:  1.0  ──▶ scatter R ──▶  P1: 1.0
+      P2: 0.3 ╱      ("+=")            ("=")         ╲  P2: 1.0
+
+  Same two-level path as M⁻¹ (partition ⇄ intm ⇄ intm2) but with the
+  eliminate / KLU-solve / back-substitute stages skipped: what was summed
+  on the way down is copied straight back on the way up.
+</div>
+
+<p>It is composed entirely from the four existing calls
+(<code>fill_intm_rhs</code> → <code>fill_intm2_rhs</code> for the gather,
+<code>update_port_intm</code> → <code>update_port</code> for the scatter — companion A.3), operating on a
+scratch RHS/solution buffer pair instead of the preconditioner's. Its three uses:</p>
+
+<table>
+<tr><th style="width:26%">Use</th><th style="width:20%">When</th><th style="width:54%">What it provides</th></tr>
+<tr>
+    <td>Shadow setup</td>
+    <td>Once, before the loop</td>
+    <td>\(\hat{\mathbf{r}}_0=\operatorname{assemble}(\mathbf{r}_0)\); the gather half also yields
+        \(\rho_1=\|\mathbf{R}^{T}\mathbf{r}_0\|^2\) and the normalisation constants
+        (\(\|\hat{\mathbf{b}}\|\) — gathered in the same round when a warm start makes
+        \(\mathbf{r}_0\neq\tilde{\mathbf{b}}\)).</td>
+</tr>
+<tr>
+    <td>Restart shadow</td>
+    <td>On breakdown (Section 8)</td>
+    <td>\(\hat{\mathbf{r}}_0\leftarrow\operatorname{assemble}(\mathbf{r}_k)\), which guarantees the restart
+        \(\rho=\|\mathbf{R}^{T}\mathbf{r}_k\|^2&gt;0\).</td>
+</tr>
+<tr>
+    <td>\(\mathbf{t}\)-gather</td>
+    <td>Every iteration</td>
+    <td><em>Gather half only</em>: \(\mathbf{t}_g=\mathbf{R}^{T}\mathbf{t}\) on the intm/intm2 slices, dotted
+        there against the cached \(\mathbf{s}_g\). No scatter needed — the assembled copies feed only
+        scalars.</td>
+</tr>
+</table>
+
+<div class="note">
+<strong>Not a projector — just a converter.</strong> \(\mathbf{R}\mathbf{R}^{T}\) is not idempotent
+(\(\mathbf{R}^{T}\mathbf{R}=\operatorname{diag}(\text{node multiplicities})\neq\mathbf{I}\)), and nothing
+here requires it to be. Its only job is to move a vector from distributed to consistent representation while
+preserving the assembled value \(\mathbf{R}^{T}\mathbf{x}\) — which is the only value a distributed vector
+carries.
+</div>
+
+<h2 id="s6">6. Side-by-Side Algorithm Mapping</h2>
+
+<div class="sbs">
+<div class="left">
+<h4>Textbook BiCGSTAB — assembled space</h4>
+<div class="algo" style="border:none; padding:0; background:transparent;">
+<div class="aline">\(\mathbf{r}=\mathbf{b}-\mathbf{A}\mathbf{u}_0\); choose \(\hat{\mathbf{r}}_0\)</div>
+<div class="aline">\(\rho=\hat{\mathbf{r}}_0^{T}\mathbf{r}\)</div>
+<div class="aline">\(\mathbf{p}=\mathbf{r}+\beta(\mathbf{p}-\omega\mathbf{v})\)</div>
+<div class="aline">\(\hat{\mathbf{p}}=\mathbf{M}^{-1}\mathbf{p}\)</div>
+<div class="aline">\(\mathbf{v}=\mathbf{A}\hat{\mathbf{p}}\); \(\;\alpha=\rho/\hat{\mathbf{r}}_0^{T}\mathbf{v}\)</div>
+<div class="aline">\(\mathbf{s}=\mathbf{r}-\alpha\mathbf{v}\)</div>
+<div class="aline">\(\hat{\mathbf{s}}=\mathbf{M}^{-1}\mathbf{s}\)</div>
+<div class="aline">\(\mathbf{t}=\mathbf{A}\hat{\mathbf{s}}\)</div>
+<div class="aline">\(\omega=\mathbf{t}^{T}\mathbf{s}/\mathbf{t}^{T}\mathbf{t}\)</div>
+<div class="aline">\(\mathbf{u}\mathrel{+}=\alpha\hat{\mathbf{p}}+\omega\hat{\mathbf{s}}\)</div>
+<div class="aline">\(\mathbf{r}=\mathbf{s}-\omega\mathbf{t}\)</div>
+</div>
+<div class="legend">One global vector of length \(n_{\text{tnode}}\); \(\mathbf{A}=\hat{\mathbf{S}}\) formed explicitly.</div>
+</div>
+
+<div class="right">
+<h4>mPower — duplicated space</h4>
+<div class="algo" style="border:none; padding:0; background:transparent;">
+<div class="aline">\(\mathbf{r}_p\mathrel{-}=\mathbf{S}_p\mathbf{x}_p\); \(\hat{\mathbf{r}}_0=\) assemble\((\mathbf{r})\)</div>
+<div class="aline">from previous batch <span class="cmt">(fused, §7)</span></div>
+<div class="aline">\(\mathbf{p}_p=\mathbf{r}_p+\beta(\mathbf{p}_p-\omega\mathbf{v}_p)\) <span class="cmt">per partition</span></div>
+<div class="aline">gather → elim → KLU → scatter</div>
+<div class="aline">\(\mathbf{v}_p=\mathbf{S}_p\hat{\mathbf{p}}_p\) + local shadow dot <span class="cmt">fused</span></div>
+<div class="aline">\(\mathbf{s}_p=\mathbf{r}_p-\alpha\mathbf{v}_p\) <span class="cmt">per partition</span></div>
+<div class="aline">gather (cache \(\mathbf{s}_g\)) → elim → KLU → scatter</div>
+<div class="aline">\(\mathbf{t}_p=\mathbf{S}_p\hat{\mathbf{s}}_p\) + local shadow dots</div>
+<div class="aline">gather \(\mathbf{t}_g\); slice dots vs cached \(\mathbf{s}_g\)</div>
+<div class="aline">\(\mathbf{u}_p\mathrel{+}=\alpha\hat{\mathbf{p}}_p+\omega\hat{\mathbf{s}}_p\) <span class="cmt">fused</span></div>
+<div class="aline">\(\mathbf{r}_p=\mathbf{s}_p-\omega\mathbf{t}_p\) <span class="cmt">with above</span></div>
+</div>
+<div class="legend">One private vector set per partition; \(\hat{\mathbf{S}}\) never formed.</div>
+</div>
+</div>
+
+<p>Line by line, with the communication that matters at scale:</p>
+
+<table>
+<tr>
+    <th style="width:24%">Textbook step</th>
+    <th style="width:44%">mPower realisation</th>
+    <th style="width:32%">Communication</th>
+</tr>
+<tr>
+    <td>\(\mathbf{r}_0=\mathbf{b}-\mathbf{A}\mathbf{u}_0\)</td>
+    <td>Per-partition <code>rmAx</code>-style subtraction from the compressed RHS; warm start allowed
+        (\(\mathbf{u}_0\) consistent from the previous solve).</td>
+    <td><strong>None</strong></td>
+</tr>
+<tr>
+    <td>choose \(\hat{\mathbf{r}}_0\)</td>
+    <td>\(\operatorname{assemble}(\mathbf{r}_0)\); the gather half also delivers \(\rho_1\),
+        \(\|\mathbf{R}^{T}\mathbf{r}_0\|\), and \(\|\hat{\mathbf{b}}\|\).</td>
+    <td>1 gather + 1 scatter, <em>once per solve</em></td>
+</tr>
+<tr>
+    <td>\(\rho_k=\hat{\mathbf{r}}_0^{T}\mathbf{r}_{k-1}\), \(\beta_k\)</td>
+    <td>No work at all: \(\rho_k\) was produced by the <em>previous</em> iteration's batched reduction via
+        \(\rho_k=\hat{\mathbf{r}}_0^{T}\mathbf{s}-\omega\,\hat{\mathbf{r}}_0^{T}\mathbf{t}\)
+        (<a href="#a2">A.2</a>); \(\rho_1\) comes from setup. \(\beta_k\) is scalar arithmetic.</td>
+    <td><strong>None</strong></td>
+</tr>
+<tr>
+    <td>\(\mathbf{p}\) update</td>
+    <td>Per-partition AXPY on private slices (two coefficients).</td>
+    <td><strong>None</strong></td>
+</tr>
+<tr>
+    <td>\(\hat{\mathbf{p}}=\mathbf{M}^{-1}\mathbf{p}\)</td>
+    <td><code>precond_solve</code>, byte-for-byte the CG preconditioner: gather → eliminate LPORTs →
+        KLU top solve → back-substitute → scatter.</td>
+    <td>Gather + scatter</td>
+</tr>
+<tr>
+    <td>\(\mathbf{v}=\mathbf{A}\hat{\mathbf{p}}\) and \(\hat{\mathbf{r}}_0^{T}\mathbf{v}\)</td>
+    <td><strong>Fused</strong>: dense \(\mathbf{S}_p\) mat-vec with the local shadow dot accumulated in the
+        same pass (the <code>zAp_zdotp</code> pattern, shadow vector in place of \(\mathbf{p}\)).
+        Valid because \(\hat{\mathbf{r}}_0\) is consistent.</td>
+    <td>1 scalar reduction <em>(reduction #1)</em></td>
+</tr>
+<tr>
+    <td>\(\alpha\); \(\mathbf{s}=\mathbf{r}-\alpha\mathbf{v}\)</td>
+    <td>Scalar; per-partition AXPY. The local shadow dots \(\hat{\mathbf{r}}_0^{T}\mathbf{s}\) (and later
+        \(\hat{\mathbf{r}}_0^{T}\mathbf{t}\)) are accumulated now for the next batch.</td>
+    <td><strong>None</strong></td>
+</tr>
+<tr>
+    <td>\(\|\mathbf{s}\|\) half-step test</td>
+    <td><strong>Reordered</strong>: \(\|\mathbf{R}^{T}\mathbf{s}\|\) becomes available <em>inside</em>
+        preconditioner solve #2's down-sweep (which gathers \(\mathbf{s}\) anyway — companion §4 notes the
+        same for CG's stopping norm). The test is applied after that solve returns; on the rare terminating
+        iteration one preconditioner application is wasted. See note below.</td>
+    <td>None (piggybacked)</td>
+</tr>
+<tr>
+    <td>\(\hat{\mathbf{s}}=\mathbf{M}^{-1}\mathbf{s}\)</td>
+    <td><code>precond_solve</code> with one new option: <em>retain the gathered input</em>
+        \(\mathbf{s}_g\) (intm LPORT slices + intm2 GPORT slice), snapshotted <em>before</em> the
+        elimination \(\mathcal{E}\) consumes the GPORT right-hand side.</td>
+    <td>Gather + scatter</td>
+</tr>
+<tr>
+    <td>\(\mathbf{t}=\mathbf{A}\hat{\mathbf{s}}\)</td>
+    <td>Dense \(\mathbf{S}_p\) mat-vec, local.</td>
+    <td><strong>None</strong></td>
+</tr>
+<tr>
+    <td>\(\omega_k\), \(\rho_{k+1}\), \(\|\mathbf{r}_k\|\)</td>
+    <td>Gather-only round for \(\mathbf{t}_g\); slice dots
+        \(\mathbf{t}_g^{T}\mathbf{s}_g\), \(\mathbf{t}_g^{T}\mathbf{t}_g\) against the cached
+        \(\mathbf{s}_g\); batched with the two local shadow partials into <strong>one</strong> reduction.
+        \(\omega_k\), \(\rho_{k+1}\), and \(\|\mathbf{R}^{T}\mathbf{r}_k\|\) then follow from scalar
+        identities (<a href="#a2">A.2</a>) — no further communication.</td>
+    <td>1 gather + 1 scalar reduction <em>(reduction #2, 4 partials)</em></td>
+</tr>
+<tr>
+    <td>\(\mathbf{u}\), \(\mathbf{r}\) updates</td>
+    <td><strong>Fused</strong> per-partition AXPYs (the <code>xr_axpy</code> pattern, now with two
+        coefficients each).</td>
+    <td><strong>None</strong></td>
+</tr>
+<tr>
+    <td>Convergence test</td>
+    <td>Companion §6 criteria on \(\|\mathbf{R}^{T}\mathbf{r}_k\|/\|\hat{\mathbf{b}}\|\), already reduced;
+        plus the acceptance-time true-residual check of Section 8.</td>
+    <td>None (scalars already reduced)</td>
+</tr>
+</table>
+
+<div class="note">
+<strong>On the reordered half-step exit.</strong> The textbook tests \(\|\mathbf{s}\|\) <em>before</em>
+paying for preconditioner solve #2. Here the norm is a by-product of that very solve's gather, so testing
+first would cost a dedicated gather round <em>every</em> iteration to save one preconditioner solve
+<em>once</em> (on the terminating iteration). The reorder is the right trade. A later micro-optimisation —
+an abort-after-gather flag inside <code>precond_solve</code> — would recover even that single wasted solve;
+it is noted in Section 10 as optional.
+</div>
+
+<h2 id="s7">7. Anatomy of One Iteration</h2>
+
+<div class="diagram-title">Figure 4 — communication schedule of one BiCGSTAB iteration</div>
+<div class="diagram">
+  local            comm                     local           comm
+  ─────────────────────────────────────────────────────────────────────────────
+  p update   ①  precond #1            v = S·p̂ (+dot)   ②  reduce #1 → α
+             (gather+scatter)
+  s = r−αv   ③  precond #2            t = S·ŝ (+dots)  ⑤  reduce #2 (4 partials)
+             (gather+scatter;                                → ω, ρ_{k+1}, ‖r_k‖
+              caches s_g, ‖s_g‖)     ④  gather t_g
+                                      (no scatter)      u, r updates (fused)
+  ─────────────────────────────────────────────────────────────────────────────
+  per iteration:  2 preconditioner rounds + 1 gather-only round
+                  2 scalar reductions   (CG: 1 round, 2 reductions)
+</div>
+
+<div class="panel panel-approx">
+    <div class="hdr"><span class="tag">APPROXIMATE</span>
+        ①③ PRECONDITIONER — unchanged, applied twice</div>
+    <p style="margin:6px 0 2px 0;">The identical cascade as CG's Figure 4 (companion §5): gather → eliminate
+    LPORTs → top-level solve (KLU in this path) → back-substitute → scatter. Its quality still sets the
+    iteration count only — but note the caveat of Section 9: for a general matrix, "only the iteration
+    count" is an empirical statement, not a theorem.</p>
+</div>
+
+<div class="panel panel-exact">
+    <div class="hdr"><span class="tag">EXACT (as stored)</span>
+        OPERATOR &nbsp; \(\mathbf{v}=\mathbf{A}\hat{\mathbf{p}}\), \(\;\mathbf{t}=\mathbf{A}\hat{\mathbf{s}}\) — unchanged, applied twice</div>
+    <p style="margin:6px 0 2px 0;">Two dense general \(\mathbf{S}_p\) mat-vecs per iteration
+    (<code>mult_schur</code>, general <code>dsMatrix</code> branch, full \(n^2\) storage per companion
+    §7.3). Perfectly parallel, no communication. "Exact" retains its §7.3 meaning: exact for the stored
+    surrogate operator.</p>
+</div>
+
+<div class="panel panel-neutral">
+    <div class="hdr"><span class="tag">2 REDUCTIONS + 1 GATHER</span>
+        ②④⑤ SCALARS — the one genuinely new pattern</div>
+    <p style="margin:6px 0 2px 0;">Reduction #1 carries the single shadow partial
+    \(\hat{\mathbf{r}}_0^{T}\mathbf{v}\). Reduction #2 batches four partials —
+    \(\mathbf{t}_g^{T}\mathbf{s}_g\), \(\mathbf{t}_g^{T}\mathbf{t}_g\) (slice dots),
+    \(\hat{\mathbf{r}}_0^{T}\mathbf{s}\), \(\hat{\mathbf{r}}_0^{T}\mathbf{t}\) (local dots) — from which
+    \(\omega_k\), the next \(\rho_{k+1}\), and \(\|\mathbf{R}^{T}\mathbf{r}_k\|\) all follow algebraically
+    (<a href="#a2">A.2</a>). The gather-only round ④ has the same MPI shape as a preconditioner down-sweep
+    (LPORT partials rank-local; GPORT shares to rank 0) with no factorization work attached.</p>
+</div>
+
+<h3>7.1 Cost versus the CG driver</h3>
+
+<table>
+<tr><th></th><th>CG (companion §5)</th><th>BiCGSTAB (this document)</th></tr>
+<tr><td>Preconditioner solves / iteration</td><td>1</td><td>2</td></tr>
+<tr><td>Dense \(\mathbf{S}_p\) mat-vecs / iteration</td><td>1</td><td>2</td></tr>
+<tr><td>Communication rounds / iteration</td><td>1 (precond)</td><td>3 (2 precond + 1 gather-only)</td></tr>
+<tr><td>Scalar reductions / iteration</td><td>2</td><td>2 (batched)</td></tr>
+<tr><td>Per-partition vectors</td><td>4 (\(\mathbf{x},\mathbf{r},\mathbf{p},\mathbf{z}/\mathbf{q}\))</td>
+    <td>8 (\(\mathbf{u},\mathbf{r}/\mathbf{s},\hat{\mathbf{r}}_0,\mathbf{p},\mathbf{v},
+        \hat{\mathbf{p}},\hat{\mathbf{s}},\mathbf{t}\))</td></tr>
+<tr><td>Residual behaviour</td><td>Smooth (SPD theory)</td><td>Erratic by design; guards adapted (Section 8)</td></tr>
+<tr><td>Validity domain</td><td>\(\mathbf{A}\), \(\mathbf{M}\) SPD</td><td>\(\mathbf{A}\), \(\mathbf{M}\) nonsingular</td></tr>
+</table>
+
+<p>Read per mat-vec, one BiCGSTAB iteration is two CG-like half-steps, so comparable-quality preconditioning
+typically yields iteration counts near half of a hypothetical valid two-sided method — the honest statement
+is simply that each unit of work is now spent inside a method whose recurrences are correct for the matrix.
+The vector memory doubles but remains negligible against the dense \(\mathbf{S}_p\) storage, which
+already pays the full-\(n^2\) general premium in this path (companion §7.3).</p>
+
+<div class="warn">
+<strong>Buffer-aliasing trap — do not inherit CG's.</strong> The CG driver overlays \(\mathbf{z}\) and
+\(\mathbf{q}\) in one buffer (<code>mtxPart::s2</code>), safe only by strict consumption order (companion
+A.3). The corresponding BiCGSTAB overlay is <em>unsafe</em>: \(\hat{\mathbf{p}}\) must survive
+<em>past</em> the mat-vec that produces \(\mathbf{v}\), all the way to the
+\(\mathbf{u}\)-update (line 15). \(\hat{\mathbf{p}}\) and \(\mathbf{v}\) require distinct storage, as do
+\(\hat{\mathbf{s}}\) and \(\mathbf{t}\). The only safe merge is \(\mathbf{s}\) overwriting \(\mathbf{r}\)
+in place (line 10), with \(\mathbf{r}_k\) then overwriting it again (line 16) — reflected in the
+8-buffer count above.
+</div>
+
+<h2 id="s8">8. Convergence, Breakdowns, and Restarts</h2>
+
+<h3>8.1 Stopping criteria — inherited, with one adaptation</h3>
+
+<p>The companion §6 criteria transfer directly, measured on the same quantity
+\(\|\mathbf{R}^{T}\mathbf{r}_k\|/\|\hat{\mathbf{b}}\|\): the relative-residual threshold, the
+half-decade-improvement rule, the minimum-iteration floor with its \(10^{-15}\) bypass, and the
+absolute-tolerance mode. Two adaptations:</p>
+
+<ul>
+    <li><strong>The divergence guard must be loosened.</strong> CG's "abort if the residual more than
+        doubles" is calibrated to a method whose preconditioned-energy error is monotone. BiCGSTAB residual
+        histories legitimately spike by orders of magnitude before converging. Proposed guard: abort only
+        when the residual exceeds a large multiple (default \(10^{4}\)) of the <em>best residual seen so
+        far</em>, or when it is non-finite. Anything tighter converts normal BiCGSTAB behaviour into
+        spurious failures.</li>
+    <li><strong>Acceptance requires a true-residual check.</strong> The recursively updated
+        \(\mathbf{r}_k\) can drift from \(\mathbf{b}-\mathbf{A}\mathbf{u}_k\) in finite precision,
+        especially across residual spikes — and the cheap norm of <a href="#a2">A.2</a> adds a cancellation
+        caveat of its own. Before declaring convergence: recompute
+        \(\mathbf{r}=\tilde{\mathbf{b}}_p-\mathbf{S}_p\mathbf{u}_p\) locally (one mat-vec) and gather its
+        norm (one gather round). Accept only if the true norm also passes; otherwise continue with the
+        recomputed residual. Cost: one extra mat-vec + gather, once per solve in the common case.</li>
+</ul>
+
+<h3>8.2 Breakdown detection and restart</h3>
+
+<p>BiCGSTAB has three breakdown denominators, all detectable from scalars the schedule already reduces:</p>
+
+<table>
+<tr><th style="width:22%">Breakdown</th><th style="width:36%">Detection (scale-aware)</th><th style="width:42%">Response</th></tr>
+<tr>
+    <td>\(\rho_k\approx 0\)<br><em>(shadow space exhausted)</em></td>
+    <td>\(|\rho_k|&lt;\varepsilon_\rho\,\|\hat{\mathbf{r}}_0\|_g\,\|\mathbf{R}^{T}\mathbf{r}_{k-1}\|\)</td>
+    <td rowspan="2"><strong>Restart:</strong> \(\hat{\mathbf{r}}_0\leftarrow\operatorname{assemble}(\mathbf{r}_k)\)
+        (guaranteeing the fresh \(\rho=\|\mathbf{R}^{T}\mathbf{r}_k\|^2&gt;0\)),
+        \(\mathbf{p}\leftarrow\mathbf{r}_k\), \(\mathbf{v}\leftarrow\mathbf{0}\),
+        \(\rho=\alpha=\omega=1\) re-armed. Bounded by a restart budget; exhaustion is a hard failure
+        (exit 5).</td>
+</tr>
+<tr>
+    <td>\(\hat{\mathbf{r}}_0^{T}\mathbf{v}_k\approx 0\)<br><em>(BiCG pivot)</em></td>
+    <td>Same form, against \(\|\mathbf{R}^{T}\mathbf{v}_k\|\)</td>
+</tr>
+<tr>
+    <td>\(\omega_k\approx 0\)<br><em>(stabilisation)</em></td>
+    <td>\(\mathbf{t}_g^{T}\mathbf{t}_g\approx 0\) (then \(\hat{\mathbf{s}}\approx\mathbf{0}\): accept the
+        half-step if \(\|\mathbf{s}\|\) passes) or \(\omega_k\approx 0\) with \(\mathbf{t}\neq\mathbf{0}\)</td>
+    <td>Half-step accept when converged; otherwise restart as above.</td>
+</tr>
+</table>
+
+<p>Note the contrast with the current state of the asymmetric path: running CG on a nonsymmetric matrix
+fails <em>structurally</em> — the recurrences themselves are wrong, and no guard distinguishes that from
+slow convergence. BiCGSTAB's breakdowns are <em>exceptional, detectable, and restartable</em> events in an
+otherwise valid method.</p>
+
+<h3>8.3 Proposed options and exit codes</h3>
+
+<p>Mirroring companion §6's tables; all values are proposals.</p>
+
+<table>
+<tr><th>Option (proposed)</th><th>Default</th><th>Role</th></tr>
+<tr><td><code>BICGSTAB_MAX_ITERATION_NUMBER</code></td><td>1000</td><td>Iteration cap (one iteration = two mat-vecs)</td></tr>
+<tr><td><code>BICGSTAB_RESD_TOLERANCE</code></td><td>1e-9</td><td>Relative residual target (same normalisation switch as <code>CG_USE_REL_RNORM</code>)</td></tr>
+<tr><td><code>BICGSTAB_MIN_ITERATION_NUMBER</code></td><td>1</td><td>Iteration floor, \(10^{-15}\) bypass as in CG</td></tr>
+<tr><td><code>BICGSTAB_MAX_RESTARTS</code></td><td>3</td><td>Breakdown restart budget per solve</td></tr>
+<tr><td><code>BICGSTAB_BREAKDOWN_TOL</code></td><td>1e-30</td><td>\(\varepsilon_\rho\) in the scale-aware breakdown tests</td></tr>
+<tr><td><code>BICGSTAB_DIVERGE_FACTOR</code></td><td>1e4</td><td>Abort when residual exceeds this multiple of the best-so-far</td></tr>
+<tr><td><code>BICGSTAB_TRUE_RESD_CHECK</code></td><td><code>true</code></td><td>Recompute the true residual before accepting convergence</td></tr>
+</table>
+
+<table>
+<tr><th>Code</th><th>Name (proposed)</th><th>Meaning</th></tr>
+<tr><td>0</td><td><code>BICG_DIST_CONVERGED</code></td><td>Converged; true-residual check passed</td></tr>
+<tr><td>2</td><td><code>BICG_DIST_ITER_LIMIT</code></td><td>Iteration cap exhausted</td></tr>
+<tr><td>3</td><td><code>BICG_DIST_DEGENERATE_RHS</code></td><td>Same semantics as the CG code 3 (benign decoupled-port zero RHS)</td></tr>
+<tr><td>4</td><td><code>BICG_DIST_SOLVER_FAILURE</code></td><td>Non-finite from the preconditioner or operator — genuine breakdown of a sub-solve</td></tr>
+<tr><td>5</td><td><code>BICG_DIST_BREAKDOWN</code></td><td>Krylov breakdown persisting after <code>BICGSTAB_MAX_RESTARTS</code> restarts</td></tr>
+</table>
+
+<h2 id="s9">9. What This Fixes — and What It Does Not</h2>
+
+<div class="panel panel-exact">
+<div class="hdr"><span class="tag">FIXED</span>&nbsp;</div>
+<ul>
+    <li><strong>Method validity.</strong> The recurrences are derived for general nonsingular
+        \(\mathbf{A}\). The companion §7.3 warning — "classical PCG theory no longer applies" — is retired
+        for this driver, replaced by the standard (weaker, but honest) BiCGSTAB theory: finite termination
+        in exact arithmetic absent breakdown, no monotonicity.</li>
+    <li><strong>The SPD preconditioner requirement disappears.</strong> Companion §7.4's warning that
+        directed diagonal lumping does not preserve SPD threatened CG's formal validity. BiCGSTAB requires
+        only that the hierarchical solve be nonsingular — which KLU verifies factor-by-factor and reports,
+        mapping cleanly onto exit 4. Sparsification quality now affects only speed.</li>
+    <li><strong>Failure semantics.</strong> Breakdowns are named, detected by scale-aware scalar tests,
+        and answered by a principled restart with a provably non-degenerate fresh shadow — instead of a
+        wrong-method iteration that may quietly stall inside generic guards.</li>
+</ul>
+</div>
+
+<div class="panel panel-approx">
+<div class="hdr"><span class="tag">NOT FIXED</span>&nbsp;</div>
+<ul>
+    <li><strong>The bottom-level surrogate.</strong> BiCGSTAB converges to the solution of the <em>stored</em>
+        system. Where the bottom-level reduction substituted \(\mathbf{B}^{T}\) for an independently stamped
+        \(\mathbf{C}\) (companion §7.2), the converged answer is still the surrogate's answer. That is a
+        modelling/storage decision upstream of any Krylov method.</li>
+    <li><strong>No global convergence guarantee.</strong> For general matrices no short-recurrence method has
+        one. BiCGSTAB can stagnate (notably on spectra with large imaginary parts — the BiCGSTAB(ℓ)
+        escalation of Section 2 is the standard remedy) and, in exact arithmetic, can break down; the
+        restart machinery bounds but does not eliminate this.</li>
+    <li><strong>Preconditioner quality still rules.</strong> The sparsified hierarchical solve determines the
+        iteration count exactly as before; a poor preconditioner is now a slow solve rather than an invalid
+        one, but it is still slow.</li>
+    <li><strong>The symmetric path should keep CG.</strong> On the default SPD flow, CG is strictly better:
+        half the preconditioner solves and mat-vecs per iteration, one communication round instead of three,
+        monotone error, full theory. BiCGSTAB is the fallback for the general path, not a replacement.</li>
+</ul>
+</div>
+
+<h2 id="s10">10. Implementation Map</h2>
+
+<p>Driver selection follows the flag that already marks the hierarchy general: if any partition sets
+<code>is_pkg</code> (hence the intm2 level uses general storage — companion §7.3), dispatch
+<code>solve_bicgstab_dist</code>; otherwise <code>solve_cg_dist</code> as today.</p>
+
+<table>
+<tr><th style="width:8%">Status</th><th style="width:34%">Piece</th><th style="width:58%">Notes</th></tr>
+<tr><td><span class="tag-existing">EXISTING</span></td>
+    <td><code>mtxPart::mult_schur</code> (mtxPart.cc:1043)</td>
+    <td>Operator application, both mat-vecs. The general-storage branch already dispatches inside
+        <code>dsMatrix::mult</code> (companion §7.3). Used twice per iteration, second use fused with the
+        local shadow dots.</td></tr>
+<tr><td><span class="tag-existing">EXISTING</span></td>
+    <td><code>simIntm2::precond_solve</code> (simIntm2.cc:2371)</td>
+    <td>Preconditioner, both applications, byte-for-byte the CG cascade with KLU factors in this path.</td></tr>
+<tr><td><span class="tag-existing">EXISTING</span></td>
+    <td><code>fill_intm_rhs</code> / <code>fill_intm2_rhs</code>,
+        <code>update_port_intm</code> / <code>update_port</code> (companion A.3)</td>
+    <td>The gather and scatter halves from which <code>assemble</code> and the \(\mathbf{t}\)-gather are
+        composed, on scratch buffers.</td></tr>
+<tr><td><span class="tag-existing">EXISTING</span></td>
+    <td>Per-partition AXPY / fused-update / init patterns
+        (<code>update_p</code>, <code>xr_axpy</code>, <code>rmAx_cg</code>, <code>init_cg</code> — simPart.h)</td>
+    <td>Reused as templates; BiCGSTAB variants take two coefficients and touch the 8-buffer set.</td></tr>
+<tr><td><span class="tag-existing">EXISTING</span></td>
+    <td>Scalar-reduction path of <code>rdotz</code> (simIntm2.cc:2471)</td>
+    <td>Extended to carry a 4-partial batch in reduction #2; the thread/MPI reduce-and-broadcast shape is
+        unchanged (companion §16.7).</td></tr>
+<tr><td><span class="tag-new">NEW</span></td>
+    <td><code>solve_bicgstab_dist</code> (beside <code>solve_cg_dist</code> in <code>mtx/iterSolve.cc</code>)</td>
+    <td>The driver of <a href="#a3">A.3</a>: knows no matrices, calls the entries above, owns the guard,
+        restart, and acceptance logic of Section 8.</td></tr>
+<tr><td><span class="tag-new">NEW</span></td>
+    <td><code>assemble()</code> primitive</td>
+    <td>Scatter ∘ gather on scratch buffers (Section 5). Three call sites: setup shadow, restart shadow,
+        and the gather-only \(\mathbf{t}\) round.</td></tr>
+<tr><td><span class="tag-new">NEW</span></td>
+    <td><code>precond_solve</code> option: retain gathered input</td>
+    <td>Snapshot the gathered RHS slices (intm LPORT + intm2 GPORT) <em>before</em> the elimination
+        \(\mathcal{E}\) consumes them; expose them for the slice dots. Optional micro-extension: an
+        abort-after-gather early exit for the half-step test (Section 6 note).</td></tr>
+<tr><td><span class="tag-new">NEW</span></td>
+    <td>Per-partition buffer set: 8 vectors</td>
+    <td>\(\mathbf{u},\ \mathbf{r}/\mathbf{s}\) (in place), \(\hat{\mathbf{r}}_0,\ \mathbf{p},\ \mathbf{v},\
+        \hat{\mathbf{p}},\ \hat{\mathbf{s}},\ \mathbf{t}\). The CG <code>s2</code> aliasing must
+        <em>not</em> be copied (Section 7 warning).</td></tr>
+<tr><td><span class="tag-new">NEW</span></td>
+    <td>Options / exit codes of §8.3</td>
+    <td>Registered beside the CG_* family; defaults as proposed.</td></tr>
+</table>
+
+<h2 id="a0">Appendix</h2>
+
+<h3 id="a1">A.1 Dot-product rules in the duplicated space</h3>
+
+<p><strong>Rule 1 (inherited).</strong> For consistent \(\mathbf{y}\) (duplicated as
+\(\mathbf{y}=\mathbf{R}\hat{\mathbf{y}}\)) and distributed \(\mathbf{x}\):</p>
+
+<div class="equation-box">
+\[
+\sum_p \mathbf{y}_p^{T}\mathbf{x}_p
+=(\mathbf{R}\hat{\mathbf{y}})^{T}\mathbf{x}
+=\hat{\mathbf{y}}^{T}(\mathbf{R}^{T}\mathbf{x})
+=\hat{\mathbf{y}}^{T}\hat{\mathbf{x}}
+\]
+</div>
+
+<p>— the consistent factor carries the same value into every copy, so summing over copies performs the
+gather on the distributed factor for free (companion A.1). BiCGSTAB uses this for
+\(\hat{\mathbf{r}}_0^{T}\mathbf{r}\), \(\hat{\mathbf{r}}_0^{T}\mathbf{v}\),
+\(\hat{\mathbf{r}}_0^{T}\mathbf{s}\), \(\hat{\mathbf{r}}_0^{T}\mathbf{t}\) — which is precisely why
+\(\hat{\mathbf{r}}_0\) is <em>constructed</em> consistent (§4.2).</p>
+
+<p><strong>Rule 2 (new).</strong> For two distributed vectors the true product is
+\(\hat{\mathbf{t}}^{T}\hat{\mathbf{s}}
+=(\mathbf{R}^{T}\mathbf{t})^{T}(\mathbf{R}^{T}\mathbf{s})\), and
+\(\sum_p\mathbf{t}_p^{T}\mathbf{s}_p\) differs from it by every cross-owner term
+\(\sum_{p\neq q}\mathbf{t}_p^{T}\mathbf{s}_q\) at shared nodes (the \(0.3/0.7\) example of §4.1). The only
+correct evaluation gathers at least one factor. Gathering both and dotting the unique fully-summed slots
+(Figure 2) is what the schedule does — each unique node contributes exactly once, so the slice sum
+<em>is</em> the assembled product. <span class="checkmark">✓</span></p>
+
+<p><strong>Type preservation.</strong> Every update in the loop preserves the table of §4: line 6 combines
+distributed with distributed (\(\mathbf{p}\) stays distributed); line 15 combines consistent with consistent
+(\(\mathbf{u}\) stays consistent); lines 10 and 16 combine distributed with distributed. The two
+\(\mathbf{M}^{-1}\) applications and the two \(\mathbf{A}\) applications are the only type conversions, in
+opposite directions, twice per iteration (Figure 1). The types never leak — the same closure argument as
+companion A.1.</p>
+
+<h3 id="a2">A.2 The fused-scalar identities and their numerical caveat</h3>
+
+<p><strong>Next iteration's \(\rho\) for free.</strong> By linearity of Rule 1 in the distributed factor:</p>
+
+<div class="equation-box">
+\[
+\rho_{k+1}
+=\hat{\mathbf{r}}_0^{T}\mathbf{r}_k
+=\hat{\mathbf{r}}_0^{T}(\mathbf{s}-\omega_k\mathbf{t})
+=\underbrace{\hat{\mathbf{r}}_0^{T}\mathbf{s}}_{\text{local, batched}}
+-\;\omega_k\,\underbrace{\hat{\mathbf{r}}_0^{T}\mathbf{t}}_{\text{local, batched}}
+\]
+</div>
+
+<p>Both partials are consistent × distributed, computed locally <em>before</em> \(\omega_k\) is known, and
+shipped in reduction #2. Line 4 of the next iteration therefore costs nothing — which is what holds the
+loop at two reductions.</p>
+
+<p><strong>The residual norm for free.</strong> \(\omega_k\) is the least-squares minimiser of
+\(\|\mathbf{s}_g-\omega\,\mathbf{t}_g\|\), so the minimised residual is orthogonal to \(\mathbf{t}_g\)
+and</p>
+
+<div class="equation-box">
+\[
+\|\mathbf{R}^{T}\mathbf{r}_k\|^2
+=\|\mathbf{s}_g\|^2-\frac{(\mathbf{t}_g^{T}\mathbf{s}_g)^2}{\mathbf{t}_g^{T}\mathbf{t}_g},
+\qquad
+\omega_k=\frac{\mathbf{t}_g^{T}\mathbf{s}_g}{\mathbf{t}_g^{T}\mathbf{t}_g},
+\]
+</div>
+
+<p>with \(\|\mathbf{s}_g\|\) already returned by preconditioner solve #2's down-sweep. The convergence norm
+therefore needs no gather of \(\mathbf{r}_k\) at all.</p>
+
+<div class="warn">
+<strong>Cancellation caveat.</strong> The norm identity subtracts nearly equal quantities exactly when the
+stabilisation step is most effective (\(\|\mathbf{r}_k\|\ll\|\mathbf{s}\|\)) — the computed value can lose
+most of its significant digits at the moment it matters. This is why Section 8.1's acceptance test
+recomputes the <em>true</em> residual (one mat-vec, one gather) before declaring convergence, and why the
+identity's value is treated as a trigger for that test rather than as the final word. The same check
+catches recursive-residual drift across BiCGSTAB's residual spikes.
+</div>
+
+<h3 id="a3">A.3 The full distributed loop</h3>
+
+<div class="implementation-box"><span class="comment">// solve_bicgstab_dist — proposed driver, beside solve_cg_dist in mtx/iterSolve.cc.</span>
+<span class="comment">// Knows no matrices: every line is a call documented in Section 10.</span>
+<span class="comment">// [E] = existing entry point   [N] = new</span>
+
+<span class="keyword">setup:</span>
+  r_p = btilde_p − S_p·u0_p                     <span class="comment">// [E] rmAx pattern, warm start OK</span>
+  (r_g, ‖r_g‖, ‖b_g‖) = gather(r, btilde)      <span class="comment">// [N] assemble, gather half (batched)</span>
+  rhat0 = scatter(r_g)                          <span class="comment">// [N] assemble, scatter half → consistent shadow</span>
+  rho = ‖r_g‖²;  alpha = omega = 1;  p = v = 0
+  <span class="keyword">if</span> ‖b_g‖ degenerate → exit 3               <span class="comment">// same semantics as CG code 3</span>
+
+<span class="keyword">for</span> k = 1 .. maxiter:
+  beta = (rho/rho_prev)·(alpha/omega)
+  p_p  = r_p + beta·(p_p − omega·v_p)           <span class="comment">// [E] AXPY pattern, local</span>
+  phat = precond_solve(p)                       <span class="comment">// [E] round ①: gather→elim→KLU→scatter</span>
+  v_p  = S_p·phat_p;  w += rhat0_p·v_p          <span class="comment">// [E] mult_schur fused with local dot</span>
+  reduce #1 → rhat0ᵀv;  breakdown test          <span class="comment">// scale-aware, §8.2; restart on trip</span>
+  alpha = rho / rhat0ᵀv
+  s_p  = r_p − alpha·v_p  (in place over r)     <span class="comment">// local; accumulate rhat0ᵀs partial</span>
+  shat = precond_solve(s, retain_gathered)      <span class="comment">// [E]+[N] round ③: caches s_g, ‖s_g‖</span>
+  <span class="keyword">if</span> ‖s_g‖ passes tolerance:                  <span class="comment">// reordered half-step exit, §6 note</span>
+      u_p += alpha·phat_p;  <span class="keyword">goto</span> accept
+  t_p  = S_p·shat_p                             <span class="comment">// [E] mult_schur; accumulate rhat0ᵀt partial</span>
+  t_g  = gather(t)                              <span class="comment">// [N] round ④: gather only, no scatter</span>
+  reduce #2 → { t_gᵀs_g, t_gᵀt_g, rhat0ᵀs, rhat0ᵀt }
+  omega = t_gᵀs_g / t_gᵀt_g;  breakdown tests   <span class="comment">// §8.2; restart on trip</span>
+  rho_prev = rho;  rho = rhat0ᵀs − omega·rhat0ᵀt          <span class="comment">// A.2 fusion</span>
+  ‖r_g‖² = ‖s_g‖² − (t_gᵀs_g)²/t_gᵀt_g                    <span class="comment">// A.2 identity (trigger only)</span>
+  u_p += alpha·phat_p + omega·shat_p            <span class="comment">// [E] fused xr_axpy pattern,</span>
+  r_p  = s_p − omega·t_p                        <span class="comment">//     two coefficients</span>
+  <span class="keyword">if</span> §6-criteria pass on ‖r_g‖/‖b_g‖ → <span class="keyword">goto</span> accept
+  <span class="keyword">if</span> ‖r_g‖ &gt; DIVERGE_FACTOR·best or non-finite → exit 4/restart
+
+<span class="keyword">accept:</span>
+  r_p = btilde_p − S_p·u_p;  ‖r_g‖ = gather-norm(r)   <span class="comment">// true-residual check, §8.1</span>
+  <span class="keyword">if</span> passes → exit 0 (converged);  <span class="keyword">else</span> resume loop with recomputed r
+
+<span class="keyword">restart</span> (≤ MAX_RESTARTS, else exit 5):
+  rhat0 = assemble(r);  rho = ‖r_g‖²;  p = r;  v = 0;  alpha = omega = 1</div>
+
+<hr style="margin-top: 50px;">
+<p style="text-align: center; color: #666; font-size: 0.9em;">
+    mPower Simulator — BiCGSTAB ↔ Hierarchical Solver Mapping (proposed extension).<br>
+    Companions: <code>pcg_hierarchical_mapping.html</code> (the CG mapping this document extends, esp. §7)
+    and <code>hierarchical_solver_report.html</code> (the hierarchy itself).
+</p>
+
+</body>
+</html>
